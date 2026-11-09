@@ -1,10 +1,10 @@
-// The agenda (SMD-3669): what matters now, as one read of migration 123's
-// agenda — open, startable, unclaimed tickets and open items in a scope, ranked
-// by 122's effective priority, each with the terms behind its place, and what
-// was left out and why. A read: the database decides the candidates, the
-// filters and the order; this file turns the caller's arguments into the call,
-// passes the calling key for `mine`, answers 123's refusal of `mine` as
-// CLAIMS_UNREADABLE, and writes the call's query_log row.
+// The agenda (SMD-3669, SMD-4162): what matters now, as one read of migration
+// 124's agenda — open, startable, unclaimed, unstarted tickets and open items
+// in a scope, ranked by 122's effective priority, each with the terms behind
+// its place, and what was left out and why. A read: the database decides the
+// candidates, the filters and the order; this file turns the caller's
+// arguments into the call, passes the calling key for `mine`, answers 123's
+// refusal of `mine` as CLAIMS_UNREADABLE, and writes the call's query_log row.
 
 import type { Principal } from "../auth.ts";
 import type { AgendaResult } from "../store.ts";
@@ -27,6 +27,7 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     r = await (await ctx.store()).agenda({
       scope, holder, limit: input.limit,
       includeBlocked: input.include_blocked, includeClaimed: input.include_claimed, includeProposed: input.include_proposed,
+      includeStarted: input.include_started,
     });
   } catch (e) {
     // mine on a role without the claims group (123 raises 42501): designed, so a refusal, not a fault (review pass 2).
@@ -36,7 +37,7 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     }
     throw e;
   }
-  await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed },
+  await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed, include_started: input.include_started },
     input.limit, r.items.map((i) => ({ kind: i.kind, key: i.key, effective: i.effective })));
   return ok(r);
 }

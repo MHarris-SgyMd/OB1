@@ -17995,6 +17995,9 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
 {
   const file = files.find((f) => /^\d{3}_agenda\.sql$/.test(f)) ?? "no NNN_agenda.sql";
   await reapply(file.slice(0, 4));
+  // 124 (SMD-4162) replaced 123's agenda under a ninth argument; 123's re-apply puts its eight-argument one back beside
+  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's).
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean)`);
   // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
   // or compares this section's own items among themselves.
   const P = "Agenda [110]";
@@ -18247,6 +18250,80 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
+  // The shipped agenda back: 124's, which drops 123's eight-argument one.
+  await restoreShipped("agenda");
+}
+
+console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves a started ticket out and counted unless asked (holder mine shows its own), counts a claimed started ticket once, as claimed, and says how many live claims the brain holds; one agenda, of nine arguments, 123's eight positional ones read as the default; a re-apply a no-op (SMD-4162)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f)) ?? "no NNN_agenda_unstarted.sql";
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [111]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag111-op', 'operator')`);
+  const BOT_ID = "4b5c6d7e-8f9a-4b2c-8d3e-4f5a6b7c8d9e";
+  await db.query(`INSERT INTO ob1_agents (canonical_agent_id, label, kind) VALUES ($1::uuid, 'ag111-bot', 'agent')`, [BOT_ID]);
+  const OP = { name: "ag111-op", scope: "write" };
+  type It = { key: string; status: string | null; status_type: string | null; claimed: { holder: string }[] | null };
+  type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; claims_read: boolean; claims_live: number | null };
+  const ticket = async (issue: string, status: string, statusType: string) => {
+    const content = `${issue} — [111] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag111-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status, status_type: statusType, project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    await db.query(`SELECT assert_priority('ticket', $1, 2, NULL, NULL, NULL, NULL, NULL, false, $2::jsonb)`, [issue, JSON.stringify(OP)]);
+  };
+  await ticket("SMD-9901", "Backlog", "backlog"); await ticket("SMD-9902", "Todo", "unstarted"); await ticket("SMD-9903", "In Progress", "started");
+  const ag = async (o: { started?: boolean; claimed?: boolean; holder?: object; now?: string } = {}) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, $2::jsonb, 100, false, $3, false, NULL, $4::timestamptz, $5) AS a`,
+      [o.holder ? null : JSON.stringify({ project: P }), o.holder ? JSON.stringify(o.holder) : null, o.claimed ?? false, o.now ?? NOW, o.started ?? false])).rows[0].a;
+  const row = (a: Ag) => a.items.map((i) => `${i.key} ${i.status}/${i.status_type}`).join(", ");
+
+  // The shape: one agenda, nine arguments, STABLE, commented for both migrations.
+  const fns = (await db.query<{ n: number; v: string; c: string | null }>(
+    `SELECT p.pronargs::int AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname = 'agenda'`)).rows;
+  assert(fns.length === 1 && fns[0].n === 9 && fns[0].v === "s" && /Migrations 123 \(SMD-3669\) and 124 \(SMD-4162\)/.test(fns[0].c ?? ""),
+    `one agenda, of nine arguments, STABLE, its comment naming 123 and 124 (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+
+  // Default: the Backlog and Todo tickets with their status; the In Progress one left out and counted. Asked: all three.
+  const plain = await ag(), all = await ag({ started: true });
+  const eight = (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz) AS a`, [JSON.stringify({ project: P }), NOW])).rows[0].a;
+  assert(row(plain) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted" && plain.total === 2 && plain.left_out.started === 1
+      && row(all) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && all.left_out.started === 0
+      && JSON.stringify(eight) === JSON.stringify(plain),
+    `a ticket row says its status; the started one is left out and counted unless asked; 123's eight positional arguments read as the default (${row(plain)}; started ${plain.left_out.started} | ${row(all)})`);
+
+  // Claims, on the real clock: claims_live counts the brain's live claims on any ticket ([110] leaves its own); the
+  // bot's claim on the started ticket shows under holder mine, and a claimed started ticket is counted once, as claimed.
+  const t = new Date().toISOString();
+  const before = (await ag({ now: t })).claims_live ?? -1;
+  const BOT = JSON.stringify({ name: "ag111-bot", agent_id: BOT_ID });
+  const claimed = (await db.query<{ r: { outcome: string; claim: { id: string } | null; token: string | null } }>(`SELECT claim_work('SMD-9903', NULL, 'ag111-bot laptop', 14400, NULL, $1::jsonb) AS r`, [BOT])).rows[0].r;
+  const now = new Date().toISOString();
+  const after = await ag({ now }), mine = await ag({ now, holder: { name: "ag111-bot", agent_id: BOT_ID } }), shown = await ag({ now, started: true, claimed: true });
+  const nobody = await ag({ now: "2099-01-01T00:00:00Z" });
+  assert(claimed.outcome === "claimed" && after.claims_read && after.claims_live === before + 1 && after.left_out.claimed === 1 && after.left_out.started === 0
+      && row(mine) === "SMD-9903 In Progress/started" && shown.items.find((i) => i.key === "SMD-9903")?.claimed?.[0]?.holder === "ag111-bot"
+      && nobody.claims_live === 0,
+    `claims_live counts the brain's live claims, one more for the bot's; the claimed started ticket counted once, as claimed; holder mine shows it, started; every lease run out, 0 (${before} → ${after.claims_live}; claimed ${after.left_out.claimed}, started ${after.left_out.started}; ${row(mine)}; ${nobody.claims_live})`);
+  // Released, the claim is no longer live: claims_live back where it was, the started ticket counted as started again.
+  const released = (await db.query<{ r: { outcome: string } }>(`SELECT release_work_claim($1::uuid, $2, 'test-schema [111]', false, $3::jsonb) AS r`, [claimed.claim?.id ?? null, claimed.token, BOT])).rows[0].r;
+  const freed = await ag({ now: new Date().toISOString() });
+  assert(released.outcome === "released" && freed.claims_live === before && freed.left_out.claimed === 0 && freed.left_out.started === 1,
+    `a released claim is not live: claims_live back to ${before}, the started ticket counted as started (${released.outcome}; ${freed.claims_live}; claimed ${freed.left_out.claimed}, started ${freed.left_out.started})`);
+
+  // A NULL flag is refused as 123 refuses one; a re-apply is a no-op.
+  let nullFlag = "";
+  try { await db.query(`SELECT agenda(NULL, NULL, 20, false, false, false, NULL, now(), NULL)`); } catch (e) { nullFlag = String((e as { code?: string }).code ?? "?"); }
+  await reapply(file.slice(0, 4));
+  const again = await ag();
+  assert(nullFlag === "22023" && JSON.stringify(again) === JSON.stringify(plain),
+    `a NULL include_started is refused (22023), and a re-apply is a no-op: the same read (${nullFlag})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

@@ -789,7 +789,7 @@ export const SPECS = {
   agenda: {
     title: "Agenda",
     description:
-      "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed work: blocked items, items under a live claim and items not yet startable are left out and counted. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), and `claimsRead` false means claims could not be read, so none was left out. It orders and explains; the caller decides.",
+      "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so none was left out, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       source: AGENDA_SCOPE.optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
@@ -800,6 +800,7 @@ export const SPECS = {
       include_blocked: z.boolean().optional().default(false).describe("Also list items blocked by an open item, with their blockers"),
       include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder"),
       include_proposed: z.boolean().optional().default(false).describe("Also list open items still proposed (an extraction nobody confirmed)"),
+      include_started: z.boolean().optional().default(false).describe("Also list started (In Progress) tickets; holder mine shows the key's own, started or not"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

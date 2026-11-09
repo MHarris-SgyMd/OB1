@@ -2291,7 +2291,7 @@ console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): RES
       && items[0].effective === 4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
     `REST and MCP give one agenda, each stamped with its own clock: the Medium due tomorrow (4), the High (3), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
   const out = rendered((v) => say.renderAgenda(ok(v)), r.body);
-  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 "SMD-9912 — \[17\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
+  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 \("backlog"\) "SMD-9912 — \[17\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
       && /\n1 of 3 carry no priority, stated or inherited \(read as medium, not low\)\./.test(m.text),
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
@@ -2311,6 +2311,20 @@ console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): RES
   const hook = await rest("GET", q, undefined, KEYS.hook);
   assert(reader.status === 200 && same(reader.body.items, r.body.items) && hook.status === 403,
     `a read key reads the agenda; a capture-only key does not (${reader.status} ${hook.status})`);
+  // A started ticket (124, SMD-4162): left out by default and counted, said in the text; include_started lists it with
+  // its status, over both doors; claimsLive is a count.
+  await ticket("SMD-9915", "started");
+  await rest("POST", "/v1/priorities/ticket/SMD-9915", { level: 3 });
+  const [noStarted, withStarted, withStartedMcp] = [await rest("GET", q), await rest("GET", `${q}&include_started=true`), await mcp("agenda", { project: P, include_started: true })];
+  type Sit = It & { status: string | null; statusType: string | null };
+  const startedRow = ((withStarted.body.items ?? []) as Sit[]).find((i) => i.key === "SMD-9915");
+  const noStartedMcp = await mcp("agenda", { project: P });
+  assert(noStarted.status === 200 && ((noStarted.body.items ?? []) as It[]).every((i) => i.key !== "SMD-9915") && (noStarted.body.leftOut as { started?: number }).started === 1
+      && typeof noStarted.body.claimsLive === "number"
+      && withStarted.status === 200 && startedRow?.status === "started" && startedRow.statusType === "started" && (withStarted.body.leftOut as { started?: number }).started === 0
+      && !withStartedMcp.isError && /ticket SMD-9915 \("started"\)/.test(withStartedMcp.text)
+      && /\nLeft out: 1 started \(include_started lists them\)\./.test(noStartedMcp.text),
+    `a started ticket is left out and counted, said in the text; include_started lists it with its status over REST and MCP; claimsLive a count (${noStarted.status} ${JSON.stringify(noStarted.body.leftOut)} ${noStarted.body.claimsLive} | ${startedRow?.status}/${startedRow?.statusType})`);
   // holder mine: the tickets this key holds a live claim on, claimed as they are.
   const claim = await rest("POST", "/v1/claims", { ticket: "SMD-9914", label: "test-rest-sql [17]", lease_seconds: 3600 });
   const mine = await rest("GET", "/v1/agenda?holder=mine");
