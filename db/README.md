@@ -2507,9 +2507,10 @@ server proposes its own items as it lands.
 
 Migration 124 replaces the agenda under a ninth argument, `include_started`
 (SMD-4162). A ticket's row carries its head's `status` and `status_type`. A
-started ticket is left out unless asked, or unless the holder is `mine`, and
-counted in `left_out.started` (decided 2026-11-09: 123 took every unsettled
-ticket). `claims_live` says how many live claims the brain records on any ticket:
+started ticket no live claim covers is left out unless asked, and counted in
+`left_out.started` (decided 2026-11-09: 123 took every unsettled ticket). A
+claimed started ticket is the claim rule's: counted as claimed, and listed by
+`include_claimed` or under holder `mine`. `claims_live` says how many live claims the brain records on any ticket:
 0 means no claim could leave anything out, as on a brain whose board is claimed
 through another. 123's eight positional arguments read as 124's default.
 

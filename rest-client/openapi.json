@@ -6197,7 +6197,7 @@
             "required": false,
             "schema": {
               "default": false,
-              "description": "Also list items under a live claim, with their holder",
+              "description": "Also list items under a live claim, with their holder, started or not",
               "type": "boolean"
             }
           },
@@ -6217,7 +6217,7 @@
             "required": false,
             "schema": {
               "default": false,
-              "description": "Also list started (In Progress) tickets; holder mine shows the key's own, started or not",
+              "description": "Also list started tickets (In Progress, In Review: Linear's started type) that no live claim covers; a claimed one is include_claimed's, and holder mine shows the key's own",
               "type": "boolean"
             }
           }

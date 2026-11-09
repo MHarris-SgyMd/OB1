@@ -1590,8 +1590,8 @@ export function normaliseEffectivePriority(r: unknown, what: string): EffectiveP
 export type AgendaClaim = { holder: string; piece: string | null; label: string | null; at: string };
 /**
  * One agenda item (migrations 123 and 124, SMD-3669, SMD-4162): a ticket or an open item, its place, what it is, and
- * 122's terms behind its place. `status` is a ticket's Linear status (`statusType` its type: backlog, unstarted or
- * started) or an open item's (open or proposed, `statusType` null). `claimed` names live claims (shown only with
+ * 122's terms behind its place. `status` is a ticket's Linear status (`statusType` its type: triage, backlog,
+ * unstarted or started) or an open item's (open or proposed, `statusType` null). `claimed` names live claims (shown only with
  * include_claimed or holder mine), `lapsedClaim` claims never released whose lease ran out, `blockers` the open items
  * blocking it (shown only with include_blocked).
  */

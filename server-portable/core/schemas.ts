@@ -798,9 +798,9 @@ export const SPECS = {
       holder: z.enum(["mine"]).optional().describe("mine: only the work this key holds a live claim on"),
       limit: z.number().int().min(1).max(100).optional().default(20).describe("At most this many. Default 20"),
       include_blocked: z.boolean().optional().default(false).describe("Also list items blocked by an open item, with their blockers"),
-      include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder"),
+      include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder, started or not"),
       include_proposed: z.boolean().optional().default(false).describe("Also list open items still proposed (an extraction nobody confirmed)"),
-      include_started: z.boolean().optional().default(false).describe("Also list started (In Progress) tickets; holder mine shows the key's own, started or not"),
+      include_started: z.boolean().optional().default(false).describe("Also list started tickets (In Progress, In Review: Linear's started type) that no live claim covers; a claimed one is include_claimed's, and holder mine shows the key's own"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

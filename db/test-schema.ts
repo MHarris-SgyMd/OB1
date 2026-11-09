@@ -18264,24 +18264,31 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
   const BOT_ID = "4b5c6d7e-8f9a-4b2c-8d3e-4f5a6b7c8d9e";
   await db.query(`INSERT INTO ob1_agents (canonical_agent_id, label, kind) VALUES ($1::uuid, 'ag111-bot', 'agent')`, [BOT_ID]);
   const OP = { name: "ag111-op", scope: "write" };
-  type It = { key: string; status: string | null; status_type: string | null; claimed: { holder: string }[] | null };
+  type It = { key: string; status: string | null; status_type: string | null; claimed: { holder: string }[] | null; blockers: string[] };
   type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; claims_read: boolean; claims_live: number | null };
-  const ticket = async (issue: string, status: string, statusType: string) => {
+  const ticket = async (issue: string, status: string, statusType: string, o: { project?: string; blockedBy?: string; notBefore?: string } = {}) => {
     const content = `${issue} — [111] ${issue}\nbody`;
     let id = "";
     await db.transaction(async (tx) => {
       await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag111-op" })]);
       id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
-        [content, JSON.stringify({ source: "linear", issue, status, status_type: statusType, project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+        [content, JSON.stringify({ source: "linear", issue, status, status_type: statusType, project: o.project ?? P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
     });
     await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
-    await db.query(`SELECT assert_priority('ticket', $1, 2, NULL, NULL, NULL, NULL, NULL, false, $2::jsonb)`, [issue, JSON.stringify(OP)]);
+    if (o.blockedBy) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify([{ relation: "blocked_by", target: o.blockedBy }])]);
+    await db.query(`SELECT assert_priority('ticket', $1, 2, NULL, $2::timestamptz, NULL, NULL, NULL, false, $3::jsonb)`, [issue, o.notBefore ?? null, JSON.stringify(OP)]);
   };
+  // SMD-9904 is started and blocked by SMD-9901 (open); SMD-9905 is started and not yet startable; SMD-9906 is started,
+  // in another project: the claim on it is outside the scope, and claims_live counts it all the same.
   await ticket("SMD-9901", "Backlog", "backlog"); await ticket("SMD-9902", "Todo", "unstarted"); await ticket("SMD-9903", "In Progress", "started");
-  const ag = async (o: { started?: boolean; claimed?: boolean; holder?: object; now?: string } = {}) =>
-    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, $2::jsonb, 100, false, $3, false, NULL, $4::timestamptz, $5) AS a`,
-      [o.holder ? null : JSON.stringify({ project: P }), o.holder ? JSON.stringify(o.holder) : null, o.claimed ?? false, o.now ?? NOW, o.started ?? false])).rows[0].a;
+  await ticket("SMD-9904", "In Progress", "started", { blockedBy: "SMD-9901" });
+  await ticket("SMD-9905", "In Review", "started", { notBefore: "2027-04-01T00:00:00Z" });
+  await ticket("SMD-9906", "In Progress", "started", { project: "Agenda [111] elsewhere" });
+  const ag = async (o: { started?: boolean; claimed?: boolean; blocked?: boolean; holder?: object; now?: string } = {}) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, $2::jsonb, 100, $3, $4, false, NULL, $5::timestamptz, $6) AS a`,
+      [o.holder ? null : JSON.stringify({ project: P }), o.holder ? JSON.stringify(o.holder) : null, o.blocked ?? false, o.claimed ?? false, o.now ?? NOW, o.started ?? false])).rows[0].a;
   const row = (a: Ag) => a.items.map((i) => `${i.key} ${i.status}/${i.status_type}`).join(", ");
+  const lo = (a: Ag) => JSON.stringify(a.left_out);
 
   // The shape: one agenda, nine arguments, STABLE, commented for both migrations.
   const fns = (await db.query<{ n: number; v: string; c: string | null }>(
@@ -18290,32 +18297,65 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
   assert(fns.length === 1 && fns[0].n === 9 && fns[0].v === "s" && /Migrations 123 \(SMD-3669\) and 124 \(SMD-4162\)/.test(fns[0].c ?? ""),
     `one agenda, of nine arguments, STABLE, its comment naming 123 and 124 (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
 
-  // Default: the Backlog and Todo tickets with their status; the In Progress one left out and counted. Asked: all three.
-  const plain = await ag(), all = await ag({ started: true });
+  // Default: the Backlog and Todo tickets with their status; the unblocked, startable In Progress one left out and
+  // counted as started, the blocked one as blocked and the one not yet startable as waiting: one bucket each, the
+  // earlier filter's. Asked: the started one listed, the other two still the earlier filters'. include_blocked alone
+  // moves the blocked started ticket to the started count; with include_started it is listed with its blocker.
+  const plain = await ag(), all = await ag({ started: true }), blk = await ag({ blocked: true }), blkAll = await ag({ blocked: true, started: true });
   const eight = (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz) AS a`, [JSON.stringify({ project: P }), NOW])).rows[0].a;
-  assert(row(plain) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted" && plain.total === 2 && plain.left_out.started === 1
-      && row(all) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && all.left_out.started === 0
+  assert(row(plain) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted" && plain.total === 2 && lo(plain) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}'
+      && row(all) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && lo(all) === '{"blocked":1,"claimed":0,"started":0,"waiting":1}'
+      && row(blk) === row(plain) && lo(blk) === '{"blocked":0,"claimed":0,"started":2,"waiting":1}'
+      && JSON.stringify(blkAll.items.find((i) => i.key === "SMD-9904")?.blockers) === '["SMD-9901"]' && lo(blkAll) === '{"blocked":0,"claimed":0,"started":0,"waiting":1}'
       && JSON.stringify(eight) === JSON.stringify(plain),
-    `a ticket row says its status; the started one is left out and counted unless asked; 123's eight positional arguments read as the default (${row(plain)}; started ${plain.left_out.started} | ${row(all)})`);
+    `a ticket row says its status; a started ticket left out and counted unless asked, in the first bucket whose filter takes it; 123's eight positional arguments read as the default (${row(plain)}; ${lo(plain)} | ${row(all)}; ${lo(all)} | ${lo(blk)} | ${lo(blkAll)})`);
 
-  // Claims, on the real clock: claims_live counts the brain's live claims on any ticket ([110] leaves its own); the
-  // bot's claim on the started ticket shows under holder mine, and a claimed started ticket is counted once, as claimed.
+  // Claims, on the real clock. claims_live is every live claim the brain records, in the scope or not: the count
+  // work_claims gives, and two more for the bot's two, one of them on a ticket outside the scope. A claimed started
+  // ticket is the claim rule's alone: counted once, as claimed; include_claimed alone lists it with its holder (claimed
+  // work is started work, review pass 1); holder mine shows it, nothing counted started.
   const t = new Date().toISOString();
-  const before = (await ag({ now: t })).claims_live ?? -1;
+  const liveCount = async (at: string) => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE released_at IS NULL AND expires_at > $1::timestamptz`, [at])).rows[0].n;
+  const before = (await ag({ now: t })).claims_live ?? -1, direct = await liveCount(t);
   const BOT = JSON.stringify({ name: "ag111-bot", agent_id: BOT_ID });
-  const claimed = (await db.query<{ r: { outcome: string; claim: { id: string } | null; token: string | null } }>(`SELECT claim_work('SMD-9903', NULL, 'ag111-bot laptop', 14400, NULL, $1::jsonb) AS r`, [BOT])).rows[0].r;
+  type Claimed = { outcome: string; claim: { id: string } | null; token: string | null };
+  const claimed = (await db.query<{ r: Claimed }>(`SELECT claim_work('SMD-9903', NULL, 'ag111-bot laptop', 14400, NULL, $1::jsonb) AS r`, [BOT])).rows[0].r;
+  const elsewhere = (await db.query<{ r: Claimed }>(`SELECT claim_work('SMD-9906', NULL, 'ag111-bot laptop', 14400, NULL, $1::jsonb) AS r`, [BOT])).rows[0].r;
   const now = new Date().toISOString();
-  const after = await ag({ now }), mine = await ag({ now, holder: { name: "ag111-bot", agent_id: BOT_ID } }), shown = await ag({ now, started: true, claimed: true });
+  const after = await ag({ now }), mine = await ag({ now, holder: { name: "ag111-bot", agent_id: BOT_ID } }), withClaimed = await ag({ now, claimed: true });
   const nobody = await ag({ now: "2099-01-01T00:00:00Z" });
-  assert(claimed.outcome === "claimed" && after.claims_read && after.claims_live === before + 1 && after.left_out.claimed === 1 && after.left_out.started === 0
-      && row(mine) === "SMD-9903 In Progress/started" && shown.items.find((i) => i.key === "SMD-9903")?.claimed?.[0]?.holder === "ag111-bot"
+  assert(claimed.outcome === "claimed" && elsewhere.outcome === "claimed" && before === direct && after.claims_read && after.claims_live === before + 2
+      && lo(after) === '{"blocked":1,"claimed":1,"started":0,"waiting":1}'
+      && row(withClaimed) === "SMD-9901 Backlog/backlog, SMD-9902 Todo/unstarted, SMD-9903 In Progress/started" && withClaimed.items.find((i) => i.key === "SMD-9903")?.claimed?.[0]?.holder === "ag111-bot"
+      && lo(withClaimed) === '{"blocked":1,"claimed":0,"started":0,"waiting":1}'
+      && row(mine) === "SMD-9903 In Progress/started, SMD-9906 In Progress/started" && mine.left_out.started === 0
       && nobody.claims_live === 0,
-    `claims_live counts the brain's live claims, one more for the bot's; the claimed started ticket counted once, as claimed; holder mine shows it, started; every lease run out, 0 (${before} → ${after.claims_live}; claimed ${after.left_out.claimed}, started ${after.left_out.started}; ${row(mine)}; ${nobody.claims_live})`);
-  // Released, the claim is no longer live: claims_live back where it was, the started ticket counted as started again.
-  const released = (await db.query<{ r: { outcome: string } }>(`SELECT release_work_claim($1::uuid, $2, 'test-schema [111]', false, $3::jsonb) AS r`, [claimed.claim?.id ?? null, claimed.token, BOT])).rows[0].r;
+    `claims_live is the brain's live claims, in scope or not (work_claims says ${direct}), two more for the bot's; a claimed started ticket counted once, as claimed, and listed with its holder by include_claimed alone; holder mine shows both, started; every lease run out, 0 (${before} → ${after.claims_live}; ${lo(after)} | ${row(withClaimed)}; ${lo(withClaimed)} | ${row(mine)} | ${nobody.claims_live})`);
+
+  // A role without the claims group: claims_live null, and with no claim to read a claimed started ticket is a started one.
+  await db.exec(`CREATE ROLE ag111_noclaims NOLOGIN; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ag111_noclaims; REVOKE SELECT ON work_claims FROM ag111_noclaims`);
+  let soft: Ag | null = null;
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET LOCAL ROLE ag111_noclaims`);
+    try { soft = (await tx.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, now(), false) AS a`, [JSON.stringify({ project: P })])).rows[0].a; } catch { soft = null; }
+  });
+  await db.exec(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ag111_noclaims; DROP ROLE ag111_noclaims`);
+  const softA = soft as Ag | null;
+  assert(softA !== null && softA.claims_read === false && softA.claims_live === null && lo(softA) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}',
+    `without the claims group claims_live is null, and the claimed started ticket is counted started, no claim read (${softA === null ? "raised" : `${softA.claims_live}; ${lo(softA)}`})`);
+
+  // Released, a claim is no longer live: claims_live one down, the started ticket counted as started again.
+  const release = async (c: Claimed) => (await db.query<{ r: { outcome: string } }>(`SELECT release_work_claim($1::uuid, $2, 'test-schema [111]', false, $3::jsonb) AS r`, [c.claim?.id ?? null, c.token, BOT])).rows[0].r.outcome;
+  const released = await release(claimed);
   const freed = await ag({ now: new Date().toISOString() });
-  assert(released.outcome === "released" && freed.claims_live === before && freed.left_out.claimed === 0 && freed.left_out.started === 1,
-    `a released claim is not live: claims_live back to ${before}, the started ticket counted as started (${released.outcome}; ${freed.claims_live}; claimed ${freed.left_out.claimed}, started ${freed.left_out.started})`);
+  const releasedElsewhere = await release(elsewhere);
+  assert(released === "released" && releasedElsewhere === "released" && freed.claims_live === before + 1 && lo(freed) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}',
+    `a released claim is not live: claims_live ${before} + 1 (the other claim), the started ticket counted as started (${released}; ${freed.claims_live}; ${lo(freed)})`);
+
+  // query_log.filter's comment says an agenda row holds four flags.
+  const filterComment = (await db.query<{ c: string | null }>(`SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS c`)).rows[0].c ?? "";
+  assert(/its four include flags \(blocked, claimed, proposed, started; migrations 123 and 124\)/.test(filterComment),
+    `query_log.filter's comment names the agenda row's four include flags (${filterComment.slice(-120)})`);
 
   // A NULL flag is refused as 123 refuses one; a re-apply is a no-op.
   let nullFlag = "";

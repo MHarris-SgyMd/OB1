@@ -2269,7 +2269,7 @@ const relationsDeniedCore = () => coreWhoseReadThrows("relationsAmong", "permiss
 const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
 const STALE_KEY_HEAD = "A relation marked edited since judged was judged on a text that has changed since";
 
-console.log("\n[17] The agenda through both doors (migration 123, SMD-3669): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; holder mine lists the tickets the key holds a claim on");
+console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3669, SMD-4162): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; a started ticket left out and counted unless include_started, listed with its status; holder mine lists the tickets the key holds a claim on");
 {
   await sql`SELECT set_agent_kind('writer', 'operator')`;
   const P = "Agenda rest [17]";

@@ -24,11 +24,14 @@
 --   eight-argument agenda; the flag is appended, so a positional call of
 --   123's arguments reads as it did. Beside 123:
 --   * a ticket row carries its head's `status` and `status_type` (068);
---   * a ticket whose status type is `started` is left out unless
---     p_include_started, or unless p_holder (`mine` shows the key's own
---     claimed work, started or not), and counted in left_out.started after
---     the filters before it (waiting, blocked, claimed), as claimed is
---     counted after blocked;
+--   * a ticket whose status type is `started` and that no live claim covers
+--     is left out unless p_include_started, and counted in left_out.started
+--     after the filters before it (waiting, blocked, claimed), as claimed is
+--     counted after blocked. A started ticket under a live claim is the claim
+--     rule's alone: left out and counted as claimed, listed with its holder
+--     by p_include_claimed or under p_holder (`mine`). Claimed work is
+--     started work here (CLAUDE.md moves a claimed ticket to In Progress), so
+--     a started filter over it would empty p_include_claimed (review pass 1);
 --   * `claims_live`: the live claims (unreleased, unexpired, 115) this brain
 --     records on any ticket, null when claims_read is false. 0 says no claim
 --     could leave anything out, as on a brain whose board is claimed through
@@ -42,6 +45,10 @@
 -- SAFETY
 --   One function replaced (123's dropped first, so no call is ambiguous
 --   between the two), STABLE as it was; no table, column or row touched.
+--   query_log.filter's comment re-issued: an agenda row holds four flags.
+--   No ACL is carried: 123 granted none (EXECUTE is PUBLIC's, as for every
+--   function here), so a hand-made REVOKE on the eight-argument agenda is
+--   not carried to the nine-argument one.
 --   MINOR under the version rules. test-schema [111], test-upgrade [20bo].
 --
 -- Prerequisites
@@ -241,7 +248,7 @@ BEGIN
        WHERE NOT j.waiting
          AND (p_include_blocked OR cardinality(j.blockers) = 0)
          AND (p_include_claimed OR v_mine OR j.live IS NULL)
-         AND (p_include_started OR v_mine OR (j.c->>'status_type') IS DISTINCT FROM 'started')
+         AND (p_include_started OR j.live IS NOT NULL OR (j.c->>'status_type') IS DISTINCT FROM 'started')
     ), ranked AS (
       SELECT k.*, row_number() OVER (ORDER BY (k.s->>'effective')::numeric DESC, (k.s->>'due_at')::timestamptz ASC NULLS LAST,
                                               k.c->>'kind', k.c->>'key') AS rank
@@ -273,10 +280,10 @@ BEGIN
         'claimed', (SELECT count(*) FROM judged j WHERE NOT (p_include_claimed OR v_mine) AND j.live IS NOT NULL
                                                     AND NOT j.waiting
                                                     AND (p_include_blocked OR cardinality(j.blockers) = 0)),
-        'started', (SELECT count(*) FROM judged j WHERE NOT (p_include_started OR v_mine) AND (j.c->>'status_type') = 'started'
+        'started', (SELECT count(*) FROM judged j WHERE NOT p_include_started AND (j.c->>'status_type') = 'started'
                                                     AND NOT j.waiting
                                                     AND (p_include_blocked OR cardinality(j.blockers) = 0)
-                                                    AND (p_include_claimed OR j.live IS NULL)),
+                                                    AND j.live IS NULL),
         'waiting', (SELECT count(*) FROM judged j WHERE j.waiting)),
       'board_sync', v_board,
       'claims_read', v_claims_ok,
@@ -286,4 +293,17 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean) IS
-  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket (p_include_started lists it; p_holder shows its own started or not), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migrations 123 (SMD-3669) and 124 (SMD-4162).';
+  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by effective, then the sooner due time, then kind and key. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing and is named. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), now}. Raises 22023 on a bad limit, scope, holder, clock or weight, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migrations 123 (SMD-3669) and 124 (SMD-4162).';
+
+-- ---------------------------------------------------------------------------
+-- query_log.filter: an agenda row now holds four include flags (review pass 1)
+-- ---------------------------------------------------------------------------
+DO $fc$
+DECLARE
+  v text := 'The metadata containment filter a search ran with (jsonb; the search applies metadata @> filter). Populated from the search tools'' filter argument (SMD-1490); {} is unfiltered, and an absent or empty argument normalises to {} at the tool boundary. The argument is a shallow object — top-level keys mapping to a scalar or an array of scalars — so the containment stays GIN-indexable (SMD-1625 is the row-level-security cost of exposing it). NULL on an action row. On an agenda row, no containment filter: the call''s scope (source, project, label), its holder and its four include flags (blocked, claimed, proposed, started; migrations 123 and 124).';
+BEGIN
+  IF col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter' AND NOT attisdropped)) IS DISTINCT FROM v THEN
+    EXECUTE format('COMMENT ON COLUMN query_log.filter IS %L', v);
+  END IF;
+END
+$fc$;
