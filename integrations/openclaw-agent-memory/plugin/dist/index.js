@@ -57,7 +57,8 @@ var AgentMemoryClient = class {
    * One call on the plugin's routes, under `endpoint`
    * (`https://<host>/api/v1/plugins/agent-memory`), the key as x-brain-key,
    * which the REST core reads (it reads no `?key=`). A GET's input goes in
-   * the query string and it sends no body; a refusal throws AgentMemoryError.
+   * the query string and it sends no body; a refusal, or a 2xx that is no JSON
+   * object, throws AgentMemoryError.
    */
   async request(path, options = {}) {
     const method = options.method || "GET";

@@ -128,6 +128,11 @@ def _mock_urlopen_response(body: Dict[str, Any], status: int = 200):
     return cm
 
 
+def _memory_count(memory_payload: Dict[str, Any]) -> int:
+    """How many memories a write-back's memory_payload carries: every list item but ``entities``."""
+    return sum(len(v) for k, v in memory_payload.items() if k != "entities")
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
@@ -429,7 +434,7 @@ class TestOB1Client:
 
     def test_routes_are_the_plugins(self):
         # Each call on the agent-memory plugin's route: the reads on GET with
-        # their input in the query string and no body, the writes with a body.
+        # their input in the query string and no body, the review's body whole.
         client = _OB1Client("http://x/api/v1/plugins/agent-memory/", "k", 5.0)
         calls = [
             (lambda: client.recall(workspace_id="w", project_id=None, task_type="t", query="q"), "POST", "/recall", None),
@@ -501,7 +506,7 @@ class TestOB1Client:
             body = json.loads(req.data.decode("utf-8")) if req.data else {}
             bodies.append(body)
             timeouts.append(timeout)
-            n = sum(len(v) for k, v in (body.get("memory_payload") or {}).items() if k != "entities")
+            n = _memory_count(body.get("memory_payload") or {})
             return _mock_urlopen_response({"schema_version": "v", "memories": [{"memory_id": f"m{len(bodies)}-{i}"} for i in range(n)]})
 
         return bodies, timeouts, fake
@@ -514,7 +519,7 @@ class TestOB1Client:
         payload = {"decisions": [f"d{i}" for i in range(30)], "lessons": [f"l{i}" for i in range(30)], "entities": {"repos": ["r"]}}
         with patch("urllib.request.urlopen", fake):
             out = client.writeback(workspace_id="w", project_id=None, memory_payload=payload, idempotency_key="key")
-        sizes = [sum(len(v) for k, v in b["memory_payload"].items() if k != "entities") for b in bodies]
+        sizes = [_memory_count(b["memory_payload"]) for b in bodies]
         assert sizes == [10] * 6
         sent = [item for b in bodies for k, v in b["memory_payload"].items() if k != "entities" for item in v]
         assert sent == payload["decisions"] + payload["lessons"]
@@ -598,7 +603,6 @@ class TestOB1Client:
             with pytest.raises(ob1_module.OB1WritebackCut) as cut:
                 client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l1", "l2"]})
         assert bodies == [] and cut.value.unsent == 2 and cut.value.memories == []
-
 
     @pytest.mark.parametrize("raw", [b"<html>login</html>", b"[1, 2]", b"\xff\xfe not utf-8", b""])
     def test_ok_answer_that_is_no_json_object_raises(self, raw):
@@ -924,7 +928,7 @@ class TestSessionEnd:
         ]
         p.on_session_end(msgs)
         p._sync_thread and p._sync_thread.join(timeout=5)
-        # in the background, holding the turn at most 2 s (Hermes ends sessions mid-turn too, on a compression)
+        # Written back in the background (Hermes ends sessions mid-turn too, on a compression): joined first.
         assert len(recorded) == 1
         payload = recorded[0]["memory_payload"]
         assert any("Bun" in d for d in payload.get("decisions", []))
@@ -939,7 +943,7 @@ class TestSessionEnd:
 
         def fake(req, timeout=None):
             body = json.loads(req.data.decode("utf-8"))
-            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
+            sent.append(_memory_count(body["memory_payload"]))
             return _mock_urlopen_response({"memories": []})
 
         lines = []
@@ -964,13 +968,14 @@ class TestSessionEnd:
                 raise socket.timeout("timed out")
             clock[0] += needs
             body = json.loads(req.data.decode("utf-8"))
-            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
+            sent.append(_memory_count(body["memory_payload"]))
             return _mock_urlopen_response({"memories": [{"memory_id": "m"}] * sent[-1]})
 
         return fake
 
-    _LINES = [f"We decided to use tool number {i} for the job." for i in range(10)] + [f"Lesson learned: check item {i} before the release." for i in range(10)] \
-        + [f"The build failed because of module {i} again." for i in range(10)]
+    _LINES = ([f"We decided to use tool number {i} for the job." for i in range(10)]
+              + [f"Lesson learned: check item {i} before the release." for i in range(10)]
+              + [f"The build failed because of module {i} again." for i in range(10)])
 
     def test_session_end_waits_one_deadline_and_shutdown_shares_it(self, configured, monkeypatch, caplog):
         # 30 findings at 15 s a part: three parts inside the 60 s deadline, nothing cut; shutdown right after it
@@ -1081,7 +1086,7 @@ class TestSessionEnd:
         def held(req, timeout=None):
             release.wait(5)
             body = json.loads(req.data.decode("utf-8"))
-            sent.append(sum(len(v) for k, v in body["memory_payload"].items() if k != "entities"))
+            sent.append(_memory_count(body["memory_payload"]))
             return _mock_urlopen_response({"memories": []})
 
         with patch("urllib.request.urlopen", held):
@@ -1283,7 +1288,6 @@ class TestSessionEnd:
         # Active should be False without key
         assert p._active is False
         p.on_session_end([{"role": "user", "content": "We decided to do X."}])
-        p._sync_thread and p._sync_thread.join(timeout=5)
         # Should not crash — no client to call
 
 

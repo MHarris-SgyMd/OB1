@@ -6,7 +6,8 @@ which replaces the standalone Agent Memory API server after the brain's 2.0.0
 
 ## Changed
 
-- `endpoint` is the plugin's routes, `https://<host>/api/v1/plugins/agent-memory`
+- `endpoint` is the plugin's routes,
+  `https://<host>/api/v1/plugins/agent-memory`
   (`http://127.0.0.1:8000/api/v1/plugins/agent-memory` on the brain's machine).
   The key is still sent as `x-brain-key`. A key with write scope reaches every
   tool; a read key recall, inspection, the queue and the trace; a capture-only
@@ -16,10 +17,9 @@ which replaces the standalone Agent Memory API server after the brain's 2.0.0
   `content-type` header goes only with a body, and an id in a path is encoded.
 - A refusal throws `AgentMemoryError`, whose message, `code` and `status` name
   the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`);
-  a retryable 503 carries its `Retry-After`. A body that is not JSON (a
-  proxy's error page, or a 2xx from an endpoint that is not the plugin's) and
-  a 2xx that is no JSON object, an empty one among them, throw one too, never
-  a bare parse error.
+  a retryable 503 carries its `Retry-After`. A proxy's error page, and a 2xx
+  that is no JSON object (from an endpoint that is not the plugin's, or
+  empty), throw one too, never a bare parse error.
 - Each call passes on only the fields its route takes: the plugin refuses a
   field it does not name, so one a model adds to a tool's arguments is
   dropped rather than failing the call.

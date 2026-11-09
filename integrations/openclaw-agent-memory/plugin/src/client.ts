@@ -39,10 +39,9 @@ function projectIdFrom(input: Record<string, unknown>, configuredProjectId?: str
 }
 
 /**
- * A route that answered other than 2xx, or a 2xx that is no JSON object: its HTTP status, and the plugin's
- * refusal code when the body names one (`NO_SUCH_MEMORY`, `UNSAFE_WRITEBACK`,
- * `PROVIDER_UNAVAILABLE`, ...). `retryAfter` is the Retry-After a 503 the
- * caller may retry carries, in seconds; `body` the refusal as answered.
+ * A route that answered other than 2xx, or a 2xx that is no JSON object: its HTTP status, and the plugin's refusal
+ * code when the body names one (`NO_SUCH_MEMORY`, `UNSAFE_WRITEBACK`, `PROVIDER_UNAVAILABLE`, ...). `retryAfter` is
+ * the Retry-After a 503 the caller may retry carries, in seconds; `body` the refusal as answered.
  */
 export class AgentMemoryError extends Error {
   readonly status: number;
@@ -88,7 +87,8 @@ export class AgentMemoryClient {
    * One call on the plugin's routes, under `endpoint`
    * (`https://<host>/api/v1/plugins/agent-memory`), the key as x-brain-key,
    * which the REST core reads (it reads no `?key=`). A GET's input goes in
-   * the query string and it sends no body; a refusal throws AgentMemoryError.
+   * the query string and it sends no body; a refusal, or a 2xx that is no JSON
+   * object, throws AgentMemoryError.
    */
   async request(path: string, options: RequestOptions = {}) {
     const method = options.method || "GET";

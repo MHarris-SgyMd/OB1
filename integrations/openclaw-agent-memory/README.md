@@ -67,7 +67,7 @@ cd ../../..
 openclaw --profile ob1-agent-memory plugins install integrations/openclaw-agent-memory/plugin --link
 ```
 
-For public distribution, install the live ClawHub package once it is 0.2.0 or later. Until 0.2.0 is published there, the ClawHub package is 0.1.6, whose usage, trace and review-queue tools call routes the agent-memory plugin does not have (its recall, write-back, inspection and review still answer): use the linked install above.
+For public distribution, install the live ClawHub package once it is 0.2.0 or later. Until then it is 0.1.6, whose usage, trace and review-queue tools call routes the agent-memory plugin does not have (its recall, write-back, inspection and review still answer): use the linked install above.
 
 ```bash
 openclaw plugins install clawhub:@natebjones/ob1-agent-memory

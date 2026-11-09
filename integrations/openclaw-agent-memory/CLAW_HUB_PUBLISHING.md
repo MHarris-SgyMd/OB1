@@ -150,8 +150,8 @@ Prepared on 2026-11-08 (SMD-2690):
 
 - Package version bumped to `0.2.0`: the client calls the brain's
   agent-memory plugin's routes, which replace the standalone Agent Memory API
-  server after the brain's 2.0.0. [RELEASE_NOTES_0.2.0.md](./RELEASE_NOTES_0.2.0.md)
-  lists the changes.
+  server after the brain's 2.0.0.
+  [RELEASE_NOTES_0.2.0.md](./RELEASE_NOTES_0.2.0.md) lists the changes.
 - `npm run build` rebuilt `dist/index.js`, which now ships the explicit 0.1.5
   tool schemas (`src/tool-schemas.js`) that `schema:check` reads.
 - Not published: the publish commands below still name `0.1.6` until the

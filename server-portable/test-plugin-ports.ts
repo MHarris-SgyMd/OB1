@@ -3606,9 +3606,9 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedDown = false;
   }
-  // The repository's two clients of the plugin (SMD-2690 PR 2b), each call they make on its routes answered, not refused:
+  // The repository's two clients of the plugin (SMD-2690 PR 2b), each client method answered on its routes, not refused:
   // the REST input is strict, so a field a client sends that the plugin does not take, or a route it no longer has, fails here.
-  console.log("\n[agent-memory's clients] the OpenClaw and Hermes clients on the plugin's routes: every call each makes, answered");
+  console.log("\n[agent-memory's clients] the OpenClaw and Hermes clients on the plugin's routes: each client method, answered");
   {
     const ENDPOINT = `${API}/v1/plugins/agent-memory`;
     const { AgentMemoryClient, AgentMemoryError, FIELDS, corpusDocument, corpusHits } = await import("../integrations/openclaw-agent-memory/plugin/src/client.ts");
@@ -3644,12 +3644,15 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
         && reviewed.memory?.content === "ocxmem_route edited by the OpenClaw client."
         && restricted.memory?.scope?.visibility === "personal" && inspected.memory?.memory_id === mem.memory_id && Array.isArray(inspected.source_refs),
         `OpenClaw review queue on /review-queue, the configured project's alone, an edit and a restriction on /memories/{id}/review, the memory on /memories/{id} (${JSON.stringify(queue).slice(0, 120)}; ${JSON.stringify(inspected).slice(0, 120)})`);
-      let refused: unknown;
-      try {
-        await oc.inspectMemory(NO_ROW);
-      } catch (e) {
-        refused = e;
-      }
+      const thrown = async (f: () => Promise<unknown>) => {
+        try {
+          await f();
+          return null;
+        } catch (e) {
+          return e;
+        }
+      };
+      const refused = await thrown(() => oc.inspectMemory(NO_ROW));
       assert(refused instanceof AgentMemoryError && refused.status === 404 && refused.code === "NO_SUCH_MEMORY" && refused.message.includes("404 NO_SUCH_MEMORY"),
         `OpenClaw: a refusal thrown with its status and the plugin's code (${String(refused)})`);
       const capturer = new AgentMemoryClient({ endpoint: `${ENDPOINT}//`, accessKey: KEYS.capture, workspaceId: "ws-clients", projectId: "p-openclaw" });
@@ -3664,24 +3667,13 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       assert(Array.isArray(extra.memories) && extraReview.memory?.review_status === "evidence_only" && extraWrite.memories?.length === 1 && extraUsage.recorded?.used === 0,
         `OpenClaw drops a field the route does not take (a recall's, a write-back's and usage's stray field, a review's actor_id) rather than be refused (${JSON.stringify(extraReview).slice(0, 120)}; ${JSON.stringify(extraUsage)})`);
       // An id that is not a UUID stays one path segment, encoded: refused as input, not routed elsewhere.
-      let notUuid: unknown;
-      try {
-        await oc.inspectMemory("not/a-uuid");
-      } catch (e) {
-        notUuid = e;
-      }
+      const notUuid = await thrown(() => oc.inspectMemory("not/a-uuid"));
       assert(notUuid instanceof AgentMemoryError && notUuid.status === 400 && notUuid.code === "REFUSED_INPUT",
         `OpenClaw: an id with a slash stays one segment, refused 400 REFUSED_INPUT rather than reaching another route (${String(notUuid)})`);
       // A retryable 503 carries its Retry-After to the caller.
       embedDown = true;
-      let down: unknown;
-      try {
-        await oc.recall({ query: "ocxmem_route while the provider is away" });
-      } catch (e) {
-        down = e;
-      } finally {
-        embedDown = false;
-      }
+      const down = await thrown(() => oc.recall({ query: "ocxmem_route while the provider is away" }));
+      embedDown = false;
       assert(down instanceof AgentMemoryError && down.status === 503 && down.code === "PROVIDER_UNAVAILABLE" && Number(down.retryAfter) > 0
         && down.message.includes("the brain's embedding provider did not answer"),
         `OpenClaw: a 503 PROVIDER_UNAVAILABLE thrown with its Retry-After (${String(down)}; retryAfter ${(down as { retryAfter?: unknown })?.retryAfter})`);
@@ -3721,14 +3713,6 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
         },
       });
       const elsewhere = new AgentMemoryClient({ endpoint: `http://127.0.0.1:${page.port}/x`, accessKey: "k", workspaceId: "w" });
-      const thrown = async (f: () => Promise<unknown>) => {
-        try {
-          await f();
-          return null;
-        } catch (e) {
-          return e;
-        }
-      };
       const html = await thrown(() => elsewhere.recall({ query: "q" }));
       const array = await thrown(() => elsewhere.listReviewQueue());
       const gateway = await thrown(() => elsewhere.inspectMemory("m"));
@@ -3759,6 +3743,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       const named = (o: Body | undefined) => new Set(Object.keys(o?.properties ?? {}));
       const memoryContract = contract.properties?.memories?.items as Body;
       const stray: string[] = [];
+      const listed = (schema: Body | undefined, v: unknown, at: string) => { if (Array.isArray(schema?.enum) && !schema.enum.includes(v)) stray.push(`${at}=${String(v)}`); };
       // The recall's memories, and the example write-back's, whose artifact reference carries related_artifacts: one memory shape.
       // And one a review disputed, whose provenance is then `disputed`, a value the old contract did not list.
       const disputedId = (examples[0]?.memories as Body[] | undefined)?.[0]?.memory_id;
@@ -3769,12 +3754,12 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
         for (const part of ["source", "provenance", "scope", "use_policy", "freshness"]) for (const k of Object.keys(m[part] ?? {})) if (!named(memoryContract.properties?.[part]).has(k)) stray.push(`${part}.${k}`);
         for (const a of m.related_artifacts ?? []) for (const k of Object.keys(a)) if (!named(memoryContract.properties?.related_artifacts?.items).has(k)) stray.push(`related_artifacts.${k}`);
         for (const k of memoryContract.required ?? []) if (!(k in m)) stray.push(`missing ${k}`);
-      const listed = (schema: Body | undefined, v: unknown, at: string) => { if (Array.isArray(schema?.enum) && !schema.enum.includes(v)) stray.push(`${at}=${String(v)}`); };
-      for (const [k, v] of Object.entries(m)) listed(memoryContract.properties?.[k], v, k);
-      for (const part of ["provenance", "scope"]) for (const [k, v] of Object.entries(m[part] ?? {})) listed(memoryContract.properties?.[part]?.properties?.[k], v, `${part}.${k}`);
+        for (const [k, v] of Object.entries(m)) listed(memoryContract.properties?.[k], v, k);
+        for (const part of ["provenance", "scope"]) for (const [k, v] of Object.entries(m[part] ?? {})) listed(memoryContract.properties?.[part]?.properties?.[k], v, `${part}.${k}`);
       }
       for (const k of Object.keys(recalled)) if (!named(contract).has(k)) stray.push(k);
-      assert(shown.some((m) => m.related_artifacts?.length > 0) && shown.some((m) => m.provenance?.status === "disputed") && recalled.memories.length > 0 && stray.length === 0, `every field of the recall's answer is one recall-response.schema.json names, and each it requires is there (${[...new Set(stray)].join(", ") || "none stray"})`);
+      assert(shown.some((m) => m.related_artifacts?.length > 0) && shown.some((m) => m.provenance?.status === "disputed") && recalled.memories.length > 0 && stray.length === 0,
+        `every field of the recall's answer is one recall-response.schema.json names, with a value it lists where it lists them, and each it requires is there (${[...new Set(stray)].join(", ") || "none stray"})`);
     } catch (e) {
       assert(false, `the OpenClaw client's calls ran (${String(e).slice(0, 400)})`);
     }
@@ -3837,7 +3822,7 @@ print(json.dumps(out))
       assert(h.queue.memories?.some((m: Body) => m.memory_id === h.mid) && h.list.count >= 1 && h.list.memories?.some((m: Body) => m.memory_id === h.mid),
         `Hermes review queue on GET /review-queue and listing on GET /memories, their input in the query string (${JSON.stringify(h.queue).slice(0, 120)}; ${JSON.stringify(h.list).slice(0, 120)})`);
       assert(h.review.memory?.content === "hermesxmem_route edited by the Hermes client." && h.confirm.memory?.review_status === "confirmed" && h.confirm.memory?.use_policy?.can_use_as_instruction === true,
-        `Hermes review: an edit with its content, then a confirm, the reviewer sent as actor_label (${JSON.stringify(h.confirm).slice(0, 160)})`);
+        `Hermes review: an edit with its content, then a confirm, each taken, so neither sent the old reviewer field the plugin refuses (${JSON.stringify(h.confirm).slice(0, 160)})`);
       assert(h.refused?.status === 404 && h.refused?.code === "NO_SUCH_MEMORY" && String(h.refused?.message).includes("HTTP 404 NO_SUCH_MEMORY"),
         `Hermes: a refusal raised with its status and the plugin's code (${JSON.stringify(h.refused)})`);
       const many = (h.many?.memories ?? []) as Body[];

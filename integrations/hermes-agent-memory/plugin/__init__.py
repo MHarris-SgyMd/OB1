@@ -68,9 +68,9 @@ _PREFETCH_TTL_SECONDS = 90.0
 # (not OpenClaw). See plugins/agent-memory/index.ts.
 _RECALL_SCHEMA_VERSION = "openbrain.agent_memory.recall.v1"
 _WRITEBACK_SCHEMA_VERSION = "openbrain.agent_memory.writeback.v1"
-# The most memories one write-back request carries. The plugin takes at most 50 (TOO_MANY_MEMORIES), but each memory
-# is a capture with its model calls, one after another in the request, so a longer payload is sent in parts of ten:
-# each part's request stays well inside the write-back timeout, and a part that fails costs that part alone.
+# The most memories one write-back request carries. The plugin takes at most 50 (TOO_MANY_MEMORIES), but a longer
+# payload is sent in parts of ten: each part's request stays well inside the write-back timeout (above), and a part
+# that fails costs that part alone.
 _WRITEBACK_PART_MEMORIES = 10
 # The plugin's bound on an id: an idempotency key or a step id, a part's suffix included.
 _ID_MAX = 200
@@ -94,7 +94,8 @@ def _part_id(value: str, n: int) -> str:
 def _split_payload(memory_payload: Dict[str, Any], limit: int = _WRITEBACK_PART_MEMORIES) -> List[Dict[str, Any]]:
     """A memory_payload as parts of at most ``limit`` memories each, in its own
     order: every item of every list but ``entities`` is one memory. One part
-    when it fits; ``entities`` rides with the first part."""
+    when it fits; ``entities``, and any value that is no list, ride with the
+    first part."""
     parts: List[Dict[str, Any]] = [{}]
     count = 0
     for key, items in memory_payload.items():
@@ -108,6 +109,7 @@ def _split_payload(memory_payload: Dict[str, Any], limit: int = _WRITEBACK_PART_
             parts[-1].setdefault(key, []).append(item)
             count += 1
     return parts
+
 
 # Trivial messages we should not write back as memory turns.
 _TRIVIAL_RE = re.compile(
@@ -542,12 +544,12 @@ class _OB1Client:
         self._access_key = access_key
         self._timeout = timeout
         self._writeback_timeout = writeback_timeout
-        # When Hermes exits (time.monotonic()): no write-back part starts after it (a part in flight keeps the wait it started with).
+        # Set by stop_by at shutdown (time.monotonic()): no write-back part starts after it.
         self._stop_at: Optional[float] = None
 
     def stop_by(self, deadline: float) -> None:
-        """No write-back part starts after ``deadline`` (time.monotonic()). A part started before it waits no
-        longer than the deadline allowed when it started (a part already in flight keeps its wait)."""
+        """No write-back part starts after ``deadline`` (time.monotonic()); a part already in flight keeps the
+        wait it started with."""
         self._stop_at = deadline if self._stop_at is None else min(self._stop_at, deadline)
 
     def _writeback_wait(self, deadline: Optional[float]) -> Optional[float]:
@@ -681,7 +683,8 @@ class _OB1Client:
         # two memories, as it is in one write-back. A part refused or timed out raises, the parts before it kept
         # and the ones after it not sent: the same write-back sent again answers the kept ones, writing nothing
         # twice, and sends the rest (a refusal that holds, an unsafe memory, refuses it again). No part starts
-        # after the deadline, and a part's wait never runs past the deadline it started under: OB1WritebackCut says what was kept.
+        # after the deadline, and a part's wait never runs past the deadline it started under: OB1WritebackCut says
+        # what was kept.
         answer: dict = {}
         memories: List[Any] = []
         for n, part in enumerate(parts):
@@ -697,10 +700,11 @@ class _OB1Client:
             memories.extend(answer.get("memories") or [])
         return {**answer, "memories": memories}
 
-    def _send_part(self, body: dict, wait: float, deadline: Optional[float], kept: List[Any], in_flight: int, later: int) -> dict:
+    def _send_part(self, body: dict, wait: float, deadline: Optional[float], kept: List[Any],
+                   in_flight: int, later: int) -> dict:
         """One write-back request. One that times out with its wait cut short by the deadline is the deadline's cut
         (OB1WritebackCut, chained to the timeout): the memories kept before it, this part's unconfirmed (the
-        plugin finishes it all the same), and the later parts' unsent. A refusal is OB1RequestError, never here."""
+        plugin finishes it all the same), and the later parts' unsent. A refusal (OB1RequestError) is never a cut."""
         try:
             return self._request("POST", "/writeback", body=body, timeout=wait)
         except OSError as e:  # a read timeout (TimeoutError) or a connect one (URLError)
@@ -870,15 +874,18 @@ class OB1MemoryProvider(MemoryProvider):
         self._client: Optional[_OB1Client] = None
         self._session_id: str = ""
         self._turn_count: int = 0
+        # The latest background write-back, of any kind: the next one gives it 2 s to finish first.
         self._sync_thread: Optional[threading.Thread] = None
-        # Every background write-back still running (sync_turn's, on_pre_compress's): shutdown joins them all.
+        # Every background write-back still running (sync_turn's, on_session_end's, on_pre_compress's): shutdown
+        # joins them all.
         self._writeback_threads: List[threading.Thread] = []
         # The last session end's deadline (time.monotonic()): shutdown right after it, at exit, shares it.
         self._session_end_by: Optional[float] = None
         # The last session end's write-back, by its session and findings: Hermes's TUI ends a session twice with
         # the same transcript (finalize, then close), and a second identical write-back would race the first.
         self._last_session_end: Optional[str] = None
-        # _start_writeback runs on Hermes's background worker (sync_turn) and on the compressing thread.
+        # _start_writeback runs on Hermes's background worker (sync_turn, and on_session_end on /new), on the
+        # compressing thread, and wherever else Hermes ends a session.
         self._writeback_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetch_lock = threading.Lock()
@@ -1055,7 +1062,7 @@ class OB1MemoryProvider(MemoryProvider):
 
     def _start_writeback(self, target, name: str) -> None:
         """A background write-back, kept so shutdown can wait for it. The previous one gets 2 s to finish first,
-        as before, so turns' write-backs go roughly in order."""
+        so turns' write-backs go roughly in order."""
         previous = self._sync_thread
         if previous and previous.is_alive():
             previous.join(timeout=2.0)
@@ -1072,7 +1079,8 @@ class OB1MemoryProvider(MemoryProvider):
         # gets until then, and the client starts no write-back part after it (it may serve no more, a gateway's
         # process living on).
         now = time.monotonic()
-        deadline = self._session_end_by if self._session_end_by is not None and self._session_end_by > now else now + self._writeback_budget()
+        deadline = (self._session_end_by if self._session_end_by is not None and self._session_end_by > now
+                    else now + self._writeback_budget())
         if self._client:
             self._client.stop_by(deadline)
         with self._writeback_lock:
@@ -1338,8 +1346,8 @@ class OB1MemoryProvider(MemoryProvider):
                     flow_id=flow_id,
                 )
             except OB1WritebackCut as cut:
-                logger.warning("OB1 sync_turn write-back cut at the exit deadline: %d memories not written back, %d unconfirmed",
-                               cut.unsent, cut.unconfirmed)
+                logger.warning("OB1 sync_turn write-back cut at the exit deadline: %d memories not written back, "
+                               "%d unconfirmed", cut.unsent, cut.unconfirmed)
             except Exception:
                 logger.debug("OB1 sync_turn writeback failed", exc_info=True)
 
@@ -1480,8 +1488,8 @@ class OB1MemoryProvider(MemoryProvider):
                         idempotency_key=f"precompress:{task_id or 'no-task'}:{len(messages)}",
                     )
                 except OB1WritebackCut as cut:
-                    logger.warning("OB1 pre-compress write-back cut at the exit deadline: %d memories not written back, %d unconfirmed",
-                                   cut.unsent, cut.unconfirmed)
+                    logger.warning("OB1 pre-compress write-back cut at the exit deadline: %d memories not written "
+                                   "back, %d unconfirmed", cut.unsent, cut.unconfirmed)
                 except Exception:
                     logger.debug("OB1 on_pre_compress writeback failed", exc_info=True)
 
