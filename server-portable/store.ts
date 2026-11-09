@@ -1455,21 +1455,24 @@ export type PriorityRecord = { item: PriorityItem; exists: boolean; level: numbe
 
 /**
  * docs/priority.md's weights, as migration 122's effective_priority names them (SMD-3667). A read passes the ones it
- * overrides; the read's defaults stand for the rest (unknown 2, hop 1, hops 2, soon 2 by the end of soon_days 1, week 1
- * by the end of week_days 7, overdue 3, unblocks_one 0.5, unblocks_many 1 from unblocks_many_at 3, depth 3, cap 50,
- * count_inferred false).
+ * overrides; the read's defaults stand for the rest, level first since migration 127 (SMD-4177): unknown 2, hop 1,
+ * hops 2, soon 0.4 by the end of soon_days 1, week 0.2 by the end of week_days 7, overdue 0.6, unblocks_one 0.1,
+ * unblocks_many 0.2 from unblocks_many_at 3, depth 3, cap 50, count_inferred false. The terms after the level add at
+ * most 0.8 under the defaults; a caller's own weights may make them cross a level (122's were soon 2, week 1,
+ * overdue 3, unblocks_one 0.5, unblocks_many 1).
  */
 export type PriorityWeights = {
   unknown: number; hop: number; hops: number; soon: number; soon_days: number; week: number; week_days: number; overdue: number;
   unblocks_one: number; unblocks_many: number; unblocks_many_at: number; depth: number; cap: number; count_inferred: boolean;
 };
-/** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from). */
-export type PriorityTerm = { term: "level" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
+/** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from, the open item a thought read its level or due time from: `item`, migration 125). */
+export type PriorityTerm = { term: "level" | "from_items" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
 /**
  * One item's effective priority (migration 122, SMD-3667): the order a ranking read uses and every term that made
- * it. `level` is the counted statement's (null: unknown, or inherited); `inheritedFrom` the item it inherits from, its
- * level and how many hops; `dueFrom` where the due time came from; `waiting`, a not_before still ahead; `passedOver`
- * every other open statement, inferred ones among them when they are not counted.
+ * it. `level` is the counted statement's (null: unknown, inherited, or read from a thought's open items, its first
+ * term then `from_items`, migration 125); `inheritedFrom` the item it inherits from, its level and how many hops;
+ * `dueFrom` where the due time came from (`from_items`: the soonest of a thought's open items); `waiting`, a
+ * not_before still ahead; `passedOver` every other open statement, inferred ones among them when they are not counted.
  */
 export type EffectivePriority = {
   item: PriorityItem;
@@ -1477,7 +1480,7 @@ export type EffectivePriority = {
   level: number | null;
   inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
   dueAt: string | null;
-  dueFrom: "stated" | "due_ref" | "item" | null;
+  dueFrom: "stated" | "due_ref" | "item" | "from_items" | null;
   urgency: number;
   overdue: boolean;
   unblocks: number;
@@ -1552,8 +1555,9 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
   };
 }
 
-const TERM_NAMES = new Set(["level", "inherited", "unknown", "urgency", "overdue", "unblocks"]);
-const DUE_FROM = new Set(["stated", "due_ref", "item"]);
+// from_items: a thought's open items (migration 125, SMD-4149).
+const TERM_NAMES = new Set(["level", "from_items", "inherited", "unknown", "urgency", "overdue", "unblocks"]);
+const DUE_FROM = new Set(["stated", "due_ref", "item", "from_items"]);
 
 /** One row of 122's effective_priority; a row that is not one throws, naming the call and nothing of the row. */
 export function normaliseEffectivePriority(r: unknown, what: string): EffectivePriority {
@@ -1609,7 +1613,7 @@ export type AgendaItem = {
   level: number | null;
   inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
   dueAt: string | null;
-  dueFrom: "stated" | "due_ref" | "item" | null;
+  dueFrom: "stated" | "due_ref" | "item" | "from_items" | null;
   urgency: number;
   overdue: boolean;
   unblocks: number;
@@ -1633,8 +1637,19 @@ export type AgendaResult = {
    * leave anything out, as on a brain whose board is claimed through another brain.
    */
   claimsLive: number | null;
+  /**
+   * With a `keys` scope (126, SMD-2684), the named tickets it does not list: `others`, a ticket whose head is
+   * settled or carries a status type the brain does not know, with its status; `waiting`, one a not_before ahead
+   * keeps out; `missing`, a key no thought records. A named key is in exactly one of items and these.
+   * Null without keys, and from a brain before 126.
+   */
+  keyed: { others: AgendaOther[]; waiting: AgendaWaiting[]; missing: string[] } | null;
   now: string;
 };
+/** A named ticket the agenda does not rank (126): settled, or a status type the brain does not know. */
+export type AgendaOther = { key: string; title: string; status: string | null; statusType: string | null; settled: boolean };
+/** A named ticket a not_before ahead keeps out (126, review pass 1): not yet startable, and when it will be. */
+export type AgendaWaiting = { key: string; title: string; status: string | null; statusType: string | null; notBefore: string | null };
 
 const claimsOf = (v: unknown, what: string): AgendaClaim[] => {
   if (v === null || v === undefined) return [];
@@ -1658,6 +1673,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     throw new Error(`${what} answered no agenda this server reads`);
   }
   const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
+  const keyed = keyedOf(o.keyed, what);
   const items = (o.items as unknown[]).map((it) => {
     const i = it !== null && typeof it === "object" ? (it as Record<string, unknown>) : undefined;
     if (!i || (i.kind !== "ticket" && i.kind !== "item") || typeof i.key !== "string" || typeof i.source !== "string" || !Number.isInteger(num(i.rank))
@@ -1685,8 +1701,33 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     boardSync: bs && (typeof bs.at === "string" || bs.at instanceof Date) ? { at: isoTimestamp(bs.at as string | Date), outcome: bs.outcome ?? null } : null,
     claimsRead: o.claims_read as boolean,
     claimsLive: o.claims_live === null ? null : num(o.claims_live),
+    keyed,
     now: isoTimestamp(o.now as string | Date),
   };
+}
+
+/** 126's `keyed`: null or absent is null (no keys, or a brain before 126); any other shape throws. */
+function keyedOf(v: unknown, what: string): AgendaResult["keyed"] {
+  if (v === null || v === undefined) return null;
+  const o = typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+  if (!o || !Array.isArray(o.others) || !Array.isArray(o.waiting) || !Array.isArray(o.missing) || !(o.missing as unknown[]).every((k) => typeof k === "string")) {
+    throw new Error(`${what} answered named tickets this server cannot read`);
+  }
+  const others = (o.others as unknown[]).map((x) => {
+    const t = x !== null && typeof x === "object" ? (x as Record<string, unknown>) : undefined;
+    if (!t || typeof t.key !== "string" || typeof t.settled !== "boolean") throw new Error(`${what} answered named tickets this server cannot read`);
+    return { key: t.key, title: typeof t.title === "string" ? t.title : "", status: typeof t.status === "string" ? t.status : null,
+             statusType: typeof t.status_type === "string" ? t.status_type : null, settled: t.settled };
+  });
+  const waiting = (o.waiting as unknown[]).map((x) => {
+    const t = x !== null && typeof x === "object" ? (x as Record<string, unknown>) : undefined;
+    if (!t || typeof t.key !== "string") throw new Error(`${what} answered named tickets this server cannot read`);
+    const nb = t.not_before;
+    return { key: t.key, title: typeof t.title === "string" ? t.title : "", status: typeof t.status === "string" ? t.status : null,
+             statusType: typeof t.status_type === "string" ? t.status_type : null,
+             notBefore: typeof nb === "string" || nb instanceof Date ? isoTimestamp(nb as string | Date) : null };
+  });
+  return { others, waiting, missing: o.missing as string[] };
 }
 
 /** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
@@ -2002,6 +2043,22 @@ export type QueryActionLog = {
   agentId?: string;
   targetId: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
+  tier?: string;
+};
+
+/**
+ * A plan_context call's row (migration 126, SMD-2684): the request, its limit, the knowledge hits' ids and scores and
+ * their arm, the board's tickets in the order shown, and `filter` saying why the board was not read ({} when it was).
+ */
+export type QueryPlanContextLog = {
+  agentId?: string;
+  query: string;
+  matchCount: number;
+  arm: string;
+  resultIds: string[];
+  resultScores: (number | null)[];
+  items: { kind: string; key: string; effective: number }[];
+  filter: Record<string, unknown>;
   tier?: string;
 };
 
@@ -2432,13 +2489,18 @@ export interface ThoughtStore {
    * first, and the core answers holder mine's 42501 as CLAIMS_UNREADABLE.
    */
   agenda(opts: {
-    scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
+    /** `keys` (126): those tickets alone, 1 to 100 upper-case keys; the named ones it does not rank come back in `keyed`. */
+    scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean;
     /** Also list started tickets (124); absent is false: started work is left out, and counted. */
     includeStarted?: boolean; now?: string;
+    /** A ceiling on the call's statement, in ms (plan_context's deadline, SMD-2684); a stricter role or database setting is kept. Past it the call throws 57014. */
+    timeoutMs?: number;
   }): Promise<AgendaResult>;
   /** One agenda row in query_log (migration 123): the scope and the items returned, in order. */
   logAgenda(row: QueryAgendaLog): Promise<void>;
+  /** One plan_context row in query_log (migration 126, SMD-2684): the request, the knowledge hits and the board's tickets, in order. */
+  logPlanContext(row: QueryPlanContextLog): Promise<void>;
   /**
    * Open items (migration 117, SMD-3665 PR 2): 117's writers, each one statement in its own transaction, the actor
    * as the maker's envelope with `scope` stated (as 116's) and `plugin` the plugin a call came through (a plugin's
@@ -2765,7 +2827,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

@@ -7721,6 +7721,7 @@ const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
   ["server-portable/test-support.ts", "Bun.serve({ port, hostname, fetch: () => new Response(null) })", "quietPort: a port is quiet only where both 127.0.0.1 and every address bind, so it binds each in turn and frees it (SMD-3296)"],
   ["db/test-connect.ts", "Bun.listen({ hostname: lan,", "the counted refusals' listener: on this machine's own non-loopback address, remote to the database rule and reachable, so a connection opened before the guard is seen"],
+  ["server-portable/test-local-provider.ts", "SLOTS_CHANNEL, (k) =>", "a Postgres LISTEN on the background slots' channel (Bun's SQL listen, SMD-3379 PR 2c-1): a subscription on a database connection, no port bound"],
 ];
 
 /**
@@ -10451,9 +10452,9 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts", "scripts/agent-runner/brief.ts", "scripts/agent-runner/probes-check.ts", "scripts/agent-runner/probes.ts"], why: "named in messages, in the agent-runner probes' fixtures (planted in a clone or named in a refused-path case, not read), and by the brief as a house rule the session follows from its own copy" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
   "FORK.md": { by: ["deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/changes-index.ts", "integrations/package.json"], why: "named in messages and integrations/package.json's comment; linked by the index changes-index.ts renders into changes/README.md (its writer until SMD-3765), which no gated job runs" },
-  "README.md": { by: ["db/ingest-records.ts", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/agent-runner/brief-check.ts", "scripts/agent-runner/bundle-check.ts", "scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, in a plugin's npm files list, and by the agent-runner probe, gate, brief and bundle harnesses' \"README.md\" token (which resolves to the repo root's as well), not read" },
+  "README.md": { by: ["db/ingest-records.ts", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/agent-runner/brief-check.ts", "scripts/agent-runner/bundle-check.ts", "scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts", "scripts/agent-runner/run-check.ts", "scripts/changes-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, in a plugin's npm files list, and by the agent-runner probe, gate, brief, bundle and run harnesses' \"README.md\" token (which resolves to the repo root's as well), not read" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
-  "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
+  "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/brain-info.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
   "docs/01-getting-started.md": { by: ["db/test-schema.ts", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
   "docs/agent-runner.md": { by: ["scripts/agent-runner/probes-check.ts"], why: "named in the self-check's assertion text (the probe list matches the design) and a refused-path case; it opens no file" },
   "docs/connector-taxonomy.md": { by: ["docs/connector-registry.json", "scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs; the registry names it as its spec" },
@@ -10464,7 +10465,7 @@ const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
   "jev/h2o/README.md": { by: ["db/consolidate.ts", "server-portable/preflight.ts"], why: "named in preflight's and decide mode's messages" },
   "recipes/gmail-smart-pull/README.md": { by: ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs"], why: "named by the recipe's own script, which no job runs" },
   "recipes/session-capture-hook/README.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the hook's test, which repo-consistency runs" },
-  "scripts/agent-runner/README.md": { by: ["scripts/agent-runner/brief-check.ts", "scripts/agent-runner/bundle-check.ts", "scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts"], why: "the probe, gate, brief and bundle harnesses' \"README.md\" token resolves from their own directory to this file; they plant a README in the clone, not this one" },
+  "scripts/agent-runner/README.md": { by: ["scripts/agent-runner/brief-check.ts", "scripts/agent-runner/bundle-check.ts", "scripts/agent-runner/gate-check.ts", "scripts/agent-runner/probes.ts", "scripts/agent-runner/run-check.ts"], why: "the probe, gate, brief, bundle and run harnesses' \"README.md\" token resolves from their own directory to this file; they plant a README in the clone, not this one" },
 };
 /** The tracked files a token in a code file can name: the token from the root, its leading ./, ../ and / taken off, and the token from the file's own directory. */
 function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<string> {
@@ -11745,7 +11746,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["integrations/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["integrations/chrome-capture-extension/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/chrome-capture-extension/icons/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
-  ["integrations/hermes-agent-memory/README.md", { fork: { why: KEPT.NBJ, lines: 1 }, name: { why: KEPT.NBJ, lines: 1 } }],
+  ["integrations/hermes-agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/openclaw-agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/slack-capture/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
   ["jev/README.md", { fork: { why: KEPT.SENSE, lines: 1 } }],

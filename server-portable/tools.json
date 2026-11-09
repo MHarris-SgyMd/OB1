@@ -82,6 +82,10 @@
       "scope": "read"
     },
     {
+      "name": "plan_context",
+      "scope": "read"
+    },
+    {
       "name": "thread",
       "scope": "read"
     },

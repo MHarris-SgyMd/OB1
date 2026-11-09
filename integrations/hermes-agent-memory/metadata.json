@@ -6,15 +6,15 @@
     "name": "Mike Scalise",
     "github": "scalisemichael"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "requires": {
     "open_brain": true,
-    "services": ["Hermes Agent 0.13.0+", "OB1 Agent Memory API"],
+    "services": ["Hermes Agent 0.13.0+"],
     "tools": ["Python 3.11+"]
   },
   "tags": ["hermes", "agent-memory", "memory-provider", "plugin", "governance"],
   "difficulty": "intermediate",
   "estimated_time": "20 minutes",
   "created": "2026-05-09",
-  "updated": "2026-05-09"
+  "updated": "2026-11-08"
 }

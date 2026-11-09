@@ -10,5 +10,5 @@ sequenceDiagram
   API->>API: Rank by scope, provenance, freshness, confidence
   API-->>Runtime: Memories with use_policy
   Runtime->>Agent: Inject evidence, preferences, or instructions allowed by policy
-  Runtime->>API: POST /recall/:id/usage
+  Runtime->>API: POST /recalls/:id/usage
   API->>DB: Record usage and audit events

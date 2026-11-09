@@ -52,7 +52,9 @@ source (`derived_from` / `supersedes`), whether or not a search returned it:
 every source a synthesis cites is a row, and the link to a search is made when
 the log is read, not when it is written. Since migration 123 it also records one
 row per agenda call: the calling key, its scope (source, project, label, `mine`)
-and flags, and the tickets and items it was shown, in order. Together they let a
+and flags, and the tickets and items it was shown, in order; since migration 126,
+one per plan_context call: the request, the thoughts it returned and the tickets
+on its board. Together they let a
 retrieval change be replayed against what the brain was actually asked
 (`evals/eval-replay.ts`) and show whether callers use what comes back
 (`evals/eval-utilization.ts`). It is

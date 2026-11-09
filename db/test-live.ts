@@ -46,7 +46,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -4201,7 +4201,8 @@ if (want("9")) {
 // whose every cell test-worker-bootstrap.ts holds; here one case per path it
 // sends a thought down), and what the follower says, stamps and ends with. Its
 // own section, out of [9] so the long shard kept its time (review pass 4);
-// in the rest since SMD-3714, which evened the cells out under sleep.
+// in the rest from SMD-3714, which evened the cells out under sleep, and in
+// long since SMD-3306 PR 6b-1 (the header's shard history).
 
 if (want("9f")) {
   console.log("\n[9f] db/reembed.ts --follow: the provider and the database going away, at the start and mid-pass");
@@ -4212,6 +4213,18 @@ if (want("9f")) {
   let providerDown503 = false;
   let downStatus = 503;
   let keyRefused401 = false;
+  /** The probe's call alone answers 401, the rows' calls passing (SMD-2636 PR 3b). */
+  let probeRefused401 = false;
+  /** While set, a zz-deadline thought's call never answers (SMD-2636 PR 3b); cleared, it answers as any. */
+  let deadlinesHang = true;
+  /**
+   * While set, the first probe after each zz-deadline call answers 503, the wait's probe after it answering: a thought
+   * whose deadline's probe meets an outage twice (SMD-2636 PR 3b, the build's mutants and review pass 1's).
+   */
+  let probeDownAfterDeadline = false;
+  let probeDownNext = false;
+  /** Every row's call answers OpenRouter's 402 "can only afford", the probe's passing (SMD-2636 PR 3b, the build's mutants). */
+  let rowsAfford402 = false;
   let modelGone404 = false;
   /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
   let limitConcurrent = false;
@@ -4246,6 +4259,21 @@ if (want("9f")) {
       }
       if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
       if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
+      // The probe's refusal past the 160 characters its words are cut at in the closing line (review pass 3).
+      if (probe && probeRefused401) return Response.json({ error: { message: `stub: invalid api key — ${"the key was revoked by its owner; ".repeat(5)}` } }, { status: 401 });
+      if (probe && probeDownNext) {
+        probeDownNext = false;
+        // Past the 160 characters the "is not answering" line cuts at, so its mark is read (review pass 5).
+        return Response.json({ error: { message: `stub: overloaded — ${"every replica is busy, retry after the queue drains; ".repeat(3)}` } }, { status: 503 });
+      }
+      // Past the worker line's 200 characters and the closing line's 300, as OpenRouter's is with its advice (review pass 3).
+      if (rowsAfford402 && !probe) return Response.json({ error: { message: `This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12. ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
+      // A zz-deadline thought's call never answers, so its deadline passes; the probe after it answers unless a flag
+      // above says otherwise (SMD-2636 PR 3b).
+      if (input.includes("zz-deadline") && deadlinesHang) {
+        if (probeDownAfterDeadline) probeDownNext = true;
+        return neverAnswers();
+      }
       if (modelGone404) return Response.json({ error: { message: `model "stub-embed" not found, try pulling it first` } }, { status: 404 });
       if (rowsLimited && !probe) return Response.json({ error: { message: "stub: rate limit reached for tokens per minute" } }, { status: rowsStatus });
       if (limitConcurrent && !probe) {
@@ -4256,7 +4284,11 @@ if (want("9f")) {
       }
       if (input.includes("zz-filtered")) return Response.json({ error: { message: "stub: the request was rejected by the content filter" } }, { status: 400 });
       if (input.includes("zz-overlong")) return Response.json({ error: { message: "stub: the input exceeds the model's context length" } }, { status: 400 });
-      if (poison && input.includes("hemlock")) return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
+      // A slow hemlock note answers its 500 after 1 s, so a second worker has claimed its own thought by then, on a slow runner too (review pass 4: 500 ms).
+      if (poison && input.includes("hemlock")) {
+        if (input.includes("slow hemlock")) await Bun.sleep(1000);
+        return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
+      }
       if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
@@ -4411,20 +4443,25 @@ if (want("9f")) {
     keyRefused401 = false;
     const keyRow = await row();
     const keyClaim = await claimOf(keyThought);
-    assert(keyEnd === "exit 2" && keyRow?.ended === true && keyRow.refused === "provider" && keyClaim?.status === "pending" && keyed.lines.some((l) => /The embedding provider refused the request itself: Embeddings request .* 401/.test(l)),
+    // The probe's refusal said first, as extract's is (SMD-2636 PR 3b).
+    assert(keyEnd === "exit 2" && keyRow?.ended === true && keyRow.refused === "provider" && keyClaim?.status === "pending" && keyed.lines.some((l) => /The embedding provider refused the request itself: a probe's embedding call was refused \(Embeddings request .* 401.*\), right after Embeddings request .* 401/.test(l)),
       `a key refused mid-pass ends the follower with 2, its row refused provider, the row in hand left pending (${keyEnd}; row ${JSON.stringify(keyRow)}; claim ${JSON.stringify(keyClaim)})`);
     await sql`DELETE FROM thoughts WHERE id = ${keyThought}::uuid`;
 
     // A 400 about one thought's length is that thought's: recorded failed, the follower goes on (review pass 1: it ended the follower, refused provider, and every restart met the same row first).
     const lengthy = liveFollower();
     await lengthy.idle();
+    const overlongProbes = probeCalls;
     const overlong = await newThought("a zz-overlong thought the provider refuses by its length");
     const overlongFailed = await pollUntil(async () => (await claimOf(overlong))?.status === "failed", 15_000);
+    // Its own words, unprobed: the length names the thought (SMD-2636 PR 3b, review pass 1's mutant: `thought` read as a probe passed).
+    const overlongError = (await claimOf(overlong))?.last_error ?? "";
+    const overlongProbed = probeCalls - overlongProbes;
     const afterOverlong = await newThought("a thought the follower takes after a length refusal");
     const afterEmbedded = await pollUntil(() => atModel(afterOverlong), 15_000);
     const lengthyExit = await lengthy.stop();
-    assert(overlongFailed && afterEmbedded && lengthyExit === "exit 0" && !lengthy.lines.some((l) => /refused the request itself/.test(l)),
-      `a 400 about a thought's length records that thought failed and the follower goes on, a stop 0 (failed ${overlongFailed}, next embedded ${afterEmbedded}; ${lengthyExit})`);
+    assert(overlongFailed && /context length/.test(overlongError) && !/probe/.test(overlongError) && overlongProbed === 0 && afterEmbedded && lengthyExit === "exit 0" && !lengthy.lines.some((l) => /refused the request itself/.test(l)),
+      `a 400 about a thought's length records that thought failed, unprobed, and the follower goes on, a stop 0 (failed ${overlongFailed}: ${overlongError.slice(0, 120)}; ${overlongProbed} probe(s); next embedded ${afterEmbedded}; ${lengthyExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${overlong}::uuid`;
 
     // A 400 not about length that the probe's text then gets answered (a content filter) is the thought's too: recorded failed, the follower goes on (review pass 2: it ended the follower, refused provider).
@@ -4439,6 +4476,121 @@ if (want("9f")) {
     assert(filteredFailed && /content filter.*the provider answered a probe right after, so this thought's/.test(filteredClaim?.last_error ?? "") && afterFilteredEmbedded && filteringExit === "exit 0",
       `a 400 the probe's text then gets answered is the thought's: recorded failed, said so, the follower goes on, a stop 0 (${filteredClaim?.last_error?.slice(0, 160)}; next embedded ${afterFilteredEmbedded}; ${filteringExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${filtered}::uuid`;
+
+    // A call that meets its deadline with no answer is probed first (SMD-2636 PR 3b, the maintainer's rule of
+    // 2026-11-05; it was an outage at once, the thought recorded only when it hung again after a wait): the probe
+    // answered, the thought's — recorded failed at once, said so, no outage — and the follower goes on.
+    const deadlined = liveFollower();
+    await deadlined.idle();
+    const hangs = await newThought("a zz-deadline thought whose call never answers");
+    const hangsFailed = await pollUntil(async () => (await claimOf(hangs))?.status === "failed", 15_000);
+    const hangsClaim = await claimOf(hangs);
+    const afterHangs = await newThought("a thought the follower takes after a deadline the probe answered past");
+    const afterHangsEmbedded = await pollUntil(() => atModel(afterHangs), 15_000);
+    const deadlinedExit = await deadlined.stop();
+    const deadlinedOutage = deadlined.lines.some((l) => /goes back to the pool unrecorded|is not answering/.test(l));
+    assert(hangsFailed && /the provider answered a probe right after, so this thought's; --retry-failed revisits it\)$/.test(hangsClaim?.last_error ?? "") && !deadlinedOutage && afterHangsEmbedded && deadlinedExit === "exit 0",
+      `a deadline with no answer is probed first: the probe answered, the thought recorded failed as its own at once, no outage, the follower going on, a stop 0 (${hangsClaim?.last_error?.slice(0, 160)}; outage said ${deadlinedOutage}; next embedded ${afterHangsEmbedded}; ${deadlinedExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${hangs}::uuid OR id = ${afterHangs}::uuid`;
+
+    // A deadline whose probe is refused is the request's: every worker stops, exit 2, refused provider, the thought
+    // pending, the probe's refusal said first (SMD-2636 PR 3b; it was an outage, the wait's probe then refused).
+    const deadRefused = liveFollower();
+    await deadRefused.idle();
+    probeRefused401 = true;
+    let deadRefusedEnd: string | null = null;
+    let refusedHangs = "";
+    try {
+      refusedHangs = await newThought("a zz-deadline thought whose probe is refused");
+      deadRefusedEnd = await deadRefused.ended();
+    } finally {
+      probeRefused401 = false;
+    }
+    const deadRefusedRow = await row();
+    const deadRefusedClaim = await claimOf(refusedHangs);
+    // The probe's words cut at 160, marked (review pass 3: unmarked, a cut read whole).
+    const deadRefusedSaid = deadRefused.lines.some((l) => /The embedding provider refused the request itself: a probe's embedding call was refused \(Embeddings request .* 401 .*…\), right after /.test(l));
+    const deadRefusedWaited = deadRefused.lines.some((l) => /goes back to the pool unrecorded/.test(l));
+    assert(deadRefusedEnd === "exit 2" && deadRefusedRow?.refused === "provider" && deadRefusedClaim?.status === "pending" && deadRefusedSaid && !deadRefusedWaited,
+      `a deadline whose probe is refused ends the follower with 2, refused provider, the thought pending, the probe's refusal said, no outage waited (${deadRefusedEnd}; row ${JSON.stringify(deadRefusedRow)}; claim ${JSON.stringify(deadRefusedClaim)}; said ${deadRefusedSaid}, waited ${deadRefusedWaited})`);
+    await sql`DELETE FROM thoughts WHERE id = ${refusedHangs}::uuid`;
+
+    // A deadline whose probe gets no answer is the provider's outage, the thought back in the pool unrecorded, not the
+    // thought's (SMD-2636 PR 3b, the build's mutant: probedFault's outage read the thought's passed every row). Once
+    // the wait's probe answers, the same again is the suspect's own, recorded failed (review pass 1's mutants: the
+    // suspect dropped on this path, or the second round handed back, passed every row and cycled for ever).
+    const deadDown = liveFollower();
+    await deadDown.idle();
+    probeDownAfterDeadline = true;
+    let downHangs = "";
+    let downSentBack = false;
+    let downFailed = false;
+    let downClaim: Awaited<ReturnType<typeof claimOf>>;
+    try {
+      downHangs = await newThought("a zz-deadline thought whose probe meets an outage");
+      // In the probe's words, cut at 160 and marked (review pass 5: the mark was held by no row).
+      downSentBack = await deadDown.saw(new RegExp(`the embedding provider is not answering \\(Embeddings request .* 503 .*…\\) — ${downHangs} goes back to the pool unrecorded`));
+      downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 20_000);
+      downClaim = await claimOf(downHangs);
+    } finally {
+      probeDownAfterDeadline = false;
+      probeDownNext = false;
+    }
+    const deadDownExit = await deadDown.stop();
+    assert(downSentBack && deadDownExit === "exit 0",
+      `a deadline whose probe gets no answer is an outage: the thought back in the pool unrecorded, said as the probe's 503 (sent back ${downSentBack}; ${deadDownExit})`);
+    assert(downFailed && /^provider error again right after the provider answered a probe, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? ""),
+      `…and, once the wait's probe answers, the same again is the suspect's own: recorded failed (${JSON.stringify(downClaim)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${downHangs}::uuid`;
+
+    // Another worker's outage is joined unprobed (SMD-2636 PR 3b, as extract's, PR 3a's review pass 1): under two
+    // workers a slow hemlock note's 500 begins an outage while a deadline thought's call is still in hand, which, met
+    // after, goes back to the pool unrecorded, where a probe would answer and record it failed. The 500 comes after
+    // 1 s: at once, it began the outage before the other worker claimed, which then claimed nothing.
+    const joining = liveFollower({ workers: 2 });
+    await joining.idle();
+    poison = true;
+    let joinHangs = "";
+    let joinSick = "";
+    let joinSentBack = false;
+    let joinClaim: Awaited<ReturnType<typeof claimOf>>;
+    try {
+      [{ id: joinHangs }, { id: joinSick }] = (await sql`INSERT INTO thoughts (content) VALUES ('a zz-deadline thought in hand when another begins an outage'), ('the slow hemlock note that begins the outage') RETURNING id::text AS id`) as { id: string }[];
+      joinSentBack = await joining.saw(new RegExp(`${joinHangs} goes back to the pool unrecorded`));
+      joinClaim = await claimOf(joinHangs);
+    } finally {
+      poison = false;
+    }
+    const joiningExit = await joining.stop();
+    const joinProbedFailed = joinClaim?.status === "failed";
+    assert(joinSentBack && !joinProbedFailed && joiningExit === "exit 0",
+      `a deadline met during another worker's outage joins it, unprobed: back in the pool, not recorded failed (sent back ${joinSentBack}; claim ${JSON.stringify(joinClaim)}; ${joiningExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${joinHangs}::uuid OR id = ${joinSick}::uuid`;
+
+    // A 402 saying the call asks more than the account affords is the request's at once, unprobed: exit 2, refused
+    // provider, the thought pending (SMD-2636 PR 3b; the probe's one call is affordable and would read each thought its own).
+    const afford = liveFollower();
+    await afford.idle();
+    rowsAfford402 = true;
+    const affordProbes = probeCalls;
+    let affordEnd: string | null = null;
+    let affordThought = "";
+    try {
+      affordThought = await newThought("a thought the account cannot afford to re-embed");
+      affordEnd = await afford.ended();
+    } finally {
+      rowsAfford402 = false;
+    }
+    const affordRow = await row();
+    const affordClaim = await claimOf(affordThought);
+    // The closing line cut at 300, marked (review pass 3).
+    const affordSaid = afford.lines.some((l) => /The embedding provider refused the request itself: Embeddings request .* 402 .*can only afford 12\..*…$/.test(l));
+    // The worker's own line too, its words whole or marked cut (review pass 1: cut at 160, "…up to 81" read as a number).
+    const affordWorkerLine = afford.lines.find((l) => /: the embedding provider refuses the request itself \(/.test(l)) ?? "";
+    const affordWorkerSaid = /\(Embeddings request .* 402 .*…\) — stopping every worker; nothing is marked failed$/.test(affordWorkerLine);
+    assert(affordEnd === "exit 2" && affordRow?.refused === "provider" && affordClaim?.status === "pending" && affordSaid && affordWorkerSaid && probeCalls === affordProbes,
+      `a 402 "can only afford" ends the follower with 2 unprobed, refused provider, the thought pending, its worker's line saying why (${affordEnd}; row ${JSON.stringify(affordRow)}; claim ${JSON.stringify(affordClaim)}; said ${affordSaid}, worker ${affordWorkerLine.trim().slice(-120)}; ${probeCalls - affordProbes} probe(s))`);
+    await sql`DELETE FROM thoughts WHERE id = ${affordThought}::uuid`;
 
     // The model missing mid-pass (a 404 naming it, as while Ollama pulls it) is waited for, as an outage is — not the request refused.
     const pulled = liveFollower();
@@ -4497,6 +4649,10 @@ if (want("9f")) {
     const throttledExit = await throttledFollower.stop();
     assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
       `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
+    // A 429 says the provider "is not answering", as every follower's outage does (SMD-2636 PR 3b: it said "is holding calls back").
+    const throttledSaid = throttledFollower.lines.filter((l) => l.includes(`${throttledThought} goes back to the pool unrecorded`));
+    assert(throttledSaid.length >= 1 && throttledSaid.every((l) => /: the embedding provider is not answering \(Embeddings request .* 429/.test(l)),
+      `…each 429's line says the provider is not answering (${throttledSaid.length}; ${throttledSaid[0]?.slice(0, 160)})`);
     // Re-embed's carried line in its own words, as on main: no pauses in its window or its note (SMD-2636 PR 2,
     // review pass 3, mutant: re-embed given extract's pausing window and words passed every row).
     const carriedLines = throttledFollower.lines.filter((l) => /the follower calls stub-embed at /.test(l) && / \(back within /.test(l));
@@ -4830,6 +4986,43 @@ if (want("9f")) {
     const setBackLine = aborting.lines.find((l) => /set back in the queue/.test(l)) ?? "";
     assert(embedInHand && embedTooYoung === 0 && embedAborted === 1 && embedded && abortingExit === "exit 0" && /1 set back in the queue, the embedding call in hand aborted by the pass's caller/.test(setBackLine),
       `abortInHand aborts a re-embed follower's call in hand: the thought set back and re-embedded, the follower going on (${embedTooYoung} then ${embedAborted} aborted, re-embedded ${embedded}; ${abortingExit}; ${setBackLine.trim().slice(0, 160)}; ${probeCalls - embedFrom} probe(s))`);
+
+    // The probe after a deadline is part of the call in hand (SMD-2636 PR 3b, review pass 1): abortInHand during it
+    // sets the thought back, where a probe deaf to it held the pass to its own timeout, then began an outage. Timed,
+    // at a 6 s call timeout: re-embedded within 2 s of the abort, so the probe heard it (review pass 3's mutant: the
+    // probe on the stop alone passed, the set-back coming once the deaf probe timed out).
+    let abortProbe: InHandAbort | undefined;
+    const probing = liveFollower({ env: { ...env, OB1_LLM_TIMEOUT: "6" }, onPass: (_st, a) => { abortProbe = a; } });
+    await probing.idle();
+    const probeHungFrom = embedProbesHung;
+    let probeAborted = -1;
+    let probedThought = "";
+    let probeEmbedded = false;
+    let probeAfterMs = -1;
+    let probeClaim: Awaited<ReturnType<typeof claimOf>>;
+    try {
+      embedProbeHangs = true;
+      probedThought = await newThought("a zz-deadline thought whose probe is aborted in hand");
+      await pollUntil(async () => embedProbesHung > probeHungFrom, 15_000);
+      // The thought's next call answers: set back, it is claimed again at once, in the same drain (a second
+      // deadline with the probe still hung was an outage). The "set back" count is the run's closing summary's,
+      // read after the stop (review pass 2: waited for here, it never came before the stop).
+      deadlinesHang = false;
+      embedProbeHangs = false;
+      const abortAt = Date.now();
+      probeAborted = abortProbe?.() ?? -1;
+      probeEmbedded = await pollUntil(() => atModel(probedThought), 15_000);
+      probeAfterMs = Date.now() - abortAt;
+      probeClaim = await claimOutOfHand(probedThought);
+    } finally {
+      deadlinesHang = true;
+      embedProbeHangs = false;
+    }
+    const probingExit = await probing.stop();
+    const probeOutageLine = probing.lines.find((l) => /goes back to the pool unrecorded|is not answering/.test(l));
+    assert(embedProbesHung > probeHungFrom && probeAborted === 1 && probeEmbedded && probeAfterMs >= 0 && probeAfterMs < 2_000 && probeClaim?.status === "succeeded" && probeOutageLine === undefined && probing.lines.some((l) => /set back in the queue/.test(l)) && probingExit === "exit 0",
+      `abortInHand during the probe after a deadline sets the thought back, then re-embedded: no outage, not recorded failed (${probeAborted} aborted; embedded ${probeEmbedded} ${probeAfterMs} ms after it; claim ${JSON.stringify(probeClaim)}; outage said ${probeOutageLine?.trim().slice(0, 200)}; ${probingExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${probedThought}::uuid`;
   } finally {
     restoreOutage();
     providerDown503 = false;
@@ -29673,7 +29866,7 @@ if (want("47")) {
     assert(JSON.stringify(written) === JSON.stringify(["a2→a1 a3→a2", "b2→b1"]) && census.code === 0
         && now.threads === was.threads + 2 && now.thoughts === was.thoughts + 5 && now.standing === was.standing + 1 && now.whole === was.whole + 3
         && /^ {2}linked: {4}2 key\(s\) whose edges differ from their thread's, 1 key\(s\) no thought holds still carrying edges — threads\.ts without --status links them$/m.test(census.out)
-        && census.out.includes(`  keys:      ${KA}, ${KB}, ${KO} — --key <key> re-links one`),
+        && census.out.includes(`  keys:      ${KA}\n             ${KB}\n             ${KO}\n             --key <a key as printed above> re-links one`),
       `the subjects' writes linked each thread; unlinked, --status reads two more threads of five thoughts, the orphan's edge standing where three are wanted, and names both keys and the orphan's (${JSON.stringify([was, now])}; ${census.out.trim().split("\n").at(-1)})`);
 
     const withWork = await keysWithWork();
@@ -29776,7 +29969,7 @@ if (want("47")) {
       `--key re-links one thread, its dry run counting first (${keyDry.out} | ${keyRun.out})`);
     // A key nothing holds is said so, not read as a thread linked already.
     const nothing = await threads({ key: "ticket:SMD-9479" });
-    assert(nothing.code === 0 && nothing.out === "  ticket:SMD-9479: 0 thought(s), 0 edge(s) closed, 0 written\n  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the keys whose edges differ)"
+    assert(nothing.code === 0 && nothing.out === "  ticket:SMD-9479: 0 thought(s), 0 edge(s) closed, 0 written\n  no thought holds this key and no thread's edge stands under it — nothing to link (--status names the first keys whose edges differ, each as --key takes it)"
         && !/no thought holds this key/.test(keyRun.out),
       `--key on a key nothing holds says so (${nothing.out})`);
     // A thread linked wrong with the right number of edges: --status compares the edges, not their count.
@@ -29786,7 +29979,7 @@ if (want("47")) {
     const skewed = await threads({ status: true });
     const mended = await threads({ key: KA });
     assert(skewedPairs === "a2→a1 a3→a1" && /^ {2}linked: {4}1 key\(s\) whose edges differ from their thread's — threads\.ts without --status links them$/m.test(skewed.out)
-        && skewed.out.includes(`  keys:      ${KA} — --key <key> re-links one`)
+        && skewed.out.includes(`  keys:      ${KA}\n             --key <a key as printed above> re-links one`)
         && mended.out === `  ${KA}: 3 thought(s), 1 edge(s) closed, 1 written` && (await pairs(KA)) === "a2→a1 a3→a2",
       `a thread linked wrong with as many edges as it wants is read as differing, and --key mends it (${skewedPairs}; ${skewed.out.trim().split("\n").at(-1)}; ${mended.out})`);
 
@@ -29851,6 +30044,193 @@ if (want("47")) {
   } finally {
     if (renamed) await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
     await sql`DELETE FROM thoughts WHERE content LIKE '[47]%'`;
+    await sql.close();
+  }
+}
+
+if (want("47b")) {
+  console.log("\n[47b] The threads' census bounded (SMD-3306 PR 7a-2c): brain_info's and preflight's read, db/threads.ts --status's with a bound — the standing subjects and the thread edges walked in key order, at most the bound each, a key either walk cuts left out so every key read is read whole; an unlinked thread and orphaned keys counted within the keys read, none past the cut; complete only when nothing was cut; brain_info's threads fact and its Threads line, which name no key; a brain without 120 carries none");
+  // Its own client: [24] closed the suite's.
+  const sql = new SQL({ url: URL_!, max: 1 });
+  const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await runThreads({ url: URL_!, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+    return { code, out: outs.join("\n"), err: errs.join("\n") };
+  };
+  const thought = async (label: string, created: string) =>
+    ((await sql`INSERT INTO thoughts (content, metadata, created_at) VALUES (${`[47b] ${label}`}, ${{ source: "live" }}::jsonb, ${created}::timestamptz)
+      RETURNING id::text AS id`)[0] as { id: string }).id;
+  const subject = async (id: string, key: string) =>
+    ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'model', 'subject:qwen3.8:27b@p1', NULL::uuid,
+      (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
+  const edge = (newer: string, older: string, key: string) =>
+    sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${newer}::uuid, 'relation', ${{ relation: "evolves", target: older, judge_key: "thread:v1", key }}::jsonb)`;
+  // Keys that sort before every other key the suite writes (a phrase's digits before any letter, phrase before pr,
+  // ticket and version), so a bound counts their rows from the first: P1 < P2 < OB < P3 < OD < PE.
+  const P1 = "phrase:0000 a", P2 = "phrase:0000 b", OB = "phrase:0000 bb", P3 = "phrase:0000 c", OD = "phrase:0000 d", PE = "phrase:0000 e";
+  let renamed = false, pathSet = false, decoy = false;
+  try {
+    // Settled first: every other section's thread linked, so the counts below are this section's alone.
+    const settle = await threads({});
+    const [before] = (await sql`
+      SELECT (SELECT count(*) FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL AND payload->>'key' < ${P1})::int AS s,
+             (SELECT count(*) FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key' AND payload->>'key' < ${P1})::int AS e`) as { s: number; e: number }[];
+    // Three threads of three thoughts each, written through the subjects' door, so each is linked; then P2's edges
+    // taken away (an upgrade's unlinked thread), an orphan's edge under OB, and eight under OD.
+    const ids: string[] = [];
+    for (const [i, key] of [P1, P2, P3].entries())
+      for (let j = 1; j <= 3; j++) {
+        const id = await thought(`${key} #${j}`, `2026-10-0${i + 1}T0${j}:00:00Z`);
+        ids.push(id);
+        await subject(id, key);
+      }
+    const [p1a, p1b, p1c, p2a, , , p3a, p3b, p3c] = ids;
+    // A fourth thread of two after OD, so a bound of 10 cuts the subjects' walk too (inside PE), the edges' first.
+    for (let j = 1; j <= 2; j++) await subject(await thought(`${PE} #${j}`, `2026-10-05T0${j}:00:00Z`), PE);
+    await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${P2}`;
+    await edge(p2a, p1a, OB);
+    for (const [n, o] of [[p1b, p1a], [p1c, p1a], [p1c, p1b], [p1a, p1b], [p3b, p3a], [p3c, p3a], [p3c, p3b], [p3a, p3b]] as const) await edge(n, o, OD);
+    // A judged relation (084's, no key) beside them is no thread's edge: it counts in nothing below (review pass 4).
+    await sql`SELECT record_thought_relation(${p3a}::uuid, ${p1b}::uuid, 'related', 0.9, 'consolidate:47b@p1', NULL, 'a', 'b', NULL)`;
+    const whole = await threadCensus(sql, UNBOUNDED);
+    const [c2, c3, c4, c7, c10] = [await threadCensus(sql, 2), await threadCensus(sql, 3), await threadCensus(sql, 4), await threadCensus(sql, 7), await threadCensus(sql, 10)];
+    // 11 subjects and 14 edges (P1 2, OB 1, P3 2, OD 8, PE 1): from a bound of 11 the subjects' walk is not cut, the
+    // edges' walk is until 14 (review pass 1).
+    const [c11, c13, c14] = [await threadCensus(sql, 11), await threadCensus(sql, 13), await threadCensus(sql, 14)];
+    const status = await threads({ status: true });
+    assert(settle.code === 0 && before.s === 0 && before.e === 0,
+      `the brain settled, and this section's keys sort before every other key: no subject or thread edge before them (${JSON.stringify(before)})`);
+    assert(whole.complete && whole.unlinked === 1 && whole.orphaned === 2 && JSON.stringify(whole.first) === JSON.stringify([P2, OB, OD])
+        && status.out.includes(`  keys:      '${P2}'\n             '${OB}'\n             '${OD}'\n             --key <a key as printed above> re-links one`),
+      `with no bound the census reads every key: P2 unlinked, OB and OD orphaned, named in key order, as --status says (${JSON.stringify(whole)})`);
+    // A bound of 2 cuts P1, the first key, so no key is read: not complete, all zero — and the line and the row say
+    // so, never "linked" (review pass 1).
+    const c2fact = threadsFact(c2);
+    const c2line = threadsLine({ threads: c2fact, unread: {} }), c2row = threadsRow(c2fact, undefined);
+    assert(!c2.complete && c2.keys === 0 && c2.threads === 0 && c2.standing === 0 && c2.unlinked === 0 && c2.orphaned === 0
+        && /^not counted — the first key in key order alone passes the census's bound/.test(c2line) && c2row.status === "warn" && /^could not verify: /.test(c2row.detail),
+      `a bound of 2 cuts the first key: nothing read, not complete, and said so — not counted, a warning (${JSON.stringify(c2)} | ${c2line} | ${c2row.status})`);
+    // A bound of 3 ends exactly at P1's last thought: the cut is P2's first row, so P1 is read whole, P2 left out.
+    assert(!c3.complete && c3.keys === 1 && c3.threads === 1 && c3.unlinked === 0 && c3.orphaned === 0,
+      `a bound of 3 ending at a key's last row reads that key whole and leaves the next out (${JSON.stringify(c3)})`);
+    // A bound of 4 cuts P2's walk at its second thought: P2 is left out, unlinked as it is; P1 alone is read.
+    assert(!c4.complete && c4.keys === 1 && c4.threads === 1 && c4.thoughts === 3 && c4.standing === 2 && c4.whole === 2 && c4.unlinked === 0 && c4.orphaned === 0 && c4.first.length === 0,
+      `a bound of 4 cuts the subjects' walk inside P2: P2 is left out whole, P1 read and linked, not complete (${JSON.stringify(c4)})`);
+    // A bound of 7 cuts P3's walk: P1 and P2 read, P2 unlinked; OB, before the cut, orphaned; P3 and OD left out.
+    assert(!c7.complete && c7.keys === 2 && c7.unlinked === 1 && c7.orphaned === 1 && JSON.stringify(c7.first) === JSON.stringify([P2, OB]) && c7.standing === 3 && c7.whole === 4,
+      `a bound of 7 cuts the subjects' walk inside P3: P1 and P2 read, P2 unlinked, OB orphaned before the cut, P3 and OD left out (${JSON.stringify(c7)})`);
+    // A bound of 10 cuts both walks: the subjects' inside PE, the edges' first, inside OD's eight; the first cut
+    // holds, so OD is left out whole, and PE with it.
+    assert(!c10.complete && c10.keys === 3 && c10.unlinked === 1 && c10.orphaned === 1 && JSON.stringify(c10.first) === JSON.stringify([P2, OB]) && c10.standing === 5 && c10.whole === 6,
+      `a bound of 10 lets the edges' walk cut first, inside OD: P1, P2 and P3 read, OD left out whole, not complete (${JSON.stringify(c10)})`);
+    // The edges' walk cut alone is not complete either (review pass 1): at 11 inside OD, at 13 at PE's one edge; at 14
+    // neither walk is cut, and every key is read.
+    assert(!c11.complete && c11.keys === 3 && c11.orphaned === 1 && !c13.complete && c13.keys === 3 && c13.orphaned === 2
+        && c14.complete && c14.keys === 4 && c14.unlinked === 1 && c14.orphaned === 2 && c14.threads === 4 && c14.standing === 14,
+      `the edges' walk cut alone, the subjects' not, is not complete (11: inside OD; 13: PE left out); at 14 nothing is cut (${JSON.stringify({ c11, c13, c14 })})`);
+
+    // brain_info's fact: the same census at its bound, its counts and no key; the Threads line says so.
+    const facts = await readDatabaseFacts(sql as never, { stats: false });
+    const t = facts.threads;
+    const line = threadsLine(facts);
+    assert(t !== null && t.complete && t.unlinked === 1 && t.orphaned === 2 && !("first" in t)
+        && /^[\d,]+ \([\d,]+ thoughts in them\); 1 key whose edges differ from its thread's, 2 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's connection string> links them \(--status names the first 10\)$/.test(line)
+        && !line.includes("phrase:"),
+      `brain_info's threads fact counts the same keys and names none, its line giving the remedy (${line})`);
+
+    // The census orders a thread as thread_relink does (review pass 1): PF's two thoughts at one created_at, broken by
+    // id, and one with none, last; each linked through the subjects' door, so none differs. PG's one thought with a
+    // stray edge differs: a thread of one wants none. P3's last thought re-keyed to PH: its closed subject is no
+    // longer P3's, and P3 is linked again as two.
+    const PF = "phrase:0000 f", PG = "phrase:0000 g", PH = "phrase:0000 h";
+    const pfa = await thought(`${PF} #1`, "2026-10-06T01:00:00Z"), pfb = await thought(`${PF} #2`, "2026-10-06T01:00:00Z");
+    const pfc = ((await sql`INSERT INTO thoughts (content, metadata, created_at) VALUES (${`[47b] ${PF} #3`}, ${{ source: "live" }}::jsonb, NULL) RETURNING id::text AS id`)[0] as { id: string }).id;
+    for (const id of [pfc, pfb, pfa]) await subject(id, PF);
+    const pg = await thought(`${PG} #1`, "2026-10-07T01:00:00Z");
+    await subject(pg, PG);
+    await edge(pg, p1a, PG);
+    await subject(p3c, PH);
+    const mid = await threadCensus(sql, UNBOUNDED);
+    const [p3subjects] = (await sql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL AND payload->>'key' = ${P3}`) as { n: number }[];
+    assert(mid.complete && mid.unlinked === 2 && mid.orphaned === 2 && JSON.stringify(mid.first) === JSON.stringify([P2, OB, OD, PG]) && p3subjects.n === 2,
+      `ties broken by id and an undated thought last, as thread_relink orders them, so PF is linked; PG's stray edge on a thread of one differs; P3's re-keyed thought's closed subject is not read (${JSON.stringify(mid)})`);
+
+    // Linked again, the census finds nothing to do; a brain without 120 carries no fact (null, no entry).
+    const relinked = await threads({});
+    // The subjects' walk cut alone (review pass 4): 17 subjects to 8 edges once PA (two thoughts, its edge taken
+    // away, written last though it sorts second) joins — a3 a0·2 b3 c2 e2 f3 g1 h1. A bound of 14 cuts inside PF, so
+    // PA is read and unlinked; 16 cuts at PH, PG's one thought counted among the keys read. Neither is complete.
+    const PA = "phrase:0000 a0";
+    for (let j = 1; j <= 2; j++) await subject(await thought(`${PA} #${j}`, `2026-10-09T0${j}:00:00Z`), PA);
+    await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${PA}`;
+    const [s14, s16] = [await threadCensus(sql, 14), await threadCensus(sql, 16)];
+    const paRelinked = await threads({ key: PA });
+    assert(!s14.complete && s14.keys === 5 && s14.threads === 5 && s14.thoughts === 12 && s14.standing === 6 && s14.whole === 7 && s14.unlinked === 1 && s14.orphaned === 0 && JSON.stringify(s14.first) === JSON.stringify([PA])
+        && !s16.complete && s16.keys === 7 && s16.threads === 6 && s16.thoughts === 15 && s16.standing === 8 && s16.whole === 9 && s16.unlinked === 1 && paRelinked.code === 0,
+      `the subjects' walk cut alone is not complete, and a key one thought holds counts among the keys read (${JSON.stringify({ s14, s16 })})`);
+
+    const after = await threadCensus(sql, UNBOUNDED);
+    await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
+    renamed = true;
+    const without = await readDatabaseFacts(sql as never, { stats: false });
+    // A thread_relink(text, boolean) in another schema is not this brain's 120 (review pass 3): the census reads the
+    // thought_facets the path resolves, so a function of that name elsewhere does not open the read.
+    await sql`CREATE FUNCTION pg_temp.thread_relink(text, boolean) RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb'`;
+    decoy = true;
+    const elsewhere = await readDatabaseFacts(sql as never, { stats: false });
+    await sql`DROP FUNCTION pg_temp.thread_relink(text, boolean)`;
+    decoy = false;
+    await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+    renamed = false;
+    assert(relinked.code === 0 && after.complete && after.unlinked === 0 && after.orphaned === 0
+        && without.threads === null && !("threads" in without.unread) && threadsLine(without) === "not counted — migration 120 is not applied (it keeps the threads' edges)"
+        && elsewhere.threads === null && !("threads" in elsewhere.unread),
+      `linked again, nothing differs; a brain without 120 carries no threads fact and says why, a thread_relink in another schema not counting as its (${JSON.stringify(after)} | ${threadsLine(without)} | ${JSON.stringify(elsewhere.threads)})`);
+
+    // A role whose search_path misses the brain's schema is told so, never that 120 is not applied (review pass 2):
+    // thought_facets does not resolve, so the gate looks for thread_relink in any schema, and the read's own entry says so.
+    await sql`ALTER ROLE CURRENT_USER SET search_path = ob1_47b_nowhere`;
+    pathSet = true;
+    const lost = new SQL({ url: URL_!, max: 1 });
+    let lostFacts: Awaited<ReturnType<typeof readDatabaseFacts>>;
+    try { lostFacts = await readDatabaseFacts(lost as never, { stats: false }); } finally { await lost.close(); }
+    // threads.ts --status says the same, not that 120 is missing (review pass 3).
+    const lostStatus = await threads({ status: true });
+    await sql`ALTER ROLE CURRENT_USER RESET search_path`;
+    pathSet = false;
+    const lostRow = threadsRow(lostFacts.threads, lostFacts.unread.threads);
+    assert(lostFacts.threads === null && lostFacts.unread.threads?.reason === "invisible" && /^\? \(thought_facets /.test(threadsLine(lostFacts))
+        && lostRow.status === "warn" && /^Put that schema on the server role's search_path/.test(lostRow.fix ?? "")
+        && lostStatus.code === 2 && /thought_facets exists \(schema public\) but does not resolve for this role/.test(lostStatus.err) && !/migration 120/.test(lostStatus.err),
+      `a role whose search_path misses the schema: the threads read is said invisible, with the search_path fix, and --status says so too — not "120 is not applied" (${JSON.stringify(lostFacts.unread.threads)} | ${threadsLine(lostFacts)} | ${lostStatus.err})`);
+
+    // --status prints each key it names on a line of its own, quoted as the shell takes it (review pass 3): a phrase key
+    // may hold an apostrophe, a comma and a space. The printed word, pasted into a shell, gives the key back.
+    const QK = "phrase:0000 o'brien, notes";
+    const q1 = await thought(`${QK} #1`, "2026-10-08T01:00:00Z");
+    await subject(q1, QK);
+    await edge(q1, p1a, QK);
+    const quoted = await threads({ status: true });
+    const printed = quoted.out.split("\n").find((l) => l.includes("brien"))?.replace(/^\s*keys:\s*/, "").trim() ?? "";
+    const pasted = Bun.spawnSync(["bash", "-c", `printf %s ${printed}`]).stdout.toString();
+    const requoted = await threads({});
+    // Orphans alone, twelve keys written in reverse key order (review pass 4): --status says what differs, names the
+    // first ten in key order, and counts the rest.
+    const zs = Array.from({ length: 12 }, (_, i) => `phrase:0000 z${String(12 - i).padStart(2, "0")}`);
+    for (const z of zs) await edge(q1, p1a, z);
+    const orphansOnly = await threads({ status: true });
+    const zRelinked = await threads({});
+    const zLines = Array.from({ length: 10 }, (_, i) => `'phrase:0000 z${String(i + 1).padStart(2, "0")}'`);
+    assert(orphansOnly.out.includes("  linked:    0 key(s) whose edges differ from their thread's, 12 key(s) no thought holds still carrying edges — threads.ts without --status links them")
+        && orphansOnly.out.endsWith(`  keys:      ${zLines.join("\n             ")}\n             and 2 more; --key <a key as printed above> re-links one`) && zRelinked.code === 0,
+      `--status with orphans alone says so, names the first ten in key order and counts the rest (${orphansOnly.out.split("\n").slice(-4).join(" | ")})`);
+    assert(printed === "'phrase:0000 o'\\''brien, notes'" && pasted === QK && quoted.out.endsWith("\n             --key <a key as printed above> re-links one") && requoted.code === 0,
+      `--status prints a key holding an apostrophe, a comma and a space on its own line, quoted so a shell gives it back (${printed} → ${pasted})`);
+  } finally {
+    if (renamed) await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+    if (pathSet) await sql`ALTER ROLE CURRENT_USER RESET search_path`;
+    if (decoy) await sql`DROP FUNCTION IF EXISTS pg_temp.thread_relink(text, boolean)`;
+    await sql`DELETE FROM thoughts WHERE content LIKE '[47b]%'`;
     await sql.close();
   }
 }
