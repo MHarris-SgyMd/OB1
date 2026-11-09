@@ -2045,13 +2045,13 @@ console.log("\n[24] plan_context's store calls (migration 126, SMD-2684): logPla
   try {
     const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
     const before = Number((await admin`SELECT count(*)::int AS n FROM query_log WHERE kind = 'plan_context'`)[0].n);
-    await store.logPlanContext({ agentId: undefined, query: "[24] plan a thing", matchCount: 8, arm: "current", resultIds: [A, B], resultScores: [0.5, null], items: [{ kind: "ticket", key: "SMD-1", effective: 3 }], tier: "canary" });
+    await store.logPlanContext({ agentId: undefined, query: "[24] plan a thing", matchCount: 8, arm: "current", resultIds: [A, B], resultScores: [0.5, null], items: [{ kind: "ticket", key: "SMD-1", effective: 3 }], filter: { board: "deadline" }, tier: "canary" });
     const [row] = await admin`SELECT tool, query, match_count, arm, result_ids::text[] AS ids, result_scores, result_items, filter, tier FROM query_log WHERE kind = 'plan_context' ORDER BY logged_at DESC LIMIT 1`;
     const after = Number((await admin`SELECT count(*)::int AS n FROM query_log WHERE kind = 'plan_context'`)[0].n);
     assert(after === before + 1 && row.tool === "plan_context" && row.query === "[24] plan a thing" && row.match_count === 8 && row.arm === "current" && row.tier === "canary"
         && JSON.stringify(row.ids) === JSON.stringify([A, B]) && Number(row.result_scores?.[0]) === 0.5 && row.result_scores?.[1] === null
-        && JSON.stringify(row.filter) === "{}" && Array.isArray(row.result_items) && row.result_items[0]?.key === "SMD-1",
-      `one plan_context row: the request, the limit, the arm, the hits' ids and scores in order, an empty filter, the board's tickets, the tier (${JSON.stringify(row)?.slice(0, 200)})`);
+        && JSON.stringify(row.filter) === '{"board":"deadline"}' && Array.isArray(row.result_items) && row.result_items[0]?.key === "SMD-1",
+      `one plan_context row: the request, the limit, the arm, the hits' ids and scores in order, why the board was not read, the board's tickets, the tier (${JSON.stringify(row)?.slice(0, 200)})`);
 
     // The keys scope through the store: the named ticket alone; the key nobody records, missing.
     const content = "SMD-9961 — [24] SMD-9961";
@@ -2059,7 +2059,7 @@ console.log("\n[24] plan_context's store calls (migration 126, SMD-2684): logPla
     await admin`SELECT record_thought_source(${id}::uuid, 'linear', 'SMD-9961', ${content}, 'text/markdown')`;
     const keyed = await store.agenda({ scope: { keys: ["SMD-9961", "SMD-9969"] }, limit: 100, includeBlocked: true, includeClaimed: true, includeProposed: false, includeStarted: true, timeoutMs: 5000 });
     const plain = await store.agenda({ scope: { project: "nothing [24]" }, limit: 20, includeBlocked: false, includeClaimed: false, includeProposed: false });
-    assert(keyed.items.map((i) => i.key).join(" ") === "SMD-9961" && keyed.items[0].statusType === "unstarted" && JSON.stringify(keyed.keyed) === '{"others":[],"missing":["SMD-9969"]}' && plain.keyed === null,
+    assert(keyed.items.map((i) => i.key).join(" ") === "SMD-9961" && keyed.items[0].statusType === "unstarted" && JSON.stringify(keyed.keyed) === '{"others":[],"waiting":[],"missing":["SMD-9969"]}' && plain.keyed === null,
       `the keys scope reads the named ticket alone, the unknown key missing; without keys, keyed is null (${JSON.stringify(keyed.keyed)})`);
 
     // A deadline is a ceiling local to the call's transaction: a 1 ms one cancels the real agenda's statement, and no
@@ -2070,7 +2070,14 @@ console.log("\n[24] plan_context's store calls (migration 126, SMD-2684): logPla
     for (let i = 0; i < 12; i++) {
       try { await store.agenda({ scope: { keys: ["SMD-9961"] }, limit: 100, includeBlocked: true, includeClaimed: true, includeProposed: false, includeStarted: true }); later++; } catch { /* counted below */ }
     }
-    assert(code === "57014" && later === 12, `a 1 ms deadline cancels the agenda's statement (57014); the twelve calls after, with none, all answer (${code || "no error"}, ${later})`);
+    // A deadline on a call that commits leaves no connection with it either (review pass 1: a session-wide set_config
+    // survived the 1 ms call only because its transaction rolled back): every pooled connection reads the default after.
+    await store.agenda({ scope: { keys: ["SMD-9961"] }, limit: 100, includeBlocked: true, includeClaimed: true, includeProposed: false, includeStarted: true, timeoutMs: 54321 });
+    const pool = (store as unknown as { sql: SQL }).sql;
+    const shown = new Set<string>();
+    for (let i = 0; i < 12; i++) shown.add(String((await pool`SHOW statement_timeout`)[0].statement_timeout));
+    assert(code === "57014" && later === 12 && !shown.has("54321ms"),
+      `a 1 ms deadline cancels the agenda's statement (57014); the twelve calls after, with none, all answer; a committed call's deadline stays in its transaction (${code || "no error"}, ${later}, ${[...shown]})`);
   } finally {
     await admin.close();
   }

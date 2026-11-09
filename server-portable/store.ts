@@ -1634,15 +1634,18 @@ export type AgendaResult = {
    */
   claimsLive: number | null;
   /**
-   * With a `keys` scope (126, SMD-2684), the keys named that are no candidate: `others`, a ticket whose head is
-   * settled or carries a status type the brain does not know, with its status; `missing`, a key no thought records.
+   * With a `keys` scope (126, SMD-2684), the named tickets it does not list: `others`, a ticket whose head is
+   * settled or carries a status type the brain does not know, with its status; `waiting`, one a not_before ahead
+   * keeps out; `missing`, a key no thought records. A named key is in exactly one of items and these.
    * Null without keys, and from a brain before 126.
    */
-  keyed: { others: AgendaOther[]; missing: string[] } | null;
+  keyed: { others: AgendaOther[]; waiting: AgendaWaiting[]; missing: string[] } | null;
   now: string;
 };
 /** A named ticket the agenda does not rank (126): settled, or a status type the brain does not know. */
 export type AgendaOther = { key: string; title: string; status: string | null; statusType: string | null; settled: boolean };
+/** A named ticket a not_before ahead keeps out (126, review pass 1): not yet startable, and when it will be. */
+export type AgendaWaiting = { key: string; title: string; status: string | null; statusType: string | null; notBefore: string | null };
 
 const claimsOf = (v: unknown, what: string): AgendaClaim[] => {
   if (v === null || v === undefined) return [];
@@ -1703,7 +1706,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
 function keyedOf(v: unknown, what: string): AgendaResult["keyed"] {
   if (v === null || v === undefined) return null;
   const o = typeof v === "object" ? (v as Record<string, unknown>) : undefined;
-  if (!o || !Array.isArray(o.others) || !Array.isArray(o.missing) || !(o.missing as unknown[]).every((k) => typeof k === "string")) {
+  if (!o || !Array.isArray(o.others) || !Array.isArray(o.waiting) || !Array.isArray(o.missing) || !(o.missing as unknown[]).every((k) => typeof k === "string")) {
     throw new Error(`${what} answered named tickets this server cannot read`);
   }
   const others = (o.others as unknown[]).map((x) => {
@@ -1712,7 +1715,15 @@ function keyedOf(v: unknown, what: string): AgendaResult["keyed"] {
     return { key: t.key, title: typeof t.title === "string" ? t.title : "", status: typeof t.status === "string" ? t.status : null,
              statusType: typeof t.status_type === "string" ? t.status_type : null, settled: t.settled };
   });
-  return { others, missing: o.missing as string[] };
+  const waiting = (o.waiting as unknown[]).map((x) => {
+    const t = x !== null && typeof x === "object" ? (x as Record<string, unknown>) : undefined;
+    if (!t || typeof t.key !== "string") throw new Error(`${what} answered named tickets this server cannot read`);
+    const nb = t.not_before;
+    return { key: t.key, title: typeof t.title === "string" ? t.title : "", status: typeof t.status === "string" ? t.status : null,
+             statusType: typeof t.status_type === "string" ? t.status_type : null,
+             notBefore: typeof nb === "string" || nb instanceof Date ? isoTimestamp(nb as string | Date) : null };
+  });
+  return { others, waiting, missing: o.missing as string[] };
 }
 
 /** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
@@ -2032,10 +2043,9 @@ export type QueryActionLog = {
 };
 
 /**
- * An 'agenda' row for the query log (migration 123, SMD-3669): the call's scope, holder and flags in `filter`, its
- * limit as `matchCount`, and the items returned, in order, each with its effective priority.
+ * A plan_context call's row (migration 126, SMD-2684): the request, its limit, the knowledge hits' ids and scores and
+ * their arm, the board's tickets in the order shown, and `filter` saying why the board was not read ({} when it was).
  */
-/** A plan_context call's row (migration 126, SMD-2684): the request, its limit, the knowledge hits' ids and scores and their arm, and the board's tickets in the order shown. */
 export type QueryPlanContextLog = {
   agentId?: string;
   query: string;
@@ -2044,9 +2054,14 @@ export type QueryPlanContextLog = {
   resultIds: string[];
   resultScores: (number | null)[];
   items: { kind: string; key: string; effective: number }[];
+  filter: Record<string, unknown>;
   tier?: string;
 };
 
+/**
+ * An 'agenda' row for the query log (migration 123, SMD-3669): the call's scope, holder and flags in `filter`, its
+ * limit as `matchCount`, and the items returned, in order, each with its effective priority.
+ */
 export type QueryAgendaLog = {
   agentId?: string;
   filter: Record<string, unknown>;

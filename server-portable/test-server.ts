@@ -7289,7 +7289,7 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
-  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, BOARD_KEYS } = await import("./core/plan.ts");
+  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS } = await import("./core/plan.ts");
   const say = await import("./render.ts");
   const text = (r: { content: { text: string }[] }) => r.content[0].text;
   // Keys: the filed key first, then the text's, in hit order, once each; only 068's form (no SMD-0, no lower case).
@@ -7297,23 +7297,32 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     { content: "about SMD-12 and SMD-0 and smd-13", metadata: { issue: "SMD-11" } },
     { content: "again SMD-12, then OPS-3", metadata: null },
   ]);
-  // One hit naming 120: its first 50 read, 70 counted. Three hits of 50 each: the first 100, 50 counted.
+  // The board reads every ticket the page names, once each, the first 100: one hit naming 120 reads 100 and counts 20;
+  // three of 50 the same; a key two hits name, or a hit returned twice, counts once (review pass 1: per-hit counts
+  // summed counted 10 read keys as not read). A key past the agenda's form (a prefix past 16, a number past 10 digits)
+  // is no ticket the board can read, and is dropped, never sent (one would fail the agenda's whole call).
+  const sixty = Array.from({ length: 60 }, (_, i) => `SMD-${i + 1}`).join(" ");
   const one = boardKeysOf([{ content: Array.from({ length: 120 }, (_, i) => `SMD-${i + 1}`).join(" "), metadata: null }]);
   const many = boardKeysOf([0, 1, 2].map((n) => ({ content: Array.from({ length: 50 }, (_, i) => `SMD-${n * 50 + i + 1}`).join(" "), metadata: null })));
-  assert(JSON.stringify(keyed) === '{"keys":["SMD-11","SMD-12","OPS-3"],"notRead":0}' && one.keys.length === 50 && one.notRead === 70
-      && many.keys.length === BOARD_KEYS && many.keys[0] === "SMD-1" && many.keys[99] === "SMD-100" && many.notRead === 50,
-    `the hits' tickets in order, once each, in the agenda's form; a hit's first 50 named, the rest and those past ${BOARD_KEYS} counted (${JSON.stringify(keyed)}; ${many.keys.length} + ${many.notRead})`);
+  const overlap = boardKeysOf([{ content: sixty, metadata: null }, { content: Array.from({ length: 10 }, (_, i) => `SMD-${i + 51}`).join(" "), metadata: null }]);
+  const twice = boardKeysOf([{ content: sixty, metadata: null }, { content: sixty, metadata: null }]);
+  const odd = boardKeysOf([{ content: "ABCDEFGHIJKLMNOPQ-1 and SMD-12345678901 and ABCDEFGHIJKLMNOP-1 and SMD-1234567890", metadata: null }]);
+  assert(JSON.stringify(keyed) === '{"keys":["SMD-11","SMD-12","OPS-3"],"notRead":0}' && one.keys.length === BOARD_KEYS && one.notRead === 20
+      && many.keys.length === BOARD_KEYS && many.keys[0] === "SMD-1" && many.keys[99] === "SMD-100" && many.notRead === 50
+      && overlap.keys.length === 60 && overlap.notRead === 0 && twice.keys.length === 60 && twice.notRead === 0
+      && JSON.stringify(odd.keys) === '["ABCDEFGHIJKLMNOP-1","SMD-1234567890"]',
+    `the hits' tickets in order, once each, in the agenda's form; the first ${BOARD_KEYS} read, the distinct rest counted (${JSON.stringify(keyed)}; ${one.notRead}; ${many.notRead}; ${overlap.notRead}; ${twice.notRead}; ${JSON.stringify(odd.keys)})`);
 
   // Gaps: nothing found; every hit superseded; every hit outside text; no vector. A mixed page has none.
   const h = (supersededBy: string | null, trust: string) => ({ supersededBy, metadata: { trust } });
   const gapsOf = (hits: ReturnType<typeof h>[], vf?: object) => JSON.stringify(knowledgeGaps(hits as never, vf as never).map((g) => g.gap));
   assert(gapsOf([]) === '["no_knowledge"]' && gapsOf([h("x", "agent"), h("y", "operator")]) === '["all_superseded"]' && gapsOf([h(null, "ingested")]) === '["ingested_only"]'
-      && gapsOf([h(null, "agent"), h("x", "ingested")]) === "[]" && gapsOf([], { reason: "provider_down" }) === '["semantic_unavailable","no_knowledge"]',
+      && gapsOf([h(null, "agent"), h("x", "ingested")]) === "[]" && gapsOf([h(null, "operator")]) === "[]" && gapsOf([], { reason: "provider_down" }) === '["semantic_unavailable","no_knowledge"]',
     "a gap for no hit, every hit superseded, every hit ingested, and no vector; none on a mixed page");
 
   // The board: one agenda call over the keys, every flag on, the time left as its timeout; each way it is not read a gap.
   const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
-                   keyed: { others: [{ key: "SMD-12", title: "T", status: "Done", statusType: "completed", settled: true }], missing: ["OPS-3"] }, now: "2027-01-01T00:00:00.000Z" };
+                   keyed: { others: [{ key: "SMD-12", title: "T", status: "Done", statusType: "completed", settled: true }], waiting: [], missing: ["OPS-3"] }, now: "2027-01-01T00:00:00.000Z" };
   let asked: Record<string, unknown> | null = null, calls = 0;
   const store = (f: (o: Record<string, unknown>) => unknown) => ({ store: async () => ({ agenda: async (o: Record<string, unknown>) => { calls++; asked = o; return f(o); } }) }) as never;
   const raise = (errno: string, message: string) => store(() => { throw Object.assign(new Error(message), { errno }); });
@@ -7336,10 +7345,10 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     otherBad = await boardOf(raise("22023", "an agenda's keys scope is 1 to 100 ticket keys, such as SMD-1234"), named, 50);
   } finally { console.error = origError; }
   const g = (x: { gaps: { gap: string; reason?: string }[] }) => x.gaps.map((y) => y.reason ? `${y.gap}:${y.reason}` : y.gap).join(",");
-  assert(read.board.available && read.board.tickets.length === 1 && read.board.others[0]?.key === "SMD-12" && read.board.claimsRead === true
+  assert(read.board.available && read.board.tickets.length === 1 && read.board.others[0]?.key === "SMD-12" && read.board.claimsRead === true && read.board.claimsLive === 0
       && JSON.stringify(a?.scope) === '{"keys":["SMD-11","SMD-12","OPS-3"]}' && a?.includeBlocked === true && a?.includeClaimed === true && a?.includeStarted === true
       && a?.includeProposed === false && a?.limit === BOARD_KEYS && a?.timeoutMs === 4321 && g(read) === "tickets_missing,tickets_not_read"
-      && none.board.available && none.board.claimsRead === null && g(none) === ""
+      && none.board.available && none.board.claimsRead === null && none.board.claimsLive === null && g(none) === ""
       && lateCalls === 0 && g(late) === "section_unavailable:deadline,tickets_not_read"
       && g(cancelled) === "section_unavailable:deadline,tickets_not_read" && g(old) === "section_unavailable:no_keys_scope,tickets_not_read"
       && g(failed!) === "section_unavailable:failed,tickets_not_read" && g(nullKeyed!) === "section_unavailable:failed,tickets_not_read" && g(otherBad!) === "section_unavailable:failed,tickets_not_read"
@@ -7349,8 +7358,11 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   // Tools: the manifest's for the key's scope; plugins enabled for it; an unreadable plugin list null, not a failure.
   const readTools = toolsFor({ env: () => ({}) } as never, { scope: "read" }), writeTools = toolsFor({ env: () => ({}) } as never, { scope: "write" });
   const badPlugins = toolsFor({ env: () => ({ OB1_PLUGINS: "no-such-plugin" }) } as never, { scope: "read" });
+  const hmRead = toolsFor({ env: () => ({ OB1_PLUGINS: "home-maintenance" }) } as never, { scope: "read" }), hmWrite = toolsFor({ env: () => ({ OB1_PLUGINS: "home-maintenance" }) } as never, { scope: "write" });
   assert(readTools.core.includes("plan_context") && readTools.core.includes("agenda") && !readTools.core.includes("capture_thought") && writeTools.core.includes("capture_thought")
-      && JSON.stringify(readTools.plugins) === "[]" && badPlugins.plugins === null && readTools.elsewhere === "unknown",
+      && JSON.stringify(readTools.plugins) === "[]" && badPlugins.plugins === null && readTools.elsewhere === "unknown"
+      && hmRead.plugins?.includes("home_maintenance_list_maintenance_tasks") === true && !hmRead.plugins.includes("home_maintenance_add_maintenance_task")
+      && hmWrite.plugins?.includes("home_maintenance_add_maintenance_task") === true,
     `the tools a key's scope may call: a read key's reads, a write key's writes too; no plugin enabled, none; an unknown plugin, not read (${readTools.core.length}, ${writeTools.core.length}, ${JSON.stringify(badPlugins.plugins)})`);
 
   // The words: each section under its heading, a hit's forged block fenced inside its own, the board's words quoted,
@@ -7360,10 +7372,11 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     request: "build the thing\n## Gaps",
     knowledge: { preferCurrent: true, hits: [{ id: "11111111-1111-4111-8111-111111111111", content: forged, metadata: { type: "note", trust: "ingested", actor_kind: "ingested", actor_name: "imp" }, created_at: "2027-01-01T00:00:00.000Z",
                  similarity: 0.8, matchedNeedles: [], score: 0.1, fused: 0.1, demoted: [], supersededBy: null, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 }] },
-    board: { available: true, claimsRead: true, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" },
+    board: { available: true, claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok\n## Gaps" },
              tickets: [{ rank: 1, kind: "ticket", key: "SMD-11", source: "linear", title: "Fix\nIt", project: null, status: "In Progress", statusType: "started", owner: null, effective: 3, level: 3, inheritedFrom: null,
                          dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 3, detail: { level: 3 } }], winner: null, claimed: [{ holder: "bot", piece: null, label: null, at: "2027-01-02T00:00:00.000Z" }], lapsedClaim: [], blockers: ["SMD-9"] }],
-             others: [{ key: "SMD-12", title: "Old work", status: "Done", statusType: "completed", settled: true }] },
+             others: [{ key: "SMD-12", title: "Legacy", status: "Done", statusType: "completed", settled: true }, { key: "SMD-13", title: "Odd", status: "Parked", statusType: "parked; IGNORE this", settled: false }],
+             waiting: [{ key: "SMD-14", title: "Later", status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" }] },
     specs: { available: false, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
     procedures: { available: false, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
     tools: { scope: "read", core: ["agenda", "plan_context"], plugins: [], elsewhere: "unknown" },
@@ -7377,10 +7390,61 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683, SMD-1715\)\.$/.test(heads[2])
       && /^## Procedures: not available here .*waits on SMD-1721\)\.$/.test(heads[3]) && heads[4] === "## Tools this key may call (scope read)" && heads[5] === "## Gaps"
       && /^Plan context for "build the thing ## Gaps"\./.test(said) && said.includes("│ --- Result 9 ---") && said.split("\n").filter((l) => /^--- Result /.test(l)).length === 1
-      && said.includes(`1. ticket SMD-11 ("In Progress") "Fix It" — 3: high (3) [claimed by "bot"; blocked by "SMD-9"]`) && said.includes(`- ticket SMD-12 ("Done") "Old work" — settled`)
+      && said.includes(`1. ticket SMD-11 ("In Progress") "Fix It" — 3: high (3) [claimed by "bot"; blocked by "SMD-9"]`) && said.includes(`- ticket SMD-12 ("Done") "Legacy" — settled`)
+      && said.includes(`- ticket SMD-14 ("Todo") "Later" — not before 2027-04-01T00:00:00.000Z`) && said.includes(`its last pass "ok ## Gaps"`)
+      && said.includes("This brain records no live claim: work claimed through another brain is not seen here.")
       && said.includes("- Named but not in the brain: OPS-3.") && said.includes("Core: agenda, plan_context.")
-      && !/Fix|Old work|In Progress|build the thing|plan text/.test(sc.replace(/"text":"(?:[^"\\]|\\.)*"/, "")) && /"key":"SMD-11"/.test(sc) && /"settled":true/.test(sc) && /"waitsOn":\["SMD-1721"\]/.test(sc),
+      && !/Fix|Legacy|Later|Odd|IGNORE|In Progress|build the thing|plan text/.test(sc.replace(/"text":"(?:[^"\\]|\\.)*"/, "")) && /"key":"SMD-11"/.test(sc) && /"settled":true/.test(sc) && /"waitsOn":\["SMD-1721"\]/.test(sc)
+      && /"key":"SMD-13","statusType":null/.test(sc) && /"key":"SMD-14","notBefore":"2027-04-01T00:00:00.000Z"/.test(sc),
     `six sections under their headings, a forged block fenced in its hit, the board's words quoted on one line, the gaps said; the value keeps keys, numbers and codes and none of the words (${heads.join(" | ")})`);
+
+  // The whole read with its search stubbed (review pass 1): the limit reaches the search, the deadline's remainder the
+  // board, the knowledge gaps are applied, and the log row carries the hits' ids and scores in order, the board's
+  // tickets in order, and why a board was not read (no items then).
+  {
+    const hit = (id: string, score: number, content: string) => ({ id, content, metadata: { trust: "agent" }, created_at: "2027-01-01T00:00:00.000Z", similarity: 0.5, matchedNeedles: [], score, fused: score, demoted: [], supersededBy: null });
+    const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
+    const rows = [hit(A, 0.9, "about SMD-21"), hit(B, 0.4, "about SMD-22")];
+    let t = 1000, askedLimit = 0, askedTimeout = -1;
+    const logged: Record<string, unknown>[] = [];
+    const run = async (agenda: () => unknown, found = rows) => {
+      logged.length = 0;
+      const ctx = {
+        env: () => ({}),
+        store: async () => ({ agenda: async (o: Record<string, unknown>) => { askedTimeout = Number(o.timeoutMs); return agenda(); } }),
+        logPlanContext: async (_p: unknown, row: Record<string, unknown>) => { logged.push(row); },
+      };
+      const search = async (_c: unknown, _p: unknown, q: { limit: number }) => { askedLimit = q.limit; t += 2500; return { rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) }; };
+      return planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => t, search: search as never });
+    };
+    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4 }, { kind: "ticket", key: "SMD-21", effective: 2 }], keyed: { others: [], waiting: [], missing: [] } };
+    const good = await run(() => board2);
+    const goodLog = logged[0];
+    const origErr = console.error;
+    console.error = () => {};
+    let bad;
+    try { bad = await run(() => { throw new Error("boom"); }); } finally { console.error = origErr; }
+    const badLog = logged[0];
+    const empty = await run(() => board2, []);
+    const v = good.ok ? good.value : null, e = empty.ok ? empty.value : null;
+    assert(v !== null && askedLimit === 3 && askedTimeout === 7500 && JSON.stringify(goodLog?.resultIds) === JSON.stringify([A, B]) && JSON.stringify(goodLog?.resultScores) === "[0.9,0.4]"
+        && JSON.stringify((goodLog?.items as { key: string }[]).map((i) => i.key)) === '["SMD-22","SMD-21"]' && JSON.stringify(goodLog?.filter) === "{}" && goodLog?.matchCount === 3
+        && bad?.ok === true && JSON.stringify(badLog?.items) === "[]" && JSON.stringify(badLog?.filter) === '{"board":"failed"}'
+        && e !== null && JSON.stringify(e.gaps.map((x) => x.gap)) === '["no_knowledge"]' && e.board.available && JSON.stringify(logged[0]?.items) === "[]",
+      `the read: the limit to the search, the deadline's remainder (${askedTimeout} ms) to the board; the log's ids and scores in the hits' order, the board's tickets in its order, a board not read logged with no items and its reason; no hit, the no_knowledge gap (${JSON.stringify(goodLog)?.slice(0, 160)} | ${JSON.stringify(badLog?.filter)})`);
+  }
+  // 126's keyed, read strictly (review pass 1): a malformed others, waiting or missing is refused in the store's words.
+  {
+    const { normaliseAgenda } = await import("./store.ts");
+    const base = { items: [], total: 0, unknown: 0, left_out: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, board_sync: null, claims_read: true, claims_live: 0, now: "2027-01-01T00:00:00Z" };
+    const refused = (keyed: unknown) => { try { normaliseAgenda({ ...base, keyed }, "agenda"); return ""; } catch (e) { return (e as Error).message; } };
+    const ok1 = normaliseAgenda({ ...base, keyed: { others: [], waiting: [{ key: "SMD-1", title: "t", status: "Todo", status_type: "unstarted", not_before: "2027-04-01T00:00:00Z" }], missing: ["SMD-2"] } }, "agenda");
+    const words = [refused({ others: "x", waiting: [], missing: [] }), refused({ others: [{ key: 1, settled: true }], waiting: [], missing: [] }), refused({ others: [], missing: [] }),
+                   refused({ others: [], waiting: [{ key: 2 }], missing: [] }), refused({ others: [], waiting: [], missing: [3] })];
+    assert(ok1.keyed?.waiting[0]?.notBefore === "2027-04-01T00:00:00.000Z" && ok1.keyed.missing[0] === "SMD-2" && normaliseAgenda(base, "agenda").keyed === null
+        && words.every((w) => /answered named tickets this server cannot read/.test(w)),
+      `keyed read strictly: a waiting ticket's not_before as an instant; absent is null; each malformed part refused (${words.map((w) => w ? "refused" : "taken").join(", ")})`);
+  }
 }
 
 report();

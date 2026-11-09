@@ -2384,9 +2384,15 @@ console.log("\n[17b] plan_context through both doors (migration 126, SMD-2684): 
   const hook = await rest("POST", "/v1/plan-context", { request }, KEYS.hook);
   const gone = await rest("POST", "/v1/plan-context", { request }, "no-such-key-raw");
   const blank = await rest("POST", "/v1/plan-context", { request: "   " });
+  // The limit (review pass 1): 2 keeps two of the three notes' hits; 21 is past the schema's 20, refused; the log is
+  // off in this suite, so no call here wrote a row.
+  const two = await rest("POST", "/v1/plan-context", { request, limit: 2 });
+  const tooMany = await rest("POST", "/v1/plan-context", { request, limit: 21 });
+  const [{ n: planRows }] = await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'plan_context'`;
   assert(reader.status === 200 && same((reader.body.board as { tickets: Tk[] }).tickets.map((t) => t.key), keysShown) && (reader.body.tools as { scope: string; core: string[] }).scope === "read"
-      && !(reader.body.tools as { core: string[] }).core.includes("capture_thought") && hook.status === 403 && gone.status === 401 && blank.status === 400,
-    `a read key reads it, its own tools listed; a capture-only key is refused 403, an unknown key 401, a blank request 400 (${reader.status} ${hook.status} ${gone.status} ${blank.status})`);
+      && !(reader.body.tools as { core: string[] }).core.includes("capture_thought") && hook.status === 403 && gone.status === 401 && blank.status === 400
+      && two.status === 200 && (two.body.knowledge as { hits: Hit[] }).hits.length === 2 && tooMany.status === 400 && planRows === 0,
+    `a read key reads it, its own tools listed; a capture-only key is refused 403, an unknown key 401, a blank request 400; limit 2 keeps two hits, 21 is refused; with the log off no row is written (${reader.status} ${hook.status} ${gone.status} ${blank.status} ${(two.body.knowledge as { hits?: Hit[] } | undefined)?.hits?.length} ${tooMany.status} ${planRows})`);
 }
 
 console.log("\n[18] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search_thoughts, search_thoughts_keyword, list_thoughts and fetch (none on search), the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");

@@ -65,14 +65,14 @@ interface RunSearch {
   // provider call.
   // An embedding of null is a query the provider did not answer for, and
   // vectorFailed says why (SMD-2891).
-  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean }):
+  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean; signal?: AbortSignal }):
     Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }>;
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
 export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean;
+  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean; signal?: AbortSignal;
 }): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }> => {
   // min_trust (SMD-1724) is no column of query_log, so a search with it is not
   // logged: a replay (db/tier.ts) would run it without the floor and report
@@ -98,15 +98,18 @@ export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts
   let embedding: number[];
   const embedStarted = performance.now();
   try {
-    embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query");
+    embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query", opts.signal);
   } catch (e) {
-    const down = providerDown(e);
+    // The caller's own stop (plan_context's deadline, SMD-2684): answered as a provider that did not answer in time,
+    // by exact matches alone, and not said of the provider's health — the provider was not what stopped.
+    const stopped = opts.signal?.aborted === true;
+    const down = stopped ? { reason: "deadline", detail: "the read's deadline came before the provider answered" } : providerDown(e);
     if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
     // As a row prints an endpoint: userinfo masked (SMD-2885).
     const base = shownBase(ctx.embedConfig().embeddings);
     console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
-    // The provider's state, as every embedding call tells it (SMD-2890).
-    heardFrom(ctx.providerHealth, embedStarted, e);
+    // The provider's state, as every embedding call tells it (SMD-2890) — not when the caller stopped the call.
+    if (!stopped) heardFrom(ctx.providerHealth, embedStarted, e);
     const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });
     // Logged as arm `literal` (106): no arm a replay could take, since a
     // replay's provider answers; db/brain-compare.ts leaves it out of a plan.
@@ -418,10 +421,15 @@ const TICKET_KEY = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 const filedUnder = (v: unknown) => (typeof v === "string" && TICKET_KEY.test(v.trim().toUpperCase()) ? v.trim().toUpperCase() : null);
 /** The tickets a result names: those its metadata files it under, then the first MOVED_READ others its text mentions; the rest counted. */
 export function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; notRead: number } {
+  const { filed, named } = ticketsNamedBy(h);
+  return { keys: [...filed, ...named.slice(0, MOVED_READ)], notRead: Math.max(0, named.length - MOVED_READ) };
+}
+
+/** Every ticket a result names: those its metadata files it under, then the others its text mentions, in order, once each. */
+export function ticketsNamedBy(h: { content: string; metadata?: Record<string, unknown> | null }): { filed: string[]; named: string[] } {
   const filed = [...new Set([filedUnder(h.metadata?.issue), filedUnder(h.metadata?.ticket)].filter((k): k is string => k !== null))];
   // A filed key the text also names is read as filed: not one of the text's 50, nor counted past them (review pass 1).
-  const named = keysInOrder(h.content).filter((k) => !filed.includes(k));
-  return { keys: [...filed, ...named.slice(0, MOVED_READ)], notRead: Math.max(0, named.length - MOVED_READ) };
+  return { filed, named: keysInOrder(h.content).filter((k) => !filed.includes(k)) };
 }
 
 /**

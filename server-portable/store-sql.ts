@@ -1213,7 +1213,7 @@ export class SqlStore implements ThoughtStore {
   async logPlanContext(row: QueryPlanContextLog): Promise<void> {
     await this.sql`
       INSERT INTO query_log (kind, tool, agent_id, query, match_count, filter, result_ids, result_scores, arm, result_items, tier)
-      VALUES ('plan_context', 'plan_context', ${row.agentId ?? null}::uuid, ${row.query}::text, ${row.matchCount}::int, '{}'::jsonb,
+      VALUES ('plan_context', 'plan_context', ${row.agentId ?? null}::uuid, ${row.query}::text, ${row.matchCount}::int, (${JSON.stringify(row.filter)}::text)::jsonb,
               ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[], ${row.arm}::text,
               (${JSON.stringify(row.items)}::text)::jsonb, ${row.tier ?? null}::text)`;
   }

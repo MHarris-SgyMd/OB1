@@ -2455,7 +2455,7 @@ const gapWords = (g: PlanGap): string => {
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
     case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
-    case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran past the read's deadline" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}.`;
+    case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}.`;
   }
 };
 
@@ -2481,13 +2481,15 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   }
   const b = v.board;
   out.push("\n## Board: the tickets the hits name");
-  if (!b.available) out.push(b.reason === "deadline" ? "Not read: the read's deadline came first." : b.reason === "no_keys_scope" ? "Not available here: this brain's agenda predates migration 126." : "Not read: the agenda's read failed (the server's log says why).");
-  else if (!b.tickets.length && !b.others.length) out.push("The hits name no ticket this brain holds.");
+  if (!b.available) out.push(b.reason === "deadline" ? "Not read: it ran out of time." : b.reason === "no_keys_scope" ? "Not available here: this brain's agenda predates migration 126." : "Not read: the agenda's read failed (the server's log says why).");
+  else if (!b.tickets.length && !b.others.length && !b.waiting.length) out.push(b.claimsRead === null ? "The hits name no ticket." : "The hits name no ticket this brain holds.");
   else {
     if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map(agendaLine));
+    if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`));
     if (b.others.length) out.push(`Not ranked (${b.others.length}):`, ...b.others.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)}${t.settled ? " — settled: finished, or not to be done" : " — a status type this brain does not know"}`));
     out.push(b.boardSync ? `Board-sync last stamped ${b.boardSync.at}${typeof b.boardSync.outcome === "string" ? `, its last pass ${quoted(b.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
     if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
+    else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
   }
   out.push(`\n## Specs and deliverables: not available here (${v.specs.reason}; waits on ${v.specs.waitsOn.join(", ")}).`);
   out.push(`## Procedures: not available here (${v.procedures.reason}; waits on ${v.procedures.waitsOn.join(", ")}).`);
@@ -2495,15 +2497,18 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   out.push(`\n## Tools this key may call (scope ${t.scope})`, `Core: ${t.core.join(", ") || "none"}.`,
     t.plugins === null ? "Plugins: the plugin list could not be read." : `Plugins: ${t.plugins.join(", ") || "none enabled for this scope"}.`,
     "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
-  out.push("\n## Gaps", ...(v.gaps.length ? v.gaps.map((g) => `- ${gapWords(g)}`) : ["- None found: the read reached every section it could."]));
+  // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
+  out.push("\n## Gaps", ...(v.gaps.length ? v.gaps.map((g) => `- ${gapWords(g)}`) : ["- None found. How close the hits are to the request is each hit's match; weigh them before relying on them."]));
   return out.join("\n");
 }, (r) => searchRefusal(r), (v) => ({
   knowledge: { preferCurrent: v.knowledge.preferCurrent, ...(v.knowledge.vectorFailed ? { vectorFailed: v.knowledge.vectorFailed.reason } : {}), hits: v.knowledge.hits.map(safeHit) },
   board: v.board.available
-    ? { available: true, claimsRead: v.board.claimsRead, boardSyncAt: v.board.boardSync?.at ?? null,
+    ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,
         tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, level: i.level, overdue: i.overdue, unblocks: i.unblocks,
                                               blockers: i.blockers.filter((x) => TOKEN.test(x)), claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
-        others: v.board.others.map((x) => ({ key: x.key, statusType: x.statusType, settled: x.settled })) }
+        // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
+        others: v.board.others.map((x) => ({ key: x.key, statusType: x.statusType, settled: x.settled })),
+        waiting: v.board.waiting.map((x) => ({ key: x.key, notBefore: x.notBefore })) }
     : { available: false, reason: v.board.reason },
   specs: { available: false, waitsOn: v.specs.waitsOn },
   procedures: { available: false, waitsOn: v.procedures.waitsOn },

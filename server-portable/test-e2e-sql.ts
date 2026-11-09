@@ -4303,13 +4303,16 @@ console.log("\n[26] plan_context's query_log row (migration 126, SMD-2684): one 
     const count = async (kind: string) => Number((await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = ${kind}`)[0].n);
     const [searchBefore, planBefore] = [await count("search"), await count("plan_context")];
     const text = await call("plan_context", { request: 'what is "kestrel plan"', limit: 5 });
+    // The default limit (review pass 1): 8, as the schema says.
+    await call("plan_context", { request: 'what else is "kestrel plan"' });
+    const [{ m: defaultLimit }] = await sql`SELECT match_count AS m FROM query_log WHERE kind = 'plan_context' ORDER BY logged_at DESC LIMIT 1`;
     const [searchAfter, planAfter] = [await count("search"), await count("plan_context")];
-    const [row] = await sql`SELECT tool, query, match_count, arm, result_ids::text[] AS ids, result_items FROM query_log WHERE kind = 'plan_context' ORDER BY logged_at DESC LIMIT 1`;
+    const [row] = await sql`SELECT tool, query, match_count, arm, result_ids::text[] AS ids, result_items FROM query_log WHERE kind = 'plan_context' AND query = 'what is "kestrel plan"' ORDER BY logged_at DESC LIMIT 1`;
     const shown = [...text.matchAll(/^ID: ([0-9a-f-]{36})$/gm)].map((m) => m[1]);
-    assert(planAfter === planBefore + 1 && searchAfter === searchBefore && row?.tool === "plan_context" && row.query === 'what is "kestrel plan"' && row.match_count === 5 && row.arm === "current"
+    assert(planAfter === planBefore + 2 && searchAfter === searchBefore && defaultLimit === 8 && row?.tool === "plan_context" && row.query === 'what is "kestrel plan"' && row.match_count === 5 && row.arm === "current"
         && JSON.stringify(row.ids) === JSON.stringify(shown) && row.ids.includes(note) && Array.isArray(row.result_items)
         && row.result_items.some((i: { key: string }) => i.key === "KES-1"),
-      `one plan_context row and no search row: the request, the limit, arm current, the hits' ids in the order shown, the board's tickets (${planBefore} → ${planAfter}, search ${searchBefore} → ${searchAfter} | ${JSON.stringify(row?.result_items)})`);
+      `one plan_context row a call and no search row, the default limit 8: the request, the limit, arm current, the hits' ids in the order shown, the board's tickets (${planBefore} → ${planAfter}, search ${searchBefore} → ${searchAfter} | ${JSON.stringify(row?.result_items)})`);
   } finally {
     await sql.close();
   }

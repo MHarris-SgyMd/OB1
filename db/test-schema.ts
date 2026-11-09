@@ -18379,28 +18379,34 @@ console.log("\n[112] Migration 126: the agenda's keys scope — the tickets name
   const OP = { name: "ag112-op", scope: "write" };
   type It = { kind: string; key: string; status: string | null; blockers: string[] };
   type Other = { key: string; title: string; status: string | null; status_type: string | null; settled: boolean };
-  type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; keyed: { others: Other[]; missing: string[] } | null };
-  const ticket = async (issue: string, status: string, statusType: string, o: { project?: string; blockedBy?: string } = {}) => {
+  type Wait = { key: string; status: string | null; not_before: string | null };
+  type Ag = { items: It[]; total: number; left_out: { blocked: number; claimed: number; started: number; waiting: number }; keyed: { others: Other[]; waiting: Wait[]; missing: string[] } | null };
+  const ticket = async (issue: string, status: string | null, statusType: string | null, o: { project?: string; blockedBy?: string } = {}) => {
     const content = `${issue} — [112] ${issue}\nbody`;
     let id = "";
     await db.transaction(async (tx) => {
       await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag112-op" })]);
       id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
-        [content, JSON.stringify({ source: "linear", issue, status, status_type: statusType, project: o.project ?? P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+        [content, JSON.stringify({ source: "linear", issue, ...(status === null ? {} : { status }), ...(statusType === null ? {} : { status_type: statusType }), project: o.project ?? P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
     });
     await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
     if (o.blockedBy) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify([{ relation: "blocked_by", target: o.blockedBy }])]);
   };
+  // Review pass 1: SMD-9947 is not yet startable (a not_before ahead), and SMD-9948's row carries no status at all —
+  // each was in neither the list, others nor missing before.
+  await ticket("SMD-9947", "Todo", "unstarted"); await ticket("SMD-9948", null, null);
+  await db.query(`SELECT assert_priority('ticket', 'SMD-9947', 2, NULL, '2027-04-01T00:00:00Z'::timestamptz, NULL, NULL, NULL, false, $1::jsonb)`, [JSON.stringify(OP)]);
   // SMD-9941 Backlog at High; SMD-9942 started, unclaimed; SMD-9943 Done; SMD-9944 blocked by SMD-9941; SMD-9945 a
   // status type this brain doesn't know; SMD-9946 open but never named; SMD-9949 named and nowhere.
   await ticket("SMD-9941", "Backlog", "backlog"); await ticket("SMD-9942", "In Progress", "started"); await ticket("SMD-9943", "Done", "completed");
   await ticket("SMD-9944", "Todo", "unstarted", { blockedBy: "SMD-9941" }); await ticket("SMD-9945", "Parked", "parked"); await ticket("SMD-9946", "Backlog", "backlog");
   await db.query(`SELECT assert_priority('ticket', 'SMD-9941', 3, NULL, NULL, NULL, NULL, NULL, false, $1::jsonb)`, [JSON.stringify(OP)]);
-  const NAMED = ["SMD-9944", "SMD-9941", "SMD-9942", "SMD-9943", "SMD-9945", "SMD-9949", "SMD-9941"];
+  const NAMED = ["SMD-9944", "SMD-9941", "SMD-9942", "SMD-9943", "SMD-9945", "SMD-9949", "SMD-9941", "SMD-9947", "SMD-9948", "SMD-9949"];
   const ag = async (scope: object | null, all = true) =>
     (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, $2, $2, false, NULL, $3::timestamptz, $2) AS a`, [scope === null ? null : JSON.stringify(scope), all, NOW])).rows[0].a;
   const row = (a: Ag) => a.items.map((i) => `${i.kind}:${i.key} ${i.status}`).join(", ");
   const others = (a: Ag) => (a.keyed?.others ?? []).map((o) => `${o.key} ${o.status}/${o.status_type}${o.settled ? " settled" : ""}`).join(", ");
+  const waits = (a: Ag) => (a.keyed?.waiting ?? []).map((w) => `${w.key} ${w.status} ${String(w.not_before).slice(0, 10)}`).join(", ");
 
   // The shape: still one agenda of nine arguments, its comment naming 126.
   const fns = (await db.query<{ n: number; c: string | null }>(
@@ -18416,12 +18422,13 @@ console.log("\n[112] Migration 126: the agenda's keys scope — the tickets name
   const both = await ag({ keys: NAMED, project: "nothing in scope [112]" }), plain = await ag({ project: P });
   assert(row(named) === "ticket:SMD-9941 Backlog, ticket:SMD-9942 In Progress, ticket:SMD-9944 Todo" && named.total === 3
       && JSON.stringify(named.items.find((i) => i.key === "SMD-9944")?.blockers) === '["SMD-9941"]'
-      && others(named) === "SMD-9943 Done/completed settled, SMD-9945 Parked/parked" && JSON.stringify(named.keyed?.missing) === '["SMD-9949"]'
+      && others(named) === "SMD-9943 Done/completed settled, SMD-9945 Parked/parked, SMD-9948 null/null" && JSON.stringify(named.keyed?.missing) === '["SMD-9949"]'
+      && waits(named) === "SMD-9947 Todo 2027-04-01" && waits(off) === waits(named)
       && named.keyed?.others[0]?.title === "SMD-9943 — [112] SMD-9943"
-      && row(off) === "ticket:SMD-9941 Backlog" && JSON.stringify(off.left_out) === '{"blocked":1,"claimed":0,"started":1,"waiting":0}' && others(off) === others(named)
+      && row(off) === "ticket:SMD-9941 Backlog" && JSON.stringify(off.left_out) === '{"blocked":1,"claimed":0,"started":1,"waiting":1}' && others(off) === others(named)
       && both.items.length === 0 && others(both) === others(named)
       && plain.keyed === null && row(plain).includes("SMD-9946"),
-    `the keys scope reads the named tickets alone, under the flags, and says the settled, unknown and missing ones beside (${row(named)}; ${others(named)}; ${JSON.stringify(named.keyed?.missing)} | ${row(off)}; ${JSON.stringify(off.left_out)} | ${both.items.length} | ${plain.keyed === null})`);
+    `the keys scope reads the named tickets alone, under the flags, and says the settled, unknown-type, status-less, not yet startable and missing ones beside, a key named twice once (${row(named)}; ${others(named)}; ${waits(named)}; ${JSON.stringify(named.keyed?.missing)} | ${row(off)}; ${JSON.stringify(off.left_out)} | ${both.items.length} | ${plain.keyed === null})`);
 
   // Refused, 22023: keys not an array, none, more than 100, a lower-case key, a number.
   const raisedCode = async (scope: unknown) => { try { await db.query(`SELECT agenda($1::jsonb, NULL, 20, false, false, false, NULL, now(), false)`, [JSON.stringify(scope)]); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
@@ -18441,7 +18448,7 @@ console.log("\n[112] Migration 126: the agenda's keys scope — the tickets name
             col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'result_items')::int) AS i,
             col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0];
   assert(logged.join(",") === "ok,23514,23514,23514" && /one per plan_context call \(kind plan_context/.test(comments.t ?? "") && /a plan_context row's board tickets/.test(comments.i ?? "")
-      && /On a plan_context row, \{\} \(migration 126\)/.test(comments.f ?? ""),
+      && /On a plan_context row, \{\} when its board was read, else \{board: deadline, failed or no_keys_scope\} \(migration 126\)/.test(comments.f ?? ""),
     `query_log takes a plan_context row with its query and items array and refuses one without (${logged.join(",")}); its comments name the kind`);
 
   // A re-apply is a no-op: the same read, the same constraints.
