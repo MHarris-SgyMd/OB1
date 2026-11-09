@@ -18437,11 +18437,11 @@ console.log("\n[112] Migration 125: a note's open items reach its priority — a
   const stated = await note("[112] stated Low, its item High");
   nameItem(await item(stated, "a High to-do", { level: 3 }), "high");
   await put("thought", stated, 1);
-  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9901', '[112] SMD-9901', 'text/markdown')`, [await note("[112] SMD-9901", { source: "linear", issue: "SMD-9901", status: "Todo", status_type: "unstarted" })]);
-  await put("ticket", "SMD-9901", 5);
-  const under = await note("[112] filed under a Critical ticket, its item Medium", { ticket: "SMD-9901" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9981', '[112] SMD-9981', 'text/markdown')`, [await note("[112] SMD-9981", { source: "linear", issue: "SMD-9981", status: "Todo", status_type: "unstarted" })]);
+  await put("ticket", "SMD-9981", 5);
+  const under = await note("[112] filed under a Critical ticket, its item Medium", { ticket: "SMD-9981" });
   nameItem(await item(under, "a Medium to-do", { level: 2 }), "medium");
-  const inheritsAlone = await note("[112] filed under a Critical ticket, no item", { ticket: "SMD-9901" });
+  const inheritsAlone = await note("[112] filed under a Critical ticket, no item", { ticket: "SMD-9981" });
   const many = await note("[112] three items");
   nameItem(await item(many, "a Low due today", { level: 1, due: "2027-03-10" }), "low");
   nameItem(await item(many, "a High due in a week", { level: 3, due: "2027-03-16" }), "high-week");
@@ -18496,11 +18496,11 @@ console.log("\n[112] Migration 125: a note's open items reach its priority — a
     `the note reads 4 from its Urgent item; the item reads its own 4; its sibling with no level inherits nothing from the note (${named(rpair)}; ${named(rurgent)}; ${named(rbare)})`);
 
   // A ticket's own row reads as its ticket, never its items (the maintainer, SMD-4149: plain thoughts only).
-  const row = await note("[112] SMD-9902", { source: "linear", issue: "SMD-9902", status: "Todo", status_type: "unstarted" });
-  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9902', '[112] SMD-9902', 'text/markdown')`, [row]);
+  const row = await note("[112] SMD-9982", { source: "linear", issue: "SMD-9982", status: "Todo", status_type: "unstarted" });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9982', '[112] SMD-9982', 'text/markdown')`, [row]);
   await item(row, "an Urgent to-do opened from the row", { level: 4, due: "2027-03-11" });
-  const [rrow, rticket] = await eff([["thought", row], ["ticket", "SMD-9902"]]);
-  assert(named(rrow) === "unknown=2" && (rrow.terms[0] as { as?: { key: string } }).as?.key === "SMD-9902" && named(rticket) === "unknown=2" && rrow.due_at === null,
+  const [rrow, rticket] = await eff([["thought", row], ["ticket", "SMD-9982"]]);
+  assert(named(rrow) === "unknown=2" && (rrow.terms[0] as { as?: { key: string } }).as?.key === "SMD-9982" && named(rticket) === "unknown=2" && rrow.due_at === null,
     `a ticket's row and its ticket read nothing from an item opened from the row (${named(rrow)}; ${named(rticket)})`);
 
   // The helpers, as the read uses them: an open item's due time is its own (due_from item), the done ones are not listed.

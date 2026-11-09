@@ -5652,6 +5652,8 @@ console.log("\n[20bo] Migration 124: onto a populated brain at the file before i
     `applied: one agenda, of nine arguments; the Backlog ticket listed with its status, the In Progress one left out and counted, listed with include_started; 123's eight positional arguments read as the default; no live claim; no stored statement moved (${await agendas()} | ${plain.items.map((i) => `${i.key} ${i.status}`).join(", ")} | started ${plain.left_out.started} | claims_live ${plain.claims_live})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 });
   assert(JSON.stringify(await read(false)) === JSON.stringify(plain) && await agendas() === "9", "a re-apply is a no-op: the same read, the one function");
+  await sql.close();
+}
 
 console.log("\n[20bp] Migration 125: onto a populated brain at the file before it — refused by name without 122's helpers, nothing replaced; then applied: a note whose open item is due tomorrow and stated High reads High +2 from that item, where 122 read it unknown; the agenda's answer unchanged; nothing stored moved; a re-apply a no-op (SMD-4149)");
 {
