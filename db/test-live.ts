@@ -17658,8 +17658,9 @@ if (want("16")) {
     // The re-applies of 102 above put back its facet validator, from before 111's subject kind, and its judge's door:
     // the shipped ones restored — 111's, with 113's door after it, which 111's re-apply replaces, and 120's validator
     // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
-    // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) });
+    // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
+    // 127's doors, trigger function and index, which those re-applies undo (PR 7a-3a).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -29619,7 +29620,7 @@ if (want("46")) {
 }
 
 if (want("47")) {
-  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a writing run as a role short of a re-link's writes refused by name, every lack named under its group, its dry run read under READ COMMITTED whatever the role's default; a dry run visiting exactly the keys with work, a batch a key; a key whose re-link only closes ending its batch too, a run visiting each key with work once; a page's keys in key order under a hashed union and hashed arms; --batch at most 200; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
+  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a thought with a set of subjects (127) standing in each key's thread, counted a place in each; a writing run as a role short of a re-link's writes refused by name, every lack named under its group, its dry run read under READ COMMITTED whatever the role's default; a dry run visiting exactly the keys with work, a batch a key; a key whose re-link only closes ending its batch too, a run visiting each key with work once; a page's keys in key order under a hashed union and hashed arms; --batch at most 200; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
   // Its own client: [24] closed the suite's.
   const sql = new SQL({ url: URL_!, max: 1 });
   const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
@@ -29692,6 +29693,27 @@ if (want("47")) {
       `the run, a key a transaction, links both threads, each edge origin thread, and closes the orphan's edge (${ran.out.trim()}; origin ${origins})`);
     const done = await threads({ status: true });
     assert(/^ {2}linked: {4}every thread — nothing to do$/m.test(done.out), `--status after it: nothing to do (${done.out.trim().split("\n").at(-1)})`);
+    // A thought standing in two threads (127): a session on both tickets, captured after them, its set written. Each
+    // thread links it at the write's commit; --status counts it in each, a place in each thread wanting its edge;
+    // unlinked, a run links it in both. Its set closed, both threads stand as before.
+    const c1 = await thought("c1", "2026-11-04T01:00:00Z");
+    const setOf = async (keys: string[]) => ((await sql`SELECT record_thought_subjects(${c1}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL::uuid,
+      (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${c1}::uuid), NULL::jsonb) AS r`)[0] as { r: { action: string; added: number; closed: number } }).r;
+    const setWritten = await setOf([KB, KA]);
+    const linkedAtWrite = [await pairs(KA), await pairs(KB)];
+    const withSet = await threads({ status: true });
+    const was2 = counts(done.out), now2 = counts(withSet.out);
+    await unlink([KA, KB]);
+    const setRun = await threads({});
+    const setRelinked = [await pairs(KA), await pairs(KB)];
+    const setClosed = await setOf([]);
+    const setDone = await threads({ status: true });
+    assert(setWritten.added === 2 && JSON.stringify(linkedAtWrite) === JSON.stringify(["a2→a1 a3→a2 c1→a3", "b2→b1 c1→b2"])
+        && now2.threads === was2.threads && now2.thoughts === was2.thoughts + 2 && now2.standing === was2.standing + 2 && now2.whole === was2.whole + 2
+        && /^ {2}linked: {4}every thread — nothing to do$/m.test(withSet.out)
+        && setRun.code === 0 && JSON.stringify(setRelinked) === JSON.stringify(linkedAtWrite)
+        && setClosed.closed === 2 && (await pairs(KA)) === "a2→a1 a3→a2" && (await pairs(KB)) === "b2→b1" && /^ {2}linked: {4}every thread — nothing to do$/m.test(setDone.out),
+      `a thought with a set of two stands in both threads, linked at its write; --status counts a place in each (${JSON.stringify([was2, now2])}); unlinked, a run links it in both; its set closed, each thread stands as before (${JSON.stringify(linkedAtWrite)}; ${setRun.out.trim()})`);
     // A key whose re-link writes ends its batch, its row locks going at its commit, and the next batch takes the page's
     // rest: two threads to link in a run of one --batch are two batches or more from one page read, and the empty one
     // that ends the run. A page read again at each batch a write ended would cost a run linking every key a page a key.
@@ -30043,7 +30065,7 @@ if (want("47b")) {
 }
 
 if (want("48")) {
-  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a close a delete's own close reached first counted as none (SMD-3306)");
+  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (127) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken; a close a delete's own close reached first counted as none (SMD-3306)");
   // Its own clients: [24] closed the suite's.
   const owner = new SQL({ url: URL_!, max: 1 });
   const SERVER = "ob1_live_threads_server";
@@ -30293,6 +30315,44 @@ if (want("48")) {
       } finally {
         await moverA.close();
         await moverB.close();
+      }
+
+      // A thought's set replaced (127): the first re-link at the commit locks every key the transaction moved on the
+      // thought, in key order, before any re-link, so a writer holding one of them is waited on with none after it taken.
+      // The holder keeps the third of four keys; the replace closes the first and the third and writes the second and the
+      // fourth. Waiting, the mover holds the first two and not the fourth, which another session takes and lets go at
+      // once. Locking each key as its re-link came (a close locking its key and the keys written, 120's way), it would hold
+      // the fourth while it waited on the third, and a writer taking the third, then the fourth, would deadlock with it.
+      const S1 = "ticket:SMD-94891", S2 = "ticket:SMD-94892", S3 = "ticket:SMD-94893", S4 = "ticket:SMD-94894";
+      const sx = await thought("sx", 1), s3n = await thought("s3n", 2), s4n = await thought("s4n", 3);
+      const setOn = (c: SQL, id: string, keys: string[]) => c`SELECT record_thought_subjects(${id}::uuid, ${c.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL::uuid,
+        (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb)`;
+      await setOn(owner, sx, [S1, S3]);
+      await subjectOn(owner, s3n, S3);
+      await subjectOn(owner, s4n, S4);
+      const setMover = new SQL({ url: URL_!, max: 1 }), prober = new SQL({ url: URL_!, max: 1 });
+      const heldBy = async (pid: number) => ((await owner`SELECT k FROM unnest(${owner.array([S1, S2, S3, S4], "TEXT")}::text[]) AS k
+          WHERE EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = ${pid}::int AND l.granted AND l.locktype = 'advisory' AND l.objsubid = 1
+                          AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('ob1:thread:' || k, 0)) ORDER BY k`) as { k: string }[]).map((r) => r.k).join(",");
+      try {
+        const mPid = await pidOf(setMover);
+        await holder`BEGIN`;
+        await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${S3}::text, 0))`;
+        await setMover`BEGIN`;
+        const atWrite = await setOn(setMover, sx, [S2, S4]).then(() => heldBy(mPid));
+        const mCommit = settled(async () => { await setMover`COMMIT`; });
+        const mWaits = await pollUntil(() => waitsOn(mPid), 5000);
+        const waiting = await heldBy(mPid);
+        const fourthFree = ((await prober`SELECT pg_try_advisory_lock(hashtextextended('ob1:thread:' || ${S4}::text, 0)) AS ok`)[0] as { ok: boolean }).ok;
+        if (fourthFree) await prober`SELECT pg_advisory_unlock(hashtextextended('ob1:thread:' || ${S4}::text, 0))`;
+        await holder`COMMIT`;
+        const mEnd = await mCommit;
+        assert(atWrite === "" && mWaits && waiting === `${S1},${S2}` && fourthFree && mEnd === "ok"
+               && (await pairs(S1)) === "" && (await pairs(S2)) === "" && (await pairs(S3)) === "" && (await pairs(S4)) === "s4n→sx",
+          `a set replaced takes no thread lock as it writes (${atWrite || "none"}); at its commit, the third key held elsewhere, it waits holding the first two (${waiting}) and not the fourth (free: ${fourthFree}), and once let go it commits, each thread exact (waited ${mWaits}; ${mEnd}; ${await pairs(S3)} | ${await pairs(S4)})`);
+      } finally {
+        await setMover.close();
+        await prober.close();
       }
 
       // A close counts once it lands. A stray edge under the key, from a thread's thought to one outside it: the owner

@@ -1945,7 +1945,7 @@ const capture = async (content: string, metadata?: Record<string, unknown>) => S
 const subject = async (id: string, key: string | null, by: "metadata" | "model") =>
     ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
 
-console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status as the row records it; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought in no thread, a phrase key's value, and each refusal by its rule");
+console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status as the row records it; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought with a set of subjects (127) read in both its threads; a thought in no thread, a phrase key's value, and each refusal by its rule");
 {
   // The ticket's own row, two notes on it, the rows of its parent, blocker, duplicate and child, a loose thought and one on a phrase.
   const [row, note1, note2, parent, blocker, dup, loose, phrased, child] = await Promise.all([
@@ -2008,6 +2008,22 @@ console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticke
       && ft2?.continues?.id === note1 && ft2.continues.supersededBy === note2 && ft2.continuedBy === null && !("threads" in fLoose.body)
       && same((JSON.parse(fMcp.text) as { threads?: FT[] }).threads?.[0]?.continues?.id, row),
     `fetch says what a thought continues and what continues it, a superseded neighbour labelled; none on a thought in no thread (${JSON.stringify(ft1)} ${JSON.stringify(Object.keys(fLoose.body))})`);
+  // A thought with a set of subjects (127) stands in each key's thread: an id's read gives both, keyed in order, and
+  // fetch says where it stands in each. Its set closed after, so the reads below see the threads as they were.
+  const session = await capture("Session summary — SMD-9700, SMD-9701 — the parent and its child's note, one session");
+  await at(session, "2026-10-04T00:00:00Z");
+  const setOf = async (keys: string[]) => ((await sql`SELECT record_thought_subjects(${session}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:test@p3r', NULL::uuid,
+    (SELECT content_fingerprint FROM thoughts WHERE id = ${session}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean; added: number; closed: number } }).r;
+  const setWritten = await setOf(["ticket:SMD-9701", "ticket:SMD-9700"]);
+  const [bySet, bySetMcp, fSet] = await Promise.all([rest("GET", `/v1/thread?id=${session}&limit=5`), mcp("thread", { id: session, limit: 5 }), rest("GET", `/v1/thoughts/${session}`)]);
+  const setThreads = threadsOf(bySet.body), setPlaces = (fSet.body.threads as FT[] | undefined) ?? [];
+  const setClosed = await setOf([]);
+  assert(setWritten.added === 2 && bySet.status === 200 && same(setThreads.map((t) => t.key), ["ticket:SMD-9700", "ticket:SMD-9701"])
+      && setThreads[0].place === 4 && setThreads[0].total === 4 && same(setThreads[1].members.map((m) => m.id), [session, parent]) && setThreads[1].place === 1
+      && bySetMcp.text.startsWith(`Thought ${session} stands in 2 threads.`)
+      && same(setPlaces.map((p) => [p.key, p.place, p.total, p.continues?.id ?? null, p.continuedBy?.id ?? null]), [["ticket:SMD-9700", 4, 4, note2, null], ["ticket:SMD-9701", 1, 2, null, parent]])
+      && setClosed.closed === 2,
+    `a thought with a set of two stands in both threads: an id's read gives each, in key order, its place in each; MCP says two threads; fetch says what it continues and what continues it in each (${JSON.stringify(setPlaces.map((p) => [p.key, p.place, p.total]))}; ${bySetMcp.text.slice(0, 70)})`);
   // A thought in no thread; a phrase key's value carries no key, its text the key quoted.
   const [noThread, noThreadMcp, phrase] = await Promise.all([rest("GET", `/v1/thread?id=${loose}`), mcp("thread", { id: loose }), mcp("thread", { key: "phrase:retry budget" })]);
   assert(noThread.status === 200 && same(noThread.body.threads, []) && noThreadMcp.text.startsWith(`Thought ${loose} stands in no thread`)

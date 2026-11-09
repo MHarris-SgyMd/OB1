@@ -726,13 +726,17 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // reads alone, and query_log's agenda kind and result_items, refusing by
   // name without 006, 034, 058, 071, 115, 117 or 122 ([20bn]); 124
   // replaces the agenda under a ninth argument, its ticket rows with their
-  // status, refusing by name without 068, 115, 122 or 123 ([20bo]) — all
+  // status, refusing by name without 068, 115, 122 or 123 ([20bo]); 127
+  // makes a thought's subjects a set — 111's index replaced by one per
+  // thought and key, a set door, a set close and the threads' locks in key
+  // order — and redefines 113's two doors as sets of one and 120's trigger
+  // function, refusing by name without 111, 113 or 120 ([20bp]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 95, `030 is among the last ninety-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 96, `030 is among the last ninety-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5650,6 +5654,83 @@ console.log("\n[20bo] Migration 124: onto a populated brain at the file before i
     `applied: one agenda, of nine arguments; the Backlog ticket listed with its status, the In Progress one left out and counted, listed with include_started; 123's eight positional arguments read as the default; no live claim; no stored statement moved (${await agendas()} | ${plain.items.map((i) => `${i.key} ${i.status}`).join(", ")} | started ${plain.left_out.started} | claims_live ${plain.claims_live})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 });
   assert(JSON.stringify(await read(false)) === JSON.stringify(plain) && await agendas() === "9", "a re-apply is a no-op: the same read, the one function");
+  await sql.close();
+}
+
+console.log("\n[20bp] Migration 127: refused by name without 111, 113 or 120; onto a populated brain at the file before it — thoughts with their subjects, a thread's edges and their lineage standing as they were, 111's index on the thought alone replaced by one on the thought and key; after it a thought's set stands in each key's thread, a set replaced moving the thought between threads, and 113's door on it a set of one; a re-apply a no-op (SMD-3306)");
+{
+  const the127 = MIGRATIONS.find((f) => f.endsWith("_subject_sets.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["111", "migration 127 needs 111 (record_thought_subject); this schema lacks it"],
+    ["113", "migration 127 needs 113 (close_thought_subject); this schema lacks it"],
+    ["120", "migration 127 needs 120 (thread_relink); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `127 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the127 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const capture = async (i: number) =>
+    ((await sql`SELECT upsert_thought(${`upgrade 127: a session note, the ${i}th`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id;
+  const t: string[] = [];
+  for (let i = 0; i < 4; i++) t.push(await capture(i));
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const JUDGE = "subject:qwen3.8:27b@p2r";
+  const subject = async (id: string, key: string | null) =>
+    (await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'model', ${JUDGE}, NULL::uuid, ${await fpOf(id)}::text, NULL::jsonb) AS r`)[0].r as { action: string; id?: string };
+  // A brain at the file before: two threads, their edges written by 120's triggers as the subjects landed.
+  const K1 = "ticket:SMD-3410", K2 = "ticket:SMD-3411", K3 = "pr:3412";
+  for (const [i, key] of [[0, K1], [1, K2], [2, K1], [3, K2]] as const) await subject(t[i], key);
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe FROM derivations ORDER BY id`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const facetsBefore = await facets(), lineageBefore = await lineage(), before = await rows(), auditBefore = await audits();
+  const oldIndex = String((await sql`SELECT pg_get_indexdef(to_regclass('thought_facets_subject_active_uniq')) AS d`)[0].d ?? "");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
+
+  const [idx] = (await sql`SELECT pg_get_indexdef(to_regclass('thought_facets_subject_key_uniq')) AS uniq, to_regclass('thought_facets_subject_active_uniq')::text AS old`) as { uniq: string | null; old: string | null }[];
+  assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before && (await audits()) === auditBefore
+         && /\(thought_id\)/.test(oldIndex) && /\(thought_id, \(\(payload ->> 'key'::text\)\)\)/.test(idx.uniq ?? "") && idx.old === null,
+    `the file moves nothing it finds: the subjects, the threads' edges, their lineage, every thought and audit row as they were; 111's index on the thought (${oldIndex.slice(0, 60)}…) replaced by one on the thought and key (${idx.uniq})`);
+  // Each thread in capture order, as the database orders it.
+  const order = async (ids: string[]) => ((await sql`SELECT id::text FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[]) ORDER BY created_at, id`) as { id: string }[]).map((r) => r.id);
+  const edges = async (key: string) =>
+    ((await sql`SELECT thought_id::text AS n, payload->>'target' AS o FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${key} ORDER BY created_at, id`) as { n: string; o: string }[])
+      .map((e) => `${e.n}>${e.o}`).sort().join(" ");
+  const chain = (ids: string[]) => ids.slice(1).map((id, i) => `${id}>${ids[i]}`).sort().join(" ");
+  const sets = async (id: string, keys: string[]) =>
+    (await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', ${JUDGE}, NULL::uuid, ${await fpOf(id)}::text, NULL::jsonb) AS r`)[0].r as { action: string; added: number; kept: number; closed: number };
+  // A session on both tickets, captured after them: a set of two, standing in each thread.
+  t.push(await capture(4));
+  const both = await sets(t[4], [K2, K1]);
+  assert(both.action === "added" && both.added === 2 && (await edges(K1)) === chain(await order([t[0], t[2], t[4]])) && (await edges(K2)) === chain(await order([t[1], t[3], t[4]])),
+    `after it a set of two stands in both threads, each linked through the thought (${JSON.stringify(both)})`);
+  // Replaced: K1 dropped, K3 written, K2 kept; the thought leaves K1's thread and joins K3's.
+  t.push(await capture(5));
+  await subject(t[5], K3);
+  const moved = await sets(t[4], [K2, K3]);
+  assert(moved.action === "replaced" && moved.kept === 1 && moved.added === 1 && moved.closed === 1
+         && (await edges(K1)) === chain(await order([t[0], t[2]])) && (await edges(K2)) === chain(await order([t[1], t[3], t[4]])) && (await edges(K3)) === chain(await order([t[4], t[5]])),
+    `a set replaced moves the thought between threads, the kept one's standing (${JSON.stringify(moved)})`);
+  // 113's door on it: a set of one, 113's answer.
+  const one = await subject(t[4], K2);
+  const left = ((await sql`SELECT payload->>'key' AS k FROM thought_facets WHERE thought_id = ${t[4]}::uuid AND kind = 'subject' AND valid_until IS NULL`) as { k: string }[]).map((r) => r.k).join();
+  assert(one.action === "replaced" && typeof one.id === "string" && left === K2 && (await edges(K3)) === "",
+    `record_thought_subject on a thought's set narrows it to its one key, 113's answer (${JSON.stringify(one)})`);
+  const facetsAfter = await facets(), lineageAfter = await lineage(), rowsAfter = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
+  assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === rowsAfter,
+    "a re-apply is a no-op: every facet, edge, lineage row and thought as it was");
   await sql.close();
 }
 
