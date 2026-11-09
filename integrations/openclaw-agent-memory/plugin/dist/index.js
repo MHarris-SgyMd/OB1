@@ -4,18 +4,48 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { resolveConfiguredSecretInputString } from "openclaw/plugin-sdk/secret-input-runtime";
 
 // src/client.ts
-function requestInput(input) {
-  return input && typeof input === "object" ? input : {};
+var FIELDS = {
+  recall: ["schema_version", "workspace_id", "project_id", "task_id", "flow_id", "task_type", "channel", "runtime", "model_intent", "query", "entities", "scope", "limits", "sensitivity"],
+  writeback: ["schema_version", "workspace_id", "project_id", "task_id", "flow_id", "step_id", "idempotency_key", "content_hash", "trust", "channel", "runtime", "models_used", "source_refs", "memory_payload", "provenance", "retention", "visibility"],
+  record_usage: ["used_memory_ids", "ignored"],
+  review_memory: ["action", "actor_label", "notes", "content", "summary", "visibility", "related_memory_id"]
+};
+function only(input, fields) {
+  const given = input && typeof input === "object" ? input : {};
+  return Object.fromEntries(fields.filter((f) => given[f] !== void 0).map((f) => [f, given[f]]));
 }
 function projectIdFrom(input, configuredProjectId) {
   if (configuredProjectId) return configuredProjectId;
   if (typeof input.project_id === "string" || input.project_id === null) return input.project_id;
   return null;
 }
+var AgentMemoryError = class extends Error {
+  status;
+  code;
+  retryAfter;
+  body;
+  constructor(method, path, status, text, retryAfter) {
+    let body = text;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+    }
+    const named = body && typeof body === "object" ? body : {};
+    const code = typeof named.code === "string" ? named.code : null;
+    const message = typeof named.message === "string" && named.message ? `: ${named.message}` : "";
+    super(`OB1 agent-memory ${method} ${path} ${status} ${code ?? text.slice(0, 300)}${message}`.trimEnd());
+    this.name = "AgentMemoryError";
+    this.status = status;
+    this.code = code;
+    this.retryAfter = retryAfter;
+    this.body = body;
+  }
+};
+var segment = (id) => encodeURIComponent(id);
 var AgentMemoryClient = class {
   constructor(config) {
     this.config = config;
-    this.endpoint = config.endpoint.replace(/\/$/, "");
+    this.endpoint = config.endpoint.replace(/\/+$/, "");
     this.accessKey = config.accessKey;
     if (!this.accessKey) {
       throw new Error("OB1 Agent Memory access key missing. Configure plugins.entries.nbj-ob1-agent-memory.config.accessKey.");
@@ -23,24 +53,37 @@ var AgentMemoryClient = class {
   }
   endpoint;
   accessKey;
+  /**
+   * One call on the plugin's routes, under `endpoint`
+   * (`https://<host>/api/v1/plugins/agent-memory`), the key as x-brain-key,
+   * which the REST core reads (it reads no `?key=`). A GET's input goes in
+   * the query string and it sends no body; a refusal, or a 2xx that is no JSON
+   * object, throws AgentMemoryError.
+   */
   async request(path, options = {}) {
-    const response = await fetch(`${this.endpoint}${path}`, {
-      method: options.method || "GET",
-      headers: {
-        "content-type": "application/json",
-        "x-brain-key": this.accessKey
-      },
+    const method = options.method || "GET";
+    const query = options.query ? new URLSearchParams(Object.entries(options.query).filter((e) => typeof e[1] === "string" && e[1] !== "")).toString() : "";
+    const headers = { "x-brain-key": this.accessKey };
+    if (options.body !== void 0) headers["content-type"] = "application/json";
+    const response = await fetch(`${this.endpoint}${path}${query ? `?${query}` : ""}`, {
+      method,
+      headers,
       body: options.body === void 0 ? void 0 : JSON.stringify(options.body)
     });
     const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
-    if (!response.ok) {
-      throw new Error(`OB1 Agent Memory API ${response.status}: ${data.error || text}`);
+    if (!response.ok) throw new AgentMemoryError(method, path, response.status, text, response.headers.get("retry-after"));
+    let answer = null;
+    try {
+      answer = text ? JSON.parse(text) : null;
+    } catch {
     }
-    return data;
+    if (!answer || typeof answer !== "object" || Array.isArray(answer)) {
+      throw new AgentMemoryError(method, path, response.status, `not the plugin's answer (not a JSON object): ${text}`, null);
+    }
+    return answer;
   }
   recall(input) {
-    const request = requestInput(input);
+    const request = only(input, FIELDS.recall);
     const projectId = projectIdFrom(request, this.config.projectId);
     return this.request("/recall", {
       method: "POST",
@@ -56,8 +99,9 @@ var AgentMemoryClient = class {
       }
     });
   }
+  /** Answered {schema_version, memories}: each memory whole under a write key, its memory_id and thought_id alone under a capture-only key. */
   writeback(input) {
-    const request = requestInput(input);
+    const request = only(input, FIELDS.writeback);
     const projectId = projectIdFrom(request, this.config.projectId);
     return this.request("/writeback", {
       method: "POST",
@@ -75,26 +119,75 @@ var AgentMemoryClient = class {
       }
     });
   }
+  /** Answered {recorded: {used, ignored}}, the memories it marked. */
   reportUsage(requestId, input) {
-    return this.request(`/recall/${requestId}/usage`, { method: "POST", body: input });
+    return this.request(`/recalls/${segment(requestId)}/usage`, { method: "POST", body: only(input, FIELDS.record_usage) });
   }
+  /** Answered {memory, source_refs, models_used, relations}. */
   inspectMemory(memoryId) {
-    return this.request(`/memories/${memoryId}`);
+    return this.request(`/memories/${segment(memoryId)}`);
   }
+  /** Answered {memories}: those still waiting for a person's confirmation. */
   listReviewQueue(input = {}) {
-    const workspaceId = input.workspace_id || this.config.workspaceId;
-    const projectId = input.project_id || this.config.projectId;
-    const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (projectId) params.set("project_id", projectId);
-    return this.request(`/memories/review?${params.toString()}`);
+    return this.request("/review-queue", {
+      query: { workspace_id: input.workspace_id || this.config.workspaceId, project_id: input.project_id || this.config.projectId }
+    });
   }
+  /** Answered {memory}, as the review left it. */
   reviewMemory(memoryId, input) {
-    return this.request(`/memories/${memoryId}/review`, { method: "PATCH", body: input });
+    return this.request(`/memories/${segment(memoryId)}/review`, { method: "PATCH", body: only(input, FIELDS.review_memory) });
   }
+  /** Answered {trace, items}: a recall made under a write key. */
   getRecallTrace(requestId) {
-    return this.request(`/recall-traces/${requestId}`);
+    return this.request(`/recalls/${segment(requestId)}`);
   }
 };
+function provenanceLabel(m) {
+  const policy = m?.use_policy ?? {};
+  return policy?.can_use_as_instruction ? "instruction" : policy?.can_use_as_evidence ? "evidence" : void 0;
+}
+function updatedAtOf(m) {
+  const f = m?.freshness;
+  const at = f?.last_confirmed_at ?? f?.created_at;
+  return typeof at === "string" ? at : void 0;
+}
+function corpusHits(recall) {
+  const memories = Array.isArray(recall?.memories) ? recall.memories : [];
+  return memories.map((m, i) => {
+    const id = typeof m?.memory_id === "string" ? m.memory_id : void 0;
+    return {
+      corpus: "openbrain",
+      path: `openbrain://memory/${id ?? i}`,
+      title: typeof m?.summary === "string" ? m.summary.slice(0, 80) : void 0,
+      kind: "memory",
+      score: Math.max(0, 1 - i / Math.max(memories.length, 1)),
+      snippet: String(m?.summary ?? m?.content ?? "").slice(0, 600),
+      id,
+      provenanceLabel: provenanceLabel(m),
+      source: "openbrain.agent_memory",
+      sourceType: "openbrain.agent_memory",
+      updatedAt: updatedAtOf(m)
+    };
+  });
+}
+function corpusDocument(answer, lookup, id) {
+  const memory = answer?.memory;
+  if (!memory || typeof memory !== "object") return null;
+  const content = String(memory.content ?? memory.summary ?? "");
+  return {
+    corpus: "openbrain",
+    path: lookup,
+    title: typeof memory.summary === "string" ? memory.summary.slice(0, 80) : void 0,
+    kind: "memory",
+    content,
+    fromLine: 1,
+    lineCount: content.split("\n").length,
+    id: typeof memory.memory_id === "string" ? memory.memory_id : id,
+    provenanceLabel: provenanceLabel(memory),
+    sourceType: "openbrain.agent_memory",
+    updatedAt: updatedAtOf(memory)
+  };
+}
 
 // src/tool-schemas.js
 import { Type } from "typebox";
@@ -251,112 +344,6 @@ function toolResult(value) {
     details: value
   };
 }
-var nullableString = Type.Union([Type.String(), Type.Literal(null)]);
-var optionalNullableString = Type.Optional(nullableString);
-var stringArrayRecord = Type.Record(Type.String(), Type.Array(Type.String()));
-var channelParameters = Type.Object({
-  kind: optionalNullableString,
-  id: optionalNullableString,
-  thread_id: optionalNullableString
-});
-var runtimeParameters = Type.Object({
-  name: Type.Optional(Type.String()),
-  version: optionalNullableString
-});
-var modelIntentParameters = Type.Object({
-  provider: optionalNullableString,
-  model: optionalNullableString
-});
-var recallParameters = Type.Object({
-  schema_version: Type.Optional(Type.Union([
-    Type.Literal("openbrain.agent_memory.recall.v1"),
-    Type.Literal("openbrain.openclaw.recall.v1")
-  ])),
-  workspace_id: Type.Optional(Type.String()),
-  project_id: optionalNullableString,
-  task_id: optionalNullableString,
-  flow_id: optionalNullableString,
-  task_type: optionalNullableString,
-  channel: Type.Optional(channelParameters),
-  runtime: Type.Optional(runtimeParameters),
-  model_intent: Type.Optional(modelIntentParameters),
-  query: Type.String(),
-  entities: Type.Optional(stringArrayRecord),
-  scope: Type.Optional(Type.Object({
-    visibility: optionalNullableString,
-    project_only: Type.Optional(Type.Boolean()),
-    include_unconfirmed: Type.Optional(Type.Boolean()),
-    include_stale: Type.Optional(Type.Boolean())
-  })),
-  limits: Type.Optional(Type.Object({
-    max_items: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })),
-    max_tokens: Type.Optional(Type.Number({ minimum: 256, maximum: 2e4 })),
-    recency_days: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Literal(null)]))
-  })),
-  sensitivity: Type.Optional(Type.Record(Type.String(), Type.Boolean()))
-});
-var memoryPayloadParameters = Type.Object({
-  decisions: Type.Optional(Type.Array(Type.String())),
-  outputs: Type.Optional(Type.Array(Type.String())),
-  lessons: Type.Optional(Type.Array(Type.String())),
-  constraints: Type.Optional(Type.Array(Type.String())),
-  unresolved_questions: Type.Optional(Type.Array(Type.String())),
-  next_steps: Type.Optional(Type.Array(Type.String())),
-  failures: Type.Optional(Type.Array(Type.String())),
-  artifacts: Type.Optional(Type.Array(Type.Object({
-    kind: Type.String(),
-    uri: Type.String(),
-    description: optionalNullableString
-  }))),
-  entities: Type.Optional(stringArrayRecord)
-});
-var writebackParameters = Type.Object({
-  schema_version: Type.Optional(Type.Union([
-    Type.Literal("openbrain.agent_memory.writeback.v1"),
-    Type.Literal("openbrain.openclaw.writeback.v1")
-  ])),
-  workspace_id: Type.Optional(Type.String()),
-  project_id: optionalNullableString,
-  task_id: optionalNullableString,
-  flow_id: optionalNullableString,
-  step_id: optionalNullableString,
-  idempotency_key: optionalNullableString,
-  content_hash: optionalNullableString,
-  channel: Type.Optional(channelParameters),
-  runtime: Type.Optional(runtimeParameters),
-  models_used: Type.Optional(Type.Array(Type.Object({
-    provider: Type.String(),
-    model: Type.String(),
-    role: Type.String()
-  }))),
-  source_refs: Type.Optional(Type.Array(Type.Object({
-    kind: Type.String(),
-    uri: optionalNullableString,
-    title: optionalNullableString,
-    timestamp: optionalNullableString
-  }))),
-  memory_payload: memoryPayloadParameters,
-  provenance: Type.Optional(Type.Object({
-    default_status: Type.Optional(Type.Union([
-      Type.Literal("observed"),
-      Type.Literal("inferred"),
-      Type.Literal("user_confirmed"),
-      Type.Literal("imported"),
-      Type.Literal("generated")
-    ])),
-    confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-    requires_review: Type.Optional(Type.Boolean())
-  })),
-  retention: Type.Optional(Type.Object({
-    ttl_days: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Literal(null)])),
-    stale_after_days: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Literal(null)]))
-  })),
-  visibility: Type.Optional(Type.Object({
-    workspace: optionalNullableString,
-    project: optionalNullableString,
-    channel: optionalNullableString
-  }))
-});
 function registerTool(api, tool) {
   api.registerTool({
     name: tool.name,
@@ -426,7 +413,7 @@ var index_default = definePluginEntry({
     registerTool(api, {
       name: "openbrain_review_memory",
       label: "NBJ OB1 review memory",
-      description: "Confirm, edit, evidence-only, restrict, stale, dispute, supersede, or reject a memory.",
+      description: "Confirm, edit, evidence-only, restrict, stale, dispute, merge, supersede, or reject a memory. An edit gives content, summary or both; merge and supersede name related_memory_id; restrict_scope narrows to visibility.",
       parameters: Type2.Object({
         memory_id: Type2.String(),
         action: Type2.Union([
@@ -440,12 +427,17 @@ var index_default = definePluginEntry({
           Type2.Literal("dispute"),
           Type2.Literal("supersede")
         ]),
-        actor_id: Type2.Optional(Type2.String()),
         actor_label: Type2.Optional(Type2.String()),
         notes: Type2.Optional(Type2.String()),
         content: Type2.Optional(Type2.String()),
         summary: Type2.Optional(Type2.String()),
-        visibility: Type2.Optional(Type2.String()),
+        visibility: Type2.Optional(Type2.Union([
+          Type2.Literal("personal"),
+          Type2.Literal("channel"),
+          Type2.Literal("project"),
+          Type2.Literal("workspace"),
+          Type2.Literal("organization")
+        ])),
         related_memory_id: Type2.Optional(Type2.String())
       }),
       run: (client, input) => {
@@ -460,6 +452,82 @@ var index_default = definePluginEntry({
       parameters: Type2.Object({ request_id: Type2.String() }),
       run: (client, input) => client.getRecallTrace(input.request_id)
     });
+    const OB1_TOOL_NAMES = [
+      "openbrain_recall",
+      "openbrain_writeback",
+      "openbrain_report_usage",
+      "openbrain_inspect_memory",
+      "openbrain_list_review_queue",
+      "openbrain_review_memory",
+      "openbrain_get_recall_trace"
+    ];
+    function isConfigured() {
+      const raw = api.pluginConfig || {};
+      return typeof raw.endpoint === "string" && raw.endpoint.length > 0 && typeof raw.workspaceId === "string" && raw.workspaceId.length > 0;
+    }
+    if (typeof api.registerMemoryPromptSupplement === "function") {
+      api.registerMemoryPromptSupplement((params) => {
+        if (!isConfigured()) return [];
+        const present = OB1_TOOL_NAMES.filter((t) => params.availableTools.has(t));
+        if (present.length === 0) return [];
+        return [
+          "## OB1 Agent Memory",
+          "Long-term governed memory is available via OB1. Use it as a discipline, not a fallback.",
+          "",
+          "Workflow:",
+          "- Before meaningful work, call `openbrain_recall` with a task-scoped query.",
+          "- Treat returned memories tagged `instruction` as binding rules; `evidence`-tagged ones as supporting context only.",
+          "- After meaningful work, call `openbrain_writeback` with compact, provenance-labeled findings (decisions, lessons, constraints, outputs, failures).",
+          "- After acting on recalled memories, call `openbrain_report_usage` with `request_id` and the IDs you used vs. ignored \u2014 closes the recall-quality loop.",
+          "",
+          `Available tools: ${present.map((t) => "`" + t + "`").join(", ")}.`
+        ];
+      });
+    }
+    if (typeof api.registerMemoryCorpusSupplement === "function") {
+      api.registerMemoryCorpusSupplement({
+        async search(input) {
+          if (!isConfigured()) return [];
+          let client;
+          try {
+            client = await clientFromApi(api);
+          } catch {
+            return [];
+          }
+          const limit = Math.min(Math.max(input.maxResults ?? 10, 1), 50);
+          let response;
+          try {
+            response = await client.recall({
+              query: input.query.slice(0, 2e3),
+              task_type: "general",
+              limits: { max_items: limit, max_tokens: 4e3 },
+              scope: { project_only: false, include_unconfirmed: false, include_stale: false }
+            });
+          } catch {
+            return [];
+          }
+          return corpusHits(response);
+        },
+        async get(input) {
+          if (!isConfigured()) return null;
+          const id = input.lookup.replace(/^openbrain:\/\/memory\//, "");
+          if (!id) return null;
+          let client;
+          try {
+            client = await clientFromApi(api);
+          } catch {
+            return null;
+          }
+          let answer;
+          try {
+            answer = await client.inspectMemory(id);
+          } catch {
+            return null;
+          }
+          return corpusDocument(answer, input.lookup, id);
+        }
+      });
+    }
   }
 });
 export {

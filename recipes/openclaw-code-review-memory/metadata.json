@@ -9,13 +9,13 @@
   "version": "0.1.0",
   "requires": {
     "open_brain": true,
-    "services": ["Supabase", "OpenRouter"],
-    "tools": ["OpenClaw", "GitHub", "OB1 Agent Memory API"]
+    "services": [],
+    "tools": ["OpenClaw", "GitHub", "agent-memory plugin (plugins/agent-memory)"]
   },
   "requires_skills": ["openclaw-agent-memory"],
   "tags": ["openclaw", "code-review", "agent-memory", "github"],
   "difficulty": "advanced",
   "estimated_time": "30 minutes",
   "created": "2026-05-03",
-  "updated": "2026-05-03"
+  "updated": "2026-11-08"
 }

@@ -11746,7 +11746,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["integrations/_template/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["integrations/chrome-capture-extension/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/chrome-capture-extension/icons/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
-  ["integrations/hermes-agent-memory/README.md", { fork: { why: KEPT.NBJ, lines: 1 }, name: { why: KEPT.NBJ, lines: 1 } }],
+  ["integrations/hermes-agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/openclaw-agent-memory/README.md", { name: { why: KEPT.NBJ, lines: 1 } }],
   ["integrations/slack-capture/README.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
   ["jev/README.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
