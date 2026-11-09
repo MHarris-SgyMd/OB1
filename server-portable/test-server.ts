@@ -7094,6 +7094,19 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const { rankByPriority, prioritiesOf, readPriorities, priorityWindow } = await import("./core/reads.ts");
   // The brain's scale, ob1_priority_span() under 127's defaults (migration 128, SMD-4194; test-schema [115] holds it).
   const SPAN = 5.8;
+  // The copies that remain follow the defaults (review pass 2): the last migration defining ob1_priority_defaults, its
+  // span by ob1_priority_span's rule, against this suite's SPAN and the search tool's description.
+  {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const migDir = new URL("../db/migrations/", import.meta.url);
+    const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
+    const body = /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))![1];
+    const d = JSON.parse(body) as Record<string, number>;
+    const span = Math.round((Math.max(5, d.unknown) + Math.max(d.soon, d.week, d.overdue) + Math.max(d.unblocks_one, d.unblocks_many)) * 1000) / 1000;
+    const described = readFileSync(new URL("./core/schemas.ts", import.meta.url), "utf8");
+    assert(span === SPAN && described.includes(`(ob1_priority_span, ${SPAN})`),
+      `the span ${definer}'s defaults allow is this suite's ${SPAN}, and the search description says it (${span})`);
+  }
   const { priorityNote } = await import("./render.ts");
   const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
   const prio = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 5, known: true } };
@@ -7133,6 +7146,8 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const hintW = searchHint({ priority_weight: 0.5 }), hintM = searchHint({ min_priority: 3 }), hintNone = searchHint({ priority_weight: 0 });
   assert(/migration 128/.test(hintW?.("function ob1_priority_span() does not exist") ?? "")
       && /EXECUTE is PUBLIC's/.test(hintW?.("permission denied for function ob1_priority_span") ?? "")
+      && /min_priority/.test(hintM?.("permission denied for function ob1_priority_defaults") ?? "")
+      && /re-apply migration 128/.test(hintW?.("ob1_priority_span answered no span this server reads") ?? "")
       && /migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
       && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
       && hintNone === undefined && priorityHint("some other fault") === "",

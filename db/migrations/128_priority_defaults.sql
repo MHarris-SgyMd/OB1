@@ -13,9 +13,14 @@
 --
 -- WHAT
 --   The maintainer chose (SMD-4194, 2026-11-09):
---   * ob1_priority_defaults() — the default weights as jsonb, IMMUTABLE,
---     changed only by a migration. 127's values, unchanged. A retune is now a
---     migration replacing this function alone.
+--   * ob1_priority_defaults() — the default weights as jsonb, STABLE (not
+--     IMMUTABLE: Postgres folds an IMMUTABLE call into a prepared plan, and
+--     the server's prepared reads kept the old value once the function was
+--     replaced; review pass 2's e2e row),
+--     changed only by a migration. 127's values, unchanged. A retune of the
+--     read is now a migration replacing this function alone; the numbers the
+--     docs and the search description quote follow by hand, test-server [36]
+--     holding the description's span to it.
 --   * ob1_priority_span() — the largest effective priority the defaults
 --     allow: a critical level (5) plus the largest urgency term (soon, week or
 --     overdue) plus the largest unblocks term. A ranked search reads it with
@@ -77,7 +82,7 @@ $qc$;
 CREATE OR REPLACE FUNCTION ob1_priority_defaults()
 RETURNS jsonb
 LANGUAGE sql
-IMMUTABLE
+STABLE
 AS $$
   SELECT '{"unknown": 2, "hop": 1, "hops": 2, "soon": 0.4, "soon_days": 1, "week": 0.2, "week_days": 7, "overdue": 0.6,
            "unblocks_one": 0.1, "unblocks_many": 0.2, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb
@@ -95,7 +100,7 @@ COMMENT ON FUNCTION ob1_priority_defaults() IS
 CREATE OR REPLACE FUNCTION ob1_priority_span()
 RETURNS numeric
 LANGUAGE sql
-IMMUTABLE
+STABLE
 AS $$
   SELECT greatest(5, (d->>'unknown')::numeric) + greatest((d->>'soon')::numeric, (d->>'week')::numeric, (d->>'overdue')::numeric)
            + greatest((d->>'unblocks_one')::numeric, (d->>'unblocks_many')::numeric)

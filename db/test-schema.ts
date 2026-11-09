@@ -18707,13 +18707,14 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
   const under127 = await eff(ladderKeys);
   await reapply(file.slice(0, 4));
 
-  // The shape: two new functions, IMMUTABLE and commented; effective_priority reads the defaults and holds no literal.
+  // The shape: two new functions, STABLE (an IMMUTABLE value is folded into prepared plans and outlives a retune) and
+  // commented; effective_priority reads the defaults and holds no literal.
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
       WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') ORDER BY 1`)).rows;
   const def = (await db.query<{ d: string }>(`SELECT pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0].d;
-  assert(fns.length === 2 && fns.every((f) => f.v === "i" && /Migration 128 \/ SMD-4194/.test(f.c ?? "")) && /c_defaults CONSTANT jsonb := ob1_priority_defaults\(\);/.test(def) && !/"overdue":/.test(def),
-    `ob1_priority_defaults and ob1_priority_span are IMMUTABLE and commented; effective_priority reads its defaults from the function and holds no literal (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+  assert(fns.length === 2 && fns.every((f) => f.v === "s" && /Migration 128 \/ SMD-4194/.test(f.c ?? "")) && /c_defaults CONSTANT jsonb := ob1_priority_defaults\(\);/.test(def) && !/"overdue":/.test(def),
+    `ob1_priority_defaults and ob1_priority_span are STABLE and commented; effective_priority reads its defaults from the function and holds no literal (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
 
   // The values: 127's, and the span their largest sum.
   const vals = (await db.query<{ d: Record<string, unknown>; s: string }>(`SELECT ob1_priority_defaults() AS d, ob1_priority_span()::text AS s`)).rows[0];
@@ -18730,14 +18731,14 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
   let moved = "", spanMoved = "", spanUnknown = "";
   try {
     await db.transaction(async (tx) => {
-      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
+      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql STABLE AS $f$
         SELECT '{"unknown": 2, "hop": 1, "hops": 2, "soon": 2, "soon_days": 1, "week": 1, "week_days": 7, "overdue": 3,
                  "unblocks_one": 0.5, "unblocks_many": 1, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
       moved = (await tx.query<{ item_key: string; effective: string }>(`SELECT item_key, effective::text AS effective FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`,
         [JSON.stringify([{ kind: "ticket", key: "SMD-9964" }, { kind: "ticket", key: "SMD-9967" }]), NOW])).rows.map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
       spanMoved = (await tx.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s;
       // Unknown past a critical level (review pass 1): the span takes the larger of 5 and unknown's value.
-      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
+      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql STABLE AS $f$
         SELECT '{"unknown": 6, "hop": 1, "hops": 2, "soon": 0.4, "soon_days": 1, "week": 0.2, "week_days": 7, "overdue": 0.6,
                  "unblocks_one": 0.1, "unblocks_many": 0.2, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
       spanUnknown = (await tx.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s;
