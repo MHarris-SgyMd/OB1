@@ -724,13 +724,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // and nine helpers, reads alone, refusing by name without 053, 058, 068,
   // 071, 116 or 117 ([20bm]); 123 adds the agenda and its blockers' helper,
   // reads alone, and query_log's agenda kind and result_items, refusing by
-  // name without 006, 034, 058, 071, 115, 117 or 122 ([20bn]) — all
+  // name without 006, 034, 058, 071, 115, 117 or 122 ([20bn]); 124
+  // replaces the agenda under a ninth argument, its ticket rows with their
+  // status, refusing by name without 068, 115, 122 or 123 ([20bo]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 94, `030 is among the last ninety-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 95, `030 is among the last ninety-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5605,6 +5607,49 @@ console.log("\n[20bn] Migration 123: onto a populated brain at the file before i
     `applied: the Medium due tomorrow ranks above the High, the completed ticket left out; an agenda row logs; no stored statement and no search or action row moved (${r.items.map((i) => `${i.key} ${i.effective}`).join(", ")}; ${rows})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the123 });
   assert(JSON.stringify(await read()) === JSON.stringify(r), "a re-apply is a no-op: the same read");
+  await sql.close();
+}
+
+console.log("\n[20bo] Migration 124: onto a populated brain at the file before it — refused by name without 123's ob1_item_blockers, nothing made; then applied: one agenda, of nine arguments; a ticket row says its status; a started ticket is left out and counted unless asked; claims_live says how many live claims the brain holds (SMD-4162)");
+{
+  const the124 = MIGRATIONS.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the124 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ticket = async (issue: string, status: string, statusType: string) => {
+    const content = `upgrade 124: ${issue}`;
+    const meta = { source: "linear", issue, status, status_type: statusType, project: "Upgrade 124", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9701", "Backlog", "backlog"); await ticket("SMD-9702", "In Progress", "started");
+  for (const k of ["SMD-9701", "SMD-9702"]) await sql`SELECT assert_priority('ticket', ${k}, 3, NULL, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  const stored = async () => String((await sql`SELECT md5(string_agg(a::text, '|' ORDER BY a.seq)) AS h FROM priority_assertions a`)[0].h);
+  const storedBefore = await stored();
+  const agendas = async () => (await sql`SELECT pronargs::int AS n FROM pg_proc WHERE proname = 'agenda' ORDER BY pronargs`).map((r: { n: number }) => r.n).join(",");
+
+  // Without 123's blockers helper: refused by name, 123's agenda left as it was.
+  await sql`ALTER FUNCTION ob1_item_blockers(text, text) RENAME TO ob1_item_blockers_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_item_blockers_away(text, text) RENAME TO ob1_item_blockers`;
+  const kept = await agendas();
+  assert(/^migration 124 needs 034, 068, 115, 122 and 123 \(query_log, /.test(without) && kept === "8",
+    `without 123's ob1_item_blockers the file is refused by name, and 123's eight-argument agenda stays alone (${without.slice(0, 80)} | ${kept})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 });
+  type A = { items: { key: string; status: string | null; status_type: string | null }[]; total: number; left_out: { started: number }; claims_live: number | null };
+  const read = async (started: boolean) => ((await sql`SELECT agenda('{"project": "Upgrade 124"}'::jsonb, NULL, 20, false, false, false, NULL, '2027-03-10T15:00:00Z', ${started}::boolean) AS a`)[0] as { a: A }).a;
+  const plain = await read(false), all = await read(true);
+  const eight = ((await sql`SELECT agenda('{"project": "Upgrade 124"}'::jsonb, NULL, 20, false, false, false, NULL, '2027-03-10T15:00:00Z') AS a`)[0] as { a: A }).a;
+  assert(await agendas() === "9" && plain.items.map((i) => `${i.key} ${i.status} ${i.status_type}`).join(" | ") === "SMD-9701 Backlog backlog" && plain.total === 1
+      && plain.left_out.started === 1 && plain.claims_live === 0
+      && all.items.map((i) => i.key).sort().join(" ") === "SMD-9701 SMD-9702" && all.left_out.started === 0
+      && JSON.stringify(eight) === JSON.stringify(plain) && (await stored()) === storedBefore,
+    `applied: one agenda, of nine arguments; the Backlog ticket listed with its status, the In Progress one left out and counted, listed with include_started; 123's eight positional arguments read as the default; no live claim; no stored statement moved (${await agendas()} | ${plain.items.map((i) => `${i.key} ${i.status}`).join(", ")} | started ${plain.left_out.started} | claims_live ${plain.claims_live})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the124 });
+  assert(JSON.stringify(await read(false)) === JSON.stringify(plain) && await agendas() === "9", "a re-apply is a no-op: the same read, the one function");
   await sql.close();
 }
 
