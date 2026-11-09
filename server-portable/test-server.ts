@@ -7091,39 +7091,34 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
 
 console.log("\n[36] priority_weight and min_priority in the core and the words (SMD-3668): the blend's order with relevance by place, a tie in the window's order, the floor on a known priority alone, one read with each row as its own thought, the header notes, and the hint for a read that failed");
 {
-  const { rankByPriority, prioritiesOf, readPriorities, PRIORITY_SPAN, priorityWindow } = await import("./core/reads.ts");
+  const { rankByPriority, prioritiesOf, readPriorities, priorityWindow } = await import("./core/reads.ts");
+  // The brain's scale, ob1_priority_span() under 127's defaults (migration 128, SMD-4194; test-schema [115] holds it).
+  const SPAN = 5.8;
   const { priorityNote } = await import("./render.ts");
   const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
   const prio = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 5, known: true } };
-  const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n).map((r) => r.id).join("");
+  const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n, SPAN).map((r) => r.id).join("");
   // 11-02's case in miniature: four Highs, the one with urgency last by meaning.
   assert(order(0) === "abcd" && order(1) === "dabc" && order(0.6) === "adbc",
     `four of one level: at 0 the window's order, at 1 the higher priority first and the rest in theirs, at 0.6 the urgent one no longer last (${order(0)}, ${order(1)}, ${order(0.6)})`);
   // (1 − w) × relevance + w × priority, relevance by place (n − i) / n, priority over 5.8 (127's largest, SMD-4177):
   // d's 0.2 × 1/4 + 0.8 × 5/5.8 = 0.740 over a's 0.2 × 1 + 0.8 × 3/5.8 = 0.614; at 0.1, a's 0.952 over d's 0.311.
-  assert(PRIORITY_SPAN === 5.8 && order(0.8) === "dabc" && order(0.1) === "abcd",
-    `the blend weighs relevance by place and priority over ${PRIORITY_SPAN} (${order(0.8)}, ${order(0.1)})`);
+  assert(order(0.8) === "dabc" && order(0.1) === "abcd",
+    `the blend weighs relevance by place and priority over the span (${order(0.8)}, ${order(0.1)})`);
   // Within one level (127, SMD-4177): a High due tomorrow (3.4) last by place among three Highs passes the third and
   // second at 0.9 (d's 0.025 + 0.9 × 3.4/5.8 = 0.553 over b's 0.540), not at 0.7 (0.485 under c's 0.512). Over 9 it
   // would pass only the third at 0.9 (0.365 over 0.350, under b's 0.375).
   const within = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 3.4, known: true } };
-  assert(order(0.9, null, 4, within) === "adbc" && order(0.7, null, 4, within) === "abcd",
-    `a tenth of a level within one level moves a row at a high weight and not at a lower one (${order(0.9, null, 4, within)}, ${order(0.7, null, 4, within)})`);
-  // The scale is the defaults' largest: a critical level, the largest urgency term and unblocking many, as the last
-  // migration defining effective_priority sets them (review: a hand-copied 5.8 would outlive the next retune).
-  const { readdirSync, readFileSync } = await import("node:fs");
-  const migDir = new URL("../db/migrations/", import.meta.url);
-  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION effective_priority\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
-  const defaults = JSON.parse(/c_defaults CONSTANT jsonb := '([^']*)'/.exec(readFileSync(new URL(definer, migDir), "utf8"))![1]) as Record<string, number>;
-  const largest = Math.round((5 + Math.max(defaults.soon, defaults.week, defaults.overdue) + defaults.unblocks_many) * 1000) / 1000;
-  assert(PRIORITY_SPAN === largest, `PRIORITY_SPAN is ${definer}'s largest effective priority under its defaults (${PRIORITY_SPAN}, ${largest})`);
+  const over9 = rankByPriority(rows, within, 0.9, null, 4, 9).map((r) => r.id).join("");
+  assert(order(0.9, null, 4, within) === "adbc" && order(0.7, null, 4, within) === "abcd" && over9 === "abdc",
+    `a tenth of a level within one level moves a row at a high weight and not at a lower one; the span given is the one divided by (${order(0.9, null, 4, within)}, ${order(0.7, null, 4, within)}; over 9 ${over9})`);
   // Relevance is place, not score (review pass 2): a text match and a literal-only query's rows without the literal all
   // score 0, ordered by newness or similarity, and a score over the top's left them to priority alone at any weight.
   // At 0.01 the window's order holds; a score-based relevance would put z4, the most urgent, first.
   const zeros = [{ id: "z1", score: 0 }, { id: "z2", score: 0 }, { id: "z3", score: 0 }, { id: "z4", score: 0 }];
   const zp = { z1: { effective: 1, known: true }, z2: { effective: 2, known: true }, z3: { effective: 3, known: true }, z4: { effective: 5, known: true } };
-  assert(rankByPriority(zeros, zp, 0.01, null, 4).map((r) => r.id).join(",") === "z1,z2,z3,z4" && rankByPriority(zeros, zp, 1, null, 4).map((r) => r.id).join(",") === "z4,z3,z2,z1",
-    `rows that all score 0 keep the window's order at a small weight, and take priority's at 1 (${rankByPriority(zeros, zp, 0.01, null, 4).map((r) => r.id).join(",")})`);
+  assert(rankByPriority(zeros, zp, 0.01, null, 4, SPAN).map((r) => r.id).join(",") === "z1,z2,z3,z4" && rankByPriority(zeros, zp, 1, null, 4, SPAN).map((r) => r.id).join(",") === "z4,z3,z2,z1",
+    `rows that all score 0 keep the window's order at a small weight, and take priority's at 1 (${rankByPriority(zeros, zp, 0.01, null, 4, SPAN).map((r) => r.id).join(",")})`);
   const mixed = { a: { effective: 2, known: false }, b: { effective: 1, known: true }, c: { effective: 3, known: true }, d: { effective: 4, known: true } };
   assert(order(0, 3, 4, mixed) === "cd" && order(0, 1, 4, mixed) === "bcd" && order(0, 0, 4, mixed) === "bcd" && order(0, 5, 4, mixed) === "",
     `the floor keeps a known priority at or above it alone, in the window's order at weight 0; an unknown, ordered as 2, never passes, not even at 0 (${order(0, 3, 4, mixed)}, ${order(0, 1, 4, mixed)}, ${order(0, 0, 4, mixed)})`);
@@ -7131,12 +7126,13 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
     `the top limit after the order, of a window of min(100, 4 × limit) (${order(1, null, 2)}, ${priorityWindow(10)}, ${priorityWindow(30)})`);
   // Fusion-sized scores (about 0.016 to 0.03) weigh nothing: place does, so the order is the same as for any scores.
   const fusion = [{ id: "a", score: 0.03 }, { id: "b", score: 0.028 }, { id: "c", score: 0.025 }, { id: "d", score: 0.02 }];
-  assert(rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("") === "abcd" && rankByPriority(fusion, prio, 1, null, 4).map((r) => r.id).join("") === "dabc",
-    `on fusion-sized scores meaning holds at 0.1 and priority leads at 1, as on any (${rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("")})`);
+  assert(rankByPriority(fusion, prio, 0.1, null, 4, SPAN).map((r) => r.id).join("") === "abcd" && rankByPriority(fusion, prio, 1, null, 4, SPAN).map((r) => r.id).join("") === "dabc",
+    `on fusion-sized scores meaning holds at 0.1 and priority leads at 1, as on any (${rankByPriority(fusion, prio, 0.1, null, 4, SPAN).map((r) => r.id).join("")})`);
   // The hint for a ranked search whose read failed (review pass 2): a brain short of 122, a role granted before 116.
   const { searchHint, priorityHint } = await import("./render.ts");
   const hintW = searchHint({ priority_weight: 0.5 }), hintM = searchHint({ min_priority: 3 }), hintNone = searchHint({ priority_weight: 0 });
-  assert(/migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
+  assert(/migration 128/.test(hintW?.("function ob1_priority_span() does not exist") ?? "")
+      && /migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
       && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
       && hintNone === undefined && priorityHint("some other fault") === "",
     "a ranked search's fault names migration 122 or the grants it needs; a search with neither input carries no priority hint");

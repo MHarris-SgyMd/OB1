@@ -93,7 +93,7 @@ A source added later states its mapping and its default in SMD-3666's table, wit
 | Inferred | A tier-4 statement (decision 4's inferred tier) isn't counted until SMD-3670's agreement clears its bar: the read lists it as passed over. | off |
 | Not before | Before `not_before` the item isn't startable: the agenda leaves it out, and search doesn't change | – |
 
-SMD-3667 built this table as `effective_priority`'s weights (migration 122; SMD-4149 added From its open items in 125), each a setting a read overrides by name (`unknown`, `hop`, `hops`, `soon`, `soon_days`, `week`, `week_days`, `overdue`, `unblocks_one`, `unblocks_many`, `unblocks_many_at`, `depth`, `cap`, `count_inferred`).
+SMD-3667 built this table as `effective_priority`'s weights (migration 122; SMD-4149 added From its open items in 125; since migration 128 the defaults are one function, `ob1_priority_defaults()`, and their largest sum `ob1_priority_span()`, SMD-4194), each a setting a read overrides by name (`unknown`, `hop`, `hops`, `soon`, `soon_days`, `week`, `week_days`, `overdue`, `unblocks_one`, `unblocks_many`, `unblocks_many_at`, `depth`, `cap`, `count_inferred`).
 
 **Level first (SMD-4177, the maintainer, 2026-11-09; migration 127).** An item's level decides its place: stated, read from its open items, inherited, or unknown's 2. Urgency, overdue and what it unblocks order items of one level and never lift an item past the next. They are 122's terms scaled by 0.2, so together they add at most 0.8 (overdue 0.6 + unblocks_many 0.2), and items of one level keep 122's order. A caller of `effective_priority` (SQL, or the store) can still pass 122's full-level weights by name; no REST or MCP tool takes weights, so the agenda and search always read the defaults.
 

@@ -496,12 +496,6 @@ export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string
 
 // ── priority_weight and min_priority (SMD-3668) ─────────────────────────────
 
-/**
- * The largest effective priority under the default weights (docs/priority.md, migration 127, SMD-4177): a critical
- * level (5), overdue (0.6) and unblocking many (0.2). A priority-ranked search reads a match's priority as its
- * effective over this, capped at 1, so the blend's two halves share a 0–1 scale. 9 under 122's weights.
- */
-export const PRIORITY_SPAN = 5.8;
 /** The matches a priority-ranked search reads: prefer_current's window, min(100, 4 × limit) (077). */
 export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
 
@@ -685,7 +679,7 @@ export const priorityResult = (all: Record<string, PriorityHit> | null, id: stri
 /**
  * The window re-ranked and filtered (SMD-3668): each match scored (1 − weight) × relevance + weight × priority —
  * relevance its place in the window, (n − i) / n, so the first is 1 and the last 1/n; priority its effective over
- * PRIORITY_SPAN, capped at 1 — in that order, a tie in the window's own; then, with a floor, only matches whose
+ * `span`, the brain's largest effective priority (ob1_priority_span, migration 128; 5.8 under 127's defaults), capped at 1 — in that order, a tie in the window's own; then, with a floor, only matches whose
  * priority is known and at least it; then the first `limit`. Pure, for the unit test.
  *
  * By place, not score (review pass 2): the hybrid's score is its fusion score, 0 for a text match, for every row of
@@ -693,9 +687,9 @@ export const priorityResult = (all: Record<string, PriorityHit> | null, id: stri
  * similarity or newness, which a score over the top's left to priority alone at any weight. The window's order is the
  * search's own, ties and all; and the fusion scores bunch (the 40th about 0.6 of the first), which place does not.
  */
-export function rankByPriority<T extends { id: string }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number): T[] {
+export function rankByPriority<T extends { id: string }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number, span: number): T[] {
   const n = rows.length;
-  const priority = (r: T) => Math.min(1, Math.max(0, prio[r.id]?.effective ?? 0) / PRIORITY_SPAN);
+  const priority = (r: T) => Math.min(1, Math.max(0, prio[r.id]?.effective ?? 0) / span);
   const scored = rows.map((r, i) => ({ r, i, s: (1 - weight) * ((n - i) / n) + weight * priority(r) }));
   // The window's own order breaks a tie, so a weight of 0 with a floor keeps it.
   scored.sort((a, b) => b.s - a.s || a.i - b.i);
@@ -742,10 +736,12 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   let labels: Promise<Record<string, PriorityHit> | null> | null = null;
   if (ranked && data.length) {
     const store = await ctx.store();
-    const all = await readPriorities(store, data, { tickets: false });
+    // The blend's scale is the brain's own (SMD-4194): read beside the window, and only when a weight blends; a floor
+    // alone at weight 0 never divides.
+    const [all, span] = await Promise.all([readPriorities(store, data, { tickets: false }), priority_weight > 0 ? store.prioritySpan() : Promise.resolve(1)]);
     const prio = prioritiesOf(all, data);
     const read = data.length;
-    data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit);
+    data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit, span);
     labels = priorityOf(store, data, all.by);
     priority = { weight: priority_weight, min: min_priority ?? null, window, read, kept: data.length, known: Object.values(prio).filter((p) => p.known).length };
   } else if (ranked) {

@@ -732,12 +732,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 126 replaces the agenda again with a keys scope, and adds query_log's
   // plan_context kind, refusing by name without 034, 068, 115, 122 or 123
   // ([20bq]); 127 replaces effective_priority's default weights, level
-  // first, refusing by name without 125 ([20br]) — all recorded by the
+  // first, refusing by name without 125 ([20br]); 128 moves its default
+  // weights into ob1_priority_defaults and adds ob1_priority_span, refusing by
+  // name without 127 ([20bs]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 98, `030 is among the last ninety-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 99, `030 is among the last ninety-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5781,6 +5783,48 @@ console.log("\n[20br] Migration 127: onto a populated brain at the file before i
     `applied: the overdue note goes from above the Urgent ticket (5 over 4) to below it (2.6 under 4), the same terms; 122's weights by name read as before; nothing stored moved (${show(before)} → ${show(after)}; old weights ${show(asOld)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
   assert(JSON.stringify(await eff()) === JSON.stringify(after), "a re-apply is a no-op: the same read");
+  await sql.close();
+}
+
+console.log("\n[20bs] Migration 128: onto a populated brain at the file before it — refused by name without 127's effective_priority, nothing made; then applied: the defaults function holds 127's weights, the span is 5.8, and every effective number reads as before; nothing stored moved; a re-apply a no-op (SMD-4194)");
+{
+  const the128 = MIGRATIONS.find((f) => /^\d{3}_priority_defaults\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the128 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ticket = async (issue: string) => {
+    const content = `upgrade 128: ${issue}`;
+    const meta = { source: "linear", issue, status: "Todo", status_type: "unstarted", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9621"); await ticket("SMD-9622");
+  await sql`SELECT assert_priority('ticket', 'SMD-9621', 3, '2027-03-12T00:00:00Z'::timestamptz, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  await sql`SELECT assert_priority('ticket', 'SMD-9622', 2, '2027-03-01T00:00:00Z'::timestamptz, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  const stored = async () => String((await sql`SELECT md5(string_agg(a::text, '|' ORDER BY a.seq)) AS h FROM priority_assertions a`)[0].h);
+  const storedBefore = await stored();
+  const eff = async () => ((await sql`SELECT item_key, effective::text AS effective FROM effective_priority('[{"kind":"ticket","key":"SMD-9621"},{"kind":"ticket","key":"SMD-9622"}]'::jsonb, NULL, '2027-03-10T15:00:00Z')`) as { item_key: string; effective: string }[])
+    .map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
+  const before = await eff();
+
+  // Without 127's read: refused by name, nothing made.
+  await sql`ALTER FUNCTION effective_priority(jsonb, jsonb, timestamptz) RENAME TO effective_priority_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the128 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION effective_priority_away(jsonb, jsonb, timestamptz) RENAME TO effective_priority`;
+  const made = Number((await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname IN ('ob1_priority_defaults', 'ob1_priority_span')`)[0].n);
+  assert(/^migration 128 needs 127 \(effective_priority and 125's helpers\)/.test(without) && made === 0,
+    `without 127's effective_priority the file is refused by name, and neither function is made (${without.slice(0, 80)} | ${made})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the128 });
+  const span = Number((await sql`SELECT ob1_priority_span()::text AS s`)[0].s);
+  const overdue = Number(((await sql`SELECT ob1_priority_defaults()->>'overdue' AS o`)[0] as { o: string }).o);
+  const after = await eff();
+  assert(before === "SMD-9621 3.4, SMD-9622 2.6" && after === before && span === 5.8 && overdue === 0.6 && (await stored()) === storedBefore,
+    `applied: the defaults hold 127's weights (overdue ${overdue}), the span is ${span}, and the High due tomorrow and the overdue Medium read as before (${before} → ${after}); nothing stored moved`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the128 });
+  assert(await eff() === after && Number((await sql`SELECT ob1_priority_span()::text AS s`)[0].s) === 5.8, "a re-apply is a no-op: the same read, the same span");
   await sql.close();
 }
 
