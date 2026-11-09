@@ -230,8 +230,8 @@ The runner runs the gate on the branch it imported, with tools from its own inst
 * **The diff:**
   * none of the refused paths (layer 3), which are also what SMD-4086's criteria rule out;
   * under a size cap, with no new dependency;
-  * no file over 1 MB, of a type CLAUDE.md refuses, or binary, and no symlink or submodule;
-  * no secret, token or key pattern in the diff (taken with `--text`), the commit messages or any model text bound for the PR. The scan is the session hook's own (`scanForSecrets` in `session-capture.mjs`, `wc_` tokens among its patterns).
+  * no file over 1 MB, of a type CLAUDE.md refuses, or binary, no symlink or submodule, and no rename or copy (the gate reads adds, edits and deletes; a renamed file's old and new paths are both checked above);
+  * no secret, token or key pattern in any commit's added lines (each commit scanned, not just the net diff, since the PR carries the whole branch, not only its net change; taken with `--text`, no external diff or textconv), the commit messages or any model text bound for the PR. The scan is the session hook's own (`scanForSecrets` in `session-capture.mjs`, `wc_` tokens among its patterns).
 
   A change to a file CI runs as a check is named at the top of the PR body, since CI runs the branch's copy: `scripts/check-*.ts`, `scripts/commitlint.config.ts` or `scripts/commit-grammar.ts`.
 * **The work:** each of the ticket's Verify items answered in the worker's report, and the review's findings fixed or listed.
@@ -315,16 +315,17 @@ SMD-2682 step 4 widens acting further only with step 3's numbers in hand; this r
 Each its own PR, in order:
 
 1. **Selection and a dry run:** the selection rule and CLAUDE.md step 1's checks, printing what it would take and why it skips the rest. No claims or writes. It can land before stable runs v2.0.0, but until then its claim check says it can't read claims, and it takes nothing. Needs SMD-4086's label and SMD-4089's Linear key, to read, and SMD-4089's brain key once stable runs v2.0.0.
-2. **One run, local,** in three PRs (split 2026-11-07):
+2. **One run, local,** in three cuts (split 2026-11-07), 2b in two PRs:
    * **2a, the profile and its probes** (SMD-4088):
      * the probes above, on the pinned version, and the stamp a passing run leaves;
      * each session's settings, environment and command line, the guard, and the launcher with its init and log checks.
      * It keeps sessions out of Bun's transpiler cache. The sandbox lets no session write outside its clone and temp directory, and each session's Bun runs with `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`. The guard, which runs outside the sandbox, starts Bun with an environment of its own and the cache off: the session's XDG directories sit in the temp directory the agent writes. Bun caches the transpiled form of a large file such as `dry-run.ts`, so an entry planted where the runner's Bun looks would run as the runner.
      * It needs only the pinned Claude Code.
-   * **2b, the run's local steps:**
-     * the record, the clone, the brief, the worker and review sessions, the bundle and its import into the runner's bare repository, and the gate, tested against the probes' stand-in Messages API;
-     * it holds a ticket whose description or Verify has a character that doesn't show, as cut 1 does for a title, before any of it reaches the brief;
-     * the tickets a ticket names are not vouched for by the label, so the brief leaves them out, or they pass the same checks.
+   * **2b, the run's local steps,** in three PRs (split 2026-11-08):
+     * **2b-1, the record and the gate:** the run's record — its facts as JSON, in a directory the agent can't write — and the gate over an imported branch, diff, ticket and report. Both are checked on fixtures, offline, with no session: the gate on a real bare repository and a branch git builds (a clean branch, and each kind of bad branch, diff, secret and work), the record round-tripped and its no-follow writes tested.
+     * **2b-2, the clone, the brief and the sessions,** in two PRs:
+       * **2b-2a, the clone and the brief:** the per-run clone (off the bare repository at the base commit, on the branch, as the bot, without hard links) and the worker's brief (its fields fenced as data; a ticket whose title, description or Verify has a character that doesn't show refused before any of it reaches the brief, as cut 1 does for a title; the tickets it names listed by id only, not vouched for by the label). Both on fixtures, with no session.
+       * **2b-2b, the worker and review sessions:** the run orchestrator driving the worker and review sessions (cut 2a's session machinery against the probes' stand-in Messages API) and the one resume, and the bundle and its import into the bare repository, feeding the gate.
      * It needs no key.
    * **2c, the outward steps:**
      * the claim, and a whole run ending at a branch in the runner's bare repository with no push;

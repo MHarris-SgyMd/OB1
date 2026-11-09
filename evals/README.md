@@ -4389,6 +4389,7 @@ are meant to fix that, and none turns on by default without this number.
 ```bash
 bun eval-priority.ts --self-check                       # the rules; no database, no model
 ../db/with-postgres.sh bun eval-priority.ts --seeded    # the seeded set on a throwaway Postgres; keyless
+../db/with-postgres.sh bun eval-priority.ts --seeded --priority-weight 0.7,0.9   # and priority_weight at those weights, exploratory
 ```
 
 **The seeded set.** It has 18 items and 7 prompts, with the gold order for each prompt written by judgement, not
@@ -4401,17 +4402,36 @@ computed from `docs/priority.md`'s weights.
   `renderIssue` for the text, `issueFacets` for the metadata), so a read finds it as it finds a synced ticket.
 
 Each item also states the facts its gold rests on (a due offset, a stated level, done, claimed, the blocks links).
-Today's rows carry only what main's reads read: the text, and a board row's facets. A later read's PR plants the
-facts its own store reads (SMD-3663's assertions, a claim in `work_claims`, Linear's blocks relations through
-board-sync's links) by extending the seeding. A read never takes them from `ITEMS`, which is the answer's side.
+The first registration planted only what main's search reads: the text, and a board row's facets. Since SMD-3669 PR 2
+(2026-11-08) the seeding also plants the facts where the agenda reads them (`priority.ts`'s `plantFacts`), by the
+writers that keep them there:
+* **Each board item** is recorded as board-sync records the head it has just written (`recordStructure`: its
+  source, its blocks links, its mentions). Its issue carries both sides of a blocks relation, as Linear returns them,
+  so ZQ-101 holds `blocks ZQ-104` and ZQ-104 `blocked_by ZQ-101`. The operator declares board-sync a priority
+  source, and board-sync's own priority step states each ticket's level from its Linear priority. Another agent's key
+  claims ZQ-103.
+* **Every personal note, chatter included,** is opened as an open item from its row by its writer, due on its facts'
+  day (calendar days in UTC from the run's day), done when its facts say so. Its stated level is the operator's
+  statement on the item, the operator's key classified as `SETUP.md` classifies a brain's own.
 
-A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
-line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself), how a tool's
-arguments and answer are read, the score, the mutant, the bar and the baseline reads. Changing any of them, a comment included, is a new
-registration with its baseline re-run, never an edit. A board item is registered by its issue's fields, not by
-`renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the baseline's
-numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them is a
-decision recorded on SMD-3662, never part of a re-registration. `--seeded` refuses a corpus that isn't the
+A personal note's facts sit on its open item, not on the note. So a read that scores thoughts, as SMD-3668's
+`priority_weight` does, sees the tickets' levels and none of the notes'. The maintainer decided (2026-11-08) that it
+should see them: SMD-4149 has `effective_priority` read a thought's open items, and re-measures both reads.
+
+The run reads the facts back and fails unless the database holds exactly the plan's, line for line, duplicates
+counted: every source and the row it sits on, every link but a text reference, every live claim, every open item by
+its note with its status, due instant and opener, and every open priority statement on anything, with its level,
+tier, maker and times. A ticket's planned level is its item's facts, not board-sync's mapping. So a change outside
+the registration that moves a fact (the store dropping a due day, a new level mapping, a statement on a note) is
+seen, not scored. A read never takes the facts from `ITEMS`, which is the answer's side.
+
+A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF line
+endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself, and `plantFacts`), how a tool's
+arguments and answer are read, the score, the mutant, the bar and the baseline reads. Changing any of them, a comment
+included, is a new registration with its baseline re-run, never an edit. A board item is registered by its issue's
+fields, not by `renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the
+baseline's numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them
+is a decision recorded on SMD-3662, never part of a re-registration. `--seeded` refuses a corpus that isn't the
 registered one, so no verdict is printed on an unregistered corpus.
 
 **The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
@@ -4441,8 +4461,31 @@ moves consults the answer, and fails the run. The ceiling, which reads the gold,
 pass that errors is reported as an error, not as reading the answer. A read that copies the answer when its module
 loads is the reviewer's to catch. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
 verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
-the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
-read exists.
+the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same
+path on every run, so the path is exercised whatever the measured reads do.
+
+**The agenda read** (SMD-3669, `priority.ts`'s `AGENDA_READ`) is the first measured read. The agenda takes no query,
+so the read puts it to a question as a client would (the maintainer's choice, 2026-11-08). It searches the query as
+`plain` does (its default ten hits), then orders those hits by the agenda, with its default flags at its cap of 100:
+the hits the agenda lists first, in its order, then the rest in search's order. A hit is on the agenda when it is a
+ticket's row (any row whose metadata names the ticket with source `linear`, placed by its ticket alone), else the
+origin thought of an open item. The agenda and those lookups are read through the store: a measured read's `callTool`
+admits the search tools alone, so the `agenda` tool's own layer isn't exercised here. Priority orders what is
+relevant; it adds nothing search didn't find.
+
+**The `priority_weight` read** (SMD-3668, `priority.ts`'s `PRIORITY_WEIGHT_READ`) is `search_thoughts` with
+`priority_weight` at 0.5 and its other arguments at their defaults, called through `callTool` as the baseline reads
+are. 0.5 was pre-registered on SMD-3668 on 2026-11-08, before any run, as the value it would ship with (the bar's rule
+for a read with a weight), and the self-check pins the call. The tool re-ranks its top min(100, 4 × limit) matches
+by their place and 122's effective priority, each read as a thought. A ticket's row
+reads its ticket's level. A note reads unknown 2, since its facts sit on its open item, which `effective_priority`
+doesn't read (SMD-4149).
+
+**`--priority-weight w,...`** measures the same read at other weights, beside the pre-registered one, each as an
+exploratory read named `priority_weight@<w>`. Each weight is from 0 to 1; a weight listed twice, the pre-registered
+0.5, and any other option are refused. An exploratory read is scored, checked for reading the answer and set against
+the bar like the measured reads, but its line says it is no verdict. Choosing a weight from a sweep over these
+prompts would be fitting to the test, so a sweep shows how the read moves with its weight, and nothing more.
 
 **The score.** For each prompt:
 * **top-1:** the gold's first item is the read's first hit;
@@ -4465,11 +4508,13 @@ order-blind top-1 through the mutant and requires it to land far from chance.
 
 The seeded run exits 1 when any of these holds:
 * the corpus isn't the registered one;
-* a baseline read errors, since a baseline that never ran would set the bar;
+* fewer rows are planted than items;
+* the database doesn't hold the planted facts, or a planted statement is one `effective_priority` wouldn't count;
+* a baseline read errors, since a baseline that never ran would set the bar, or returns more than the 10 hits scored;
 * a baseline read's scores differ from `priority.ts`'s recorded `BASELINE`, so a change to search on main that
   moves the bar is seen and re-recorded, not absorbed;
 * the gold ceiling errors or can't clear the bar;
-* a measured read answers differently when the answer moves;
+* a measured read answers differently when the answer moves, or the check doesn't see the ceiling, which reads it;
 * the dogfood rows aren't sound;
 * the mutant sits more than 0.05 from chance for a baseline read or the ceiling.
 
@@ -4490,7 +4535,15 @@ These mutants are each refused:
   uses the gold as a set and keeps search's order (each fails the seeded run); a broken answer-moving check (the
   ceiling isn't seen); an edited gold (an unregistered corpus);
 * a drift check comparing counts, not which prompts;
-* a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2).
+* a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2);
+* a seeding that leaves the operator's key unclassified or board-sync undeclared (their statements tier 4), or drops
+  the claim, the blocks links or the done item; a store that drops an item's due day; Linear's High mapped to 4; and
+  due times hours off, a statement on a note and an operator's statement on a ticket (each fails the seeded run on
+  its own message); a plan that takes a ticket's level from its Linear label, not its facts (the self-check);
+* a `priority_weight` read at a weight other than the pre-registered 0.5, through another tool, or with another
+  argument (the self-check);
+* an exploratory read that ignores its weight, and a `--priority-weight` that takes a weight outside 0 to 1, one
+  listed twice, or the pre-registered one (the self-check).
 
 An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
 
@@ -4536,10 +4589,115 @@ not part of the registration: the verdict always compares a measured read with t
 re-record changes `BASELINE` and adds a dated table here, naming the main and the change that moved it. The tables
 before it stay as they were measured.
 
+**The agenda, 2026-11-08** (main 601b0452 with SMD-3669 PR 2, registration `acb196be7ec50868`, the
+facts planted; the baseline reads score as recorded above). The program's output, verbatim:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.143 | 0.571 | 0.607 | 0.083 / 0.390 / 0.001 | 0.085 / 0.390 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: the agenda doesn't clear the bar.** It passes (c), with mean tau 0.607 against the 0.502 needed, and
+(d), keeping `highest-value` and `due-soon` in the top 3. It fails (a) and (b): top-1 on 1 of 7 prompts, where 5 are
+needed, as many as the best baseline but not the same one. It gains `due-soon` and loses `highest-value`, where the
+gutters overtake the Urgent ticket.
+* **Search caps it below the bar, whatever the weights.** The read only reorders search's ten hits, and on three
+  prompts the gold's first item isn't among them: the Urgent ticket on `matters-most`, the bill on `this-week`, the
+  commitment on `promised`. So this read reaches top-1 on 4 of 7 at most, and (a) needs 5.
+* **Within that, the overdue task outranks the Urgent ticket.** The gutters, two weeks overdue and with no stated
+  level, score unknown 2 plus overdue 3, which is 5. The Urgent ticket that blocks another scores 4 plus 0.5, which
+  is 4.5. On the three prompts whose hits hold both and whose gold puts the ticket first (`next-ticket`,
+  `highest-value`, `blocking`), the gutters lead. That is docs/priority.md's weights against the operator's
+  judgement, which `priority.ts` says the weights are tuned against (SMD-3667); a retuning that put the ticket first
+  there would lose `due-soon`, so it reaches 3 of 7 at most, not the bar.
+* **It does order what it gets.** Mean tau goes from 0.252 to 0.607, and top-3 from 2 prompts to 4.
+
+Two pairs of chatter tie exactly on the agenda (the cat and the documentary at unknown 2, the coffee and the
+bookshelf at a stated 0), and the agenda orders a tie by its items' keys, which are random ids. So their order in the
+printed hits can differ between runs. Gold items tie only on the score, and the agenda breaks those by the sooner due
+time, then items before tickets, then the ticket's key (ZQ-105, a stated Medium, before ZQ-108, an unknown, both 2),
+never by a random id, so the scores can't differ.
+
+**`priority_weight`, 2026-11-09** (main d107abf7 with SMD-3668 PR 3, registration `acb196be7ec50868`; the baseline
+reads and the agenda score as recorded above; two runs give the same hits for it). The program's output, verbatim:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.143 | 0.571 | 0.607 | 0.083 / 0.390 / 0.001 | 0.085 / 0.390 / 0.000 |
+| priority_weight | 0.143 | 0.286 | 0.212 | 0.065 / 0.147 / -0.003 | 0.064 / 0.149 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: `priority_weight` at 0.5 doesn't clear the bar,** and doesn't beat plain search. It passes (d), keeping
+`highest-value` and `due-soon` in the top 3. It fails (a) and (b), with top-1 on 1 of 7 prompts (the same
+`highest-value` that plain search gets), and (c), with mean tau 0.212 against plain's 0.252.
+* **The notes' facts are out of its sight, so no weight reaches the bar here.** Every note reads unknown 2, and the
+  blend keeps two rows of equal priority in the window's order, whatever the weight. On three prompts the gold's first
+  item is a note that the window puts behind another note: the gutters behind the bill on `due-soon`, the bill behind
+  the documentary on `this-week`, and the commitment behind the bookshelf on `promised`. So it reaches top-1 on 4 of 7
+  at most, and (a) needs 5. SMD-4149 has `effective_priority` read a note's open items, and re-measures this read at
+  the same 0.5.
+* **Where it can see, 0.5 moves the Urgent ticket up but not first.** The Urgent ticket (4, plus 0.5 for what it
+  unblocks) goes from eighth to fifth on `next-ticket` and `blocking`, still behind rows that lead it by meaning: the
+  claimed High ticket and the renewal note on `next-ticket`, the blocked ticket and the coffee note on `blocking`.
+  On `matters-most` it stays out of the top ten, as in plain search. A claimed or done ticket ranks by its stated
+  level, as decided for this read: a settled item keeps its level, and `prefer_current` is the lever for finished
+  work.
+* **The tau it loses is on `this-week`** (0.316 to 0.120). It draws the passport into the top ten, ahead of the bill
+  and the commitment that the gold puts before it, and both stay out. On the other four prompts with a tau, it
+  scores as plain search.
+
+**Exploratory: `priority_weight` at 0.7 and 0.9, 2026-11-09** (the maintainer asked for them after the verdict; the
+same main and registration, `--priority-weight 0.7,0.9`; the same hits as two earlier runs with the weight edited in).
+Not a verdict: a weight chosen from these rows would be fitted to the prompts that judge it. The program's output,
+verbatim, its other rows as above:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| priority_weight | 0.143 | 0.286 | 0.212 | 0.065 / 0.147 / -0.003 | 0.064 / 0.149 / 0.000 |
+| priority_weight@0.7 | 0.429 | 0.429 | 0.520 | 0.202 / 0.303 / -0.003 | 0.200 / 0.305 / 0.000 |
+| priority_weight@0.9 | 0.571 | 0.571 | 0.559 | 0.223 / 0.270 / -0.002 | 0.220 / 0.269 / 0.000 |
+
+Neither would clear the bar. Each would pass (b) and (c), and fail (a) and (d).
+* **The Urgent ticket comes first as the weight rises.** At 0.7 it leads `next-ticket`, `highest-value` and
+  `blocking`. At 0.9 it leads every prompt, which adds `matters-most`: 4 of 7, the most this read can reach while
+  every note reads unknown 2.
+* **The notes lose what the tickets gain.** On `due-soon` the High and Urgent tickets take the first places, and the
+  gutters, the gold's first, fall from second to fifth at 0.7 and seventh at 0.9. That fails (d). At 0.9 the read is
+  close to a sort by ticket level.
+* **So a higher weight moves the misses rather than removing them.** The three prompts led by a note stay out of
+  reach until a note reads its open items' due times and levels (SMD-4149).
+
+**On the canary's real board, 2026-11-09** (the maintainer asked for it; not a verdict, since the real board has no
+gold order and keeps moving). The seven prompts went to the canary brain's `search_thoughts` over MCP, at weights 0,
+0.5, 0.7 and 0.9, with a limit of 5 and the other arguments at their defaults. The canary ran commit 777b2adc
+(PRs 1 and 2 of SMD-3668, migration 123) and held 3,670 thoughts. These were reads only; `--seeded` can't run there,
+since it resets the database it is given.
+* **The weight has little to work with.** Of the 20 rows the weight re-ranks, only 2 to 14 carry a known priority.
+  Most hits are session summaries, which read as unknown 2. "What is the highest-value unstarted issue?" returns the
+  same five session summaries at every weight, the 2026-10-14 session's first (2 of its 20 rows known).
+* **At 0.9 a finished ticket leads.** "Which ticket should I pick up next?" puts three Done tickets first (SMD-2448,
+  SMD-2932, SMD-2657), each keeping its stated High, as decided for the read: a settled item keeps its level.
+  With `prefer_current` on as well, 0.9 puts SMD-4086 first (an open Medium that unblocks one item), and no Done
+  ticket is in the top five. A client that raises the weight needs `prefer_current` beside it.
+* **A stated Low ranks below an unknown,** because unknown counts as 2 (`docs/priority.md`). On "What is holding up
+  other work?", SMD-4071 (Low) falls from first at 0 to third at 0.5, behind SMD-4007 and a session summary.
+* **The 11-02 filter case** (`{"status_type":"backlog","priority":"High"}` on "What is the highest-value unstarted
+  issue?") returns its seven tickets in priority order already at 0, so no weight moves them.
+* **Latency** was 200 to 1,200 ms a search at every weight, 0 included, while the canary's sleep worker ran. These
+  numbers don't separate the weight's cost.
+
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
-A row names its reads from `DOGFOOD_READS`: the seeded set's reads, baseline and measured, and `ticket_rows` (search
-filtered to board-sync's ticket rows, the 10-14 session's second read). A new read is added there with what it is, so rows stay comparable.
+A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's
+reads, each meaning its procedure there, and `ticket_rows` (search filtered to board-sync's ticket rows, the 10-14
+session's second read). So a row's `agenda` is search's hits ordered by the agenda; the rank of the pick in the agenda
+tool's own list would need a name of its own. A new read is added there with what it is, so rows stay comparable.
 
 | date | pick | picked instead | read: rank of the pick |
 | --- | --- | --- | --- |

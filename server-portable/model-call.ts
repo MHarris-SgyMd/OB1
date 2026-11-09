@@ -66,6 +66,11 @@ export type ModelCall = {
   base: string;
   /** What the call is for — a short word for a log line and a test: `capture`, `extraction`, `judge`, `probe`… */
   purpose: string;
+  /**
+   * Whether the endpoint is a local model server, as OB1_LLM_LOCAL, OB1_CHAT_LOCAL or OB1_JEV_LOCAL declares it: the
+   * background slots' defaults hold a local one's calls alone (SMD-3379 PR 2b-2b). Unset, not local.
+   */
+  local?: boolean;
   /** Set to say the class outright; else the context's (asLive / asBackground), background by default. */
   cls?: CallClass;
   /** The caller's stop: a hook waiting for a slot ends its wait on it, as the call would. */

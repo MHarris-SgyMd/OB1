@@ -86,6 +86,10 @@
       "scope": "read"
     },
     {
+      "name": "relations",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
       "scope": "capture"
     },

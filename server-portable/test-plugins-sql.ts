@@ -471,6 +471,75 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     await Promise.all(tracked);
     assert(refused.status === 202 && (await rowOf(refusedId)) === undefined && deferredFaults.at(-1) === `delivery ${refusedId} (its id given back): no thought captured`,
       `a deferred capture the core refuses: its claim given back and a fault naming the delivery, not lost without a word (${JSON.stringify(deferredFaults.at(-1))})`);
+    // A deferred capture whose model call waits for a slot of its background share past its lease (SMD-3379 PR 2b-2b,
+    // the maintainer, 2026-11-08): its claim is renewed while it waits, so a resend is still told to retry, not run
+    // again; once the slot is free it runs, and is recorded. A lease of 2 s and a wait of 5.
+    {
+      const { installBackgroundSlots } = await import("./slots.ts");
+      const { asBackground, modelCall } = await import("./model-call.ts");
+      const slots = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
+      const slotCall = (run: () => Promise<unknown>) => modelCall({ type: "chat", model: "lease-test", base: "http://127.0.0.1:9/v1", local: true, purpose: "test" }, run);
+      let freeSlot: () => void = () => {};
+      const slotFree = new Promise<void>((resolve) => { freeSlot = resolve; });
+      let freeSlot2: () => void = () => {};
+      const slotFree2 = new Promise<void>((resolve) => { freeSlot2 = resolve; });
+      let holderRunning: () => void = () => {};
+      const holderIn = new Promise<void>((resolve) => { holderRunning = resolve; });
+      // Another background call holds the one slot until it is freed.
+      const holder = asBackground(() => slotCall(async () => { holderRunning(); await slotFree; }));
+      await holderIn;
+      let runs = 0;
+      const waitingHook = {
+        ...laterHook, name: "waiting", path: "/hooks/example/waiting",
+        handler: async (ctx: Parameters<typeof hook.handler>[0], req: { text: string }) => {
+          const { id, lease, before } = JSON.parse(req.text) as { id: string; lease: number; before: number };
+          const once = await onceById(ctx, id, async () => {
+            runs += 1;
+            // Work that takes most of the lease before the call that waits (review pass 1).
+            if (before) await Bun.sleep(before);
+            await slotCall(async () => undefined);
+            const captured = await ctx.call("capture_thought", { content: `smd3379: ${id}`, source: "example-hook", trust: "ingested" });
+            return { value: captured, thoughtId: captured.ok ? captured.value.id : null };
+          }, { keepSeconds: 660, defer: true, leaseSeconds: lease });
+          if ("duplicate" in once) return { status: 200 as const, body: { id: once.duplicate, duplicate: true } };
+          if ("inFlight" in once) return { status: 409 as const, body: { code: "IN_FLIGHT", retryable: true } };
+          return { status: 202 as const, body: { accepted: true } };
+        },
+      };
+      const waitingVia = (id: string, lease = 2, before = 0) => {
+        const scripted = new Proxy({}, { get: (_t, prop) => (prop === "pluginTx" ? store.pluginTx.bind(store) : prop === "captureSeconds" ? () => 120 : async () => coreOk({ id: thought })) }) as never;
+        return runHook(waitingHook, { core: scripted, secret: HOOK_SECRET, track: (run) => { const p = run(); tracked.push(p); return p; }, deferredFault: (m) => deferredFaults.push(m) }, { headers: {}, query: {}, body: new TextEncoder().encode(JSON.stringify({ id, lease, before })), text: JSON.stringify({ id, lease, before }) });
+      };
+      const waitingId = `evt-${RUN}-waits-for-a-slot`;
+      try {
+        const firstWaiting = await waitingVia(waitingId);
+        await Bun.sleep(5000);
+        const resent = await waitingVia(waitingId);
+        freeSlot();
+        await holder;
+        await Promise.all(tracked);
+        assert(firstWaiting.status === 202 && resent.status === 409 && runs === 1 && (await rowOf(waitingId))?.thought_id === thought,
+          `a deferred capture waiting for a slot 5 s past a 2 s lease keeps its claim: a resend is 409, the run made once, and recorded (${firstWaiting.status}, ${resent.status}, ${runs} run(s))`);
+        // A wait that begins late in the lease is renewed as it begins (review pass 1: the first renewal came a third of
+        // the lease after, past it): a 3 s lease, 2.7 s of work, then the wait; a resend at 3.3 s is 409.
+        const holder2 = asBackground(() => slotCall(async () => { await slotFree2; }));
+        await Bun.sleep(100);
+        const lateId = `evt-${RUN}-waits-late`;
+        const runsBefore = runs;
+        const lateFirst = await waitingVia(lateId, 3, 2700);
+        await Bun.sleep(3300);
+        const lateResent = await waitingVia(lateId, 3, 2700);
+        freeSlot2();
+        await holder2;
+        await Promise.all(tracked);
+        assert(lateFirst.status === 202 && lateResent.status === 409 && runs === runsBefore + 1 && (await rowOf(lateId))?.thought_id === thought,
+          `a wait that begins 2.7 s into a 3 s lease renews the claim as it begins: a resend at 3.3 s is 409, the run made once (${lateFirst.status}, ${lateResent.status}, ${runs - runsBefore} run(s))`);
+      } finally {
+        freeSlot();
+        freeSlot2();
+        await slots.uninstall();
+      }
+    }
     // A handler that fails after claiming with defer: its sender is told 500
     // and retries, so the claim is given back now, not left to the lease.
     const brokenHook = { ...laterHook, name: "broken", path: "/hooks/example/broken",

@@ -40,6 +40,11 @@ ROOT="$PWD"
 # applies to none of its rows. Left set, it would drop that shard from a row's
 # name, and a live lane is held to its row's name (SMD-3688 review pass 4).
 unset OB1_LIVE_SHARD OB1_PREFLIGHT_SHARD
+# The suites run with the background slots off, as CI's suite jobs do: the
+# defaults (SMD-3379 PR 2b-2b) would hold every local stub's background calls in
+# each process a suite spawns, a connection per slot; the rows that test them
+# set their own (the maintainer, 2026-11-08).
+export OB1_BACKGROUND_SLOTS=off
 
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
 # The lane keeps the last one in LAST_ROW, which at_row writes for wait_lane.
@@ -286,6 +291,8 @@ free_rows() {
   nodb .                 scripts/suite-sections.ts --self-check
   nodb .                 scripts/agent-runner/dry-run.ts --self-check
   nodb .                 scripts/agent-runner/probes.ts --self-check
+  nodb .                 scripts/agent-runner/gate-check.ts --self-check
+  nodb .                 scripts/agent-runner/brief-check.ts --self-check
   nodb .                 .github/ci/test-counts-page.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts

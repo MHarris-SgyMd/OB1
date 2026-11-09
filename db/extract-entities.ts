@@ -109,7 +109,10 @@
  *   - a rate limit, a server error, a 408 or a lost connection still failing
  *     after the pauses;
  *   - the model missing, as while Ollama pulls it;
- *   - a timeout after which a one-token probe gets no answer either.
+ *   - a timeout, or a 4xx no rule reads (a 401, 402 or 403, a 404 naming no
+ *     model, a 400 not the request's shape), after which a one-token probe
+ *     gets no answer either — answered, it is the thought's, recorded failed;
+ *     refused, the request's, exit 2 (SMD-2636 PR 3a).
  * In each case the thought in hand goes back to the pool, not failed, the
  * other workers stop after theirs, and the follower probes the model until it
  * answers (worker-bootstrap.ts's waitOutProvider, SMD-2636 PR 2): an outage
@@ -141,8 +144,9 @@
  * The model is asked for names and types; deciding whether two names are one
  * entity is the database's (`normalize_entity_name`, migration 016). A
  * malformed answer — not JSON, or not the shape — is a failure for that
- * thought, retryable with --retry-failed; so is a timeout, which the corpus run
- * showed is a property of the longest thoughts rather than of the moment.
+ * thought, retryable with --retry-failed; so is a timeout the probe answers
+ * past, which the corpus run showed is a property of the longest thoughts
+ * rather than of the moment.
  * A windowed thought's malformed window is not (SMD-2260): the windows that
  * parsed are written and the claim is released succeeded with a caveat naming
  * the windows left out, a second kind of partial row, counted and listed
@@ -197,7 +201,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followedPass, followerFault, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, probeAtStart, probeChat, probeRefusal, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -373,6 +377,9 @@ export const STALL_FLOOR_MS = 60_000;
 const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
 const unrefSleep = (ms: number): Promise<void> => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+
+/** `fault`'s requestFault under --follow (SMD-2636 PR 3a): a 400 naming one of EXTRACT_REQUEST_FIELDS. */
+const extractRequestFault = (e: unknown): boolean => requestShapeRefused(e, EXTRACT_REQUEST_FIELDS);
 
 /** The run's numbers, each the option given or the CLI's default. */
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number; limit: number; follow: number };
@@ -1539,7 +1546,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // run is narrowed to `never`. The cast keeps the declared type as the initial
   // one (SMD-1932).
   let configError = null as string | null;
-  /** The model setting the closing remedy names: the escalation model's, its probe refused in an outage wait (SMD-2636 PR 2, review pass 1). */
+  /** The model setting the closing remedy names: the escalation model's when its call or its probe was refused — in an outage wait (SMD-2636 PR 2, review pass 1) or mid-pass (PR 3a, review pass 2). */
   let refusedKnob = "OB1_METADATA_MODEL";
 
   /**
@@ -1641,7 +1648,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
             inCall.begin(workerId);
             const asked = { at: readAt };
-            /** Whether any error in this thought's streak could be its own (followerFault's suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
+            /** Whether any error in this thought's streak could be its own (`fault`'s suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
             let streakSuspect = false;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
@@ -1718,24 +1725,40 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                // Under --follow through followClassify's split (followerFault, SMD-3311): a 408 is
-                // the provider's, paused for, not the request's; a 429, a 503 or the model not served
-                // makes no suspect of the thought in hand.
-                const { kind, suspect } = FOLLOW ? followerFault(e, { maxTokensFatal: true }) : { kind: classifyError(e, { maxTokensFatal: true }), suspect: true };
-                streakSuspect ||= suspect;
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
-                // Under --follow, the provider's state rather than the thought's
-                // or the request's (SMD-2599): a transient error past the pauses,
-                // the model missing (Ollama pulling it; the start probe saw it
-                // answer), or a timeout the probe cannot get an answer past
-                // either — given the call's whole timeout, as a model busy with
-                // another worker's call may need it, and ended by a stop or
-                // another worker's outage, which it joins unprobed (review pass 1).
                 const escalationGone = !!WINDOWING.escalateModel && missingModelIs(e, WINDOWING.escalateModel) && !missingModelIs(e, cfg.metadataModel);
-                const down = FOLLOW && (
-                  (kind === "transient" && attempt >= TRANSIENT_PAUSES_MS.length) ||
-                  (kind === "fatal" && modelMissing(e) && (!escalationGone || escalationSeen)) ||
-                  (kind === "thought" && timedOut(e) && !stopping && (outage.reason !== null || isOut(await probe(TIMEOUT_S * 1000, halt.signal)))));
+                // Under --follow, what to do is worker-bootstrap.ts's `fault` (SMD-2636 PR 3a): the provider's state
+                // — paused for, then an outage; the model missing (Ollama pulling it; the start probe saw it answer),
+                // an outage at once, but the escalation model the start could not confirm the request's — or the
+                // probe's to decide, or the thought's, or the request's shape. A run without --follow keeps
+                // classifyError's rules.
+                const kind = FOLLOW ? null : classifyError(e, { maxTokensFatal: true });
+                const read: FollowerFault = kind === null ? fault(e, { requestFault: extractRequestFault, missing: () => (escalationGone && !escalationSeen ? "fatal" : "outage") }) : { act: kind === "transient" ? "pause" : kind, suspect: true };
+                let act = read.act;
+                streakSuspect ||= read.suspect;
+                // The model whose call was refused is the one probed — an answered refusal names it; a deadline or a
+                // lost connection names none, probed on the metadata model as before — so the escalation model's
+                // refusal is not the metadata model's to answer (review pass 1).
+                const escalationCalled = !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
+                // The probe decides — a deadline with no answer, a 4xx no rule reads — given the call's whole
+                // timeout, as a model busy with another worker's call may need it: answered, the thought's;
+                // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
+                // and another worker's outage is joined unprobed (review pass 1).
+                let probeWhy: string | null = null;
+                /** The probe answered: the thought's, and said so, so an operator reads why it failed and that a retry revisits it (review pass 3). */
+                let probeAnswered = false;
+                if (act === "probe") {
+                  if (stopping) return;
+                  if (outage.reason !== null) act = "outage";
+                  else {
+                    const p = await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
+                    act = probedFault(p);
+                    // The refusal is the probe's, said beside the call's (review pass 2).
+                    if (p.state === "refused") probeWhy = p.why;
+                    probeAnswered = p.state === "up";
+                  }
+                }
+                const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
@@ -1753,13 +1776,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // cycling through the pool for ever.
                   outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                   stopAfter = true;
-                } else if (kind === "thought") {
-                  outcome = { outcome: "failed", error: msg };
-                } else if (kind === "fatal") {
+                } else if (act === "thought") {
+                  outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
+                } else if (act === "fatal") {
                   // Every thought would fail the same way. Stop everyone, mark
                   // nothing, and say what to fix; this row goes back with the
-                  // leases the finally returns.
-                  configError = msg;
+                  // leases the finally returns. The escalation model's call
+                  // refused, its remedy names it (review passes 1 and 2).
+                  if (escalationCalled) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
+                  configError = probeWhy === null ? msg : `a one-token call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
                   stopping = true;
                   passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
@@ -2272,7 +2297,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     err(
       `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
         `  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and ${refusedKnob} against the provider; a 400 about a request field\n` +
-        `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint. Nothing was marked failed.`
+        `  is usually reasoning_effort, response_format, max_tokens (the answer budget) or frequency_penalty (the runaway retry) not being supported by this model or endpoint; a 402 is the account's credit or spend limit. Nothing was marked failed.`
     );
     return 2;
   }
@@ -2282,8 +2307,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 if (import.meta.main) {
   const cli = commandLine("extract-entities.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
-  // Background calls held to OB1_BACKGROUND_SLOTS' share, once for the process (SMD-3379 PR 2b-1); off when unset.
-  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS });
+  // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`.
+  installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
   if (cli.has("subjects")) {
     // The subject sweep (db/subject-sweep.ts, SMD-3306) takes its own flags: a
     // pass's beside it would be read as asked and do nothing (SMD-2015's kind).
