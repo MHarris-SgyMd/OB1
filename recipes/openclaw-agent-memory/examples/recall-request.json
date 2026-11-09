@@ -23,7 +23,7 @@
     "people": ["Nate Jones", "Jonathan Edwards"],
     "orgs": ["OB1"],
     "repos": ["NateBJones-Projects/OB1"],
-    "files": ["integrations/agent-memory-api/index.ts"],
+    "files": ["plugins/agent-memory/index.ts"],
     "customers": [],
     "topics": ["agent memory", "code review"]
   },

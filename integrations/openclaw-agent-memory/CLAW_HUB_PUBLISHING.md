@@ -144,6 +144,20 @@ Prepared on 2026-05-22:
   `2026.5.7` and newer.
 - OpenClaw `2026.5.2` should continue using the published tarball fallback.
 
+## Prepared 0.2.0: the brain's agent-memory plugin
+
+Prepared on 2026-11-08 (SMD-2690):
+
+- Package version bumped to `0.2.0`: the client calls the brain's
+  agent-memory plugin's routes, which replace the standalone Agent Memory API
+  server after the brain's 2.0.0.
+  [RELEASE_NOTES_0.2.0.md](./RELEASE_NOTES_0.2.0.md) lists the changes.
+- `npm run build` rebuilt `dist/index.js`, which now ships the explicit 0.1.5
+  tool schemas (`src/tool-schemas.js`) that `schema:check` reads.
+- Not published: the publish commands below still name `0.1.6` until the
+  Nate/OB1 ClawHub owner publishes `0.2.0`. A brain on 2.0.0 or earlier keeps
+  `0.1.6`.
+
 License note: the OB1 repository is `FSL-1.1-MIT`. ClawHub requires public
 skills to be `MIT-0`, so the standalone skill files in
 [../../skills/openclaw-agent-memory](../../skills/openclaw-agent-memory/) are
@@ -259,7 +273,7 @@ openclaw plugins install clawhub:@natebjones/ob1-agent-memory
 - Local linked install is tested in an isolated profile with `openclaw --profile ob1-agent-memory plugins install integrations/openclaw-agent-memory/plugin --link`.
 - Runtime inspect lists all seven `openbrain_*` tools and no diagnostics.
 - The profile config includes explicit `tools.allow` entries for all seven `openbrain_*` tools.
-- Direct API smoke test can call `GET /health` on the OB1 Agent Memory API.
+- Direct API smoke test: the write-back and recall in the agent-memory plugin README's "Check it" answer with the configured key.
 - Native OpenClaw smoke test calls `openbrain_list_review_queue` from an agent turn without shell/file tools.
 - Repeatable native harness passes with `npm run smoke:native` from [plugin](plugin/).
 - `openbrain_recall` returns policy-labeled memories.
@@ -271,7 +285,7 @@ openclaw plugins install clawhub:@natebjones/ob1-agent-memory
 
 ## Release Notes
 
-See [RELEASE_NOTES_0.1.6.md](./RELEASE_NOTES_0.1.6.md).
+See [RELEASE_NOTES_0.2.0.md](./RELEASE_NOTES_0.2.0.md), and [RELEASE_NOTES_0.1.6.md](./RELEASE_NOTES_0.1.6.md) for the version on ClawHub.
 
 Public release copy should always include a short Nate Jones CTA. Keep it useful-first, not hype-first: Nate gives away practical AI systems like this, and the next step is following or subscribing for more.
 

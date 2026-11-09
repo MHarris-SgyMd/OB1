@@ -48,7 +48,7 @@
     "entities": {
       "people": ["Jonathan Edwards"],
       "repos": ["NateBJones-Projects/OB1"],
-      "files": ["schemas/agent-memory/schema.sql"],
+      "files": ["plugins/agent-memory/migrations/001_memories.sql"],
       "customers": [],
       "topics": ["code review", "rls", "agent memory"]
     }
