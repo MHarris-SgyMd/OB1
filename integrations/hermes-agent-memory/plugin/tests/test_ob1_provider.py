@@ -106,7 +106,7 @@ def hermes_home(tmp_path):
 def configured(hermes_home, monkeypatch):
     """Provider with endpoint + key wired up but urlopen still mocked elsewhere."""
     (hermes_home / "ob1.json").write_text(json.dumps({
-        "endpoint": "http://test/agent-memory-api",
+        "endpoint": "http://test/api/v1/plugins/agent-memory",
         "workspace_id": "ws-test",
         "project_id": "proj-test",
         "auto_recall": True,
@@ -126,6 +126,11 @@ def _mock_urlopen_response(body: Dict[str, Any], status: int = 200):
     cm.__enter__ = MagicMock(return_value=MagicMock(read=lambda: payload))
     cm.__exit__ = MagicMock(return_value=False)
     return cm
+
+
+def _memory_count(memory_payload: Dict[str, Any]) -> int:
+    """How many memories a write-back's memory_payload carries: every list item but ``entities``."""
+    return sum(len(v) for k, v in memory_payload.items() if k != "entities")
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +177,7 @@ class TestPureHelpers:
             {
                 "summary": "Always run migrations off-hours.",
                 "use_policy": {"can_use_as_instruction": True, "requires_user_confirmation": False},
-                "updated_at": "2026-05-09T10:00:00Z",
+                "freshness": {"created_at": "2026-05-09T10:00:00Z", "last_confirmed_at": None, "stale_after": None},
             },
             {
                 "summary": "Last build took 12 minutes.",
@@ -183,6 +188,17 @@ class TestPureHelpers:
         assert "Always run migrations" in out
         assert "[instruction]" in out
         assert "[evidence]" in out
+
+    def test_format_recall_context_reads_the_plugins_freshness(self):
+        from datetime import datetime, timezone, timedelta
+        written = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        confirmed = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        out = _format_recall_context([
+            {"summary": "written", "freshness": {"created_at": written, "last_confirmed_at": None}},
+            {"summary": "confirmed", "freshness": {"created_at": written, "last_confirmed_at": confirmed}},
+        ], 5)
+        assert "- [3d ago] written" in out
+        assert "- [2h ago] confirmed" in out
 
     def test_format_recall_context_truncates_to_max(self):
         items = [{"summary": f"memory {i}"} for i in range(10)]
@@ -399,7 +415,7 @@ class TestOB1Client:
         assert body["schema_version"] == _WRITEBACK_SCHEMA_VERSION
         assert body["memory_payload"]["decisions"] == ["chose Postgres"]
         assert body["runtime"]["name"] == "hermes"
-        # runtime must NOT include extra keys (Edge Function rejects them).
+        # runtime carries name and version alone.
         assert set(body["runtime"].keys()) <= {"name", "version"}
         assert body["models_used"][0]["model"] == "anthropic/claude-opus-4.6"
         assert body["task_id"] == "task-1"
@@ -410,21 +426,207 @@ class TestOB1Client:
         client = _OB1Client("http://x", "k", 5.0)
         with patch("urllib.request.urlopen", fake):
             client.report_usage("req-1", used=["m1", "m2"], ignored=["m3"])
-        assert "/recall/req-1/usage" in captured["url"]
+        assert captured["url"] == "http://x/recalls/req-1/usage"
+        assert captured["method"] == "POST"
         body = captured["body"]
         assert body["used_memory_ids"] == ["m1", "m2"]
         assert body["ignored"] == [{"memory_id": "m3"}]
+
+    def test_routes_are_the_plugins(self):
+        # Each call on the agent-memory plugin's route: the reads on GET with
+        # their input in the query string and no body, the review's body whole.
+        client = _OB1Client("http://x/api/v1/plugins/agent-memory/", "k", 5.0)
+        calls = [
+            (lambda: client.recall(workspace_id="w", project_id=None, task_type="t", query="q"), "POST", "/recall", None),
+            (lambda: client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}), "POST", "/writeback", None),
+            (lambda: client.list_memories(workspace_id="w s", project_id="p", review_status="pending", limit=5),
+             "GET", "/memories?workspace_id=w+s&project_id=p&review_status=pending&limit=5", None),
+            (lambda: client.get_review_queue(workspace_id="w"), "GET", "/review-queue?workspace_id=w", None),
+            (lambda: client.get_review_queue(workspace_id="w", project_id="p"), "GET", "/review-queue?workspace_id=w&project_id=p", None),
+            (lambda: client.review_memory("m/1", action="confirm"), "PATCH", "/memories/m%2F1/review", {"action": "confirm", "actor_label": "ob1-plugin"}),
+            (lambda: client.get_recall_trace("req-1"), "GET", "/recalls/req-1", None),
+        ]
+        for call, method, path, body in calls:
+            captured, fake = self._capture_request()
+            with patch("urllib.request.urlopen", fake):
+                call()
+            assert captured["method"] == method, path
+            assert captured["url"] == "http://x/api/v1/plugins/agent-memory" + path
+            if method == "GET":
+                assert captured["body"] is None, path
+                assert "content-type" not in {k.lower() for k in captured["headers"]}, path
+            elif body is not None:
+                assert captured["body"] == body, path
+
+    def test_review_memory_edit_sends_content_and_summary(self):
+        captured, fake = self._capture_request()
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.review_memory("m1", action="edit", notes="n", actor_label="hermes:a",
+                                 content="new text", summary="new summary")
+        # The plugin refuses a field it does not know: the reviewer is actor_label.
+        assert captured["body"] == {"action": "edit", "actor_label": "hermes:a", "notes": "n",
+                                    "content": "new text", "summary": "new summary"}
 
     def test_http_error_is_raised(self):
         import urllib.error
         client = _OB1Client("http://x", "k", 5.0)
         err = urllib.error.HTTPError(
             url="http://x/recall", code=400, msg="Bad",
-            hdrs=None, fp=io.BytesIO(b'{"error":"nope"}'),
+            hdrs=None, fp=io.BytesIO(b'{"code":"REFUSED_INPUT","issues":[]}'),
         )
         with patch("urllib.request.urlopen", side_effect=err):
-            with pytest.raises(RuntimeError, match="HTTP 400"):
+            with pytest.raises(RuntimeError, match="HTTP 400 REFUSED_INPUT"):
                 client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+
+    def test_refusal_carries_code_message_and_retry_after(self):
+        import email.message
+        import urllib.error
+        hdrs = email.message.Message()
+        hdrs["Retry-After"] = "5"
+        client = _OB1Client("http://x", "k", 5.0)
+        err = urllib.error.HTTPError(
+            url="http://x/recall", code=503, msg="Unavailable", hdrs=hdrs,
+            fp=io.BytesIO(b'{"code":"PROVIDER_UNAVAILABLE","message":"the brain\'s embedding provider did not answer"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(ob1_module.OB1RequestError) as caught:
+                client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+        assert caught.value.status == 503
+        assert caught.value.code == "PROVIDER_UNAVAILABLE"
+        assert caught.value.retry_after == "5"
+        assert "embedding provider did not answer" in str(caught.value)
+
+    def _parts(self):
+        """A fake urlopen that answers each write-back with one id per memory, and the bodies and timeouts it saw."""
+        bodies: List[Dict[str, Any]] = []
+        timeouts: List[Any] = []
+
+        def fake(req, timeout=None):
+            body = json.loads(req.data.decode("utf-8")) if req.data else {}
+            bodies.append(body)
+            timeouts.append(timeout)
+            n = _memory_count(body.get("memory_payload") or {})
+            return _mock_urlopen_response({"schema_version": "v", "memories": [{"memory_id": f"m{len(bodies)}-{i}"} for i in range(n)]})
+
+        return bodies, timeouts, fake
+
+    def test_writeback_past_a_part_is_sent_in_parts(self):
+        # 60 memories go as six parts of ten (the plugin takes at most 50, and each memory is a capture with its model
+        # calls): in order, the answers' memories joined, a key given made each part's own, the entities on the first.
+        bodies, timeouts, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0, writeback_timeout=90.0)
+        payload = {"decisions": [f"d{i}" for i in range(30)], "lessons": [f"l{i}" for i in range(30)], "entities": {"repos": ["r"]}}
+        with patch("urllib.request.urlopen", fake):
+            out = client.writeback(workspace_id="w", project_id=None, memory_payload=payload, idempotency_key="key")
+        sizes = [_memory_count(b["memory_payload"]) for b in bodies]
+        assert sizes == [10] * 6
+        sent = [item for b in bodies for k, v in b["memory_payload"].items() if k != "entities" for item in v]
+        assert sent == payload["decisions"] + payload["lessons"]
+        assert bodies[0]["memory_payload"]["entities"] == {"repos": ["r"]} and all("entities" not in b["memory_payload"] for b in bodies[1:])
+        assert [b["idempotency_key"] for b in bodies] == [f"key:part{n}" for n in range(6)]
+        assert all("step_id" not in b for b in bodies)
+        assert len(out["memories"]) == 60 and out["memories"][10]["memory_id"] == "m2-0"
+        # Each part under the write-back's own timeout, not the reads'.
+        assert timeouts == [90.0] * 6
+
+    def test_parts_without_a_key_each_have_a_step(self):
+        # With no key the plugin makes one of the step and the text, and the memory's index in the request: each
+        # part's own step keeps the same text at the same index of two parts two memories, as in one write-back.
+        bodies, _, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["same"] * 20})
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["same"] * 20}, step_id="s1")
+        assert [b.get("step_id") for b in bodies] == ["step:part0", "step:part1", "s1:part0", "s1:part1"]
+        assert all("idempotency_key" not in b for b in bodies)
+
+    def test_a_long_key_stays_within_the_plugins_bound(self):
+        bodies, _, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        key = "k" * 198
+        with patch("urllib.request.urlopen", fake):
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": [f"l{i}" for i in range(11)]}, idempotency_key=key)
+        keys = [b["idempotency_key"] for b in bodies]
+        assert all(len(k) <= 200 for k in keys) and len(set(keys)) == 2 and keys[0].endswith(":part0")
+        assert ob1_module._part_id(key, 0) == keys[0]  # the same key and part, the same id: a resend keys alike
+
+    def test_writeback_of_a_part_is_one_call(self):
+        bodies, timeouts, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"outputs": [f"o{i}" for i in range(10)]}, idempotency_key="key")
+            client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+        assert len(bodies) == 2 and bodies[0]["idempotency_key"] == "key" and "step_id" not in bodies[0]
+        assert timeouts == [ob1_module._DEFAULT_WRITEBACK_TIMEOUT, 5.0]
+
+    @pytest.mark.parametrize("given,kept", [(999, 255.0), (1, 8.0), ("soon", 60.0)])
+    def test_writeback_timeout_is_configured(self, hermes_home, monkeypatch, given, kept):
+        # At most the brain's idle timeout (255 s), at least the reads' default (8 s), 60 s for a value that is no number.
+        (hermes_home / "ob1.json").write_text(json.dumps({"endpoint": "http://x", "writeback_timeout": given}))
+        monkeypatch.setenv("OPENBRAIN_KEY", "k")
+        p = OB1MemoryProvider()
+        p.initialize(session_id="s", hermes_home=str(hermes_home))
+        assert p._client._writeback_timeout == kept
+
+    def test_an_unsplit_long_key_is_hashed(self):
+        bodies, _, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", fake):
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, idempotency_key="k" * 201)
+            client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, idempotency_key="k" * 200)
+        assert len(bodies[0]["idempotency_key"]) == 64 and bodies[1]["idempotency_key"] == "k" * 200
+
+    def test_parts_stop_at_the_deadline(self, monkeypatch):
+        # Each part 25 s on a fake clock, a deadline 60 s out: the parts wait 60, 35 and 10 s, and the fourth is never
+        # started; the cut says the 30 memories kept and the 30 not sent.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        bodies, timeouts, fake = self._parts()
+
+        def slow(req, timeout=None):
+            clock[0] += 25
+            return fake(req, timeout)
+
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", slow):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": [f"l{i}" for i in range(60)]}, deadline=1060.0)
+        assert timeouts == [60.0, 35.0, 10.0]
+        assert len(cut.value.memories) == 30 and cut.value.unsent == 30
+
+    def test_nothing_is_sent_past_the_deadline(self, monkeypatch):
+        bodies, _, fake = self._parts()
+        client = _OB1Client("http://x", "k", 5.0)
+        client.stop_by(ob1_module.time.monotonic() - 1)
+        with patch("urllib.request.urlopen", fake):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l1", "l2"]})
+        assert bodies == [] and cut.value.unsent == 2 and cut.value.memories == []
+
+    @pytest.mark.parametrize("raw", [b"<html>login</html>", b"[1, 2]", b"\xff\xfe not utf-8", b""])
+    def test_ok_answer_that_is_no_json_object_raises(self, raw):
+        # A 200 that is not a JSON object is no answer of the plugin's (an endpoint pointing at some other page):
+        # a coded error, never a parse, decode or attribute error.
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=MagicMock(read=lambda: raw, status=200))
+        cm.__exit__ = MagicMock(return_value=False)
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", return_value=cm):
+            with pytest.raises(ob1_module.OB1RequestError, match="HTTP 200 not the plugin's answer"):
+                client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+
+    def test_non_json_error_body_is_kept(self):
+        import urllib.error
+        client = _OB1Client("http://x", "k", 5.0)
+        err = urllib.error.HTTPError(
+            url="http://x/recall", code=502, msg="Bad Gateway",
+            hdrs=None, fp=io.BytesIO(b"<html>bad gateway</html>"),
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(ob1_module.OB1RequestError, match="HTTP 502 <html>bad gateway</html>") as caught:
+                client.recall(workspace_id="w", project_id=None, task_type="t", query="q")
+        assert caught.value.code is None
 
 
 # ---------------------------------------------------------------------------
@@ -440,39 +642,36 @@ class TestProviderLifecycle:
     def test_inactive_without_key(self, configured, monkeypatch):
         monkeypatch.delenv("OPENBRAIN_KEY", raising=False)
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         assert p._active is False
 
     def test_inactive_without_endpoint(self, hermes_home, monkeypatch):
         monkeypatch.setenv("OPENBRAIN_KEY", "k")
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(hermes_home))
+        p.initialize(session_id="s", hermes_home=str(hermes_home))
         assert p._active is False
 
     def test_active_when_both_present(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={"ok": True}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         assert p._active is True
         assert p._workspace_id == "ws-test"
         assert p._project_id == "proj-test"
 
     def test_subagent_context_disables_writes(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured),
-                         agent_context="subagent")
+        p.initialize(session_id="s", hermes_home=str(configured),
+                     agent_context="subagent")
         assert p._write_enabled is False
 
-    def test_health_failure_keeps_provider_active(self, configured):
-        # Backend health probe failing shouldn't disable the provider —
-        # the agent should still be able to attempt operations.
+    def test_initialize_makes_no_request(self, configured):
+        # The plugin has no keyless health route: initialize() asks nothing,
+        # and the provider is active on its config alone.
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", side_effect=RuntimeError("502")):
+        with patch("urllib.request.urlopen") as mock_open:
             p.initialize(session_id="s", hermes_home=str(configured))
         assert p._active is True
+        mock_open.assert_not_called()
 
     def test_save_config_persists_only_known_keys(self, hermes_home):
         p = OB1MemoryProvider()
@@ -500,8 +699,7 @@ class TestOnTurnStart:
 
     def test_caches_kwargs(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         p.on_turn_start(3, "msg", model="anthropic/claude-opus-4.6", remaining_tokens=1200)
         assert p._last_turn_meta["model"] == "anthropic/claude-opus-4.6"
         assert p._last_turn_meta["turn_number"] == 3
@@ -509,8 +707,7 @@ class TestOnTurnStart:
 
     def test_resolve_model_provider_uses_cached_kwargs(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         p._last_turn_meta = {"model": "openrouter/stepfun/step-3.5-flash"}
         out = p._resolve_model_provider()
         assert out["model"] == "openrouter/stepfun/step-3.5-flash"
@@ -523,8 +720,7 @@ class TestOnTurnStart:
             "model:\n  default: anthropic/claude-opus-4.6\n  provider: openrouter\n"
         )
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         out = p._resolve_model_provider()
         assert out["model"] == "anthropic/claude-opus-4.6"
         assert out["provider"] == "openrouter"
@@ -534,8 +730,7 @@ class TestPrefetchAndCache:
 
     def _patched(self, configured) -> OB1MemoryProvider:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         return p
 
     def test_inactive_prefetch_returns_empty(self, hermes_home):
@@ -653,8 +848,7 @@ class TestSyncTurn:
 
     def _patched(self, configured) -> Tuple[OB1MemoryProvider, List[Dict[str, Any]]]:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         recorded: List[Dict[str, Any]] = []
 
         def fake_writeback(**kwargs):
@@ -715,8 +909,7 @@ class TestSessionEnd:
 
     def _patched(self, configured) -> Tuple[OB1MemoryProvider, List[Dict[str, Any]]]:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         recorded: List[Dict[str, Any]] = []
 
         def fake_writeback(**kwargs):
@@ -726,7 +919,7 @@ class TestSessionEnd:
         p._client.writeback = fake_writeback  # type: ignore[assignment]
         return p, recorded
 
-    def test_extracts_findings_and_writes_synchronously(self, configured):
+    def test_extracts_findings_and_writes_them_back(self, configured):
         p, recorded = self._patched(configured)
         msgs = [
             {"role": "user", "content": "We need to fix the slow build pipeline."},
@@ -734,17 +927,364 @@ class TestSessionEnd:
             {"role": "user", "content": "TODO: write the migration scripts before friday."},
         ]
         p.on_session_end(msgs)
-        # synchronous — recorded immediately
+        p._sync_thread and p._sync_thread.join(timeout=5)
+        # Written back in the background (Hermes ends sessions mid-turn too, on a compression): joined first.
         assert len(recorded) == 1
         payload = recorded[0]["memory_payload"]
         assert any("Bun" in d for d in payload.get("decisions", []))
         assert any("TODO" in n for n in payload.get("next_steps", []))
 
+    def test_long_session_is_written_back_whole(self, configured):
+        # Ten findings in each of six categories: 60 memories, past the plugin's 50 a write-back holds (it would
+        # refuse the 60 whole). The client sends them in parts of ten, each under the write-back timeout.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+
+        def fake(req, timeout=None):
+            body = json.loads(req.data.decode("utf-8"))
+            sent.append(_memory_count(body["memory_payload"]))
+            return _mock_urlopen_response({"memories": []})
+
+        lines = []
+        for i in range(10):
+            lines += [f"We decided to use tool number {i} for the job.", f"Lesson learned: check item {i} before the release.",
+                      f"The deploy job is capped at {i} parallel runners.", f"TODO: write the migration script part {i} soon.",
+                      f"It is unclear whether option {i} still works.", f"The build failed because of module {i} again."]
+        with patch("urllib.request.urlopen", fake):
+            p.on_session_end([{"role": "assistant", "content": line} for line in lines])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert sent == [10] * 6, sent
+
+    @staticmethod
+    def _timed(clock: List[float], needs: float, sent: List[int]):
+        """A fake urlopen on a fake clock that honours its timeout: a part needs ``needs`` seconds, and one given
+        less times out when its timeout runs out, as urllib's would."""
+        import socket
+
+        def fake(req, timeout=None):
+            if timeout is not None and timeout < needs:
+                clock[0] += timeout
+                raise socket.timeout("timed out")
+            clock[0] += needs
+            body = json.loads(req.data.decode("utf-8"))
+            sent.append(_memory_count(body["memory_payload"]))
+            return _mock_urlopen_response({"memories": [{"memory_id": "m"}] * sent[-1]})
+
+        return fake
+
+    _LINES = ([f"We decided to use tool number {i} for the job." for i in range(10)]
+              + [f"Lesson learned: check item {i} before the release." for i in range(10)]
+              + [f"The build failed because of module {i} again." for i in range(10)])
+
+    def test_session_end_waits_one_deadline_and_shutdown_shares_it(self, configured, monkeypatch, caplog):
+        # 30 findings at 15 s a part: three parts inside the 60 s deadline, nothing cut; shutdown right after it
+        # keeps the session end's deadline, so exit waits one write-back timeout in all.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 15, sent)), caplog.at_level("WARNING"):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.shutdown()
+        assert sent == [10, 10, 10]
+        assert clock[0] == 1045.0 and p._client._stop_at == 1060.0  # shutdown at 1045 kept the session end's deadline
+        assert not any("not written back" in r.message for r in caplog.records)
+
+    def test_a_part_cut_by_the_deadline_is_logged(self, configured, monkeypatch, caplog):
+        # 40 s a part: the first at 1000-1040; the second is given the 20 s left, times out, and is the deadline's
+        # cut: logged at warning, its 10 and the third part's 10 not written back.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 40, sent)), caplog.at_level("WARNING"):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert sent == [10]
+        # The second part was in flight when its cut wait ran out: unconfirmed (the plugin finishes it), the third never sent.
+        assert any("10 finding(s) not written back by the deadline (writeback_timeout), 10 more sent but unconfirmed (the plugin may have kept them); 10 kept"
+                   in r.message for r in caplog.records)
+
+    def test_a_single_part_cut_in_flight_is_unconfirmed(self, monkeypatch):
+        # One part, 40 s needed, 20 s left: its wait cut by the deadline, it times out; its three memories were sent
+        # and the plugin finishes them, so they are unconfirmed, not unsent.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", self._timed(clock, 40, [])):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["a", "b", "c"]}, deadline=1020.0)
+        assert (cut.value.unconfirmed, cut.value.unsent, cut.value.memories) == (3, 0, [])
+
+    def test_a_full_wait_timed_out_is_no_cut_even_at_the_deadline(self, monkeypatch):
+        # A part given the whole write-back timeout times out on its own, however near the deadline: no cut.
+        import socket
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        client = _OB1Client("http://x", "k", 5.0, writeback_timeout=30.0)
+        with patch("urllib.request.urlopen", self._timed(clock, 90, [])):
+            with pytest.raises(socket.timeout):
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=1030.0)
+
+    def test_a_refused_connection_near_the_deadline_is_a_failure_not_a_cut(self):
+        # The deadline still ahead: a connection refused at once is the brain being down, not the deadline's cut.
+        import urllib.error
+        client = _OB1Client("http://x", "k", 5.0)
+        refused = urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        with patch("urllib.request.urlopen", side_effect=refused):
+            with pytest.raises(urllib.error.URLError):
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]},
+                                 deadline=ob1_module.time.monotonic() + 5)
+
+    def test_a_connect_timeout_cut_by_the_deadline_is_a_cut(self, monkeypatch):
+        # A connect that times out because the deadline cut its wait (urllib wraps it in URLError) is the deadline's cut.
+        import socket
+        import urllib.error
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+
+        def connect_times_out(req, timeout=None):
+            clock[0] += timeout
+            raise urllib.error.URLError(socket.timeout("timed out"))
+
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", connect_times_out):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=1005.0)
+        assert cut.value.unconfirmed == 1 and cut.value.unsent == 0
+
+    def test_stop_by_keeps_the_earliest(self):
+        client = _OB1Client("http://x", "k", 5.0)
+        client.stop_by(2000.0)
+        client.stop_by(3000.0)
+        assert client._stop_at == 2000.0
+        client.stop_by(1500.0)
+        assert client._stop_at == 1500.0
+
+    def test_a_timeout_not_cut_by_a_deadline_is_no_cut(self, monkeypatch):
+        # A part that times out on its own write-back timeout, no deadline near, is a failure, not the deadline's cut.
+        import socket
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", self._timed(clock, 90, [])):
+            with pytest.raises(socket.timeout):
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=2000.0)
+
+    def test_a_session_end_returns_before_its_writeback(self, configured):
+        # Hermes ends a session inside a turn on a compression: the session end returns at once, its write-back in
+        # the background, and shutdown waits for it.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        release = threading.Event()
+        sent: List[int] = []
+
+        def held(req, timeout=None):
+            release.wait(5)
+            body = json.loads(req.data.decode("utf-8"))
+            sent.append(_memory_count(body["memory_payload"]))
+            return _mock_urlopen_response({"memories": []})
+
+        with patch("urllib.request.urlopen", held):
+            started = time.monotonic()
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            returned_in = time.monotonic() - started
+            still_running = p._sync_thread.is_alive()
+            release.set()
+            p.shutdown()
+        assert returned_in < 1.0 and still_running and sent == [10]
+
+    def test_an_empty_session_end_at_exit_still_sets_exits_deadline(self, configured, monkeypatch):
+        # A mid-process session end at 1000 left 1060; the session end at exit, at 1059.5, has nothing to write but
+        # sets a deadline of its own, so shutdown gives the background write-backs a full minute, not half a second.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        with patch("urllib.request.urlopen", self._timed(clock, 0, [])):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            clock[0] = 1059.5
+            p.on_session_end([])
+            p.shutdown()
+        assert p._client._stop_at == 1119.5
+
+    def test_shutdown_forgets_the_session_ends_deadline(self, configured, monkeypatch):
+        # Shutdown shares a session end's deadline once: a later shutdown (after initialize, a new session) takes
+        # one of its own.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        with patch("urllib.request.urlopen", self._timed(clock, 0, [])):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.shutdown()
+            assert p._client._stop_at == 1060.0
+            clock[0] = 1001.0
+            p.initialize(session_id="sess-2", hermes_home=str(configured))
+            p.shutdown()
+        assert p._client._stop_at == 1061.0
+
+    def test_a_failed_session_end_is_logged_at_warning(self, configured, caplog):
+        # Once a session: a refusal (a key gone wrong) is worth seeing, not left at debug.
+        import urllib.error
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        err = urllib.error.HTTPError(url="http://x/writeback", code=401, msg="Unauthorized", hdrs=None, fp=io.BytesIO(b'{"code":"UNAUTHORIZED"}'))
+        with patch("urllib.request.urlopen", side_effect=err), caplog.at_level("WARNING"):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert any(r.levelname == "WARNING" and "session end write-back failed" in r.message for r in caplog.records)
+
+    def test_a_pre_compress_writeback_is_kept_for_shutdown(self, configured):
+        # Like a turn's, a compression's write-back is one shutdown waits for.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        release = threading.Event()
+
+        def held(req, timeout=None):
+            release.wait(5)
+            return _mock_urlopen_response({"memories": []})
+
+        with patch("urllib.request.urlopen", held):
+            p.on_pre_compress([{"role": "assistant", "content": line} for line in self._LINES[:5]])
+            kept = [t.name for t in p._writeback_threads if t.is_alive()]
+            release.set()
+            p.shutdown()
+        assert kept == ["ob1-precompress"]
+
+    def test_finished_writebacks_are_let_go(self, configured):
+        # A long-lived process (a gateway) starts a write-back a turn: the finished ones are not kept.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        for n in range(3):
+            p._start_writeback(lambda: None, f"w{n}")
+        p._sync_thread.join(timeout=5)
+        p._start_writeback(lambda: None, "w-last")
+        assert len(p._writeback_threads) == 1
+
+    def test_the_same_session_end_twice_is_written_back_once(self, configured, monkeypatch):
+        # Hermes's TUI ends a session at finalize and again at close, with one transcript: the second is skipped, so
+        # the two write-backs never race. Another session's same findings are its own.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        msgs = [{"role": "assistant", "content": line} for line in self._LINES[:10]]
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)):
+            p.on_session_end(msgs)
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.on_session_end(list(msgs))
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.initialize(session_id="sess-2", hermes_home=str(configured))
+            p.on_session_end(msgs)
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[10:20]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert sent == [10, 10, 10]
+
+    def test_a_session_end_mid_process_stops_nothing(self, configured, monkeypatch):
+        # Hermes ends a session mid-process too (/new, a compression that rotates it) and serves on: the write-backs
+        # after it, long past its deadline, go as before.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            clock[0] += 300
+            p.sync_turn("Real user question with enough content", "Real assistant content with enough length here")
+            p._sync_thread.join(timeout=5)
+            out = p.handle_tool_call("ob1_writeback", {"summary": "a lesson after the session end", "content": "kept"})
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[10:20]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert sent == [10, 1, 1, 10], sent
+        assert "deadline" not in out
+        # A shutdown long after the last session end gets a deadline of its own, not the one long passed.
+        clock[0] += 300
+        p.shutdown()
+        assert p._client._stop_at == clock[0] + 60.0
+
+    def test_after_shutdown_background_writebacks_are_cut_and_logged(self, configured, monkeypatch, caplog):
+        # Shutdown stops the client at its deadline (a gateway's process may live on): a later background write-back
+        # starts no part and says so at warning, sync_turn's and pre-compress's alike.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)), caplog.at_level("WARNING"):
+            p.shutdown()
+            clock[0] += 120
+            p.sync_turn("Real user question with enough content", "Real assistant content with enough length here")
+            p._sync_thread.join(timeout=5)
+            p.on_pre_compress([{"role": "assistant", "content": line} for line in self._LINES[:5]])
+            p._sync_thread.join(timeout=5)
+        assert sent == []
+        messages = [r.message for r in caplog.records]
+        assert any("sync_turn write-back cut at the exit deadline: 1 memories not written back" in m for m in messages)
+        assert any("pre-compress write-back cut at the exit deadline: 5 memories not written back" in m for m in messages)
+
+    def test_initialize_again_after_shutdown_writes_back(self, configured, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)):
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.shutdown()
+            clock[0] += 300
+            p.initialize(session_id="sess-2", hermes_home=str(configured))
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[10:20]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert sent == [10, 10]
+
+    def test_shutdown_waits_for_every_background_writeback(self, configured, caplog):
+        # Shutdown says how many background write-backs were still running at the exit deadline (w1 has finished
+        # inside the 2 s w2's start gives it; the next row has an earlier one outlast that).
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        quick_done = threading.Event()
+        hold = threading.Event()
+        p._start_writeback(lambda: (time.sleep(0.05), quick_done.set()), "w1")
+        p._start_writeback(lambda: hold.wait(5), "w2")
+        p._session_end_by = time.monotonic() + 0.3
+        with caplog.at_level("WARNING"):
+            p.shutdown()
+        hold.set()
+        assert quick_done.is_set()
+        messages = [r.message for r in caplog.records]
+        # Said before the wait (a process killed during it still leaves a record), then what the deadline left.
+        waiting = next(i for i, m in enumerate(messages) if "waiting up to 0 s for 1 background write-back(s) at exit" in m)
+        left = next(i for i, m in enumerate(messages) if "1 background write-back(s) still running at the exit deadline" in m)
+        assert waiting < left
+        assert p._writeback_threads == []
+
+    def test_shutdown_waits_for_an_earlier_writeback_too(self, configured):
+        # A write-back that outlives the 2 s a later one gives it is still kept: shutdown waits for it, not only the latest.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        earlier_done = threading.Event()
+        p._start_writeback(lambda: (time.sleep(2.4), earlier_done.set()), "w1")
+        p._start_writeback(lambda: None, "w2")  # waits 2 s for w1, which is still running after
+        p._session_end_by = time.monotonic() + 2.0
+        p.shutdown()
+        assert earlier_done.is_set()
+
     def test_skips_when_inactive(self, configured, monkeypatch):
         monkeypatch.delenv("OPENBRAIN_KEY", raising=False)
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         # Active should be False without key
         assert p._active is False
         p.on_session_end([{"role": "user", "content": "We decided to do X."}])
@@ -755,8 +1295,7 @@ class TestPreCompress:
 
     def test_returns_summary_string_with_findings(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         recorded: List[Dict[str, Any]] = []
 
         def fake_writeback(**kwargs):
@@ -777,8 +1316,7 @@ class TestPreCompress:
 
     def test_returns_empty_when_no_findings(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         # Trivial messages with no extractable findings
         out = p.on_pre_compress([{"role": "user", "content": "ok"}])
         assert out == ""
@@ -794,8 +1332,7 @@ class TestTools:
     @pytest.fixture
     def active(self, configured) -> OB1MemoryProvider:
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="sess", hermes_home=str(configured))
+        p.initialize(session_id="sess", hermes_home=str(configured))
         return p
 
     def test_returns_seven_schemas(self, active):
@@ -879,6 +1416,23 @@ class TestTools:
         kwargs = mock.call_args.kwargs
         assert kwargs["action"] == "confirm"
         assert kwargs["notes"] == "looks good"
+        assert kwargs["actor_label"] == "hermes:default"
+
+    def test_review_memory_edit_of_blank_text_is_refused_locally(self, active):
+        with patch.object(active._client, "review_memory") as mock:
+            out = active.handle_tool_call("ob1_review_memory", {"memory_id": "m1", "action": "edit", "content": "   ", "summary": "\t"})
+        assert "content, summary or both" in out
+        mock.assert_not_called()
+
+    def test_review_memory_edit_needs_content_or_summary(self, active):
+        with patch.object(active._client, "review_memory") as mock:
+            out = active.handle_tool_call("ob1_review_memory", {"memory_id": "m1", "action": "edit"})
+        assert "content, summary or both" in out
+        mock.assert_not_called()
+        with patch.object(active._client, "review_memory", return_value={"memory": {}}) as mock:
+            active.handle_tool_call("ob1_review_memory", {"memory_id": "m1", "action": "edit", "content": "new"})
+        assert mock.call_args.kwargs["content"] == "new"
+        assert mock.call_args.kwargs["summary"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -894,8 +1448,7 @@ class TestSystemPromptBlock:
 
     def test_lists_tools_and_workspace_when_active(self, configured):
         p = OB1MemoryProvider()
-        with patch.object(_OB1Client, "health", return_value={}):
-            p.initialize(session_id="s", hermes_home=str(configured))
+        p.initialize(session_id="s", hermes_home=str(configured))
         block = p.system_prompt_block()
         assert "OpenBrain" in block
         assert "ws-test" in block
