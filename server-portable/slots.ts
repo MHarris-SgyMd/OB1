@@ -121,6 +121,12 @@ const CONNECT_S = 5;
  */
 const IDLE_MS = 2000;
 const IDLE_MAX = 4;
+/**
+ * How long a close waits for a statement in flight, in s, before it ends the connection: Bun's close with none waits for
+ * an unanswered statement for good, so a stop or a fail-open on a stalled session held the process open after its work
+ * (review pass 4: a ping unanswered kept a CLI alive 47 s, until killed).
+ */
+const CLOSE_S = 1;
 /** How long a semaphore found down is not asked again, in ms: its calls run without a slot meanwhile. */
 const DOWN_MS = 30_000;
 
@@ -366,7 +372,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   type Held = Session & { local: Local; slot: number; pid: number };
   /** Sessions that let their slot go cleanly, holding no lock, kept a while for the next call. */
   const idle: { session: Session; timer: ReturnType<typeof setTimeout> }[] = [];
-  const close = (s: Session) => s.client.close({ timeout: 0 }).catch(() => {});
+  const close = (s: Session) => s.client.close({ timeout: CLOSE_S }).catch(() => {});
   const park = (s: Session) => {
     if (s.conn.lost || ended.signal.aborted || idle.length >= IDLE_MAX) return void close(s);
     const entry = { session: s, timer: setTimeout(() => { idle.splice(idle.indexOf(entry), 1); void close(s); }, IDLE_MS) };
@@ -450,7 +456,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
         // Bun does not ask again after a first refusal: dropped, so a head still waiting asks again in a while.
         listener = undefined;
         if (it.timer) clearTimeout(it.timer);
-        void client.close({ timeout: 0 }).catch(() => {});
+        void client.close({ timeout: CLOSE_S }).catch(() => {});
         listenAgainAt = Date.now() + LISTEN_RETRY_MS;
         sayOnce("listen", `  background slots: the ${SLOTS_CHANNEL} channel could not be heard (${(e as Error).message}) — a slot another process lets go is found at the next try, a second or two on; asked again at a waiting head's round ${LISTEN_RETRY_MS / 1000} s or more on`);
         return false;
@@ -477,7 +483,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       if ((it.heardAt ?? -1) < it.pingAt) {
         listener = undefined;
         if (it.timer) clearTimeout(it.timer);
-        void it.client.close({ timeout: 0 }).catch(() => {});
+        void it.client.close({ timeout: CLOSE_S }).catch(() => {});
         sayOnce("deaf", `  background slots: the ${SLOTS_CHANNEL} channel was no longer heard — subscribing again; meanwhile a slot another process let go was found at the next try`);
         return;
       }
@@ -498,7 +504,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       // A call of this process waiting again by now, not yet at a head's try: kept, its own end closing it.
       if ([...locals.values()].some((x) => x.polling)) return;
       if (listener === it) listener = undefined;
-      void it.client.close({ timeout: 0 }).catch(() => {});
+      void it.client.close({ timeout: CLOSE_S }).catch(() => {});
     }, IDLE_MS);
     it.timer.unref();
   };
@@ -515,7 +521,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       const c = new SQL({ url: opts.url, max: 1, connectionTimeout: boundS, connection: { application_name: SLOTS_APP } });
       void bounded(c`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid = ${pid} AND application_name = ${SLOTS_APP} AND wait_event_type = 'Lock' AND wait_event = 'advisory'`, boundS * 1000)
         .catch(() => {})
-        .finally(() => void c.close({ timeout: 0 }).catch(() => {}));
+        .finally(() => void c.close({ timeout: CLOSE_S }).catch(() => {}));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     // A tagged query runs once then'd.
@@ -610,7 +616,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
           }
         } catch (e) {
           if (signal.aborted || !answered || !sessionEnded(e)) throw e;
-          void session.close({ timeout: 0 }).catch(() => {});
+          void session.close({ timeout: CLOSE_S }).catch(() => {});
           client = undefined;
           // A poll between sessions: a database ending each one as it comes is not asked in a loop (review pass 5).
           await wait(POLL_MS + Math.floor(Math.random() * POLL_MS), signal);
@@ -624,9 +630,9 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       downUntil = Date.now() + DOWN_MS;
       return null;
     } finally {
-      // Not awaited: a close waits on a connect or a statement in flight, which a stalled database never ends. Its
-      // locks, the queue's among them, go with the session.
-      if (client) void client.close({ timeout: 0 }).catch(() => {});
+      // Not awaited: a close waits a second for a connect or a statement in flight, which a stalled database never
+      // ends, then ends the connection. Its locks, the queue's among them, go with the session.
+      if (client) void client.close({ timeout: CLOSE_S }).catch(() => {});
       l.pid = 0;
       l.busy = false;
       l.wake = undefined;
@@ -712,7 +718,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       const it = listener;
       listener = undefined;
       if (it?.timer) clearTimeout(it.timer);
-      await Promise.all([...idle.splice(0).map((e) => { clearTimeout(e.timer); return close(e.session); }), ...(it ? [it.client.close({ timeout: 0 }).catch(() => {})] : [])]);
+      await Promise.all([...idle.splice(0).map((e) => { clearTimeout(e.timer); return close(e.session); }), ...(it ? [it.client.close({ timeout: CLOSE_S }).catch(() => {})] : [])]);
     },
   };
 }

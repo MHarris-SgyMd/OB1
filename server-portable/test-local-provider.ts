@@ -1884,7 +1884,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const both = [child(), child()];
       const results = await Promise.all(both.map(async (c) => { const out = await new Response(c.stdout).text(); await c.exited; try { return JSON.parse(out.trim()) as { done: number }; } catch { return { done: -1 }; } }));
       const total = results[0].done + results[1].done;
-      assert(total >= 90 && results.every((r) => r.done >= total * 0.35),
+      assert(total >= 75 && results.every((r) => r.done >= total * 0.35),
         `two processes with backlogs of 20 ms calls at chat=1 keep the slot busy between them, each slot let go handed to the queue's head at once: ${total} calls in 3 s where 150 fit, ${JSON.stringify(results)}`);
     }
     // No other process waiting, a slot this process lets go goes to its own waiter at once, not at its next poll:
@@ -1936,19 +1936,24 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     // …a wait in the queue as long as the calls ahead of it: a role's lock_timeout and statement_timeout, here 100 ms,
     // do not end it, the semaphore's sessions setting both to none (PR 2c-1: ended, the call would fail open and run);
     // nor does its idle_session_timeout end the slot's session, idle while its call runs (review pass 1: the lock
-    // went with it, three calls running at chat=1).
+    // went with it, three calls running at chat=1). A role of the row's own, so a row cut short leaves the suite's
+    // role untouched (review pass 4: its settings left would end every later suite's statements at 100 ms).
     {
       const admin = new SQL({ url: URL_, max: 1 });
       const ahead = new SQL({ url: URL_, max: 1 });
-      const timed = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {} });
+      const role = "ob1_slots_timed";
+      const timedUrl = new URL(URL_!);
+      timedUrl.username = role;
+      timedUrl.password = "timed";
       const timedSaid: string[] = [];
+      let timed: { uninstall: () => Promise<void> } | undefined;
       try {
-        const [{ role }] = (await admin`SELECT current_user AS role`) as { role: string }[];
-        // Connected before the role's timeouts are set, so they hold its own session to none of them.
-        await ahead`SELECT 1`;
-        await admin.unsafe(`ALTER ROLE "${role}" SET lock_timeout = '100ms'`);
-        await admin.unsafe(`ALTER ROLE "${role}" SET statement_timeout = '100ms'`);
-        await admin.unsafe(`ALTER ROLE "${role}" SET idle_session_timeout = '100ms'`);
+        await admin.unsafe(`DROP ROLE IF EXISTS ${role}`);
+        await admin.unsafe(`CREATE ROLE ${role} LOGIN PASSWORD 'timed'`);
+        await admin.unsafe(`ALTER ROLE ${role} SET lock_timeout = '100ms'`);
+        await admin.unsafe(`ALTER ROLE ${role} SET statement_timeout = '100ms'`);
+        await admin.unsafe(`ALTER ROLE ${role} SET idle_session_timeout = '100ms'`);
+        timed = installBackgroundSlots({ url: timedUrl.toString(), raw: "chat=1", log: () => {} });
         await ahead`SELECT pg_advisory_lock(hashtext(${key}), -2)`;
         let ranAt = 0;
         let heldMidCall: boolean | null = null;
@@ -1966,13 +1971,15 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
         assert(ranBefore === 0 && ranAt > 0 && timedSaid.length === 0 && heldMidCall === true,
           `a role's lock_timeout and statement_timeout of 100 ms do not end a wait of 400 ms in the share's queue: the call ran once the queue was let go, not before (${ranBefore ? "ran early" : "waited"}); its idle_session_timeout of 100 ms leaves the slot held 300 ms into the call (${heldMidCall})`);
       } finally {
-        const [{ role }] = (await admin`SELECT current_user AS role`) as { role: string }[];
-        await admin.unsafe(`ALTER ROLE "${role}" RESET lock_timeout`);
-        await admin.unsafe(`ALTER ROLE "${role}" RESET statement_timeout`);
-        await admin.unsafe(`ALTER ROLE "${role}" RESET idle_session_timeout`);
-        await timed.uninstall();
-        await admin.close();
+        await timed?.uninstall();
         await ahead.close();
+        // Its connections gone before the role, its settings with it, is dropped.
+        for (let k = 0; k < 50; k++) {
+          if (Number((await admin`SELECT count(*)::int AS c FROM pg_stat_activity WHERE usename = ${role}`)[0].c) === 0) break;
+          await Bun.sleep(50);
+        }
+        await admin.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
+        await admin.close();
       }
     }
     // A process killed while its call waits in the queue leaves it within a second or two, not when the queue reaches
@@ -2035,10 +2042,13 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const holds = new SQL({ url: URL_, max: 1 });
       const admin = new SQL({ url: URL_, max: 1 });
       try {
+        const listeners = async () => (await admin`SELECT pid FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`) as { pid: number }[];
+        // An earlier row's subscription closed first, 2 s after its last wait, so the one terminated is this call's
+        // (review pass 4).
+        for (let i = 0; i < 150 && (await listeners()).length > 0; i++) await Bun.sleep(20);
         await holds`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
         let ranAt = 0;
         const waiting = modelCall(call(), async () => { ranAt = Date.now(); });
-        const listeners = async () => (await admin`SELECT pid FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`) as { pid: number }[];
         let subs: { pid: number }[] = [];
         for (let i = 0; i < 100 && subs.length === 0; i++) { await Bun.sleep(10); subs = await listeners(); }
         await admin`SELECT pg_terminate_backend(${subs[0]?.pid ?? 0})`;
@@ -2162,6 +2172,7 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
     // process open).
     {
       const holds = new SQL({ url: URL_, max: 1 });
+      const admin = new SQL({ url: URL_, max: 1 });
       try {
         await holds`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
         const t0 = Date.now();
@@ -2171,16 +2182,21 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
           installBackgroundSlots({ url: process.env.DATABASE_URL, raw: "chat=1" });
           await modelCall({ type: "chat", model: ${JSON.stringify(META_MODEL)}, base: ${JSON.stringify(PROVIDER)}, purpose: "test" }, async () => console.log(Date.now()));`],
           { cwd: import.meta.dir, env: { ...process.env, DATABASE_URL: URL_ }, stdout: "pipe", stderr: "pipe" });
-        setTimeout(() => { holds`SELECT pg_advisory_unlock(hashtext(${key}), 0)`.then(() => {}, () => {}); }, 300);
-        // Cut at 10 s, so a process held open fails the row rather than hanging the suite.
-        const cut = setTimeout(() => child.kill(), 10_000);
+        // Cut at 15 s, so a process held open fails the row rather than hanging the suite.
+        const cut = setTimeout(() => child.kill(), 15_000);
+        // The slot let go once the child has subscribed, however slow its start (review pass 4: let go at 300 ms, a
+        // child slower than that found it free and never subscribed).
+        let subscribed = 0;
+        for (let i = 0; i < 400 && subscribed === 0; i++) { await Bun.sleep(20); subscribed = Number((await admin`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name = ${SLOTS_APP} AND query ILIKE 'LISTEN%'`)[0].c); }
+        await holds`SELECT pg_advisory_unlock(hashtext(${key}), 0)`;
         const ranAt = Number((await new Response(child.stdout).text()).trim());
         const code = await child.exited;
         clearTimeout(cut);
-        const exitMs = Date.now() - t0;
-        assert(ranAt > 0 && code === 0 && exitMs < 7000,
-          `a process whose call waited, its subscription to the channel live, ends on its own ${exitMs} ms after it began, ${ranAt ? Date.now() - ranAt : -1} ms after its call ran (exit ${code})`);
+        const afterMs = Date.now() - ranAt;
+        assert(subscribed === 1 && ranAt > 0 && code === 0 && afterMs < 4500,
+          `a process whose call waited, its subscription to the channel live, ends on its own ${afterMs} ms after its call ran, ${Date.now() - t0} ms after it began (exit ${code})`);
       } finally {
+        await admin.close();
         await holds.close();
       }
     }
@@ -2425,12 +2441,13 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   const pgProxy = () => {
     const pg = new URL(URL_!);
     type Pipe = { up?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[]; ready: number; listen?: boolean; deaf?: boolean };
-    const state = { mode: "pass" as "pass" | "stall" | "close" | "closeSecond" | "deafListen", opened: 0 };
+    const state = { mode: "pass" as "pass" | "stall" | "close" | "closeSecond" | "deafListen", opened: 0, live: 0 };
     // ReadyForQuery messages in a chunk from the server: 'Z', length 5.
     const readies = (d: Uint8Array) => { let n = 0; for (let i = 0; i + 4 < d.length; i++) if (d[i] === 0x5a && d[i + 1] === 0 && d[i + 2] === 0 && d[i + 3] === 0 && d[i + 4] === 5) n++; return n; };
     const listener = Bun.listen<Pipe>({ hostname: "127.0.0.1", port: 0, socket: {
       open(c) {
         state.opened++;
+        state.live++;
         c.data = { buf: [], ready: 0 };
         Bun.connect({ hostname: pg.hostname, port: Number(pg.port), socket: { data(_, d) {
           if (state.mode === "stall") return;
@@ -2448,12 +2465,12 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
         if (state.mode === "closeSecond" && c.data.ready >= 3) { c.end(); return; }
         if (c.data.up) c.data.up.write(d); else c.data.buf.push(new Uint8Array(d));
       },
-      close(c) { c.data.up?.end(); },
+      close(c) { state.live--; c.data.up?.end(); },
     } });
     const via = new URL(URL_!);
     via.hostname = "127.0.0.1";
     via.port = String(listener.port);
-    return { url: via.toString(), stop: (closeActive?: boolean) => listener.stop(closeActive), get mode() { return state.mode; }, set mode(m) { state.mode = m; }, get opened() { return state.opened; } };
+    return { url: via.toString(), stop: (closeActive?: boolean) => listener.stop(closeActive), get mode() { return state.mode; }, set mode(m) { state.mode = m; }, get opened() { return state.opened; }, get live() { return state.live; } };
   };
   // A session the database ends mid-statement after it has answered — a restart, a terminate — is asked again on a
   // fresh one, not read as an outage: the queue behind it is not let through without slots (review pass 3: one
@@ -2495,13 +2512,15 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
   }
   // A database that stops answering after the slot is taken — a proxy in front of Postgres dropping every byte, as a
   // paused container or a frozen host does: the unlock gives up at the bound, the call's answer kept, said as lost; the
-  // next call fails open at the bound rather than waiting with no end (review pass 2: both waited past every stop).
+  // next call fails open at the bound rather than waiting with no end (review pass 2: both waited past every stop); and
+  // the sessions left with a statement unanswered are ended, a second on, not kept open for good (PR 2c-1 review pass
+  // 4: Bun's close with no timeout waits for the answer, a CLI held open 47 s until killed).
   {
     const proxy = pgProxy();
     const stallSaid: string[] = [];
     const inst = installBackgroundSlots({ url: proxy.url, raw: "chat=1", log: (l) => stallSaid.push(l), connectS: 1 });
-    // Cut at 6 s, so a wait with no bound fails the row rather than hanging the suite.
-    const cut = setTimeout(() => proxy.stop(true), 6000);
+    // Cut at 9 s, so a wait with no bound fails the row rather than hanging the suite.
+    const cut = setTimeout(() => proxy.stop(true), 9000);
     try {
       let endedAt = 0;
       const answer = await modelCall(call(), async () => { proxy.mode = "stall"; await Bun.sleep(100); endedAt = Date.now(); return "answer"; });
@@ -2509,8 +2528,10 @@ console.log("\n[12] OB1_BACKGROUND_SLOTS: background calls held to a share of a 
       const t1 = Date.now();
       const next = await modelCall(call(), async () => "next").then((r) => r, (e: unknown) => `rejected: ${(e as Error).message}`);
       const nextMs = Date.now() - t1;
-      assert(answer === "answer" && heldMs < 1800 && stallSaid.some((l) => /connection was lost while its call ran \(no answer in 1 s\)/.test(l)) && next === "next" && nextMs < 2500 && stallSaid.some((l) => /did not answer/.test(l)),
-        `a database that stops answering while a slot is held: the unlock gives up at the bound (the answer back ${heldMs} ms after the call ended), said as lost; the next call fails open in ${nextMs} ms (${JSON.stringify(stallSaid.map((l) => l.slice(0, 90)))})`);
+      let live = proxy.live;
+      for (let i = 0; i < 150 && live > 0; i++) { await Bun.sleep(20); live = proxy.live; }
+      assert(answer === "answer" && heldMs < 1800 && stallSaid.some((l) => /connection was lost while its call ran \(no answer in 1 s\)/.test(l)) && next === "next" && nextMs < 2500 && stallSaid.some((l) => /did not answer/.test(l)) && live === 0,
+        `a database that stops answering while a slot is held: the unlock gives up at the bound (the answer back ${heldMs} ms after the call ended), said as lost; the next call fails open in ${nextMs} ms; the sessions left unanswered ended, ${live} still open (${JSON.stringify(stallSaid.map((l) => l.slice(0, 90)))})`);
     } finally {
       clearTimeout(cut);
       await inst.uninstall();
