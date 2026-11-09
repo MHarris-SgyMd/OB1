@@ -656,7 +656,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
-Threads:         719 (2,218 thoughts in them), every one linked
+Threads:         41 (127 thoughts in them), every one linked
 Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — acceptance 60% (3 of 5: accepted over accepted, rejected and unanswered), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
 HNSW:            thought_chunks_embedding_idx on thought_chunks (m 16, ef_construction 64); …
@@ -688,14 +688,14 @@ alarm; preflight's `workers` row warns on the same and names the restart
 `Threads` (SMD-3306 PR 7a-2c) is the work threads' census: the threads (subject keys two thoughts or more hold), the
 thoughts in them, and whether every thread's standing edges (migration 120) are the ones its thoughts want, compared
 edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw
-write's; a key no thought holds that still carries edges is counted beside it. Either names the run that links them, `cd
-db && bun threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000 standing
-subjects and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`, `ticket:` and
-`version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the keys before
-the first cut, and it says so and how many subject keys that was; `threads.ts --status` reads every key, counts those
-that differ and names the first ten. It names no key here, since a phrase key is the judge model's words. `not counted`
-before migration 120, and when the first key in key order alone passes the bound, so that no key was read (preflight
-warns then). Preflight's `threads` row reads the same census and warns, never fails, on a
+write's; a key no thought holds that still carries edges is counted beside it. The row names the run that links either,
+`cd db && bun threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000
+standing subjects and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`,
+`ticket:` and `version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the
+keys before the first cut, and it says so and how many subject keys that was; `threads.ts --status` reads every key,
+counts those that differ and names the first ten. It names no key here, since a phrase key is the judge model's words.
+`not counted` before migration 120, and when the first key in key order alone passes the bound, so that no key was read
+(preflight warns then). Preflight's `threads` row reads the same census and warns, never fails, on a
 key that differs.
 `Proposals` and `Relations` are what consolidation found (SMD-2680), so a sleep
 pass's findings show without a query. `Proposals` is the queue a reviewer works:

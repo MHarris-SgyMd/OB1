@@ -40,7 +40,8 @@
  *
  * ── Exit codes ──────────────────────────────────────────────────────────────
  * 0 done (or --status printed); 1 a failure; 2 usage (a malformed --key among it), no database URL, a brain without
- * 120 (named, with the migrate command), or a writing run's role short of a re-link's writes (named, with the grant).
+ * 120 (named, with the migrate command), a role whose search_path misses thought_facets' schema (named, with the fix),
+ * or a writing run's role short of a re-link's writes (named, with the grant).
  */
 
 import type { SQL } from "bun";

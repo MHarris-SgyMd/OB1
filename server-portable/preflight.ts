@@ -4939,7 +4939,7 @@ if (configFailed) {
         // exact: the first keys in key order, a key the bound cuts left out; the
         // row says when it stopped there. An unlinked key warns — a thread the
         // upgrade has not linked, or a gap a delete left — and never fails: every
-        // read but the thread's own works without its edges. It names no key:
+        // read works without its edges, the thread's own reading the subjects. It names no key:
         // db/threads.ts --status does.
         {
           const r = threadsRow(facts.threads, facts.unread.threads);

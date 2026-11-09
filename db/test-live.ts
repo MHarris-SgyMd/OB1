@@ -29622,6 +29622,8 @@ if (want("47b")) {
     await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${P2}`;
     await edge(p2a, p1a, OB);
     for (const [n, o] of [[p1b, p1a], [p1c, p1a], [p1c, p1b], [p1a, p1b], [p3b, p3a], [p3c, p3a], [p3c, p3b], [p3a, p3b]] as const) await edge(n, o, OD);
+    // A judged relation (084's, no key) beside them is no thread's edge: it counts in nothing below (review pass 4).
+    await sql`SELECT record_thought_relation(${p3a}::uuid, ${p1b}::uuid, 'related', 0.9, 'consolidate:47b@p1', NULL, 'a', 'b', NULL)`;
     const whole = await threadCensus(sql, UNBOUNDED);
     const [c2, c3, c4, c7, c10] = [await threadCensus(sql, 2), await threadCensus(sql, 3), await threadCensus(sql, 4), await threadCensus(sql, 7), await threadCensus(sql, 10)];
     // 11 subjects and 14 edges (P1 2, OB 1, P3 2, OD 8, PE 1): from a bound of 11 the subjects' walk is not cut, the
@@ -29687,6 +29689,18 @@ if (want("47b")) {
 
     // Linked again, the census finds nothing to do; a brain without 120 carries no fact (null, no entry).
     const relinked = await threads({});
+    // The subjects' walk cut alone (review pass 4): 17 subjects to 8 edges once PA (two thoughts, its edge taken
+    // away, written last though it sorts second) joins — a3 a0·2 b3 c2 e2 f3 g1 h1. A bound of 14 cuts inside PF, so
+    // PA is read and unlinked; 16 cuts at PH, PG's one thought counted among the keys read. Neither is complete.
+    const PA = "phrase:0000 a0";
+    for (let j = 1; j <= 2; j++) await subject(await thought(`${PA} #${j}`, `2026-10-09T0${j}:00:00Z`), PA);
+    await sql`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${PA}`;
+    const [s14, s16] = [await threadCensus(sql, 14), await threadCensus(sql, 16)];
+    const paRelinked = await threads({ key: PA });
+    assert(!s14.complete && s14.keys === 5 && s14.threads === 5 && s14.thoughts === 12 && s14.standing === 6 && s14.whole === 7 && s14.unlinked === 1 && s14.orphaned === 0 && JSON.stringify(s14.first) === JSON.stringify([PA])
+        && !s16.complete && s16.keys === 7 && s16.threads === 6 && s16.thoughts === 15 && s16.standing === 8 && s16.whole === 9 && s16.unlinked === 1 && paRelinked.code === 0,
+      `the subjects' walk cut alone is not complete, and a key one thought holds counts among the keys read (${JSON.stringify({ s14, s16 })})`);
+
     const after = await threadCensus(sql, UNBOUNDED);
     await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
     renamed = true;
@@ -29706,7 +29720,7 @@ if (want("47b")) {
       `linked again, nothing differs; a brain without 120 carries no threads fact and says why, a thread_relink in another schema not counting as its (${JSON.stringify(after)} | ${threadsLine(without)} | ${JSON.stringify(elsewhere.threads)})`);
 
     // A role whose search_path misses the brain's schema is told so, never that 120 is not applied (review pass 2):
-    // the gate finds thread_relink in any schema, and the read's own entry says thought_facets does not resolve.
+    // thought_facets does not resolve, so the gate looks for thread_relink in any schema, and the read's own entry says so.
     await sql`ALTER ROLE CURRENT_USER SET search_path = ob1_47b_nowhere`;
     pathSet = true;
     const lost = new SQL({ url: URL_!, max: 1 });
@@ -29732,6 +29746,16 @@ if (want("47b")) {
     const printed = quoted.out.split("\n").find((l) => l.includes("brien"))?.replace(/^\s*keys:\s*/, "").trim() ?? "";
     const pasted = Bun.spawnSync(["bash", "-c", `printf %s ${printed}`]).stdout.toString();
     const requoted = await threads({});
+    // Orphans alone, twelve keys written in reverse key order (review pass 4): --status says what differs, names the
+    // first ten in key order, and counts the rest.
+    const zs = Array.from({ length: 12 }, (_, i) => `phrase:0000 z${String(12 - i).padStart(2, "0")}`);
+    for (const z of zs) await edge(q1, p1a, z);
+    const orphansOnly = await threads({ status: true });
+    const zRelinked = await threads({});
+    const zLines = Array.from({ length: 10 }, (_, i) => `'phrase:0000 z${String(i + 1).padStart(2, "0")}'`);
+    assert(orphansOnly.out.includes("  linked:    0 key(s) whose edges differ from their thread's, 12 key(s) no thought holds still carrying edges — threads.ts without --status links them")
+        && orphansOnly.out.endsWith(`  keys:      ${zLines.join("\n             ")}\n             and 2 more; --key <a key as printed above> re-links one`) && zRelinked.code === 0,
+      `--status with orphans alone says so, names the first ten in key order and counts the rest (${orphansOnly.out.split("\n").slice(-4).join(" | ")})`);
     assert(printed === "'phrase:0000 o'\\''brien, notes'" && pasted === QK && quoted.out.endsWith("\n             --key <a key as printed above> re-links one") && requoted.code === 0,
       `--status prints a key holding an apostrophe, a comma and a space on its own line, quoted so a shell gives it back (${printed} → ${pasted})`);
   } finally {

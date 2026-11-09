@@ -2598,8 +2598,9 @@ a `thread:` judge key with no confidence; any other is the judge's, `judged`,
 under 084's index, which now keeps to the judge's edges, so a judged `related`
 and a thread's `evolves` stand side by side on one pair.
 `record_thought_relation` reads, keeps, replaces and closes the judge's edge
-alone, and `brain_info`, board-sync's findings and `consolidate.ts --status`
-count the judge's alone. The upgrade writes no edge: run `threads.ts` once after
+alone, and `brain_info`'s Relations row, board-sync's findings and
+`consolidate.ts --status` count the judge's alone (its Threads row counts the
+threads' edges apart, PR 7a-2c). The upgrade writes no edge: run `threads.ts` once after
 it, which links every thread, a batch of at most 200 keys a transaction, a key
 that writes ending its batch and the next batch taking the page's rest (on the
 compose stack, from a checkout, reaching its Postgres through deploy/README's

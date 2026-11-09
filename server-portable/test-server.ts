@@ -977,8 +977,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let failRelease: RegExp | null = null;
   let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   const slow = new Set<string>();
-  const tag = (strings: TemplateStringsArray) => {
+  let censusValues: unknown[] = [];
+  const tag = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?");
+    if (text.includes("WITH s_all AS")) censusValues = values;
     for (const h of hang) if (text.includes(h)) return new Promise<unknown[]>(() => {});
     for (const h of slow) if (text.includes(h)) return Bun.sleep(150).then(() => answer(text));
     return Promise.resolve().then(() => answer(text));
@@ -1204,7 +1206,9 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   catalogThreads = true;
   const threadsRead = await readDatabaseFacts(fake, { stats: false });
   catalogThreads = false;
-  assert(threadsRead.threads?.threads === 2 && !("threads" in threadsRead.unread), `with 120 and no lock the threads' census is read (${JSON.stringify(threadsRead.threads)})`);
+  // brain_info's census is the bounded one, 10,000 rows a walk — never --status's read of every key (review pass 4).
+  assert(threadsRead.threads?.threads === 2 && !("threads" in threadsRead.unread) && censusValues.length > 0 && censusValues.every((v) => Number(v) === 10_000 || Number(v) === 10),
+    `with 120 and no lock the threads' census is read, at its bound of 10,000 rows (${JSON.stringify(threadsRead.threads)} | ${JSON.stringify(censusValues)})`);
   // A lock refused to the relations' read (thought_facets alone) is not
   // waited on by the queue's board count, which reads it through 079's
   // predicate (run-it, review pass 3).
@@ -1660,23 +1664,26 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       timeout: r(null, { reason: "timeout", message: "canceling statement due to statement timeout" }), other: r(null, { reason: "error", message: "boom" }),
       none: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 0, complete: false })),
       orphansOnly: r(f({ threads: 0, thoughts: 0, standing: 3, whole: 0, keys: 0, orphaned: 1, complete: false })),
-      ok: r(f()), okPartial: r(f({ complete: false, keys: 4 })), empty: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 3 })),
+      noThread: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 9999, complete: false })),
+      ok: r(f()), okPartial: r(f({ complete: false, keys: 4 })), oneKey: r(f({ threads: 1, thoughts: 2, standing: 1, whole: 1, keys: 1, complete: false })), empty: r(f({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 3 })),
       differ: r(f({ standing: 12, whole: 5, unlinked: 1, orphaned: 2 })), differPartial: r(f({ standing: 3, whole: 4, unlinked: 1, complete: false, keys: 4 })),
     };
     assert(rows.pre.status === "skip" && /^no thread_relink — migration 120 \(SMD-3306\) is not applied/.test(rows.pre.detail)
-        && rows.refused.status === "warn" && rows.refused.detail === "could not verify: permission denied for table thought_facets" && /--groups capture,server \(db\/README\.md, Grants for a capturing role\)\.$/.test(rows.refused.fix ?? "")
-        && rows.invisible.status === "warn" && /^Put that schema on the server role's search_path/.test(rows.invisible.fix ?? "")
+        && rows.refused.status === "warn" && rows.refused.detail === "could not verify: permission denied for table thought_facets" && rows.refused.fix === "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role)."
+        && rows.invisible.status === "warn" && rows.invisible.fix === "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it."
         && rows.timeout.status === "warn" && rows.timeout.fix === "A migration or a long transaction may hold thought_facets or thoughts: run preflight again once it has finished (--status would wait on it too). With nothing holding it, the census outran the statement cap: read it whole with cd db && bun threads.ts --url <the owner's connection string> --status."
-        && rows.other.status === "warn" && /^The check reads thought_facets and thoughts/.test(rows.other.fix ?? "")
+        && rows.other.status === "warn" && rows.other.fix === "The check reads thought_facets and thoughts; the message says why it failed."
+        && rows.oneKey.status === "ok" && rows.oneKey.detail.startsWith("1 thread(s) among the first 1 subject key(s) read, 2 thought(s) in them, 1 edge(s) standing — each read linked")
         && rows.none.status === "warn" && rows.none.detail === "could not verify: the first key in key order alone passes the census's bound (10000 rows), so no key was read" && /^Read every key: .* --status, which counts the keys whose edges differ and names the first 10; /.test(rows.none.fix ?? "")
+        && rows.noThread.status === "warn" && rows.noThread.detail === "could not verify: the first 9999 subject key(s) read are each held by one thought, so no thread was read before the census's bound (10000 rows)" && /^Read every key: /.test(rows.noThread.fix ?? "")
         && rows.orphansOnly.status === "warn" && rows.orphansOnly.detail === "no subject key before the census's cut; 3 edge(s) standing, 0 once every thread read is linked; 1 key(s) no thought holds still carrying edges; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)"
         && rows.ok.status === "ok" && rows.ok.detail === "5 thread(s), 12 thought(s) in them, 7 edge(s) standing — every thread linked" && rows.ok.fix === undefined
         && rows.okPartial.status === "ok" && rows.okPartial.detail === "5 thread(s) among the first 4 subject key(s) read, 12 thought(s) in them, 7 edge(s) standing — each read linked; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)"
         && rows.differ.status === "warn" && rows.differ.detail === "5 thread(s); 12 edge(s) standing, 5 once every thread read is linked; 1 key(s) whose edges differ from their thread's, 2 key(s) no thought holds still carrying edges"
-        && /^Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names the first 10 keys, each as --key takes it\)\. .* a gap after that is a delete whose role could not re-link, or a raw write \(120's NOT HERE\)\./.test(rows.differ.fix ?? "")
+        && /^Link them: cd db && bun threads\.ts --url <the owner's connection string> \(in batches; --dry-run counts first, --status names the first 10 keys, each as --key takes it\)\. .* a gap after that is a delete that could not re-link \(a role without the writes, above READ COMMITTED, or beside a held key\), or a raw write \(120's NOT HERE\)\. Every read works meanwhile, the thread's own included: it reads the subjects, not the edges\.$/.test(rows.differ.fix ?? "")
         && rows.empty.status === "ok" && rows.empty.detail === "none — no subject key two thoughts hold, and no edge standing to close"
         && rows.differPartial.detail === "5 thread(s) among the first 4 subject key(s) read; 3 edge(s) standing, 4 once every thread read is linked; 1 key(s) whose edges differ from their thread's; the census stops at 10000 rows (cd db && bun threads.ts --url <the owner's connection string> --status reads every key)",
-      `preflight's threads row, from the fact alone: skipped before 120; each unread reason its remedy; nothing read a warning, orphans alone said as no subject key; linked ok, past the bound saying so, none as the Threads row says it; keys differing warned in --status's shape (${JSON.stringify(Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, v.status])))})`);
+      `preflight's threads row, from the fact alone: skipped before 120; each unread reason its remedy; nothing read a warning, no thread read a warning, orphans alone said as no subject key; linked ok, past the bound saying so, none as the Threads row says it; keys differing warned in --status's shape (${JSON.stringify(Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, v.status])))})`);
   }
   // The Threads row (SMD-3306 PR 7a-2c): linked, read past the bound, keys differing, before 120, and not read.
   const census = (over: Partial<NonNullable<Facts["threads"]>> = {}) => ({ threads: 719, thoughts: 2218, standing: 1499, whole: 1499, unlinked: 0, orphaned: 0, keys: 3948, complete: true, ...over });
@@ -1687,6 +1694,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const thrOrphans = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ orphaned: 3 }) }), 1000));
   const thrNone = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 0, complete: false }) }), 1000));
   const thrOrphOnly = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 3, whole: 0, keys: 0, orphaned: 1, complete: false }) }), 1000));
+  const thrNoThread = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 1 , complete: false }) }), 1000));
+  const thrJoin = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: null, unread: { threads: { reason: "error", message: "the thread census found 0 edge(s) wanted for 2 thread(s) of 5 thought(s): its join to thoughts lost members — a thoughts table earlier on this role's search_path than the brain's?" } } }), 1000));
   const thrEmpty = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: census({ threads: 0, thoughts: 0, standing: 0, whole: 0, keys: 4 }) }), 1000));
   const thrPre = renderBrainInfo(await brainInfo(server, async () => planted(119, { threads: null }), 1000));
   const thrLost = renderBrainInfo(await brainInfo(server, async () => planted(121, { threads: null, unread: { threads: { reason: "refused", message: "permission denied for table thoughts" } } }), 1000));
@@ -1698,9 +1707,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && /^Threads: +719 \(2,218 thoughts in them\); 3 keys no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's connection string> links them \(--status names the first 10\)$/m.test(thrOrphans)
       && /^Threads: +no subject key before the census's cut; 1 key no thought holds still carrying edges — cd db && bun threads\.ts --url <the owner's connection string> links them \(--status names the first 10\) — the census stops at 10,000 rows: /m.test(thrOrphOnly)
       && /^Threads: +none$/m.test(thrEmpty)
+      && /^Threads: +not counted — the first 1 subject key read is held by one thought, so no thread was read before the census's bound \(10,000 rows\): cd db && bun threads\.ts --url <the owner's connection string> --status reads every key$/m.test(thrNoThread)
+      && /^Threads: +\? \(its join to thoughts lost members — a thoughts table earlier on the search_path\?\)$/m.test(thrJoin)
       && /^Threads: +not counted — migration 120 is not applied \(it keeps the threads' edges\)$/m.test(thrPre)
       && /^Threads: +\? \(thoughts not readable by this role\)$/m.test(thrLost),
-    `the table's Threads row: linked, read past the bound, keys differing (one and many), orphaned keys alone, nothing read past the bound, only orphans before the cut, none, before 120, and not read (${[thrLinked, thrPartial, thrDiffer, thrOne, thrPre, thrLost].map((t) => line(t, "Threads")).join(" / ")} / ${line(thrOrphans, "Threads")})`);
+    `the table's Threads row: linked, read past the bound, keys differing (one and many), orphaned keys alone, nothing read past the bound, only orphans before the cut, no thread read, a lost join, none, before 120, and not read (${[thrLinked, thrPartial, thrDiffer, thrOne, thrPre, thrLost].map((t) => line(t, "Threads")).join(" / ")} / ${line(thrOrphans, "Threads")})`);
 
   // The deadline keeps what was read (review pass 2: it threw every fact away).
   // A count that never answers: the catalog, the config and the ledger stand,

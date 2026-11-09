@@ -1092,7 +1092,7 @@ const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
 // is read whole. The thread edges are walked the same way through 120's key index, at most `bound` rows; a key their
 // bound cuts is left out too, and every key from the first cut on, of either walk. So what is read
 // is exact, and `complete` says whether it was all: past the bound it is the keys before the first cut alone. A brain
-// the upgrade left unlinked shows in any keys read; a gap a delete left shows only within them — db/threads.ts --status
+// the upgrade left unlinked shows in any thread among the keys read; a gap a delete left shows only within them — db/threads.ts --status
 // reads with no bound.
 
 /** How many standing subjects, and how many thread edges, a bounded census reads at most. */
@@ -1140,8 +1140,8 @@ export function threadCensusValue(r: Record<string, unknown> | undefined): Threa
 
 /**
  * Reads the census, at most `bound` standing subjects and `bound` thread edges (UNBOUNDED: all). One statement. Throws
- * what Postgres throws: a brain before 120 has no thread edges and reads every thread unlinked, so a caller asks only
- * where 120 stands.
+ * what Postgres throws, and when its join to thoughts lost members (threadCensusValue). A brain before 120 has no
+ * thread edges and reads every thread unlinked, so a caller asks only where 120 stands.
  */
 export async function threadCensus(sql: SqlTag, bound: number = THREAD_CENSUS_BOUND): Promise<ThreadCensus> {
   const rows = await sql`
@@ -2337,6 +2337,8 @@ export function threadsLine(db: Pick<DatabaseSummary, "threads" | "unread">): st
   const t = db.threads;
   if (t === null) {
     // The census joins thoughts too: a lock refused there names thoughts (review pass 3), as the Findings row does.
+    // The join check's error says what it found, not a table's name guessed (review pass 4).
+    if ("threads" in db.unread && /join to thoughts lost members/.test(db.unread.threads.message)) return "? (its join to thoughts lost members — a thoughts table earlier on the search_path?)";
     if ("threads" in db.unread) return `? (${deniedObject(db.unread.threads.message)?.name ?? /^not tried — a lock on (\w+)/.exec(db.unread.threads.message)?.[1] ?? "thought_facets"} ${unreadWords(db.unread.threads)})`;
     return "not counted — migration 120 is not applied (it keeps the threads' edges)";
   }
@@ -2346,6 +2348,10 @@ export function threadsLine(db: Pick<DatabaseSummary, "threads" | "unread">): st
   // Nothing read (review pass 1): the first key in key order alone passes the bound — said, never "linked".
   if (!t.complete && t.keys === 0 && t.unlinked === 0 && t.orphaned === 0)
     return `not counted — the first key in key order alone passes the census's bound (${num(THREAD_CENSUS_BOUND)} rows): ${status}`;
+  // Past the bound with no thread among the keys read (each held by one thought): nothing said either way, so not
+  // counted — never "each read linked" on a brain the upgrade left unlinked (review pass 4).
+  if (!t.complete && t.keys > 0 && t.threads === 0 && t.unlinked === 0 && t.orphaned === 0)
+    return `not counted — the first ${num(t.keys)} subject key${t.keys === 1 ? " read is" : "s read are each"} held by one thought, so no thread was read before the census's bound (${num(THREAD_CENSUS_BOUND)} rows): ${status}`;
   // No thread and nothing to do: none, as the Relations row says it (review pass 2).
   if (t.complete && t.threads === 0 && t.unlinked === 0 && t.orphaned === 0) return "none";
   // Past the bound the counts are of the keys read, and say so (review pass 1); no subject key before the cut, only
@@ -2393,6 +2399,10 @@ export function threadsRow(t: ThreadsFact | null, u: Unread | undefined): { stat
   // Only orphans before the cut: said, not "0 thread(s) among the first 0" (review pass 2).
   const head = !t.complete && t.keys === 0 ? "no subject key before the census's cut" : `${t.threads} thread(s)${among}`;
   const scope = t.complete ? "" : `; the census stops at ${THREAD_CENSUS_BOUND} rows (${linkCommand} --status reads every key)`;
+  // Past the bound with no thread among the keys read: not a pass (review pass 4).
+  if (!t.complete && t.keys > 0 && t.threads === 0 && t.unlinked === 0 && t.orphaned === 0)
+    return { status: "warn", detail: `could not verify: the first ${t.keys} subject key(s) read are each held by one thought, so no thread was read before the census's bound (${THREAD_CENSUS_BOUND} rows)`,
+             fix: `Read every key: ${linkCommand} --status, which counts the keys whose edges differ and names the first ${THREAD_CENSUS_NAMED}; ${linkCommand} links them.` };
   // No thread and nothing to do: said as the Threads row says it (review pass 3).
   if (t.complete && t.threads === 0 && t.unlinked === 0 && t.orphaned === 0)
     return { status: "ok", detail: "none — no subject key two thoughts hold, and no edge standing to close" };
@@ -2401,7 +2411,7 @@ export function threadsRow(t: ThreadsFact | null, u: Unread | undefined): { stat
   const differ = [t.unlinked ? `${t.unlinked} key(s) whose edges differ from their thread's` : "", t.orphaned ? `${t.orphaned} key(s) no thought holds still carrying edges` : ""].filter(Boolean).join(", ");
   // --status's shape (review pass 1): standing counts an orphan's edges, so "N of M" read 12 of 5.
   return { status: "warn", detail: `${head}; ${t.standing} edge(s) standing, ${t.whole} once every thread read is linked; ${differ}${scope}`,
-           fix: `Link them: ${linkCommand} (in batches; --dry-run counts first, --status names the first ${THREAD_CENSUS_NAMED} keys, each as --key takes it). A brain upgraded to 120 needs it once, for the threads it already held; a gap after that is a delete whose role could not re-link, or a raw write (120's NOT HERE). Every read but the thread's own works meanwhile.` };
+           fix: `Link them: ${linkCommand} (in batches; --dry-run counts first, --status names the first ${THREAD_CENSUS_NAMED} keys, each as --key takes it). A brain upgraded to 120 needs it once, for the threads it already held; a gap after that is a delete that could not re-link (a role without the writes, above READ COMMITTED, or beside a held key), or a raw write (120's NOT HERE). Every read works meanwhile, the thread's own included: it reads the subjects, not the edges.` };
 }
 
 /**
