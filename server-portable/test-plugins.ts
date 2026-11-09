@@ -1260,12 +1260,12 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     let plain: ModelAnswer;
     try {
       // Under a request (a REST or MCP call of the operation), as the servers run a handler: the call takes its class.
-      plain = await asLive(() => pluginChat(local, "writer", "smart-ingest", { system: "Be brief.", user: "Say something." }));
+      plain = await asLive(() => pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { system: "Be brief.", user: "Say something." }));
     } finally {
       setModelCallHook(prevHook);
     }
     const sent = bodies.at(-1);
-    const thinking = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_METADATA_REASONING: "low" }), "writer", "smart-ingest", { user: "Think." });
+    const thinking = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_METADATA_REASONING: "low" }), { actor: "writer", plugin: "smart-ingest" }, { user: "Think." });
     const sentThinking = bodies.at(-1);
     assert(plain.ok && plain.value.text === "the answer" && plain.value.model === "stub-model" && plain.value.json === undefined
       && JSON.stringify(seamCalls) === JSON.stringify([{ type: "chat", model: "classifier-model", purpose: "plugin", cls: "live" }])
@@ -1275,7 +1275,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
       `a call asks the brain's classifier model on its chat endpoint, the system and user texts as its messages, at the classifier's temperature and reasoning (OB1_METADATA_REASONING), through the model-call seam as a live call of purpose plugin (${JSON.stringify(plain)}; ${JSON.stringify(seamCalls)}; ${JSON.stringify(sent)})`);
 
     answer = () => Response.json({ choices: [{ message: { content: "```json\n{\"thoughts\": [1, 2]}\n```" } }] });
-    const asJson = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true, temperature: 0.2, max_tokens: 512 });
+    const asJson = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "Extract.", json: true, temperature: 0.2, max_tokens: 512 });
     const sentJson = bodies.at(-1);
     assert(asJson.ok && JSON.stringify(asJson.value.json) === JSON.stringify({ thoughts: [1, 2] }) && asJson.value.model === "classifier-model"
       && sentJson?.response_format?.type === "json_object" && sentJson?.temperature === 0.2 && sentJson?.max_tokens === 512
@@ -1283,37 +1283,45 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
       `json asks for a JSON object and answers the object parsed, its code fence let go; temperature and max_tokens sent as given; no system, no system message (${JSON.stringify(asJson)}; ${JSON.stringify(sentJson)})`);
 
     answer = () => Response.json({ choices: [{ message: { content: "{\"thoughts\": [" }, finish_reason: "length" }] });
-    const cutOff = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true, max_tokens: 16 });
+    const cutOff = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "Extract.", json: true, max_tokens: 16 });
     answer = () => Response.json({ choices: [{ message: { content: [{ type: "text", text: "{\"a\": " }, { type: "text", text: "1}" }] }, finish_reason: "stop" }] });
-    const parts = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true });
+    const parts = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "Extract.", json: true });
     assert(!cutOff.ok && cutOff.refusal.code === "NOT_JSON" && cutOff.refusal.finish_reason === "length" && /cut off at max_tokens/.test(cutOff.refusal.detail)
       && parts.ok && JSON.stringify(parts.value.json) === JSON.stringify({ a: 1 }) && parts.value.finish_reason === "stop",
       `an answer cut off at max_tokens says so (finish_reason length); content as text parts is joined, its finish_reason passed on (${JSON.stringify(cutOff)}; ${JSON.stringify(parts)})`);
     answer = () => Response.json({ choices: [{ message: { content: "[1, 2]" } }] });
-    const notObject = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true });
+    const notObject = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "Extract.", json: true });
     answer = () => Response.json({ choices: [{ message: { content: "not json at all" } }] });
-    const notJson = await pluginChat(local, "writer", "smart-ingest", { user: "Extract.", json: true });
+    const notJson = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "Extract.", json: true });
     assert(!notObject.ok && notObject.refusal.code === "NOT_JSON" && !notJson.ok && notJson.refusal.code === "NOT_JSON" && notJson.refusal.retryable === false,
       `json asked and the answer is no JSON object (an array, prose): NOT_JSON, not retryable (${JSON.stringify(notObject)}; ${JSON.stringify(notJson)})`);
 
     // The gate: a chat endpoint not declared local, under deny with no term, sends nothing; a term for the plugin's source or the caller's key lets it out.
     answer = () => Response.json({ choices: [{ message: { content: "let out" } }] });
     const before = bodies.length;
-    const kept = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny" }), "writer", "smart-ingest", { user: "private text" });
+    const kept = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
     const keptSent = bodies.length - before;
-    const byPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest" }), "writer", "smart-ingest", { user: "private text" });
-    const byActor = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "actor:writer" }), "writer", "smart-ingest", { user: "private text" });
-    const otherPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:agent-memory" }), "writer", "smart-ingest", { user: "private text" });
+    const byPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
+    const byActor = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "actor:writer" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
+    const otherPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:agent-memory" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
     // A source: term is a row's own label (the passes'): it never names a plugin's call, so it cannot let one out.
-    const bySourceName = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "source:smart-ingest" }), "writer", "smart-ingest", { user: "private text" });
-    // The gate reads the user text: a marker there keeps the call in, one in the plugin's own system prompt does neither.
-    const markedUser = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), "writer", "smart-ingest", { system: "plain", user: "do-not-send this" });
-    const markedSystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), "writer", "smart-ingest", { system: "do-not-send", user: "plain" });
-    const allowedBySystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "marker:#public" }), "writer", "smart-ingest", { system: "Answer #public questions.", user: "private text" });
+    const bySourceName = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "source:smart-ingest" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
+    // An allow term reads the user text alone: an allow marker in the plugin's own system prompt lets nothing out. A deny
+    // term reads the system prompt too, where keeping the call in fails safe: brain text put there is still held back.
+    const markedUser = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "plain", user: "do-not-send this" });
+    const beforeSystem = bodies.length;
+    const markedSystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
+    const markedSystemSent = bodies.length - beforeSystem;
+    const unmarked = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "plain", user: "plain" });
+    // Only allow reads deny terms, and a declared-local endpoint is never judged: the system text is read in neither.
+    const underDeny = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
+    const onLocal = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
+    const allowedBySystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "marker:#public" }), { actor: "writer", plugin: "smart-ingest" }, { system: "Answer #public questions.", user: "private text" });
     assert(!kept.ok && kept.refusal.code === "REFUSED_EGRESS" && kept.refusal.retryable === false && kept.refusal.to === `127.0.0.1:${provider.port}` && /no OB1_EGRESS_ALLOW term matches this plugin/.test(kept.refusal.reason) && !kept.refusal.reason.includes(base) && keptSent === 0
       && byPlugin.ok && byActor.ok && !otherPlugin.ok && otherPlugin.refusal.code === "REFUSED_EGRESS" && !bySourceName.ok && bySourceName.refusal.code === "REFUSED_EGRESS"
-      && !markedUser.ok && markedUser.refusal.code === "REFUSED_EGRESS" && markedSystem.ok && !allowedBySystem.ok && allowedBySystem.refusal.code === "REFUSED_EGRESS",
-      `the egress gate judges the call before it is made: refused under deny with no term (nothing sent), let out by its plugin:<name> or the caller's key, kept in by another plugin's term or a source: term of its name, and markers read against the user text alone, never the plugin's system prompt (${JSON.stringify(kept)}; ${JSON.stringify(bySourceName)}; ${JSON.stringify(markedSystem)}; ${JSON.stringify(allowedBySystem)})`);
+      && !markedUser.ok && markedUser.refusal.code === "REFUSED_EGRESS" && !allowedBySystem.ok && allowedBySystem.refusal.code === "REFUSED_EGRESS"
+      && !markedSystem.ok && markedSystem.refusal.code === "REFUSED_EGRESS" && /OB1_EGRESS_DENY marker:do-not-send matches this plugin's system text/.test(markedSystem.refusal.reason) && markedSystemSent === 0 && unmarked.ok && underDeny.ok && onLocal.ok,
+      `the egress gate judges the call before it is made: refused under deny with no term (nothing sent), let out by its plugin:<name> or the caller's key, kept in by another plugin's term or a source: term of its name; an allow marker read against the user text alone, a deny marker against the system prompt too (under allow, to an endpoint not declared local) (${JSON.stringify(kept)}; ${JSON.stringify(bySourceName)}; ${JSON.stringify(markedSystem)}; ${JSON.stringify(allowedBySystem)})`);
     // Every other caller of the blanket check carries a key and a row's units, never a plugin: a plugin: term opens none of them.
     const pluginTermOnly = resolveEgressPolicy({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest" });
     const blanket = refusesEverything({ base, local: false }, pluginTermOnly);
@@ -1323,7 +1331,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     // The provider: not answering is retryable; refusing is not.
     const failed = async (respond: (body: Record<string, any>) => Response) => {
       answer = respond;
-      return pluginChat(local, "writer", "smart-ingest", { user: "Extract." });
+      return pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "Extract." });
     };
     const down503 = await failed(() => new Response("busy", { status: 503 }));
     const down429 = await failed(() => new Response("slow down", { status: 429 }));
@@ -1349,6 +1357,47 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
       && !noMessage.ok && noMessage.refusal.code === "PROVIDER_REFUSED" && noMessage.refusal.detail === "its answer holds no message"
       && !spent.ok && spent.refusal.code === "PROVIDER_REFUSED" && spent.refusal.detail === "it spent max_tokens before any answer" && spent.refusal.finish_reason === "length",
       `a provider that does not answer (503, 429, the deadline) is PROVIDER_UNAVAILABLE, retryable; one that refuses (400, its words in the refusal and the log), answers no JSON or no message (max_tokens spent said) is PROVIDER_REFUSED (${JSON.stringify([down503, timedOut, refused400, notJsonBody, noMessage])})`);
+
+    // An answer with no message is logged too, its finish_reason named; a fault that is no provider's (the
+    // runtime's, a seam's) is thrown, not dressed as a refusal.
+    const saidEmpty: string[] = [];
+    console.error = (...a: unknown[]) => { saidEmpty.push(a.map(String).join(" ")); };
+    try {
+      await failed(() => Response.json({ choices: [{ message: {}, finish_reason: "content_filter" }] }));
+    } finally {
+      console.error = realError;
+    }
+    const prevFault = setModelCallHook(async () => { throw new TypeError("planted seam fault"); });
+    let fault: unknown;
+    try {
+      await failed(() => Response.json({ choices: [{ message: { content: "unreached" } }] }));
+    } catch (e) {
+      fault = e;
+    } finally {
+      setModelCallHook(prevFault);
+    }
+    assert(saidEmpty.some((l) => l.includes("ctx.model (plugin smart-ingest)") && l.includes("answered no message (finish_reason content_filter)"))
+      && fault instanceof TypeError && fault.message === "planted seam fault",
+      `no message is logged with its finish_reason; a fault no provider made is thrown as it was (${JSON.stringify(saidEmpty)}; ${String(fault)})`);
+
+    // The bounds are inclusive, and a temperature of 0 is sent as 0, not the classifier's.
+    answer = () => Response.json({ choices: [{ message: { content: "ok" } }] });
+    const atLimit = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_METADATA_TEMPERATURE: "0.7" }), { actor: "writer", plugin: "smart-ingest" }, { user: "x".repeat(MODEL_LIMITS.text), system: "y".repeat(MODEL_LIMITS.text), max_tokens: MODEL_LIMITS.maxTokens, temperature: 0 });
+    const sentAtLimit = bodies.at(-1);
+    assert(atLimit.ok && sentAtLimit?.max_tokens === MODEL_LIMITS.maxTokens && sentAtLimit?.temperature === 0 && sentAtLimit?.messages?.[1]?.content.length === MODEL_LIMITS.text,
+      `a text of ${MODEL_LIMITS.text} characters and max_tokens ${MODEL_LIMITS.maxTokens} are within bounds; temperature 0 is sent as 0, not the classifier's 0.7 (${JSON.stringify(atLimit)}; temperature ${sentAtLimit?.temperature})`);
+
+    // The core's method, as plugins.ts calls it: the stack's own config, the caller passed through whole.
+    const realCore = createCore({
+      env: () => ({ OB1_LLM_BASE_URL: base, OB1_METADATA_MODEL: "classifier-model", OB1_LLM_TIMEOUT: "2", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest" }) as never,
+      store: () => Promise.reject(new Error("no store")),
+      door: "test",
+    });
+    const viaCore = await realCore.pluginChat({ actor: "writer", plugin: "smart-ingest" }, { user: "x" });
+    const sentViaCore = bodies.at(-1);
+    const swapped = await realCore.pluginChat({ actor: "smart-ingest", plugin: "writer" }, { user: "x" });
+    assert(viaCore.ok && sentViaCore?.model === "classifier-model" && !swapped.ok && swapped.refusal.code === "REFUSED_EGRESS",
+      `the core's pluginChat reads the stack's config and judges the plugin it is given, not the actor (${JSON.stringify(viaCore)}; ${JSON.stringify(swapped)})`);
   } finally {
     provider.stop(true);
   }
@@ -1357,7 +1406,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
   {
     const chatOnly = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy", { status: 503 }) });
     try {
-      const own = await pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://127.0.0.1:9/v1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${chatOnly.port}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_LOCAL: "1", OB1_LLM_TIMEOUT: "2" }), "writer", "smart-ingest", { user: "x" });
+      const own = await pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://127.0.0.1:9/v1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${chatOnly.port}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_LOCAL: "1", OB1_LLM_TIMEOUT: "2" }), { actor: "writer", plugin: "smart-ingest" }, { user: "x" });
       assert(!own.ok && own.refusal.code === "PROVIDER_UNAVAILABLE" && own.refusal.to === `127.0.0.1:${chatOnly.port}`,
         `with OB1_CHAT_BASE_URL the call goes to the chat endpoint, and a refusal names its host (${JSON.stringify(own)})`);
     } finally {
@@ -1370,7 +1419,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
   const closedBase = `http://127.0.0.1:${closed.port}/v1`;
   closed.stop(true);
   // A throw here would be the runtime's error passed through: caught, so it fails this row and not the suite.
-  const unreachable = await pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1", OB1_LLM_TIMEOUT: "2" }), "writer", "smart-ingest", { user: "Extract." })
+  const unreachable = await pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1", OB1_LLM_TIMEOUT: "2" }), { actor: "writer", plugin: "smart-ingest" }, { user: "Extract." })
     .catch((e: unknown): ModelAnswer => ({ ok: false, refusal: { code: "REFUSED_INPUT", retryable: false, message: `thrown: ${String(e)}` } }));
   assert(!unreachable.ok && unreachable.refusal.code === "PROVIDER_UNAVAILABLE" && unreachable.refusal.reason === "provider_unreachable",
     `a provider no connection reaches is PROVIDER_UNAVAILABLE (${JSON.stringify(unreachable)})`);
@@ -1384,7 +1433,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     { user: "ok", max_tokens: 0 },
     { user: "ok", max_tokens: MODEL_LIMITS.maxTokens + 1 },
     { user: "ok", json: "yes" as unknown as boolean },
-  ].map((req) => pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1" }), "writer", "smart-ingest", req)));
+  ].map((req) => pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1" }), { actor: "writer", plugin: "smart-ingest" }, req)));
   assert(bounds.every((b) => !b.ok && b.refusal.code === "REFUSED_INPUT" && b.refusal.retryable === false),
     `a request outside its bounds (no text, a text or system past ${MODEL_LIMITS.text} characters, a temperature past 2, max_tokens outside 1 to ${MODEL_LIMITS.maxTokens}, json not a boolean) is REFUSED_INPUT, nothing sent (${JSON.stringify(bounds.map((b) => (b.ok ? "ok" : b.refusal.code)))})`);
 
@@ -1398,7 +1447,7 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     await runOperation(probe as never, { core: stubCore, principal: { name: "reader", scope: "read" } as Principal }, {}).catch(() => undefined);
     return got;
   })();
-  assert(JSON.stringify(seen) === JSON.stringify([["example", "reader", { user: "hi", json: true }]]) && (ctxModel as { ok?: boolean })?.ok === true,
+  assert(JSON.stringify(seen) === JSON.stringify([[{ actor: "reader", plugin: "example" }, { user: "hi", json: true }]]) && (ctxModel as { ok?: boolean })?.ok === true,
     `ctx.model.chat is the core's call for the handler's plugin, made as the caller's key (${JSON.stringify(seen)})`);
 }
 

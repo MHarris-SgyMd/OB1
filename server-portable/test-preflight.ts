@@ -5407,6 +5407,25 @@ if (want("8")) {
   const inherit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_API_KEY: "k" });
   assert(new RegExp(String.raw`✓\s+chat egress\s+${rx(LOCAL)} is declared local \(OB1_LLM_LOCAL\)`).test(inherit.out),
          "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
+
+  // A plugin: term reaches a plugin's model call alone (SMD-2690 PR 3a): it
+  // lets no capture or pass out, so it is no "some call might pass" on a row,
+  // and it never reaches the embeddings endpoint at all.
+  const pluginOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+embeddings egress\s+every embeddings and chat call a capture or pass makes to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term over actor, source, type, topic, marker; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land without a vector/.test(pluginOnly.out),
+         "plugin: terms alone under deny: the shared endpoint's row warns that every capture's and pass's call is refused, and says what the terms do let out");
+  const pluginOnlySplit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_CHAT_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+embeddings egress\s+every embeddings call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) reach a plugin's model call on the chat endpoint, never this one — so/.test(pluginOnlySplit.out),
+         "…and an embeddings endpoint of its own is told the terms never reach it");
+  const undeclaredPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/looks local but is not declared so — the gate treats it as remote, and under deny with no allow term a capture or pass can match, every embeddings and chat call they make is refused; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out/.test(undeclaredPlugin.out),
+         "…and the upgrade-case row says the same");
+  // A plugin: term naming no enabled plugin matches nothing: warned by name.
+  const strayPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:exampel, actor:chatgpt" });
+  assert(/!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables \(example\) — such a term matches no call/.test(strayPlugin.out)
+         && /✓\s+embeddings egress\s+the embeddings and chat text leaves to openrouter\.ai only under an OB1_EGRESS_ALLOW term/.test(strayPlugin.out),
+         "a plugin: term naming no enabled plugin is warned by name; an actor: term beside it keeps the endpoint row ok");
+  assert(!/no plugin OB1_PLUGINS enables/.test(pluginOnly.out), "…and no such warning for an enabled plugin's name");
 }
 
 if (want("9")) {

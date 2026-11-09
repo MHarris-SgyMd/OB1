@@ -41,8 +41,9 @@ export function egressDescription(endpoint: ProviderEndpoint, policy: EgressPoli
 /**
  * The bare reason every call to this endpoint would be refused, or null when at
  * least one would go through. `units` are what a row of the pass carries; left
- * undefined it is the full set (an actor credited optimistically before a worker
- * key has, or has not, resolved). A caller that wants the worker's full "Nothing
+ * undefined it is every unit a keyed caller carries (KEYED_UNITS: an actor
+ * credited optimistically before a worker key has, or has not, resolved, and a
+ * row's units; never plugin, which names a plugin's model call alone). A caller that wants the worker's full "Nothing
  * would be <verb>" sentence uses blanketGate; sync-linear.ts, and reembed.ts's
  * blurbs warning, wrap the bare reason in their own text and use this.
  */

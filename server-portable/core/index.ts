@@ -15,7 +15,7 @@ import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
 import * as agendaRead from "./agenda.ts";
-import { pluginChat, type ModelAnswer, type ModelRequest } from "./model.ts";
+import { pluginChat, type ModelAnswer, type ModelCaller, type ModelRequest } from "./model.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { mayLeaveBox } from "../egress.ts";
 import { resolveJevConfig } from "../jev.ts";
@@ -95,7 +95,7 @@ export function createCore(deps: CoreDeps) {
      * call through the brain's own provider path and egress gate, made as the
      * caller's key for the plugin. ctx.model.chat is this, bound to its call.
      */
-    pluginChat: (plugin: string, actor: string, req: ModelRequest): Promise<ModelAnswer> => pluginChat(ctx.embedConfig(), actor, plugin, req),
+    pluginChat: (who: ModelCaller, req: ModelRequest): Promise<ModelAnswer> => pluginChat(ctx.embedConfig(), who, req),
     /** The longest one capture's model calls may run under this brain's settings, in seconds: what a webhook's id lease is sized from (SMD-2768). */
     captureSeconds: (): number => writes.captureCallSeconds(ctx.embedConfig(), resolveJevConfig(ctx.env())),
     /** The vector mender's loop (SMD-2889): both servers start one at boot, under OB1_VECTOR_MEND_INTERVAL. */

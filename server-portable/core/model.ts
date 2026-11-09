@@ -7,7 +7,7 @@
 // ask, never where or of whom. SMD-3478 is the same call for a workflow's run.
 
 import { ProviderError, providerCall, providerDown, type EmbedConfig } from "../embed.ts";
-import { hostOf, type EgressSubject } from "../egress.ts";
+import { hostOf, termMatches, type EgressSubject } from "../egress.ts";
 
 /** The bounds on one call's input: each text, and the answer's tokens. */
 export const MODEL_LIMITS = { text: 100_000, maxTokens: 8_192 } as const;
@@ -91,19 +91,31 @@ function contentText(content: unknown): string | null {
   return parts.length ? parts.join("") : null;
 }
 
+/** Who asks: the caller's key's name and the plugin whose operation it called. One object, so the two names cannot trade places. */
+export type ModelCaller = { actor: string; plugin: string };
+
 /**
- * One chat call for `plugin`'s handler, made as `actor` (the caller's key's
- * name). The egress subject is the plugin's: its actor, the plugin (the
- * `plugin` unit, so `OB1_EGRESS_ALLOW=plugin:<name>` or `actor:<key>` lets it
- * out), and the user text alone as its content. The system prompt is the
- * plugin's own words, not the brain's text: a `marker:` term read against it
- * would let out, or keep in, every call the plugin makes, whatever it sends.
+ * One chat call for a plugin's handler, made as the caller's key. The egress
+ * subject is the plugin's: its actor, the plugin (the `plugin` unit, so
+ * `OB1_EGRESS_ALLOW=plugin:<name>` or `actor:<key>` lets it out), and the user
+ * text as its content. The system prompt is the plugin's own words: an allow
+ * term read against it would let out every call the plugin makes, whatever it
+ * sends, so the gate reads the user text alone. A deny term is also read
+ * against the system prompt, where keeping a call in fails safe: brain text a
+ * plugin put there (as it must not) is still held back. The brain's or the
+ * caller's text belongs in `user`.
  */
-export async function pluginChat(cfg: EmbedConfig, actor: string, plugin: string, req: ModelRequest): Promise<ModelAnswer> {
+export async function pluginChat(cfg: EmbedConfig, { actor, plugin }: ModelCaller, req: ModelRequest): Promise<ModelAnswer> {
   const problem = requestProblem(req);
   if (problem) return refusedInput(problem);
   const to = hostOf(cfg.chat.base);
   const subject: EgressSubject = { kind: "plugin", actor, plugin, content: req.user };
+  if (req.system && !cfg.chat.local && cfg.egress.mode === "allow") {
+    const hit = cfg.egress.deny.find((t) => termMatches(t, { ...subject, content: req.system }));
+    if (hit) {
+      return { ok: false, refusal: { code: "REFUSED_EGRESS", retryable: false, to, reason: `OB1_EGRESS_DENY ${hit.unit}:${hit.value} matches this plugin's system text — the text was not sent to ${to}` } };
+    }
+  }
   const messages = [...(req.system ? [{ role: "system", content: req.system }] : []), { role: "user", content: req.user }];
   let answer: { model?: unknown; choices?: { message?: { content?: unknown }; finish_reason?: unknown }[] };
   try {
