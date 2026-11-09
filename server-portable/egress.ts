@@ -73,7 +73,11 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * plugin whose operation asks the model (ctx.model, SMD-2690 PR 3a): its own
  * unit, never `source`, which a plugin's captures carry too (a `source:` term
  * written for the passes would otherwise release the plugin's calls, and a
- * `plugin:` term the rows it labelled).
+ * `plugin:` term the rows it labelled). Under deny a `plugin:` term is the
+ * only one that releases a plugin's call: its text is whatever the plugin
+ * read, other keys' rows among them, so neither the caller's `actor:` term
+ * nor a `marker:` one row of a bundle carries may let it out (the
+ * maintainer's call, PR 3a's third review pass). Any deny term still holds it.
  */
 export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker", "plugin"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
@@ -251,7 +255,8 @@ export function hostOf(base: string): string {
 /**
  * The gate. One pure function: the subject, the endpoint it would be sent to
  * (only `base` and `local` are read), the policy, and optionally a second
- * opinion that can only tighten the answer.
+ * opinion that can only tighten the answer. A plugin's model call is released
+ * under deny by a `plugin:` term alone (EGRESS_UNITS says why).
  */
 export function mayLeaveBox(
   subject: EgressSubject,
@@ -268,13 +273,15 @@ export function mayLeaveBox(
   if (policy.mode === "off") {
     decision = { allowed: true, rule: "off", reason: `OB1_EGRESS_POLICY=off — the gate is off; the text leaves to ${host}` };
   } else if (policy.mode === "deny") {
-    const hit = policy.allow.find((t) => termMatches(t, subject));
+    const releases = subject.kind === "plugin" ? policy.allow.filter((t) => t.unit === "plugin") : policy.allow;
+    const hit = releases.find((t) => termMatches(t, subject));
+    const pluginOnly = subject.kind === "plugin" ? "; only a plugin: term releases a plugin's call" : "";
     decision = hit
       ? { allowed: true, rule: "allow-term", reason: `allowed to leave to ${host} by OB1_EGRESS_ALLOW ${showTerm(hit)}` }
       : {
           allowed: false,
           rule: "no-allow-term",
-          reason: `OB1_EGRESS_POLICY=deny${policy.configured === undefined && !closed ? " (the default)" : ""}${closed} and no OB1_EGRESS_ALLOW term matches this ${subject.kind}${policy.allow.length ? ` (${policy.allow.map(showTerm).join(", ")})` : " (none set)"} — the text was not sent to ${host}`,
+          reason: `OB1_EGRESS_POLICY=deny${policy.configured === undefined && !closed ? " (the default)" : ""}${closed} and no OB1_EGRESS_ALLOW term matches this ${subject.kind}${policy.allow.length ? ` (${policy.allow.map(showTerm).join(", ")})` : " (none set)"}${pluginOnly} — the text was not sent to ${host}`,
         };
   } else {
     const hit = policy.deny.find((t) => termMatches(t, subject));

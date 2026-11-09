@@ -203,6 +203,17 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
          "…and nothing else: not a capture whose actor, source or text is the name, not a pass's row, not a search");
   const heldRow = mayLeaveBox({ kind: "re-embed", metadata: { source: "x" } }, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "plugin:x" }));
   assert(!heldRow.allowed && heldRow.rule === "no-allow-term", `under deny, a plugin: term lets no row out, though the row's source is the plugin's name (${heldRow.reason})`);
+  // Under deny a plugin's call is released by a plugin: term alone — not by its caller's actor: term, nor a marker
+  // its text carries, which still release that key's captures; under allow a deny term of any unit holds it.
+  const callAs = { kind: "plugin", actor: "k", plugin: "x", content: "a #public row" } as const;
+  const byKey = mayLeaveBox(callAs, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:k,marker:#public" }));
+  assert(!byKey.allowed && byKey.rule === "no-allow-term" && /only a plugin: term releases a plugin's call/.test(byKey.reason)
+         && mayLeaveBox({ kind: "capture", actor: "k", content: "a #public row" }, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:k" })).allowed
+         && mayLeaveBox(callAs, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:k,plugin:x" })).allowed,
+         `under deny an actor: or marker: term does not release a plugin's call, though it releases the key's capture; plugin: does (${byKey.reason})`);
+  assert(!mayLeaveBox(callAs, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "actor:k" })).allowed
+         && !mayLeaveBox(callAs, remote, resolveEgressPolicy({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#public" })).allowed,
+         "…and under allow the caller's actor: or a marker: deny term holds it");
   const pluginOnly = refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "plugin:x" }));
   assert(pluginOnly !== null && /plugin:x\) names a unit this caller never carries/.test(pluginOnly), `…and a keyed caller is refused up front when plugin: terms are all there are (${pluginOnly})`);
 }

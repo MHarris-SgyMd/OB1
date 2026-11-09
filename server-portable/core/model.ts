@@ -96,12 +96,11 @@ export type ModelCaller = { actor: string; plugin: string };
 
 /**
  * One chat call for a plugin's handler, made as the caller's key. The egress
- * subject is the plugin's: its actor, the plugin (the `plugin` unit, so
- * `OB1_EGRESS_ALLOW=plugin:<name>` or `actor:<key>` lets it out), and the user
- * text as its content. The system prompt is the plugin's own words: an allow
- * term read against it would let out every call the plugin makes, whatever it
- * sends, so the gate reads the user text alone. A deny term is also read
- * against the system prompt, where keeping a call in fails safe: brain text a
+ * subject is the plugin's: its actor, the plugin (the `plugin` unit:
+ * `OB1_EGRESS_ALLOW=plugin:<name>` alone lets it out under deny; a deny term
+ * of any unit holds it), and the user text as its content. The system prompt
+ * is the plugin's own words, so the subject leaves it out; a deny marker is
+ * also read against it, where keeping a call in fails safe: brain text a
  * plugin put there (as it must not) is still held back. The brain's or the
  * caller's text belongs in `user`.
  */
@@ -111,7 +110,9 @@ export async function pluginChat(cfg: EmbedConfig, { actor, plugin }: ModelCalle
   const to = hostOf(cfg.chat.base);
   const subject: EgressSubject = { kind: "plugin", actor, plugin, content: req.user };
   if (req.system && !cfg.chat.local && cfg.egress.mode === "allow") {
-    const hit = cfg.egress.deny.find((t) => termMatches(t, { ...subject, content: req.system }));
+    // The system text alone, no actor or plugin, so only a marker can match it. An actor: or plugin: deny term is the
+    // gate's to name, on the user subject below — read here it would blame the system text for the key's or plugin's.
+    const hit = cfg.egress.deny.find((t) => termMatches(t, { kind: "plugin", content: req.system }));
     if (hit) {
       return { ok: false, refusal: { code: "REFUSED_EGRESS", retryable: false, to, reason: `OB1_EGRESS_DENY ${hit.unit}:${hit.value} matches this plugin's system text — the text was not sent to ${to}` } };
     }

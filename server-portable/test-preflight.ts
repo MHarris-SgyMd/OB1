@@ -5417,6 +5417,9 @@ if (want("8")) {
   const pluginOnlySplit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_CHAT_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
   assert(/!\s+embeddings egress\s+every embeddings call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) reach a plugin's model call on the chat endpoint, never this one — so/.test(pluginOnlySplit.out),
          "…and an embeddings endpoint of its own is told the terms never reach it");
+  const pluginOnlyChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+chat egress\s+every chat call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land untagged/.test(pluginOnlyChat.out),
+         "…while a chat endpoint of its own is told what they let out");
   const undeclaredPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
   assert(/looks local but is not declared so — the gate treats it as remote, and under deny with no allow term a capture or pass can match, every embeddings and chat call they make is refused; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out/.test(undeclaredPlugin.out),
          "…and the upgrade-case row says the same");

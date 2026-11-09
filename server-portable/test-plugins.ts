@@ -1296,18 +1296,19 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     assert(!notObject.ok && notObject.refusal.code === "NOT_JSON" && !notJson.ok && notJson.refusal.code === "NOT_JSON" && notJson.refusal.retryable === false,
       `json asked and the answer is no JSON object (an array, prose): NOT_JSON, not retryable (${JSON.stringify(notObject)}; ${JSON.stringify(notJson)})`);
 
-    // The gate: a chat endpoint not declared local, under deny with no term, sends nothing; a term for the plugin's source or the caller's key lets it out.
+    // The gate: a chat endpoint not declared local, under deny with no term, sends nothing; a plugin: term, and no other, lets it out.
     answer = () => Response.json({ choices: [{ message: { content: "let out" } }] });
     const before = bodies.length;
     const kept = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
     const keptSent = bodies.length - before;
     const byPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
+    // The caller's key and a marker the text carries release its captures, never a plugin's call: its text is whatever the plugin read.
     const byActor = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "actor:writer" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
+    const byMarker = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "marker:#public" }), { actor: "writer", plugin: "smart-ingest" }, { user: "one #public row among others" });
     const otherPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:agent-memory" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
     // A source: term is a row's own label (the passes'): it never names a plugin's call, so it cannot let one out.
     const bySourceName = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "source:smart-ingest" }), { actor: "writer", plugin: "smart-ingest" }, { user: "private text" });
-    // An allow term reads the user text alone: an allow marker in the plugin's own system prompt lets nothing out. A deny
-    // term reads the system prompt too, where keeping the call in fails safe: brain text put there is still held back.
+    // An allow marker in the plugin's own system prompt lets nothing out. A deny marker reads the system prompt too, where keeping the call in fails safe: brain text put there is still held back.
     const markedUser = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "plain", user: "do-not-send this" });
     const beforeSystem = bodies.length;
     const markedSystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
@@ -1316,12 +1317,22 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     // Only allow reads deny terms, and a declared-local endpoint is never judged: the system text is read in neither.
     const underDeny = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
     const onLocal = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
+    // The embeddings endpoint declared local and the chat endpoint not: the chat endpoint's declaration is the one read.
+    const beforeSplit = bodies.length;
+    const splitChat = await pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: "http://127.0.0.1:9/v1", OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: base, OB1_CHAT_API_KEY: "k", OB1_LLM_TIMEOUT: "2", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:do-not-send" }), { actor: "writer", plugin: "smart-ingest" }, { system: "do-not-send", user: "plain" });
+    const splitSent = bodies.length - beforeSplit;
+    // A key's or a plugin's deny term is named as itself, though the call has a system prompt.
+    const deniedPlugin = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "plugin:smart-ingest" }), { actor: "writer", plugin: "smart-ingest" }, { system: "Extract thoughts.", user: "plain" });
+    const deniedActor = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "actor:writer" }), { actor: "writer", plugin: "smart-ingest" }, { system: "Extract thoughts.", user: "plain" });
     const allowedBySystem = await pluginChat(cfgOf({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "marker:#public" }), { actor: "writer", plugin: "smart-ingest" }, { system: "Answer #public questions.", user: "private text" });
     assert(!kept.ok && kept.refusal.code === "REFUSED_EGRESS" && kept.refusal.retryable === false && kept.refusal.to === `127.0.0.1:${provider.port}` && /no OB1_EGRESS_ALLOW term matches this plugin/.test(kept.refusal.reason) && !kept.refusal.reason.includes(base) && keptSent === 0
-      && byPlugin.ok && byActor.ok && !otherPlugin.ok && otherPlugin.refusal.code === "REFUSED_EGRESS" && !bySourceName.ok && bySourceName.refusal.code === "REFUSED_EGRESS"
+      && byPlugin.ok && [byActor, byMarker].every((b) => !b.ok && b.refusal.code === "REFUSED_EGRESS" && /only a plugin: term releases a plugin's call/.test((b.refusal as { reason: string }).reason)) && !otherPlugin.ok && otherPlugin.refusal.code === "REFUSED_EGRESS" && !bySourceName.ok && bySourceName.refusal.code === "REFUSED_EGRESS"
       && !markedUser.ok && markedUser.refusal.code === "REFUSED_EGRESS" && !allowedBySystem.ok && allowedBySystem.refusal.code === "REFUSED_EGRESS"
-      && !markedSystem.ok && markedSystem.refusal.code === "REFUSED_EGRESS" && /OB1_EGRESS_DENY marker:do-not-send matches this plugin's system text/.test(markedSystem.refusal.reason) && markedSystemSent === 0 && unmarked.ok && underDeny.ok && onLocal.ok,
-      `the egress gate judges the call before it is made: refused under deny with no term (nothing sent), let out by its plugin:<name> or the caller's key, kept in by another plugin's term or a source: term of its name; an allow marker read against the user text alone, a deny marker against the system prompt too (under allow, to an endpoint not declared local) (${JSON.stringify(kept)}; ${JSON.stringify(bySourceName)}; ${JSON.stringify(markedSystem)}; ${JSON.stringify(allowedBySystem)})`);
+      && !markedSystem.ok && markedSystem.refusal.code === "REFUSED_EGRESS" && /OB1_EGRESS_DENY marker:do-not-send matches this plugin's system text/.test(markedSystem.refusal.reason) && markedSystemSent === 0 && unmarked.ok && underDeny.ok && onLocal.ok
+      && !splitChat.ok && splitChat.refusal.code === "REFUSED_EGRESS" && splitSent === 0
+      && [deniedPlugin, deniedActor].every((d) => !d.ok && d.refusal.code === "REFUSED_EGRESS" && !/system text/.test((d.refusal as { reason: string }).reason))
+      && !deniedPlugin.ok && /plugin:smart-ingest/.test((deniedPlugin.refusal as { reason: string }).reason) && !deniedActor.ok && /actor:writer/.test((deniedActor.refusal as { reason: string }).reason),
+      `the egress gate judges the call before it is made: refused under deny with no term (nothing sent), let out by its plugin:<name> alone, kept in by the caller's actor: term, a marker: term, another plugin's term or a source: term of its name; an allow marker in the system prompt lets nothing out, a deny marker there holds it (under allow, to a chat endpoint not declared local, whatever the embeddings one is); a key's or plugin's deny term named as itself, never the system text (${JSON.stringify(kept)}; ${JSON.stringify(byActor)}; ${JSON.stringify(splitChat)}; ${JSON.stringify(deniedPlugin)}; ${JSON.stringify(deniedActor)}; ${JSON.stringify(bySourceName)}; ${JSON.stringify(markedSystem)}; ${JSON.stringify(allowedBySystem)})`);
     // Every other caller of the blanket check carries a key and a row's units, never a plugin: a plugin: term opens none of them.
     const pluginTermOnly = resolveEgressPolicy({ OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "plugin:smart-ingest" });
     const blanket = refusesEverything({ base, local: false }, pluginTermOnly);
@@ -1382,6 +1393,13 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
 
     // The bounds are inclusive, and a temperature of 0 is sent as 0, not the classifier's.
     answer = () => Response.json({ choices: [{ message: { content: "ok" } }] });
+    const lowEdge = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "x", temperature: 2, max_tokens: 1 });
+    const sentLowEdge = bodies.at(-1);
+    answer = () => Response.json({ choices: [{ message: { content: [] } }] });
+    const noParts = await pluginChat(local, { actor: "writer", plugin: "smart-ingest" }, { user: "x" });
+    answer = () => Response.json({ choices: [{ message: { content: "ok" } }] });
+    assert(lowEdge.ok && sentLowEdge?.temperature === 2 && sentLowEdge?.max_tokens === 1 && !noParts.ok && noParts.refusal.code === "PROVIDER_REFUSED" && noParts.refusal.detail === "its answer holds no message",
+      `temperature 2 and max_tokens 1 are within bounds; a message of no text parts is no message (${JSON.stringify(lowEdge)}; ${JSON.stringify(noParts)})`);
     const atLimit = await pluginChat(cfgOf({ OB1_LLM_LOCAL: "1", OB1_METADATA_TEMPERATURE: "0.7" }), { actor: "writer", plugin: "smart-ingest" }, { user: "x".repeat(MODEL_LIMITS.text), system: "y".repeat(MODEL_LIMITS.text), max_tokens: MODEL_LIMITS.maxTokens, temperature: 0 });
     const sentAtLimit = bodies.at(-1);
     assert(atLimit.ok && sentAtLimit?.max_tokens === MODEL_LIMITS.maxTokens && sentAtLimit?.temperature === 0 && sentAtLimit?.messages?.[1]?.content.length === MODEL_LIMITS.text,
@@ -1430,12 +1448,14 @@ console.log("\n[17] ctx.model: a handler's model call through the brain's provid
     { user: "x".repeat(MODEL_LIMITS.text + 1) },
     { user: "ok", system: "y".repeat(MODEL_LIMITS.text + 1) },
     { user: "ok", temperature: 3 },
+    { user: "ok", temperature: -1 },
+    { user: "ok", system: 5 as unknown as string },
     { user: "ok", max_tokens: 0 },
     { user: "ok", max_tokens: MODEL_LIMITS.maxTokens + 1 },
     { user: "ok", json: "yes" as unknown as boolean },
   ].map((req) => pluginChat(resolveEmbedConfig({ OB1_LLM_BASE_URL: closedBase, OB1_LLM_LOCAL: "1" }), { actor: "writer", plugin: "smart-ingest" }, req)));
   assert(bounds.every((b) => !b.ok && b.refusal.code === "REFUSED_INPUT" && b.refusal.retryable === false),
-    `a request outside its bounds (no text, a text or system past ${MODEL_LIMITS.text} characters, a temperature past 2, max_tokens outside 1 to ${MODEL_LIMITS.maxTokens}, json not a boolean) is REFUSED_INPUT, nothing sent (${JSON.stringify(bounds.map((b) => (b.ok ? "ok" : b.refusal.code)))})`);
+    `a request outside its bounds (no text, a text or system past ${MODEL_LIMITS.text} characters, a system that is no string, a temperature outside 0 to 2, max_tokens outside 1 to ${MODEL_LIMITS.maxTokens}, json not a boolean) is REFUSED_INPUT, nothing sent (${JSON.stringify(bounds.map((b) => (b.ok ? "ok" : b.refusal.code)))})`);
 
   // The handler's context reaches it as the caller, for its plugin.
   const seen: unknown[][] = [];

@@ -82,8 +82,9 @@ export interface PluginContext {
    * temperature?, max_tokens? })` asks the brain's classifier model
    * (OB1_METADATA_MODEL) through the brain's own provider path, never a
    * provider of the plugin's. The egress gate judges it as the caller's key
-   * (`actor`) for this plugin (`plugin`) before anything is sent: an allow
-   * term reads the user text alone, a deny term the system prompt too, so the
+   * (`actor`) for this plugin (`plugin`) before anything is sent: under deny
+   * only a `plugin:` allow term lets it out; under allow a deny term of any
+   * unit holds it, a deny marker read in the system prompt too, so the
    * brain's text and the caller's go in `user`, never `system`. The
    * model-call seam holds and measures it, and OB1_LLM_TIMEOUT bounds it. Its
    * answer is the model's text (and the object parsed from it, with `json`),
