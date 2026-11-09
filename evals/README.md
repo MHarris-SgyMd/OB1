@@ -4704,6 +4704,81 @@ tool's own list would need a name of its own. A new read is added there with wha
 | 2026-10-14 | SMD-2888 | SMD-2540 | plain absent; ticket_rows absent |
 | 2026-11-02 | SMD-2908 | SMD-1853 | plain absent; filter 4 |
 
+## A day's board, replayed (SMD-3669)
+
+`board-replay.ts` rebuilds the project's Linear board as it stood at a moment and asks the agenda as of then. A
+"what next" session can then be checked against the order the brain would have given.
+
+```bash
+bun board-replay.ts --self-check     # the rollback, fetch, budget read and report; no database, no Linear
+../db/with-postgres.sh bun board-replay.ts --at 2026-11-02T14:11:00Z --show SMD-2908,SMD-3602,SMD-1853
+```
+
+**The board comes from Linear's own history** (the maintainer's choice, 2026-11-08), read at run time with
+`LINEAR_API_KEY` as board-sync reads it.
+* **Fetch:** every issue on the initiative's board today, then each issue's history.
+* **Undo:** every history entry after the moment, newest first: the state, the priority, the due date, the parent,
+  the project, the labels, the title and the relations.
+* **Leave out:** an issue created after the moment, and one whose project then wasn't the initiative's.
+
+A relation change reads as an action (`a` added, `r` removed) then a type: `x` it blocks, `b` it is blocked by, `r`
+related, `d` it duplicates, `m` it is duplicated by. `xr`, `br`, `xo` and `bo` are Linear's notes that a blocker was
+resolved or reopened, not changes: on the board, the relation stood after each of them. Any other code stops the run
+by name, since skipping it would plant a board that never was.
+
+**It plants the board as board-sync would have.** Each row is inserted under board-sync's actor with `renderIssue`'s
+text and `issueFacets`' metadata, and no embedding, which the agenda doesn't read. Board-sync's own writers do the
+rest: `recordStructure` records each row's source and links, and, once the operator declares board-sync a priority
+source, its priority step states the levels and due days. Work claims didn't exist on every board a replay
+reads, so each ticket whose state then was started is claimed by another key, as today's rule has an agent claim at
+branch creation (the maintainer's choice). The agenda is then asked with its clock at the moment.
+
+**What it can't replay:**
+* **The description:** Linear's history says only that it changed, so a row's text past its header is today's. The
+  agenda reads none of it.
+* **Issues gone from today's census:** a trashed issue, or one that has left the initiative since, isn't replayed. A
+  ticket it blocked then reads that blocker as unknown, which counts as open, so it may read as blocked though the
+  blocker was settled at the moment.
+* **The initiative's projects then:** board membership is judged against today's projects, since Linear's issue
+  history doesn't record a project joining or leaving the initiative. On 11-02 no project had changed that way; three
+  created on 11-06 hold only issues created after the moment, or issues that roll back to their earlier project.
+* **An unarchive:** an archive after the moment is undone, an unarchive after it isn't. The agenda doesn't read it.
+
+Nothing of the board is committed.
+
+**Linear's budget.**
+* **The limits:** Linear refuses a query costing more than 10,000 points, and allows a key 3,000,000 points and 2,500
+  requests an hour. The stable brain's board-sync uses the same key.
+* **What a history page costs:** it is charged by the page size asked for. A 100-entry page cost about 1,500 points
+  an issue, and one run at that size spent the hour.
+* **How the replay stays cheap:** it reads 25 entries a page, 20 issues a request, and only back to the moment, and
+  never asks for the history of an issue created after it. It still reads every issue on today's board once, with its
+  relations and labels. The 11-02 replay cost about 470,000 points.
+* **Before any of that,** it resets the throwaway database (refusing one that holds thoughts) and reads Linear's
+  remaining budget through the same client, refusing below 1,000,000 points or 300 requests, or a budget it can't read,
+  and saying when the hour resets: a run cut short by the limit keeps nothing, and the hour is board-sync's too. A
+  moment further back reads more history pages, so the floor is about twice the 11-02 run, not a bound.
+
+**2026-11-02, 14:11Z.** This is the session that asked "what is the highest-value unstarted issue?" and picked
+SMD-2908 (the dogfood row of that date). SMD-3669's Verify says SMD-2908 comes first among the board's unstarted items
+with High, its due window and "unclaimed"; that SMD-3602 is left out as claimed; and that SMD-1853 ranks as a parent
+with no declared work of its own. The replay found:
+* **The board then:** 962 issues (388 Backlog, 43 started, 456 completed, 75 canceled or duplicate), 959 of them with
+  a Linear level stated. The 43 started tickets each carry a stand-in claim. The agenda listed 314 tickets, left out
+  76 as blocked and 41 as claimed, and found none with no priority. Two of the started tickets were also blocked, and
+  the agenda counts a ticket once, under blocked.
+* **SMD-2908 ranks 6th, not first.** It scores 3: its High level and nothing more. Linear held no due date for it
+  then. Its v2.0.0 deadline, the 11-03 cut, was only in its text, so no urgency term could see it. Nine others tie
+  at 3, four of them ahead by the tie-break on key: SMD-1813, SMD-1899 and SMD-2211 (each Medium and unblocking open
+  work) and SMD-2607 (High). First is SMD-2301 (High, unblocking open work, 4).
+* **SMD-3602 is left out as claimed.** It was In Progress, so it carries a stand-in claim; its score would be 2.
+* **SMD-1853 ranks 37th, on its own Medium level.** A tracking parent takes no level from its children (an item
+  inherits only from what it serves), and it unblocks nothing.
+
+So the Verify holds on SMD-3602 and SMD-1853, and fails on SMD-2908: the deadline that made it the pick was never
+stated where the agenda reads. With a due date of 11-03 on Linear, SMD-2908 would have taken urgency +2 and ranked
+first at 5.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
