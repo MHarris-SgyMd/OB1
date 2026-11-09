@@ -10,6 +10,7 @@ import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
 import { writerScope } from "./caller.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
+import { inferPriority, inferredStatement, type Inferred } from "../priority-infer.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
@@ -333,7 +334,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     let vectorFailed: { reason: string; detail: string } | undefined;
     // The provider's state, as every embedding call tells it (SMD-2890).
     const embedStarted = performance.now();
-    const [embedded, metadata, genre] = await Promise.all([
+    // The capture's own day, from which the inference resolves a due phrase (SMD-3670).
+    const capturedAt = new Date();
+    const [embedded, metadata, genre, inferred] = await Promise.all([
       gate.embeddings.allowed
         ? ctx.embedder.embedCapture(content, subject).then((v) => {
             heardFrom(ctx.providerHealth, embedStarted);
@@ -364,6 +367,14 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       // one — opt-in and null-by-default, so a capture pays nothing for it unless
       // the tier is configured.
       classifyGenre(content, { ...clientMetadata, source: origin }, resolveJevConfig(ctx.env()), subject),
+      // The priority and due time the text states (SMD-3670): opt-in (OB1_INFER_PRIORITY) and on the chat gate's terms,
+      // as the tags' call is. It never fails the capture: the runtime's own error is logged here and states nothing.
+      cfg.inferPriority && gate.chat.allowed
+        ? inferPriority(content, capturedAt, subject, cfg).catch((e: unknown) => {
+            console.error(`capture: the priority was not inferred: ${(e as Error)?.message ?? e}`);
+            return null;
+          })
+        : Promise.resolve(null),
     ]);
     const chunks = embedded?.chunks ?? [];
     const contextFailures = embedded?.contextFailures ?? 0;
@@ -523,7 +534,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // re-capture's extraction may word them otherwise, and its first capture proposed them already. Never fails the
     // capture. As the cite rows above, only when the store said the row is new (review pass 2: `!== true` read an
     // absent flag as fresh); a thought it could not say is the backfill's.
-    if (captured.existed === false) await proposeActionItems(ctx, principal, captured.id, metadata as Record<string, unknown>);
+    if (captured.existed === false) {
+      const proposedItems = await proposeActionItems(ctx, principal, captured.id, metadata as Record<string, unknown>);
+      await stateInferred(ctx, principal, captured.id, proposedItems, inferred);
+    }
 
     // What a key that cannot read may be told about the row: not whether
     // the text was already a thought, nor what it points at (first review
@@ -957,10 +971,11 @@ const cleanedAsItem = (s: string): string => s.replace(/\p{Cc}/gu, " ").replace(
  * An item not proposed here is the backfill's (db/backfill-open-items.ts), which takes a thought holding none.
  * Review pass 1: moved here from core/items.ts (an import cycle), deduplicated and capped as 117 reads the texts.
  */
-async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<void> {
+async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: string, metadata: Record<string, unknown>): Promise<string[]> {
   const scope = writerScope(principal);
   const raw = metadata.action_items;
-  if (!scope || !Array.isArray(raw)) return;
+  const opened: string[] = [];
+  if (!scope || !Array.isArray(raw)) return opened;
   const seen = new Set<string>();
   const texts: string[] = [];
   for (const t of raw) {
@@ -971,15 +986,43 @@ async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: str
     texts.push(text);
     if (texts.length === MAX_PROPOSED_PER_CAPTURE) break;
   }
-  if (texts.length === 0) return;
+  if (texts.length === 0) return opened;
   const store = await ctx.store();
   for (const text of texts) {
     try {
       const a = await store.openItem({ text, originThought: thoughtId, proposed: true, actor: actorOf(ctx, principal), scope });
       if (a.outcome === "refused") break;
+      if (a.outcome === "opened" && a.item) opened.push(a.item.id);
     } catch (e) {
       if (e instanceof ItemRefused) continue;
       console.error(`capture: the action items of thought ${thoughtId} were not proposed as open items: ${(e as Error)?.message ?? e}`);
+      break;
+    }
+  }
+  return opened;
+}
+
+/**
+ * The priority and due time a captured text states (SMD-3670), stated at tier 4, flagged inferred, by the capturing
+ * key: on each open item this capture proposed from the thought, else on the thought itself (the maintainer,
+ * 2026-11-09). Nothing ranks on it until the measurement clears its bar (effective_priority's `count_inferred`).
+ * Never fails the capture: a refusal or a fault is logged and the rest are not stated.
+ */
+async function stateInferred(ctx: Ctx, principal: Principal, thoughtId: string, items: string[], inferred: Inferred | null): Promise<void> {
+  const statement = inferredStatement(inferred);
+  const scope = writerScope(principal);
+  if (!statement || !scope) return;
+  const store = await ctx.store();
+  const targets = items.length ? items.map((key) => ({ kind: "item", key })) : [{ kind: "thought", key: thoughtId }];
+  for (const { kind, key } of targets) {
+    try {
+      const a = await store.assertPriority({ kind, key, ...statement, inferred: true, actor: actorOf(ctx, principal), scope });
+      if (a.outcome === "refused") {
+        console.error(`capture: the inferred priority of thought ${thoughtId} was refused on ${kind} ${key}: ${a.code}`);
+        break;
+      }
+    } catch (e) {
+      console.error(`capture: the inferred priority of thought ${thoughtId} was not stated: ${(e as Error)?.message ?? e}`);
       break;
     }
   }
