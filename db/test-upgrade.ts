@@ -728,13 +728,16 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // replaces the agenda under a ninth argument, its ticket rows with their
   // status, refusing by name without 068, 115, 122 or 123 ([20bo]); 125
   // replaces effective_priority, a thought reading its open items, and adds
-  // two helpers, reads alone, refusing by name without 117 or 122 ([20bp])
-  // — all recorded by the
+  // two helpers, reads alone, refusing by name without 117 or 122 ([20bp]);
+  // 126 replaces the agenda again with a keys scope, and adds query_log's
+  // plan_context kind, refusing by name without 034, 068, 115, 122 or 123
+  // ([20bq]); 127 replaces effective_priority's default weights, level
+  // first, refusing by name without 125 ([20br]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 96, `030 is among the last ninety-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 98, `030 is among the last ninety-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5692,6 +5695,91 @@ console.log("\n[20bp] Migration 125: onto a populated brain at the file before i
          && (await agenda()) === agendaBefore && (await stored()) === storedBefore,
     `applied: the note read unknown 2 under 122 and now reads its open item's High plus +2, each term naming the item; the agenda's answer and every stored statement and item unmoved (${before.effective} → ${after.effective}, ${after.terms.map((t) => t.term).join(" ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the125 });
+  assert(JSON.stringify(await eff()) === JSON.stringify(after), "a re-apply is a no-op: the same read");
+  await sql.close();
+}
+
+console.log("\n[20bq] Migration 126: onto a populated brain at the file before it — refused by name without 123's ob1_item_blockers, nothing made; then applied: one agenda, of nine arguments, reading named tickets alone with the settled and missing ones beside; an agenda row logged before kept, a plan_context row taken; a re-apply a no-op (SMD-2684)");
+{
+  const the126 = MIGRATIONS.find((f) => /^\d{3}_plan_context\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the126 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const ticket = async (issue: string, status: string, statusType: string) => {
+    const content = `upgrade 126: ${issue}`;
+    const meta = { source: "linear", issue, status, status_type: statusType, project: "Upgrade 126", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9711", "Backlog", "backlog"); await ticket("SMD-9712", "Done", "completed");
+  await sql`INSERT INTO query_log (kind, tool, match_count, filter, result_items) VALUES ('agenda', 'agenda', 20, '{}'::jsonb, '[]'::jsonb)`;
+  const agendas = async () => (await sql`SELECT pronargs::int AS n FROM pg_proc WHERE proname = 'agenda' ORDER BY pronargs`).map((r: { n: number }) => r.n).join(",");
+  const kindCheck = async () => String((await sql`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'query_log_kind_check'`)[0]?.d ?? "");
+
+  // Without 123's blockers helper: refused by name, 124's agenda and query_log's kinds left as they were.
+  const kindsBefore = await kindCheck();
+  await sql`ALTER FUNCTION ob1_item_blockers(text, text) RENAME TO ob1_item_blockers_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the126 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_item_blockers_away(text, text) RENAME TO ob1_item_blockers`;
+  assert(/^migration 126 needs 034, 068, 115, 122 and 123 \(query_log and its result_items, /.test(without) && await agendas() === "9" && await kindCheck() === kindsBefore && !/plan_context/.test(kindsBefore),
+    `without 123's ob1_item_blockers the file is refused by name, 124's agenda and the log's kinds left as they were (${without.slice(0, 80)} | ${await agendas()})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the126 });
+  type A = { items: { key: string }[]; keyed: { others: { key: string; status: string | null; status_type: string | null; settled: boolean }[]; missing: string[] } | null };
+  const read = async () => ((await sql`SELECT agenda('{"keys": ["SMD-9711", "SMD-9712", "SMD-9719"]}'::jsonb, NULL, 100, true, true, false, NULL, '2027-03-10T15:00:00Z', true) AS a`)[0] as { a: A }).a;
+  const named = await read();
+  const agendaRows = Number((await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'agenda'`)[0].n);
+  const took = await sql`INSERT INTO query_log (kind, tool, query, match_count, result_ids, result_items) VALUES ('plan_context', 'plan_context', 'upgrade 126', 8, '{}', '[]'::jsonb)`.then(() => "ok", (e: Error) => e.message);
+  assert(await agendas() === "9" && named.items.map((i) => i.key).join(" ") === "SMD-9711"
+      && named.keyed?.others.map((o) => `${o.key} ${o.status}/${o.status_type} ${o.settled}`).join(", ") === "SMD-9712 Done/completed true"
+      && JSON.stringify(named.keyed?.missing) === '["SMD-9719"]'
+      && agendaRows === 1 && took === "ok",
+    `applied: one agenda, of nine arguments, the named open ticket listed, the Done one and the unknown key beside; the agenda row logged before kept; a plan_context row taken (${named.items.map((i) => i.key)} | ${JSON.stringify(named.keyed)} | ${agendaRows} | ${took})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the126 });
+  assert(JSON.stringify(await read()) === JSON.stringify(named) && await agendas() === "9", "a re-apply is a no-op: the same read, the one function");
+  await sql.close();
+}
+
+console.log("\n[20br] Migration 127: onto a populated brain at the file before it — refused by name without 125's helpers, nothing replaced; then applied: an overdue note with no stated level, which read 5 above an Urgent ticket at 4, now reads 2.6 below it at 4, its terms the same names; 122's weights passed by name give 125's numbers back; nothing stored moved; a re-apply a no-op (SMD-4177)");
+{
+  const the127 = MIGRATIONS.find((f) => /^\d{3}_effective_priority_level_first\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the127 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const note = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 127: the gutters, two weeks overdue') RETURNING id`)[0].id);
+  const opened = (await sql`SELECT open_item('clean the gutters', NULL, '2027-02-24', ${note}::uuid, NULL, false, (${JSON.stringify(W)}::text)::jsonb) AS r`)[0] as { r: { outcome: string } };
+  if (opened.r.outcome !== "opened") throw new Error(`[20br] fixture: open_item answered ${JSON.stringify(opened.r)}`);
+  const content = "upgrade 127: SMD-9611";
+  const meta = { source: "linear", issue: "SMD-9611", status: "Todo", status_type: "unstarted", linear_updated_at: "2027-03-01T00:00:00Z" };
+  const row = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+  await sql`SELECT record_thought_source(${row}::uuid, 'linear', 'SMD-9611', ${content}, 'text/markdown')`;
+  await sql`SELECT assert_priority('ticket', 'SMD-9611', 4, NULL, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  const stored = async () => String((await sql`SELECT md5(string_agg(a::text, '|' ORDER BY a.seq)) AS h FROM priority_assertions a`)[0].h)
+    + " " + String((await sql`SELECT md5(string_agg(i::text, '|' ORDER BY i.item_id)) AS h FROM open_items i`)[0].h);
+  const storedBefore = await stored();
+  const NOW = "2027-03-10T15:00:00Z";
+  const OLD = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const eff = async (weights: object | null = null) => (await sql`SELECT item_key, effective::text AS effective, terms FROM effective_priority((${JSON.stringify([{ kind: "thought", key: note }, { kind: "ticket", key: "SMD-9611" }])}::text)::jsonb, (${weights === null ? null : JSON.stringify(weights)}::text)::jsonb, ${NOW}::timestamptz)`) as { item_key: string; effective: string; terms: { term: string }[] }[];
+  const show = (r: Awaited<ReturnType<typeof eff>>) => r.map((x) => `${Number(x.effective)} ${x.terms.map((t) => t.term).join("+")}`).join(", ");
+  const before = await eff();
+
+  // Without 125's helpers: refused by name, nothing replaced.
+  const defaultsOf = async () => String((await sql`SELECT pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) ~ '"overdue": 3,' AS old`)[0].old);
+  await sql`ALTER FUNCTION ob1_thought_items(uuid, boolean) RENAME TO ob1_thought_items_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_thought_items_away(uuid, boolean) RENAME TO ob1_thought_items`;
+  const stillOld = await defaultsOf();
+  assert(/^migration 127 needs 125 \(effective_priority's from_items helpers\)/.test(without) && stillOld === "true",
+    `without 125's helpers the file is refused by name, and 125's read stands (${without.slice(0, 80)} | old defaults ${stillOld})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
+  const after = await eff();
+  const asOld = await eff(OLD);
+  assert(show(before) === "5 unknown+overdue, 4 level" && show(after) === "2.6 unknown+overdue, 4 level" && show(asOld) === show(before) && (await stored()) === storedBefore,
+    `applied: the overdue note goes from above the Urgent ticket (5 over 4) to below it (2.6 under 4), the same terms; 122's weights by name read as before; nothing stored moved (${show(before)} → ${show(after)}; old weights ${show(asOld)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
   assert(JSON.stringify(await eff()) === JSON.stringify(after), "a re-apply is a no-op: the same read");
   await sql.close();
 }

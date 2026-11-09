@@ -354,6 +354,8 @@ const WORDS: Record<ToolName, Words> = {
   list_items: { render: (o) => say.renderListItems(o), fault: readFault() },
   // The agenda (SMD-3669).
   agenda: { render: (o) => say.renderAgenda(o), fault: readFault() },
+  // plan_context (SMD-2684).
+  plan_context: { render: (o) => say.renderPlanContext(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };

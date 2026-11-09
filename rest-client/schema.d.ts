@@ -578,11 +578,31 @@ export interface paths {
         };
         /**
          * Agenda
-         * @description What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), urgency from the due time (+2 by the end of tomorrow, +1 within the week, +3 overdue), and what it unblocks — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: "mine"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so nothing was left out for a claim and claimed started work counts as started, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.
+         * @description What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), then, within a level, urgency from the due time (+0.4 by the end of tomorrow, +0.2 within the week, +0.6 overdue) and what it unblocks (+0.1, or +0.2 for three or more), which never lift an item past the next level — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: "mine"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so nothing was left out for a claim and claimed started work counts as started, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.
          */
         get: operations["agenda"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/plan-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Plan Context
+         * @description Everything the brain holds for a request, in one read, so you can judge whether and how to do it before you plan: not a planner, and no verdict. Sections: `knowledge`, a search of the request with current work ranked first, each hit labelled as search_thoughts labels it (who wrote it and its trust, superseded, moved, claimed, priority, relations) and its text fenced; `board`, the tickets those hits name, in agenda order — blocked, claimed and started ones included, each with its status, blockers, claims and effective priority — with `others` (the named ones it does not rank: settled, or a status type unknown here) and `waiting` (those not yet startable, with when they will be); `specs` and `procedures`, not available here yet, each saying the ticket it waits on; `tools`, the tools this key's scope may call (core and enabled plugins; another server's are unknown here); and `gaps`, what it could not find, as values: no hit at all, every hit superseded or outside text, a named ticket the brain does not hold, tickets past the board's reach (500 named, 100 listed), semantic search unavailable, or a board that ran out of time or failed. No gap is no verdict on coverage: the search keeps its nearest matches, each with its similarity. One deadline bounds the two waits: an embedding past it is answered by exact matches alone, and a board past it is a gap, not a failure. Logged as one query_log row when the log is on.
+         */
+        post: operations["plan_context"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1265,11 +1285,11 @@ export interface operations {
                      */
                     prefer_current?: boolean;
                     /**
-                     * @description How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's place among them (the first 1, the last 1 over their count, so the search's own order, ties and all, is what weighs), priority its effective priority (a counted level 0 none to 5 critical, unknown counted as 2, plus urgency from a due time and what it unblocks — at most 9) over 9. A match's priority is its own: a ticket's row reads as its ticket; any other thought takes its own counted level, else one inherited from the ticket it is about (its metadata ticket or issue, else its standing subject) at one level less a hop, two hops at most, counted only above medium; a level counts when it was stated by a key the operator classified (an unclassified or importer's key's statement is inferred, and not counted yet). A finished ticket's own row keeps its stated level — only its urgency and what it unblocks drop — and passes nothing down to a note under it: to rank finished work lower, add prefer_current. A ticket a match's text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.
+                     * @description How much what matters counts beside meaning, 0-1. 0 (default) ranks by meaning alone. Above 0 the top min(100, 4 × limit) matches are ranked by (1 − weight) × relevance + weight × priority: relevance a match's place among them (the first 1, the last 1 over their count, so the search's own order, ties and all, is what weighs), priority its effective priority (a counted level 0 none to 5 critical, unknown counted as 2, plus up to 0.8 from a due time and what it unblocks, which orders items of one level and never lifts one past the next — at most 5.8) over 5.8. A match's priority is its own: a ticket's row reads as its ticket; any other thought takes its own counted level, else one inherited from the ticket it is about (its metadata ticket or issue, else its standing subject) at one level less a hop, two hops at most, counted only above medium; a level counts when it was stated by a key the operator classified (an unclassified or importer's key's statement is inferred, and not counted yet). A finished ticket's own row keeps its stated level — only its urgency and what it unblocks drop — and passes nothing down to a note under it: to rank finished work lower, add prefer_current. A ticket a match's text only mentions does not count. It reorders those matches and can surface none past them. A search with it set is not logged in the query log.
                      * @default 0
                      */
                     priority_weight?: number;
-                    /** @description Keep only matches whose priority is known — a counted level of its own (on a ticket's row, its ticket's; a finished ticket's row keeps its level), or one it inherits from the ticket it is about, as priority_weight reads them — and whose effective priority (the level plus urgency and what it unblocks, as priority_weight reads it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log. */
+                    /** @description Keep only matches whose priority is known — a counted level of its own (on a ticket's row, its ticket's; a finished ticket's row keeps its level), or one it inherits from the ticket it is about, as priority_weight reads them — and whose effective priority (the level plus up to 0.8 from urgency and what it unblocks, as priority_weight reads it, so a level decides it) is at least this: 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical. A match with no stated or inherited level never passes. Read over the top min(100, 4 × limit) matches, as priority_weight is. A search with it set is not logged in the query log. */
                     min_priority?: number;
                 };
             };
@@ -4641,6 +4661,121 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description The operation's value. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
+            };
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: "token"` (and `WWW-Authenticate: Bearer error="invalid_token"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: "token"`, a token whose subject the agent registry revoked, which no new sign-in clears. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY, ITEM_NOT_YOURS, READ_ONLY_KEY, ITEM_UNOWNABLE, PROPOSAL_YOURS, CONFIRM_NOT_YOURS. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Nothing there: NOT_FOUND, CLAIM_NOT_FOUND, ITEM_NOT_FOUND, ORIGIN_NOT_FOUND, EVIDENCE_NOT_FOUND, PROPOSAL_NOT_FOUND. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED, REFUSED_SUPERSEDED_GONE. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED, CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone; their other causes, and CLAIMS_UNREADABLE (the database role lacks the claims group), wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    plan_context: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description What you were asked to do, in your words or the operator's */
+                    request: string;
+                    /**
+                     * @description Knowledge hits to return, 1 to 20. Default 8
+                     * @default 8
+                     */
+                    limit?: number;
+                };
+            };
+        };
         responses: {
             /** @description The operation's value. */
             200: {

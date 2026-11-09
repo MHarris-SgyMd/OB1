@@ -472,13 +472,16 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   1 and the last 1/n. So the search's own order, ties and all, is what weighs,
   and a text match or a literal-only query's similarity order is kept too. Their
   fusion scores are 0, and a score over the top's would have left those rows to
-  priority alone. Priority is the effective priority (a level, unknown counted as
-  2, plus urgency and what it unblocks) over 9, the default weights' largest.
-  Ties keep the window's order.
+  priority alone. Priority is the effective priority over 5.8, the default
+  weights' largest. That is a level (unknown counted as 2), plus up to 0.8 from
+  urgency and what it unblocks, which order items of one level and never lift
+  one past the next (migration 127, SMD-4177; 9 under 122's weights). Ties keep
+  the window's order.
 - **`min_priority`** keeps the matches whose priority is known (counted, read
-  from their open items, or inherited from what they serve) and whose effective priority is at least the
-  level. Urgency counts, so a High due tomorrow (3 + 2) passes at critical. An
-  unknown priority never passes.
+  from their open items, or inherited from what they serve) and whose effective
+  priority is at least the level. Since migration 127 the level decides it: a
+  High due tomorrow (3.4) passes at high, not at urgent. An unknown priority
+  never passes.
 
 Like `prefer_current`, it reorders the window and can surface no match past it.
 The header says what it read, how many carry a known priority and, with a
@@ -514,7 +517,7 @@ priority; ten are named and `priorityMore` counts the rest. A settled item is
 ordered by the level it keeps and said settled: whether work is finished is its
 own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
 can come before an open High. Over MCP the three text tools print
-`Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
+`Priority: ticket SMD-2908 at 3.4 (high (3); +0.4 due by the end of …)`, each term
 as the agenda says it, and their values keep the fields without the terms (a
 term names the stating key). `search` and `fetch` start the title
 `[priority: ticket SMD-2908 high (3), due …]` (two named) after any claimed
@@ -1310,6 +1313,7 @@ it, each over REST and MCP alike:
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
 | `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE` |
+| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values. One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
   `proposed` item for each distinct non-blank action item the extractor reads from it, at

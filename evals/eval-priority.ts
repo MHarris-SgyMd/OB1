@@ -150,14 +150,15 @@ async function selfCheck(): Promise<void> {
   const off = plannedFacts(relabelled, "2026-02-27");
   assert(off.includes("statement on ticket:ZQ-102 level 0 tier 2 by board-sync due none not_before none due_ref none") && !off.some((l) => l.startsWith("statement on ticket:ZQ-105")),
     "a ticket's planned level follows its facts against its Linear label: a High stated 0 plans 0, a Medium with no level plans none");
-  // What each note reads as a thought once 125 reads its open items (SMD-4149's first Verify, held at every seeded run).
+  // What each note reads as a thought once 125 reads its open items (SMD-4149's first Verify, held at every seeded run),
+  // under 127's level-first weights (SMD-4177).
   const notes = plannedNoteReads(ITEMS, "2026-02-27");
   const noteNamed = [
-    "bill 4: unknown 2; urgency soon 2 item:bill", "gutters 5: unknown 2; overdue 3 item:gutters", "passport 4: from_items 4 item:passport",
-    "commitment 3: unknown 2; urgency week 1 item:commitment", "renewal 2: unknown 2", "claim-done 2: unknown 2", "coffee 0: from_items 0 item:coffee", "cat 2: unknown 2",
+    "bill 2.4: unknown 2; urgency soon 0.4 item:bill", "gutters 2.6: unknown 2; overdue 0.6 item:gutters", "passport 4: from_items 4 item:passport",
+    "commitment 2.2: unknown 2; urgency week 0.2 item:commitment", "renewal 2: unknown 2", "claim-done 2: unknown 2", "coffee 0: from_items 0 item:coffee", "cat 2: unknown 2",
   ];
   assert(notes.length === 10 && noteNamed.every((l) => notes.includes(l)) && JSON.stringify([...notes].sort()) === JSON.stringify(notes),
-    `each note as a thought: the bill due tomorrow +2, the gutters overdue +3, the passport its item's level 4, the commitment +1 within the week, the renewal a month off nothing, a done item nothing, a level 0 its 0 (${notes.join("; ")})`);
+    `each note as a thought: the bill due tomorrow +0.4, the gutters overdue +0.6, the passport its item's level 4, the commitment +0.2 within the week, the renewal a month off nothing, a done item nothing, a level 0 its 0 (${notes.join("; ")})`);
   // A level 0 takes no urgency, and a done item passes its level and due time nowhere (no corpus note has either alone).
   const edge = plannedNoteReads([{ ...ITEMS[0], key: "zero-due", facts: { level: 0, dueInDays: -2 } }, { ...ITEMS[0], key: "done-high", facts: { level: 4, dueInDays: 0, done: true } }], "2026-02-27");
   assert(JSON.stringify(edge) === JSON.stringify(["done-high 2: unknown 2", "zero-due 0: from_items 0 item:zero-due"]),
