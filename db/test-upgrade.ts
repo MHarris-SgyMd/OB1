@@ -730,7 +730,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // replaces effective_priority, a thought reading its open items, and adds
   // two helpers, reads alone, refusing by name without 117 or 122 ([20bp]);
   // 127 replaces effective_priority's default weights, level first, refusing
-  // by name without 125 ([20bq]) — all recorded by the
+  // by name without 125 ([20br]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
@@ -5697,7 +5697,7 @@ console.log("\n[20bp] Migration 125: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20bq] Migration 127: onto a populated brain at the file before it — refused by name without 125's helpers, nothing replaced; then applied: an overdue note with no stated level, which read 5 above an Urgent ticket at 4, now reads 2.6 below it at 4, its terms the same names; 122's weights passed by name give 125's numbers back; nothing stored moved; a re-apply a no-op (SMD-4177)");
+console.log("\n[20br] Migration 127: onto a populated brain at the file before it — refused by name without 125's helpers, nothing replaced; then applied: an overdue note with no stated level, which read 5 above an Urgent ticket at 4, now reads 2.6 below it at 4, its terms the same names; 122's weights passed by name give 125's numbers back; nothing stored moved; a re-apply a no-op (SMD-4177)");
 {
   const the127 = MIGRATIONS.find((f) => /^\d{3}_effective_priority_level_first\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -5707,7 +5707,7 @@ console.log("\n[20bq] Migration 127: onto a populated brain at the file before i
   await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
   const note = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 127: the gutters, two weeks overdue') RETURNING id`)[0].id);
   const opened = (await sql`SELECT open_item('clean the gutters', NULL, '2027-02-24', ${note}::uuid, NULL, false, (${JSON.stringify(W)}::text)::jsonb) AS r`)[0] as { r: { outcome: string } };
-  if (opened.r.outcome !== "opened") throw new Error(`[20bq] fixture: open_item answered ${JSON.stringify(opened.r)}`);
+  if (opened.r.outcome !== "opened") throw new Error(`[20br] fixture: open_item answered ${JSON.stringify(opened.r)}`);
   const content = "upgrade 127: SMD-9611";
   const meta = { source: "linear", issue: "SMD-9611", status: "Todo", status_type: "unstarted", linear_updated_at: "2027-03-01T00:00:00Z" };
   const row = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);

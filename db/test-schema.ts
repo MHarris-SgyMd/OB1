@@ -18514,7 +18514,7 @@ console.log("\n[112] Migration 125: a note's open items reach its priority — a
   assert(JSON.stringify(await eff([["thought", bill], ["thought", many], ["thought", zeroLevel], ["thought", pair]])) === before, "a re-apply is a no-op: the same reads");
 }
 
-console.log("\n[113] Migration 127: level first — the default weights after the level scaled by 0.2 (soon 0.4, week 0.2, overdue 0.6, unblocks 0.1 or 0.2), so an overdue note with no stated level stays below an Urgent ticket, a High due tomorrow below an Urgent, a Medium due tomorrow below a High, and a Low overdue and blocking three below a Medium; within a level, 122's order; 122's weights by name give 122's numbers; a level 0 still takes no urgency; the shape; a re-apply a no-op (SMD-4177)");
+console.log("\n[114] Migration 127: level first — the default weights after the level scaled by 0.2 (soon 0.4, week 0.2, overdue 0.6, unblocks 0.1 or 0.2), so an overdue note with no stated level stays below an Urgent ticket, a High due tomorrow below an Urgent, a Medium due tomorrow below a High, and a Low overdue and blocking three below a Medium; within a level, 122's order; 122's weights by name give 122's numbers; a level 0 still takes no urgency; the shape; a re-apply a no-op (SMD-4177)");
 {
   const file = files.find((f) => /^\d{3}_effective_priority_level_first\.sql$/.test(f)) ?? "no NNN_effective_priority_level_first.sql";
   // [109] and [112] re-apply 122's and 125's effective_priority, which 127 replaces: this section holds 127's.
@@ -18532,16 +18532,16 @@ console.log("\n[113] Migration 127: level first — the default weights after th
     });
     return id;
   };
-  const ticket = async (issue: string, links: [string, string][] = []) => {
-    const content = `[113] ${issue}`;
-    const id = await thoughtAs(content, { source: "linear", issue, status: "Todo", status_type: "unstarted", linear_updated_at: "2027-03-01T00:00:00Z" });
+  const ticket = async (issue: string, links: [string, string][] = [], statusType = "unstarted") => {
+    const content = `[114] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: statusType, status_type: statusType, linear_updated_at: "2027-03-01T00:00:00Z" });
     await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
     if (links.length) await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(links.map(([relation, target]) => ({ relation, target })))]);
   };
   const put = async (kind: string, key: string, level: number, due: string | null = null) => {
     const r = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, NULL, NULL, NULL, NULL, false, $5::jsonb) AS r`,
       [kind, key, level, due, JSON.stringify(OP)])).rows[0].r;
-    if (r.outcome !== "asserted") throw new Error(`[113] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+    if (r.outcome !== "asserted") throw new Error(`[114] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
   };
   const eff = async (items: [string, string][], weights: object | null = null) =>
     (await db.query<Row>(`SELECT item_key, effective::text AS effective, urgency::text AS urgency, terms FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
@@ -18556,9 +18556,9 @@ console.log("\n[113] Migration 127: level first — the default weights after th
     "effective_priority is 127's: its comment names the migration, its defaults the scaled weights");
 
   // The ticket's case: an overdue note with no stated level stays below an Urgent ticket that blocks one.
-  const gutters = await thoughtAs("[113] clean the gutters, two weeks overdue");
+  const gutters = await thoughtAs("[114] clean the gutters, two weeks overdue");
   const opened = (await db.query<{ r: { outcome: string } }>(`SELECT open_item('clean the gutters', NULL, '2027-02-24', $1::uuid, NULL, false, $2::jsonb) AS r`, [gutters, JSON.stringify(OP)])).rows[0].r;
-  if (opened.outcome !== "opened") throw new Error(`[113] fixture: open_item answered ${JSON.stringify(opened)}`);
+  if (opened.outcome !== "opened") throw new Error(`[114] fixture: open_item answered ${JSON.stringify(opened)}`);
   await ticket("SMD-9961", [["blocks", "SMD-9962"]]); await ticket("SMD-9962");
   await put("ticket", "SMD-9961", 4);
   const [g, u] = await eff([["thought", gutters], ["ticket", "SMD-9961"]]);
@@ -18584,11 +18584,14 @@ console.log("\n[113] Migration 127: level first — the default weights after th
   assert(JSON.stringify(nums(ladder)) === JSON.stringify([4, 3.4, 3, 2.6, 2.4, 2.2, 2, 1.8]) && JSON.stringify(nums(old)) === JSON.stringify([5, 4, 4, 3]),
     `level first: Urgent 4, High due tomorrow 3.4, High 3, then the Mediums overdue 2.6, due tomorrow 2.4, within the week 2.2, undated 2, and a Low overdue that blocks three 1.8, under every Medium; under 122's weights the High due tomorrow (5) passed the Urgent and the Medium due tomorrow (4) the High (${nums(ladder).join(", ")}; old ${nums(old).join(", ")})`);
 
-  // A level 0 still takes no urgency, and a settled item none, as 122.
+  // A level 0 still takes no urgency, and a settled item neither urgency nor unblocks, as 122.
   await ticket("SMD-9974");
   await put("ticket", "SMD-9974", 0, "2027-03-01T00:00:00Z");
-  const [zero] = await eff([["ticket", "SMD-9974"]]);
-  assert(Number(zero.effective) === 0 && Number(zero.urgency) === 0 && named(zero) === "level=0", `a level 0 overdue still reads 0 with no urgency term (${named(zero)})`);
+  await ticket("SMD-9975", [["blocks", "SMD-9976"]], "completed"); await ticket("SMD-9976");
+  await put("ticket", "SMD-9975", 3, "2027-03-01T00:00:00Z");
+  const [zero, done] = await eff([["ticket", "SMD-9974"], ["ticket", "SMD-9975"]]);
+  assert(Number(zero.effective) === 0 && Number(zero.urgency) === 0 && named(zero) === "level=0" && Number(done.effective) === 3 && Number(done.urgency) === 0 && named(done) === "level=3",
+    `a level 0 overdue still reads 0 with no urgency term; a completed High, overdue and blocking an open ticket, keeps its 3 with neither term (${named(zero)}; ${named(done)})`);
 
   // A re-apply is a no-op.
   const before = JSON.stringify(ladder);

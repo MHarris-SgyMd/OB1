@@ -1455,9 +1455,11 @@ export type PriorityRecord = { item: PriorityItem; exists: boolean; level: numbe
 
 /**
  * docs/priority.md's weights, as migration 122's effective_priority names them (SMD-3667). A read passes the ones it
- * overrides; the read's defaults stand for the rest (unknown 2, hop 1, hops 2, soon 2 by the end of soon_days 1, week 1
- * by the end of week_days 7, overdue 3, unblocks_one 0.5, unblocks_many 1 from unblocks_many_at 3, depth 3, cap 50,
- * count_inferred false).
+ * overrides; the read's defaults stand for the rest, level first since migration 127 (SMD-4177): unknown 2, hop 1,
+ * hops 2, soon 0.4 by the end of soon_days 1, week 0.2 by the end of week_days 7, overdue 0.6, unblocks_one 0.1,
+ * unblocks_many 0.2 from unblocks_many_at 3, depth 3, cap 50, count_inferred false. The terms after the level add at
+ * most 0.8 under the defaults; a caller's own weights may make them cross a level (122's were soon 2, week 1,
+ * overdue 3, unblocks_one 0.5, unblocks_many 1).
  */
 export type PriorityWeights = {
   unknown: number; hop: number; hops: number; soon: number; soon_days: number; week: number; week_days: number; overdue: number;

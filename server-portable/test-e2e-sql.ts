@@ -4176,13 +4176,15 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     assert(!due.isError, `${last}, last by meaning, made due tomorrow (${due.text.slice(0, 120)})`);
     const loggedBefore = (await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'search' AND query = ${query}`)[0].n as number;
     // By place in a window of four, the last weighs 1/4 to the third's 1/2: its urgency, 0.4 of a level within its level
-    // (127), lifts it past the third from a weight of about 0.78 (0.55 under 122's +2).
-    const mid = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0.9 });
+    // (127), lifts it past the third from a weight of about 0.78 (0.55 under 122's +2), and past the second from about
+    // 0.88. Over 9, 122's scale, it would pass the third only from about 0.85, so 0.82 holds the scale of 5.8 too.
+    const below = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0.75 });
+    const mid = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0.82 });
     const full = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 1 });
     const p = full.sc?.priority as { weight: number; min: number | null; window: number; read: number; kept: number; known: number } | undefined;
     assert(!full.isError && ids(full)[0] === rowOf[last] && JSON.stringify(ids(full).slice(1)) === JSON.stringify(ids(base).filter((id) => id !== rowOf[last]))
-        && ids(mid).indexOf(rowOf[last]) >= 0 && ids(mid).indexOf(rowOf[last]) < 3,
-      `11-02's case: the High due tomorrow, last by meaning, comes first at weight 1, the other three in their own order, and is no longer last at 0.9 (${ids(mid).indexOf(rowOf[last])})`);
+        && ids(below).indexOf(rowOf[last]) === 3 && ids(mid).indexOf(rowOf[last]) === 2,
+      `11-02's case: the High due tomorrow, last by meaning, comes first at weight 1, the other three in their own order; still last at 0.75, third at 0.82 (${ids(below).indexOf(rowOf[last])}, ${ids(mid).indexOf(rowOf[last])})`);
     // The filter holds the window to this section's four thoughts: 4 read of a window of 16, every one a known High.
     assert(p?.weight === 1 && p.min === null && p.window === 16 && p.read === 4 && p.kept === 4 && p.known === 4
         && full.text.includes("Ranked by priority (priority_weight 1): the top 4 matches ordered by") && full.text.includes("4 of them carry a known priority.")

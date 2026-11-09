@@ -38,8 +38,8 @@
 --   due time or an unblocks term reads a smaller number from this migration on
 --   (a High due tomorrow is 3.4, not 5), so the agenda's order and search's
 --   priority_weight and min_priority move with it; the agenda is unreleased
---   until v2.1.0. MINOR under FORK.md's version rules. test-schema [113],
---   test-upgrade [20bq].
+--   until v2.1.0. MINOR under FORK.md's version rules. test-schema [114],
+--   test-upgrade [20br].
 --
 -- Prerequisites
 --   125 (effective_priority's from_items helpers: ob1_priority_due,

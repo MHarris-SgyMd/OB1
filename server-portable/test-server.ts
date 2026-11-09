@@ -7103,6 +7103,20 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   // d's 0.2 × 1/4 + 0.8 × 5/5.8 = 0.740 over a's 0.2 × 1 + 0.8 × 3/5.8 = 0.614; at 0.1, a's 0.952 over d's 0.311.
   assert(PRIORITY_SPAN === 5.8 && order(0.8) === "dabc" && order(0.1) === "abcd",
     `the blend weighs relevance by place and priority over ${PRIORITY_SPAN} (${order(0.8)}, ${order(0.1)})`);
+  // Within one level (127, SMD-4177): a High due tomorrow (3.4) last by place among three Highs passes the third and
+  // second at 0.9 (d's 0.025 + 0.9 × 3.4/5.8 = 0.553 over b's 0.540), not at 0.7 (0.485 under c's 0.512). Over 9 it
+  // would pass only the third at 0.9 (0.365 over 0.350, under b's 0.375).
+  const within = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 3.4, known: true } };
+  assert(order(0.9, null, 4, within) === "adbc" && order(0.7, null, 4, within) === "abcd",
+    `a tenth of a level within one level moves a row at a high weight and not at a lower one (${order(0.9, null, 4, within)}, ${order(0.7, null, 4, within)})`);
+  // The scale is the defaults' largest: a critical level, the largest urgency term and unblocking many, as the last
+  // migration defining effective_priority sets them (review: a hand-copied 5.8 would outlive the next retune).
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const migDir = new URL("../db/migrations/", import.meta.url);
+  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /CREATE OR REPLACE FUNCTION effective_priority\(/.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
+  const defaults = JSON.parse(/c_defaults CONSTANT jsonb := '([^']*)'/.exec(readFileSync(new URL(definer, migDir), "utf8"))![1]) as Record<string, number>;
+  const largest = Math.round((5 + Math.max(defaults.soon, defaults.week, defaults.overdue) + defaults.unblocks_many) * 1000) / 1000;
+  assert(PRIORITY_SPAN === largest, `PRIORITY_SPAN is ${definer}'s largest effective priority under its defaults (${PRIORITY_SPAN}, ${largest})`);
   // Relevance is place, not score (review pass 2): a text match and a literal-only query's rows without the literal all
   // score 0, ordered by newness or similarity, and a score over the top's left them to priority alone at any weight.
   // At 0.01 the window's order holds; a score-based relevance would put z4, the most urgent, first.
