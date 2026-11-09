@@ -3633,13 +3633,17 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       assert(usage.recorded?.used === 1 && usage.recorded?.ignored === 0 && trace.trace?.request_id === requestId
         && trace.items?.some((i: Body) => i.memory?.memory_id === mem.memory_id && i.used === true),
         `OpenClaw usage on /recalls/{id}/usage, then its trace on /recalls/{id}: the memory marked used (${JSON.stringify(usage)}; ${JSON.stringify(trace).slice(0, 200)})`);
+      const otherProject = new AgentMemoryClient({ endpoint: ENDPOINT, accessKey: KEYS.writer, workspaceId: "ws-clients", projectId: "p-elsewhere" });
+      const elsewhereId = (await otherProject.writeback({ memory_payload: { lessons: ["ocxmem_elsewhere another project's pending lesson."] } })).memories?.[0]?.memory_id;
       const queue = await oc.listReviewQueue();
       const reviewed = await oc.reviewMemory(mem.memory_id, { action: "edit", actor_label: "openclaw:test", content: "ocxmem_route edited by the OpenClaw client.", notes: "client contract" });
       const restricted = await oc.reviewMemory(mem.memory_id, { action: "restrict_scope", visibility: "personal" });
       const inspected = await oc.inspectMemory(mem.memory_id);
-      assert(queue.memories?.some((m: Body) => m.memory_id === mem.memory_id) && reviewed.memory?.content === "ocxmem_route edited by the OpenClaw client."
+      assert(queue.memories?.some((m: Body) => m.memory_id === mem.memory_id) && typeof elsewhereId === "string"
+        && !queue.memories?.some((m: Body) => m.memory_id === elsewhereId) && queue.memories?.every((m: Body) => m.scope?.project_id === "p-openclaw")
+        && reviewed.memory?.content === "ocxmem_route edited by the OpenClaw client."
         && restricted.memory?.scope?.visibility === "personal" && inspected.memory?.memory_id === mem.memory_id && Array.isArray(inspected.source_refs),
-        `OpenClaw review queue on /review-queue, an edit and a restriction on /memories/{id}/review, the memory on /memories/{id} (${JSON.stringify(queue).slice(0, 120)}; ${JSON.stringify(inspected).slice(0, 120)})`);
+        `OpenClaw review queue on /review-queue, the configured project's alone, an edit and a restriction on /memories/{id}/review, the memory on /memories/{id} (${JSON.stringify(queue).slice(0, 120)}; ${JSON.stringify(inspected).slice(0, 120)})`);
       let refused: unknown;
       try {
         await oc.inspectMemory(NO_ROW);
@@ -3648,15 +3652,17 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       }
       assert(refused instanceof AgentMemoryError && refused.status === 404 && refused.code === "NO_SUCH_MEMORY" && refused.message.includes("404 NO_SUCH_MEMORY"),
         `OpenClaw: a refusal thrown with its status and the plugin's code (${String(refused)})`);
-      const capturer = new AgentMemoryClient({ endpoint: ENDPOINT, accessKey: KEYS.capture, workspaceId: "ws-clients", projectId: "p-openclaw" });
+      const capturer = new AgentMemoryClient({ endpoint: `${ENDPOINT}//`, accessKey: KEYS.capture, workspaceId: "ws-clients", projectId: "p-openclaw" });
       const ids = await capturer.writeback({ memory_payload: { decisions: ["ocxmem_capture a capture key's write-back."] }, provenance: { default_status: "user_confirmed", requires_review: false } });
       assert(ids.memories?.length === 1 && Object.keys(ids.memories[0]).sort().join() === "memory_id,thought_id",
         `OpenClaw under a capture-only key: each memory answered by its ids alone (${JSON.stringify(ids)})`);
       // A field a model adds to a tool's arguments is dropped, not sent: the plugin would refuse it.
       const extra = await oc.recall({ query: "ocxmem_route", workspace_hint: "x", limits: { max_items: 5 } });
       const extraReview = await oc.reviewMemory(mem.memory_id, { action: "evidence_only", actor_id: "an old field", actor_label: "openclaw:test" });
-      assert(Array.isArray(extra.memories) && extraReview.memory?.review_status === "evidence_only",
-        `OpenClaw drops a field the route does not take (a recall's stray field, a review's actor_id) rather than be refused (${JSON.stringify(extraReview).slice(0, 120)})`);
+      const extraWrite = await oc.writeback({ memory_payload: { lessons: ["ocxmem_stray a write-back with a stray field."] }, stray: 1 });
+      const extraUsage = await oc.reportUsage(requestId, { used_memory_ids: [], ignored: [], stray: 1 });
+      assert(Array.isArray(extra.memories) && extraReview.memory?.review_status === "evidence_only" && extraWrite.memories?.length === 1 && extraUsage.recorded?.used === 0,
+        `OpenClaw drops a field the route does not take (a recall's, a write-back's and usage's stray field, a review's actor_id) rather than be refused (${JSON.stringify(extraReview).slice(0, 120)}; ${JSON.stringify(extraUsage)})`);
       // An id that is not a UUID stays one path segment, encoded: refused as input, not routed elsewhere.
       let notUuid: unknown;
       try {
@@ -3676,7 +3682,8 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       } finally {
         embedDown = false;
       }
-      assert(down instanceof AgentMemoryError && down.status === 503 && down.code === "PROVIDER_UNAVAILABLE" && Number(down.retryAfter) > 0,
+      assert(down instanceof AgentMemoryError && down.status === 503 && down.code === "PROVIDER_UNAVAILABLE" && Number(down.retryAfter) > 0
+        && down.message.includes("the brain's embedding provider did not answer"),
         `OpenClaw: a 503 PROVIDER_UNAVAILABLE thrown with its Retry-After (${String(down)}; retryAfter ${(down as { retryAfter?: unknown })?.retryAfter})`);
       // The memory corpus OpenClaw searches, from the plugin's real answers.
       const hits = corpusHits(recalled);
@@ -3686,6 +3693,15 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
         && doc?.id === mem.memory_id && doc?.content === inspected.memory.content && doc?.updatedAt === inspected.memory.freshness.created_at
         && corpusDocument({}, "openbrain://memory/x", "x") === null,
         `OpenClaw's memory corpus: a recall's hit by its memory_id and freshness, and get_memory's {memory} read as the document (${JSON.stringify(hit)}; ${JSON.stringify(doc)})`);
+      const ranked = corpusHits({ memories: [
+        { memory_id: "m-first", summary: "First summary", content: "First content", use_policy: { can_use_as_instruction: true } },
+        { memory_id: "m-second", summary: "Second summary", content: "Second content", use_policy: { can_use_as_evidence: true } },
+      ] });
+      const whole = corpusDocument({ memory: { memory_id: "m-doc", summary: "Short summary", content: "line one\nline two", use_policy: {} } }, "openbrain://memory/m-doc", "m-doc");
+      assert(ranked.length === 2 && ranked[0].score > ranked[1].score && ranked[0].title === "First summary" && ranked[0].snippet === "First summary"
+        && ranked[0].provenanceLabel === "instruction" && ranked[1].provenanceLabel === "evidence"
+        && whole?.content === "line one\nline two" && whole?.title === "Short summary" && whole?.lineCount === 2 && whole?.provenanceLabel === undefined,
+        `OpenClaw's memory corpus: hits scored by rank, titled and excerpted by summary; a document is the memory's whole content (${JSON.stringify(ranked)}; ${JSON.stringify(whole)})`);
       // Its time is when a person last confirmed the memory, before when it was written.
       const confirmedNow = await oc.reviewMemory(mem.memory_id, { action: "confirm", actor_label: "openclaw:test" });
       const confirmedDoc = corpusDocument(await oc.inspectMemory(mem.memory_id), `openbrain://memory/${mem.memory_id}`, mem.memory_id);

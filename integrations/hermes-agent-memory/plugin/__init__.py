@@ -483,7 +483,7 @@ def _format_recall_context(memories: List[Dict[str, Any]], max_results: int) -> 
 # ---------------------------------------------------------------------------
 
 class OB1RequestError(RuntimeError):
-    """A route that answered other than 2xx: its HTTP status, and the plugin's
+    """A route that answered other than 2xx, or a 2xx that is no JSON object: its HTTP status, and the plugin's
     refusal code when the body names one (``NO_SUCH_MEMORY``,
     ``UNSAFE_WRITEBACK``, ``PROVIDER_UNAVAILABLE``, ...). ``retry_after`` is
     the Retry-After a 503 the caller may retry carries, in seconds."""
@@ -542,7 +542,7 @@ class _OB1Client:
         self._access_key = access_key
         self._timeout = timeout
         self._writeback_timeout = writeback_timeout
-        # When Hermes exits (time.monotonic()): no write-back part starts after it, and none waits past it.
+        # When Hermes exits (time.monotonic()): no write-back part starts after it (a part in flight keeps the wait it started with).
         self._stop_at: Optional[float] = None
 
     def stop_by(self, deadline: float) -> None:
@@ -681,7 +681,7 @@ class _OB1Client:
         # two memories, as it is in one write-back. A part refused or timed out raises, the parts before it kept
         # and the ones after it not sent: the same write-back sent again answers the kept ones, writing nothing
         # twice, and sends the rest (a refusal that holds, an unsafe memory, refuses it again). No part starts
-        # after the deadline (Hermes exiting), and none waits past it: OB1WritebackCut says what was kept.
+        # after the deadline, and a part's wait never runs past the deadline it started under: OB1WritebackCut says what was kept.
         answer: dict = {}
         memories: List[Any] = []
         for n, part in enumerate(parts):
@@ -1351,8 +1351,8 @@ class OB1MemoryProvider(MemoryProvider):
         """Extract structured findings from the full session and write to OB1.
 
         Hermes calls it at every real session boundary: at exit, before
-        shutdown, and mid-process too (/new, a compression that rotates the
-        session, called inside the turn), the provider serving on after. So it
+        shutdown, and mid-process too (/new, and a compression, in place or
+        not, called inside the turn), the provider serving on after. So it
         writes back in the background, as sync_turn does, holding its caller
         at most the 2 s it gives the write-back before it: the write-back gets
         at most one write-back timeout, and a shutdown that follows within it

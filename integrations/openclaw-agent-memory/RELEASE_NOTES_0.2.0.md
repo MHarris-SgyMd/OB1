@@ -12,8 +12,8 @@ which replaces the standalone Agent Memory API server after the brain's 2.0.0
   tool; a read key recall, inspection, the queue and the trace; a capture-only
   key the write-back alone, answered each memory's ids alone.
 - Routes: usage is `POST /recalls/{request_id}/usage`, a recall trace
-  `GET /recalls/{request_id}`, and the review queue `GET /review-queue`. A GET
-  sends no body, and an id in a path is encoded.
+  `GET /recalls/{request_id}`, and the review queue `GET /review-queue`. The
+  `content-type` header goes only with a body, and an id in a path is encoded.
 - A refusal throws `AgentMemoryError`, whose message, `code` and `status` name
   the plugin's refusal code (`OB1 agent-memory POST /recall 400 REFUSED_INPUT`);
   a retryable 503 carries its `Retry-After`. A body that is not JSON (a

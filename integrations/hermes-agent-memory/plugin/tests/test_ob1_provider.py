@@ -915,7 +915,7 @@ class TestSessionEnd:
         p._client.writeback = fake_writeback  # type: ignore[assignment]
         return p, recorded
 
-    def test_extracts_findings_and_writes_synchronously(self, configured):
+    def test_extracts_findings_and_writes_them_back(self, configured):
         p, recorded = self._patched(configured)
         msgs = [
             {"role": "user", "content": "We need to fix the slow build pipeline."},
@@ -924,7 +924,7 @@ class TestSessionEnd:
         ]
         p.on_session_end(msgs)
         p._sync_thread and p._sync_thread.join(timeout=5)
-        # in the background, never holding up the turn (Hermes ends sessions mid-turn too, on a compression)
+        # in the background, holding the turn at most 2 s (Hermes ends sessions mid-turn too, on a compression)
         assert len(recorded) == 1
         payload = recorded[0]["memory_payload"]
         assert any("Bun" in d for d in payload.get("decisions", []))
@@ -1025,6 +1025,33 @@ class TestSessionEnd:
             with pytest.raises(socket.timeout):
                 client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=1030.0)
 
+    def test_a_refused_connection_near_the_deadline_is_a_failure_not_a_cut(self):
+        # The deadline still ahead: a connection refused at once is the brain being down, not the deadline's cut.
+        import urllib.error
+        client = _OB1Client("http://x", "k", 5.0)
+        refused = urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        with patch("urllib.request.urlopen", side_effect=refused):
+            with pytest.raises(urllib.error.URLError):
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]},
+                                 deadline=ob1_module.time.monotonic() + 5)
+
+    def test_a_connect_timeout_cut_by_the_deadline_is_a_cut(self, monkeypatch):
+        # A connect that times out because the deadline cut its wait (urllib wraps it in URLError) is the deadline's cut.
+        import socket
+        import urllib.error
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+
+        def connect_times_out(req, timeout=None):
+            clock[0] += timeout
+            raise urllib.error.URLError(socket.timeout("timed out"))
+
+        client = _OB1Client("http://x", "k", 5.0)
+        with patch("urllib.request.urlopen", connect_times_out):
+            with pytest.raises(ob1_module.OB1WritebackCut) as cut:
+                client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=1005.0)
+        assert cut.value.unconfirmed == 1 and cut.value.unsent == 0
+
     def test_stop_by_keeps_the_earliest(self):
         client = _OB1Client("http://x", "k", 5.0)
         client.stop_by(2000.0)
@@ -1043,7 +1070,7 @@ class TestSessionEnd:
             with pytest.raises(socket.timeout):
                 client.writeback(workspace_id="w", project_id=None, memory_payload={"lessons": ["l"]}, deadline=2000.0)
 
-    def test_a_session_end_never_holds_up_its_caller(self, configured):
+    def test_a_session_end_returns_before_its_writeback(self, configured):
         # Hermes ends a session inside a turn on a compression: the session end returns at once, its write-back in
         # the background, and shutdown waits for it.
         p = OB1MemoryProvider()
@@ -1108,6 +1135,33 @@ class TestSessionEnd:
             p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[:10]])
             p._sync_thread and p._sync_thread.join(timeout=5)
         assert any(r.levelname == "WARNING" and "session end write-back failed" in r.message for r in caplog.records)
+
+    def test_a_pre_compress_writeback_is_kept_for_shutdown(self, configured):
+        # Like a turn's, a compression's write-back is one shutdown waits for.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        release = threading.Event()
+
+        def held(req, timeout=None):
+            release.wait(5)
+            return _mock_urlopen_response({"memories": []})
+
+        with patch("urllib.request.urlopen", held):
+            p.on_pre_compress([{"role": "assistant", "content": line} for line in self._LINES[:5]])
+            kept = [t.name for t in p._writeback_threads if t.is_alive()]
+            release.set()
+            p.shutdown()
+        assert kept == ["ob1-precompress"]
+
+    def test_finished_writebacks_are_let_go(self, configured):
+        # A long-lived process (a gateway) starts a write-back a turn: the finished ones are not kept.
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        for n in range(3):
+            p._start_writeback(lambda: None, f"w{n}")
+        p._sync_thread.join(timeout=5)
+        p._start_writeback(lambda: None, "w-last")
+        assert len(p._writeback_threads) == 1
 
     def test_the_same_session_end_twice_is_written_back_once(self, configured, monkeypatch):
         # Hermes's TUI ends a session at finalize and again at close, with one transcript: the second is skipped, so
@@ -1359,6 +1413,12 @@ class TestTools:
         assert kwargs["action"] == "confirm"
         assert kwargs["notes"] == "looks good"
         assert kwargs["actor_label"] == "hermes:default"
+
+    def test_review_memory_edit_of_blank_text_is_refused_locally(self, active):
+        with patch.object(active._client, "review_memory") as mock:
+            out = active.handle_tool_call("ob1_review_memory", {"memory_id": "m1", "action": "edit", "content": "   ", "summary": "\t"})
+        assert "content, summary or both" in out
+        mock.assert_not_called()
 
     def test_review_memory_edit_needs_content_or_summary(self, active):
         with patch.object(active._client, "review_memory") as mock:
