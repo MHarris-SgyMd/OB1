@@ -1591,9 +1591,11 @@ export function normaliseEffectivePriority(r: unknown, what: string): EffectiveP
 /** A live or lapsed claim an agenda item names (115): the holder's key name, the piece, and when its lease ends or ended. */
 export type AgendaClaim = { holder: string; piece: string | null; label: string | null; at: string };
 /**
- * One agenda item (migration 123, SMD-3669): a ticket or an open item, its place, what it is, and 122's terms behind
- * its place. `claimed` names live claims (shown only with include_claimed or holder mine), `lapsedClaim` claims never
- * released whose lease ran out, `blockers` the open items blocking it (shown only with include_blocked).
+ * One agenda item (migrations 123 and 124, SMD-3669, SMD-4162): a ticket or an open item, its place, what it is, and
+ * 122's terms behind its place. `status` is a ticket's Linear status (`statusType` its type: triage, backlog,
+ * unstarted or started) or an open item's (open or proposed, `statusType` null). `claimed` names live claims (shown only with
+ * include_claimed or holder mine), `lapsedClaim` claims never released whose lease ran out, `blockers` the open items
+ * blocking it (shown only with include_blocked).
  */
 export type AgendaItem = {
   rank: number;
@@ -1603,6 +1605,7 @@ export type AgendaItem = {
   title: string;
   project: string | null;
   status: string | null;
+  statusType: string | null;
   owner: string | null;
   effective: number;
   level: number | null;
@@ -1618,15 +1621,20 @@ export type AgendaItem = {
   lapsedClaim: AgendaClaim[];
   blockers: string[];
 };
-/** An agenda (migration 123): the first `limit` items, how many passed the filters, how many carry no priority, what was left out and why, and board-sync's last heartbeat. */
+/** An agenda (migrations 123 and 124): the first `limit` items, how many passed the filters, how many carry no priority, what was left out and why, board-sync's last heartbeat, and the live claims the brain records. */
 export type AgendaResult = {
   items: AgendaItem[];
   total: number;
   unknown: number;
-  leftOut: { blocked: number; claimed: number; waiting: number };
+  leftOut: { blocked: number; claimed: number; started: number; waiting: number };
   boardSync: { at: string; outcome: unknown } | null;
   /** False when the role may not read work_claims (the claims group is soft): no claim was filtered or named. */
   claimsRead: boolean;
+  /**
+   * The live claims this brain records on any ticket (124); null when claimsRead is false. 0 means no claim could
+   * leave anything out, as on a brain whose board is claimed through another brain.
+   */
+  claimsLive: number | null;
   now: string;
 };
 
@@ -1641,13 +1649,14 @@ const claimsOf = (v: unknown, what: string): AgendaClaim[] => {
   });
 };
 
-/** migration 123's agenda answer; anything else throws, naming the call and nothing of the answer. */
+/** migration 124's agenda answer; anything else throws, naming the call and nothing of the answer. */
 export function normaliseAgenda(r: unknown, what: string): AgendaResult {
   const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
   const lo = o?.left_out !== null && typeof o?.left_out === "object" ? (o.left_out as Record<string, unknown>) : undefined;
   const num = (v: unknown): number => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
   if (!o || !Array.isArray(o.items) || !Number.isInteger(num(o.total)) || !Number.isInteger(num(o.unknown)) || !lo
-      || ![lo.blocked, lo.claimed, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date)) || typeof o.claims_read !== "boolean") {
+      || ![lo.blocked, lo.claimed, lo.started, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date)) || typeof o.claims_read !== "boolean"
+      || (o.claims_live !== null && !Number.isInteger(num(o.claims_live)))) {
     throw new Error(`${what} answered no agenda this server reads`);
   }
   const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
@@ -1665,7 +1674,8 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     return {
       rank: num(i.rank), kind: i.kind as AgendaItem["kind"], key: i.key, source: i.source,
       title: typeof i.title === "string" ? i.title : "", project: typeof i.project === "string" ? i.project : null,
-      status: typeof i.status === "string" ? i.status : null, owner: typeof i.owner === "string" ? i.owner : null,
+      status: typeof i.status === "string" ? i.status : null, statusType: typeof i.status_type === "string" ? i.status_type : null,
+      owner: typeof i.owner === "string" ? i.owner : null,
       effective: e.effective, level: e.level, inheritedFrom: e.inheritedFrom, dueAt: e.dueAt, dueFrom: e.dueFrom, urgency: e.urgency,
       overdue: e.overdue, unblocks: e.unblocks, terms: e.terms, winner: e.winner,
       claimed: claimsOf(i.claimed, what), lapsedClaim: claimsOf(i.lapsed_claim, what), blockers: i.blockers as string[],
@@ -1673,9 +1683,10 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
   });
   return {
     items, total: num(o.total), unknown: num(o.unknown),
-    leftOut: { blocked: num(lo.blocked), claimed: num(lo.claimed), waiting: num(lo.waiting) },
+    leftOut: { blocked: num(lo.blocked), claimed: num(lo.claimed), started: num(lo.started), waiting: num(lo.waiting) },
     boardSync: bs && (typeof bs.at === "string" || bs.at instanceof Date) ? { at: isoTimestamp(bs.at as string | Date), outcome: bs.outcome ?? null } : null,
     claimsRead: o.claims_read as boolean,
+    claimsLive: o.claims_live === null ? null : num(o.claims_live),
     now: isoTimestamp(o.now as string | Date),
   };
 }
@@ -2424,7 +2435,9 @@ export interface ThoughtStore {
    */
   agenda(opts: {
     scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
-    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; now?: string;
+    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean;
+    /** Also list started tickets (124); absent is false: started work is left out, and counted. */
+    includeStarted?: boolean; now?: string;
   }): Promise<AgendaResult>;
   /** One agenda row in query_log (migration 123): the scope and the items returned, in order. */
   logAgenda(row: QueryAgendaLog): Promise<void>;

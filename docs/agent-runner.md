@@ -136,7 +136,7 @@ A live claim whose PR merged or closed is stale. The runner skips its ticket and
 
 The label proves less than it seems. Linear records an add made through the maintainer's personal API key just as it records the maintainer's own click, so any agent session with that key's write access can add the label. For the label to be the maintainer's own word, agent sessions hold only read access to Linear, or a key of their own (`scripts/agent-runner/README.md`, "What the label proves").
 
-The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda item carries no ticket state, assignee, delegate, title or label history, so the rule's Backlog, unassigned, title and label checks stay Linear's.
+The agenda read has landed (SMD-3669, ranked by effective priority, SMD-3667). The runner is to read it, filtered by the label, for the order and for startability (blockers, live claims, `not_before`), beside its Linear checks: an agenda ticket carries its Linear status since migration 124 (SMD-4162), as board-sync last copied it, but no assignee, delegate, or history of its title or labels, so the rule's Backlog, unassigned, title and label checks stay Linear's.
 
 ## A run, step by step
 
@@ -323,9 +323,11 @@ Each its own PR, in order:
      * It needs only the pinned Claude Code.
    * **2b, the run's local steps,** in three PRs (split 2026-11-08):
      * **2b-1, the record and the gate:** the run's record — its facts as JSON, in a directory the agent can't write — and the gate over an imported branch, diff, ticket and report. Both are checked on fixtures, offline, with no session: the gate on a real bare repository and a branch git builds (a clean branch, and each kind of bad branch, diff, secret and work), the record round-tripped and its no-follow writes tested.
-     * **2b-2, the clone, the brief and the sessions,** in two PRs:
+     * **2b-2, the clone, the brief and the sessions,** in three PRs:
        * **2b-2a, the clone and the brief:** the per-run clone (off the bare repository at the base commit, on the branch, as the bot, without hard links) and the worker's brief (its fields fenced as data; a ticket whose title, description or Verify has a character that doesn't show refused before any of it reaches the brief, as cut 1 does for a title; the tickets it names listed by id only, not vouched for by the label). Both on fixtures, with no session.
-       * **2b-2b, the worker and review sessions:** the run orchestrator driving the worker and review sessions (cut 2a's session machinery against the probes' stand-in Messages API) and the one resume, and the bundle and its import into the bare repository, feeding the gate.
+       * **2b-2b, the worker and review sessions,** in two PRs:
+         * **2b-2b-1, the bundle and the review brief:** verifying a session's bundle (a regular file opened without following a link, `git bundle verify`, and exactly one ref — the run's branch) and importing it into the bare repository with `fetch.fsckObjects`, and the review session's brief (the ticket and the diff fenced as data, read-only on a clean base checkout). On fixtures, with no session.
+         * **2b-2b-2, the run orchestrator:** driving the worker and review sessions (cut 2a's session machinery against the probes' stand-in Messages API) and the one resume, tying the clone, the brief, the bundle and the gate into a whole run on the record.
      * It needs no key.
    * **2c, the outward steps:**
      * the claim, and a whole run ending at a branch in the runner's bare repository with no push;

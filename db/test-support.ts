@@ -480,6 +480,9 @@ const FUNCTIONS = [
   // 123 (SMD-3669): the agenda and the blockers it names.
   "ob1_item_blockers(text, text)",
   "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone)",
+  // 124 (SMD-4162): the agenda again, under a ninth argument (123's eight-argument one above, dropped by 124, kept for a
+  // schema reset at 123).
+  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean)",
 ];
 
 /**

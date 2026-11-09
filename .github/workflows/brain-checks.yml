@@ -243,6 +243,13 @@ jobs:
       # sessions that run on the brief and clone are cut 2b-2b.
       - name: The agent runner's brief and clone
         run: bun scripts/agent-runner/brief-check.ts --self-check
+      # SMD-4087 cut 2b-2b-1: the bundle verify/import and the review brief on
+      # fixtures — a plain one-branch bundle and each way one is refused (symlink,
+      # multi-ref, wrong ref, not a bundle, a malformed object the import fsck
+      # rejects), and the review brief fencing the diff as data. The run
+      # orchestration that produces a real bundle is cut 2b-2b-2.
+      - name: The agent runner's bundle and review brief
+        run: bun scripts/agent-runner/bundle-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -552,6 +559,16 @@ jobs:
       - name: Priority eval rules
         working-directory: evals
         run: bun eval-priority.ts --self-check
+
+      # The board replay's rules (SMD-3669 PR 3): an issue rebuilt from
+      # Linear's history (state, priority, due date, parent, project, labels,
+      # title and relations undone after the moment, every relation-change
+      # code read or refused), the history fetch and the budget read against
+      # a stub of Linear, and the report on a stub agenda. No database, no
+      # Linear; a replay reads Linear, so it runs by hand.
+      - name: Board replay rules
+        working-directory: evals
+        run: bun board-replay.ts --self-check
 
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
