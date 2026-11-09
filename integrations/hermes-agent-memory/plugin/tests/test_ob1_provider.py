@@ -1109,6 +1109,27 @@ class TestSessionEnd:
             p._sync_thread and p._sync_thread.join(timeout=5)
         assert any(r.levelname == "WARNING" and "session end write-back failed" in r.message for r in caplog.records)
 
+    def test_the_same_session_end_twice_is_written_back_once(self, configured, monkeypatch):
+        # Hermes's TUI ends a session at finalize and again at close, with one transcript: the second is skipped, so
+        # the two write-backs never race. Another session's same findings are its own.
+        clock = [1000.0]
+        monkeypatch.setattr(ob1_module.time, "monotonic", lambda: clock[0])
+        p = OB1MemoryProvider()
+        p.initialize(session_id="sess", hermes_home=str(configured))
+        sent: List[int] = []
+        msgs = [{"role": "assistant", "content": line} for line in self._LINES[:10]]
+        with patch("urllib.request.urlopen", self._timed(clock, 1, sent)):
+            p.on_session_end(msgs)
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.on_session_end(list(msgs))
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.initialize(session_id="sess-2", hermes_home=str(configured))
+            p.on_session_end(msgs)
+            p._sync_thread and p._sync_thread.join(timeout=5)
+            p.on_session_end([{"role": "assistant", "content": line} for line in self._LINES[10:20]])
+            p._sync_thread and p._sync_thread.join(timeout=5)
+        assert sent == [10, 10, 10]
+
     def test_a_session_end_mid_process_stops_nothing(self, configured, monkeypatch):
         # Hermes ends a session mid-process too (/new, a compression that rotates it) and serves on: the write-backs
         # after it, long past its deadline, go as before.
@@ -1183,7 +1204,11 @@ class TestSessionEnd:
             p.shutdown()
         hold.set()
         assert quick_done.is_set()
-        assert any("1 background write-back(s) still running at the exit deadline" in r.message for r in caplog.records)
+        messages = [r.message for r in caplog.records]
+        # Said before the wait (a process killed during it still leaves a record), then what the deadline left.
+        waiting = next(i for i, m in enumerate(messages) if "waiting up to 0 s for 1 background write-back(s) at exit" in m)
+        left = next(i for i, m in enumerate(messages) if "1 background write-back(s) still running at the exit deadline" in m)
+        assert waiting < left
         assert p._writeback_threads == []
 
     def test_shutdown_waits_for_an_earlier_writeback_too(self, configured):

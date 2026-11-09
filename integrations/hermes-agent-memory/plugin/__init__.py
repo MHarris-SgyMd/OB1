@@ -875,6 +875,9 @@ class OB1MemoryProvider(MemoryProvider):
         self._writeback_threads: List[threading.Thread] = []
         # The last session end's deadline (time.monotonic()): shutdown right after it, at exit, shares it.
         self._session_end_by: Optional[float] = None
+        # The last session end's write-back, by its session and findings: Hermes's TUI ends a session twice with
+        # the same transcript (finalize, then close), and a second identical write-back would race the first.
+        self._last_session_end: Optional[str] = None
         # _start_writeback runs on Hermes's background worker (sync_turn) and on the compressing thread.
         self._writeback_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
@@ -1074,6 +1077,12 @@ class OB1MemoryProvider(MemoryProvider):
             self._client.stop_by(deadline)
         with self._writeback_lock:
             threads = list(self._writeback_threads)
+        running = sum(1 for t in threads if t.is_alive())
+        if running:
+            # Said before the wait, so a process killed during it (Hermes's CLI exit watchdog, HERMES_EXIT_WATCHDOG_S,
+            # 30 s by default) still leaves a record of what was outstanding.
+            logger.warning("OB1: waiting up to %.0f s for %d background write-back(s) at exit (writeback_timeout)",
+                           max(0.0, deadline - now), running)
         for t in threads:
             if t.is_alive():
                 t.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -1344,10 +1353,12 @@ class OB1MemoryProvider(MemoryProvider):
         Hermes calls it at every real session boundary: at exit, before
         shutdown, and mid-process too (/new, a compression that rotates the
         session, called inside the turn), the provider serving on after. So it
-        writes back in the background, as sync_turn does, and never holds up a
-        turn: the write-back gets at most one write-back timeout, and a
-        shutdown that follows within it (at exit) shares that deadline and
-        waits for it. It stops nothing: later write-backs go on as before.
+        writes back in the background, as sync_turn does, holding its caller
+        at most the 2 s it gives the write-back before it: the write-back gets
+        at most one write-back timeout, and a shutdown that follows within it
+        (at exit) shares that deadline and waits for it. It stops nothing:
+        later write-backs go on as before. The same session's same findings
+        again (the TUI ends a session twice) are not written back twice.
         """
         if not self._active or not self._auto_capture or not self._write_enabled or not self._client:
             return
@@ -1368,6 +1379,14 @@ class OB1MemoryProvider(MemoryProvider):
                 f"Session completed with {user_count} user messages; no structured "
                 "findings extracted by heuristics."
             ]}
+
+        # The same session's same findings again (Hermes's TUI ends a session at finalize and again at close, with one
+        # transcript): written back once. The plugin would answer a resend by its keys, but two at once would race.
+        same = hashlib.sha256(json.dumps([self._session_id, findings], sort_keys=True).encode("utf-8")).hexdigest()
+        if same == self._last_session_end:
+            logger.debug("OB1 session end: the same findings as the last session end, not written back again")
+            return
+        self._last_session_end = same
 
         mp = self._resolve_model_provider()
         models_used: List[Dict[str, Any]] = []
