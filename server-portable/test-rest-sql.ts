@@ -2336,6 +2336,65 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
   if (claim.status === 200) await rest("POST", `/v1/claims/${String((claim.body as { claim?: { id: string } }).claim?.id)}/release`, { token: (claim.body as { token?: string }).token, reason: "test-rest-sql [17] done" });
 }
 
+console.log("\n[17b] plan_context through both doors (migration 126, SMD-2684): REST's POST /v1/plan-context and MCP's plan_context give one record; the knowledge is the request's search with current work first, a superseded hit labelled with its replacement; the board is the tickets the hits name in agenda order, a started one listed with its status, a Done one beside, a key the brain does not hold a gap; specs and procedures not available, naming what they wait on; the tools a key's scope may call; a read key reads it, a capture-only key and an unknown key do not; a blank request refused by the schema");
+{
+  const P = "Plan rest [17b]";
+  const ticket = async (issue: string, st: string) => {
+    const content = `${issue} — [17b] ${issue}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: st, status_type: st, project: P })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9951", "backlog"); await ticket("SMD-9952", "started"); await ticket("SMD-9953", "completed");
+  await rest("POST", "/v1/priorities/ticket/SMD-9951", { level: 3 });
+  // Three notes holding the request's quoted span (axis beta, so the search's pool is small): a draft and the newer
+  // draft superseding it, and a note naming an open, a started, a Done and an unknown ticket.
+  const draft = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" first draft, about SMD-9952' });
+  const redraft = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" second draft, about SMD-9952', supersedes: String(draft.body.id) });
+  const note = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" needs SMD-9951, follows SMD-9953, and SMD-9959' });
+  const request = 'how do I build "zephyr plan beta"';
+  const r = await rest("POST", "/v1/plan-context", { request, limit: 20 });
+  const m = await mcp("plan_context", { request, limit: 20 });
+  type Hit = { id: string; supersededBy: string | null };
+  type Tk = { key: string; status: string | null; statusType: string | null; effective: number };
+  const k = r.body.knowledge as { hits: Hit[]; preferCurrent: boolean } | undefined;
+  const b = r.body.board as { available: boolean; tickets: Tk[]; others: { key: string; settled: boolean }[] } | undefined;
+  const gaps = (r.body.gaps ?? []) as { gap: string; keys?: string[] }[];
+  const hitIds = (k?.hits ?? []).map((h) => h.id);
+  const oldHit = k?.hits.find((h) => h.id === draft.body.id);
+  const keysShown = (b?.tickets ?? []).map((t) => t.key);
+  assert(draft.status === 201 && redraft.status === 201 && note.status === 201 && r.status === 200 && k?.preferCurrent === true
+      && [draft.body.id, redraft.body.id, note.body.id].every((id) => hitIds.includes(String(id))) && oldHit?.supersededBy === redraft.body.id
+      && hitIds.indexOf(String(redraft.body.id)) < hitIds.indexOf(String(draft.body.id)),
+    `the knowledge: the request's search, current work first, the superseded draft labelled with the draft that replaced it (${r.status} ${hitIds.length} hits; ${oldHit?.supersededBy})`);
+  assert(b?.available === true && keysShown.includes("SMD-9951") && keysShown.includes("SMD-9952") && keysShown.indexOf("SMD-9951") < keysShown.indexOf("SMD-9952")
+      && b.tickets.find((t) => t.key === "SMD-9952")?.statusType === "started" && b.others.some((o) => o.key === "SMD-9953" && o.settled)
+      && gaps.some((g) => g.gap === "tickets_missing" && g.keys?.includes("SMD-9959")),
+    `the board: the named tickets in agenda order, the High before the started one, which is listed with its status; the Done one beside, settled; the unknown key a gap (${keysShown.join(" ")} | ${JSON.stringify(b?.others)} | ${JSON.stringify(gaps)})`);
+  const specs = r.body.specs as { available: boolean; waitsOn: string[] }, procs = r.body.procedures as { available: boolean; waitsOn: string[] };
+  const tools = r.body.tools as { scope: string; core: string[] };
+  assert(specs?.available === false && same(specs.waitsOn, ["SMD-2683", "SMD-1715"]) && procs?.available === false && same(procs.waitsOn, ["SMD-1721"])
+      && tools?.scope === "write" && tools.core.includes("plan_context") && tools.core.includes("capture_thought"),
+    `specs and procedures not available, naming the tickets they wait on; the tools a write key may call (${JSON.stringify(specs)} | ${tools?.core.length})`);
+  // One record through both doors: MCP's reply is the REST answer rendered.
+  const out = rendered((v) => say.renderPlanContext(ok(v)), r.body);
+  assert(!m.isError && out.content[0].text === m.text && same(out.structuredContent, m.sc) && /^Plan context for "how do I build \\"zephyr plan beta\\""/.test(m.text)
+      && /\n## Board: the tickets the hits name\n/.test(m.text) && /ticket SMD-9952 \("started"\)/.test(m.text) && /- ticket SMD-9953 \("completed"\) .* — settled/.test(m.text),
+    `MCP's reply is the REST answer rendered, text and value (${m.text.split("\n")[0]})`);
+  const reader = await rest("POST", "/v1/plan-context", { request, limit: 20 }, KEYS.reader);
+  const hook = await rest("POST", "/v1/plan-context", { request }, KEYS.hook);
+  const gone = await rest("POST", "/v1/plan-context", { request }, "no-such-key-raw");
+  const blank = await rest("POST", "/v1/plan-context", { request: "   " });
+  // The limit (review pass 1): 2 keeps two of the three notes' hits; 21 is past the schema's 20, refused; the log is
+  // off in this suite, so no call here wrote a row.
+  const two = await rest("POST", "/v1/plan-context", { request, limit: 2 });
+  const tooMany = await rest("POST", "/v1/plan-context", { request, limit: 21 });
+  const [{ n: planRows }] = await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'plan_context'`;
+  assert(reader.status === 200 && same((reader.body.board as { tickets: Tk[] }).tickets.map((t) => t.key), keysShown) && (reader.body.tools as { scope: string; core: string[] }).scope === "read"
+      && !(reader.body.tools as { core: string[] }).core.includes("capture_thought") && hook.status === 403 && gone.status === 401 && blank.status === 400
+      && two.status === 200 && (two.body.knowledge as { hits: Hit[] }).hits.length === 2 && tooMany.status === 400 && planRows === 0,
+    `a read key reads it, its own tools listed; a capture-only key is refused 403, an unknown key 401, a blank request 400; limit 2 keeps two hits, 21 is refused; with the log off no row is written (${reader.status} ${hook.status} ${gone.status} ${blank.status} ${(two.body.knowledge as { hits?: Hit[] } | undefined)?.hits?.length} ${tooMany.status} ${planRows})`);
+}
+
 console.log("\n[18] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search_thoughts, search_thoughts_keyword, list_thoughts and fetch (none on search), the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");
 {
   const caseIds: string[] = [];

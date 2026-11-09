@@ -803,6 +803,22 @@ export const SPECS = {
       include_started: z.boolean().optional().default(false).describe("Also list started tickets (In Progress, In Review: Linear's started type) that no live claim covers; a claimed one is include_claimed's (when claims can be read), and holder mine shows the key's own"),
     },
   },
+  plan_context: {
+    title: "Plan Context",
+    description:
+      "Everything the brain holds for a request, in one read, so you can judge whether and how to do it before you plan: not a planner, and no verdict. " +
+      "Sections: `knowledge`, a search of the request with current work ranked first, each hit labelled as search_thoughts labels it (who wrote it and its trust, superseded, moved, claimed, priority, relations) and its text fenced; " +
+      "`board`, the tickets those hits name, in agenda order — blocked, claimed and started ones included, each with its status, blockers, claims and effective priority — with `others` (the named ones it does not rank: settled, or a status type unknown here) and `waiting` (those not yet startable, with when they will be); " +
+      "`specs` and `procedures`, not available here yet, each saying the ticket it waits on; `tools`, the tools this key's scope may call (core and enabled plugins; another server's are unknown here); " +
+      "and `gaps`, what it could not find, as values: no hit at all, every hit superseded or outside text, a named ticket the brain does not hold, tickets past the board's reach (500 named, 100 listed), semantic search unavailable, or a board that ran out of time or failed. No gap is no verdict on coverage: the search keeps its nearest matches, each with its similarity. " +
+      "One deadline bounds the two waits: an embedding past it is answered by exact matches alone, and a board past it is a gap, not a failure. Logged as one query_log row when the log is on.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      request: z.string().min(1).max(2000).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate")
+        .describe("What you were asked to do, in your words or the operator's"),
+      limit: z.number().int().min(1).max(20).optional().default(8).describe("Knowledge hits to return, 1 to 20. Default 8"),
+    },
+  },
 } satisfies Record<ToolName, ToolSpec>;
 
 /** The typed input a tool's operation takes: its schema's output, defaults applied and transforms run. */
