@@ -4636,9 +4636,10 @@ related, `d` it duplicates, `m` it is duplicated by. `xr`, `br`, `xo` and `bo` a
 resolved or reopened, not changes: on the board, the relation stood after each of them. Any other code stops the run
 by name, since skipping it would plant a board that never was.
 
-**It plants the board through board-sync's own writers.** Each row gets `renderIssue`'s text and `issueFacets`'
-metadata, and `recordStructure` records its source and links. The operator declares board-sync a priority source,
-and board-sync's own priority step states the levels and due days. Work claims didn't exist on every board a replay
+**It plants the board as board-sync would have.** Each row is inserted under board-sync's actor with `renderIssue`'s
+text and `issueFacets`' metadata, and no embedding, which the agenda doesn't read. Board-sync's own writers do the
+rest: `recordStructure` records each row's source and links, and, once the operator declares board-sync a priority
+source, its priority step states the levels and due days. Work claims didn't exist on every board a replay
 reads, so each ticket whose state then was started is claimed by another key, as today's rule has an agent claim at
 branch creation (the maintainer's choice). The agenda is then asked with its clock at the moment.
 
@@ -4656,16 +4657,17 @@ branch creation (the maintainer's choice). The agenda is then asked with its clo
 Nothing of the board is committed.
 
 **Linear's budget.**
-* **The limits:** Linear refuses a query costing more than 10,000 points, and allows 3,000,000 an hour to a key. The
-  stable brain's board-sync uses the same key.
+* **The limits:** Linear refuses a query costing more than 10,000 points, and allows a key 3,000,000 points and 2,500
+  requests an hour. The stable brain's board-sync uses the same key.
 * **What a history page costs:** it is charged by the page size asked for. A 100-entry page cost about 1,500 points
   an issue, and one run at that size spent the hour.
 * **How the replay stays cheap:** it reads 25 entries a page, 20 issues a request, and only back to the moment, and
   never asks for the history of an issue created after it. It still reads every issue on today's board once, with its
   relations and labels. The 11-02 replay cost about 470,000 points.
 * **Before any of that,** it resets the throwaway database (refusing one that holds thoughts) and reads Linear's
-  remaining budget, refusing below 1,000,000: a run cut short by the limit keeps nothing, and the hour is
-  board-sync's too.
+  remaining budget through the same client, refusing below 1,000,000 points or 300 requests, or a budget it can't read,
+  and saying when the hour resets: a run cut short by the limit keeps nothing, and the hour is board-sync's too. A
+  moment further back reads more history pages, so the floor is about twice the 11-02 run, not a bound.
 
 **2026-11-02, 14:11Z.** This is the session that asked "what is the highest-value unstarted issue?" and picked
 SMD-2908 (the dogfood row of that date). SMD-3669's Verify says SMD-2908 comes first among the board's unstarted items
@@ -4673,13 +4675,15 @@ with High, its due window and "unclaimed"; that SMD-3602 is left out as claimed;
 with no declared work of its own. The replay found:
 * **The board then:** 962 issues (388 Backlog, 43 started, 456 completed, 75 canceled or duplicate), 959 of them with
   a Linear level stated. The 43 started tickets each carry a stand-in claim. The agenda listed 314 tickets, left out
-  76 as blocked and 41 as claimed, and found none with no priority.
+  76 as blocked and 41 as claimed, and found none with no priority. Two of the started tickets were also blocked, and
+  the agenda counts a ticket once, under blocked.
 * **SMD-2908 ranks 6th, not first.** It scores 3: its High level and nothing more. Linear held no due date for it
   then. Its v2.0.0 deadline, the 11-03 cut, was only in its text, so no urgency term could see it. Nine others tie
   at 3, four of them ahead by the tie-break on key: SMD-1813, SMD-1899 and SMD-2211 (each Medium and unblocking open
   work) and SMD-2607 (High). First is SMD-2301 (High, unblocking open work, 4).
 * **SMD-3602 is left out as claimed.** It was In Progress, so it carries a stand-in claim; its score would be 2.
-* **SMD-1853 ranks 37th, on its own Medium level.** It inherits nothing from its children, and unblocks nothing.
+* **SMD-1853 ranks 37th, on its own Medium level.** A tracking parent takes no level from its children (an item
+  inherits only from what it serves), and it unblocks nothing.
 
 So the Verify holds on SMD-3602 and SMD-1853, and fails on SMD-2908: the deadline that made it the pick was never
 stated where the agenda reads. With a due date of 11-03 on Linear, SMD-2908 would have taken urgency +2 and ranked
