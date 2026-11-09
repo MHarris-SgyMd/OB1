@@ -1806,6 +1806,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     const msg = (e as Error).message ?? "";
     return /Embedding width mismatch|returned no embedding/.test(msg);
   }
+  /** `s` cut to `n` characters, a cut marked "…", so a number cut short does not read whole (SMD-2636 PR 3b, review passes 1, 2 and 4). */
+  const cutMarked = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
   /** One embedding call of the probe's text, as a follower's start and its outage waits ask (worker-bootstrap.ts's Probe): up, out (no answer, a timeout, a 408, a 429 or a 5xx), missing (the model not served), or refused. */
   const embedProbe = async (wake: AbortSignal, subject: EgressSubject = probeSubject): Promise<Probe> => {
     try {
@@ -1813,7 +1815,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       return { state: "up" };
     } catch (e) {
       if (wake.aborted) return { state: "out", why: "the probe was stopped" };
-      const why = (e as Error).message.slice(0, 300);
+      const why = cutMarked((e as Error).message, 300);
       if (providerDown(e)) return { state: "out", why };
       if (modelMissing(e)) return { state: "missing", why };
       return { state: "refused", why };
@@ -2222,9 +2224,6 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     }
   };
 
-  /** `s` cut to `n` characters, a cut marked "…", so a number cut short does not read whole (SMD-2636 PR 3b, review passes 1 and 2). */
-  const cutMarked = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
-
   async function worker(n: number): Promise<void> {
     // Globally unique: release_claims_for_worker matches on this alone, and a
     // bare pid collides across containers.
@@ -2295,9 +2294,11 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             outcome = { outcome: "vanished" };
           } else {
             inCall.begin(workerId);
+            /** The call's slot waits, one count for its calls and the probe after them, so a window call still waiting and the probe do not keep two (SMD-2636 PR 3b, review pass 4). */
+            const callWaits = callWaitsFor(() => inCall.get(workerId));
             try {
               // A wait for a slot on the model-call seam is not the call's time (review pass 3).
-              outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => processRow(row, workerId));
+              outcome = await withCallWaits(callWaits, () => processRow(row, workerId));
               // An aborted call is no answer from the provider (review pass 2).
               if (outcome.outcome !== "setBack") probed = true;
             } catch (e) {
@@ -2316,7 +2317,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   if (outage.begin(why, suspect ? b.thought_id : undefined) === "thought") return "thought";
                   drainEnds.abort();
                   outageSubject ??= rowSubject;
-                  err(`  ${workerId}: the embedding provider is not answering (${why.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
+                  err(`  ${workerId}: the embedding provider is not answering (${cutMarked(why, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                   return "outage";
                 };
                 /**
@@ -2362,21 +2363,27 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   // a probe deaf to it held the pass up to the call's timeout after a deadline (review pass 1). Its
                   // wait for a slot on the model-call seam is not the call's time, as the call's is not (review
                   // pass 3: a probe only queued was aborted as a call past its bound). Another worker's refusal
-                  // stopping every worker, it is not made (review pass 3: it held the exit up to a timeout more).
+                  // stopping every worker, it is not made (review pass 3: it held the exit up to a timeout more), and the
+                  // drain's end — another worker's refusal or outage, the record moved — ends it, the thought handed
+                  // back or the outage joined (review pass 4: a refusal during the probe held the exit). It counts its
+                  // slot wait in the call's own count (review pass 4: two counts on one call misread a queued probe).
                   if (configError !== null) return;
                   const call = inCall.get(workerId);
-                  const probe = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => embedProbe(call ? AbortSignal.any([onStop.signal, call.abort.signal]) : onStop.signal, probeGate.allowed ? probeSubject : rowSubject));
+                  const drain = drainEnds.signal;
+                  const probe = await withCallWaits(callWaits, () => embedProbe(AbortSignal.any([onStop.signal, drain, ...(call ? [call.abort.signal] : [])]), probeGate.allowed ? probeSubject : rowSubject));
                   const act = probedFault(probe);
                   if (call?.aborted) {
                     outcome = { outcome: "setBack" };
                   } else if (act === "thought") {
                     // Said so, and that a retry revisits it, as extract's does (review pass 1).
                     outcome = { outcome: "failed", error: `${msg} (the provider answered a probe right after, so this thought's; --retry-failed revisits it)` };
-                  } else if (stopping) {
+                  } else if (stopping || configError !== null || (drain.aborted && outage.reason === null)) {
+                    // Handed back: a stop, another worker's refusal (its words kept, not this probe's), the record moved.
                     return;
                   } else if (act === "outage") {
-                    // A suspect: an input that brings the provider down, with a code no rule names, is recorded at its next (review pass 5).
-                    if (sendBack(isOut(probe) ? probe.why : msg, true) === "outage") return;
+                    // A suspect: an input that brings the provider down, with a code no rule names, is recorded at its
+                    // next (review pass 5). Another worker's outage cut the probe short: joined, in this call's words.
+                    if (sendBack(isOut(probe) && !drain.aborted ? probe.why : msg, true) === "outage") return;
                     outcome = { outcome: "failed", error: again };
                   } else {
                     stopRefused(probe.state === "refused" ? probe.why : undefined);
@@ -2555,10 +2562,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * error once they have stopped, not while they still hold rows and the client.
    */
   const drain = async (): Promise<void> => {
-    if (ADMIT) {
-      drainEnds = new AbortController();
-      gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
-    }
+    // Each drain's own end: a probe reads it too, so one left aborted by the last drain's outage would cut every
+    // later probe short (SMD-2636 PR 3b, review pass 4: renewed under the admit gate alone, it cycled a thought).
+    drainEnds = new AbortController();
+    if (ADMIT) gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
       drainEnds.abort();

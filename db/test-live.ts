@@ -4282,9 +4282,9 @@ if (want("9f")) {
       }
       if (input.includes("zz-filtered")) return Response.json({ error: { message: "stub: the request was rejected by the content filter" } }, { status: 400 });
       if (input.includes("zz-overlong")) return Response.json({ error: { message: "stub: the input exceeds the model's context length" } }, { status: 400 });
-      // A slow hemlock note answers its 500 after 500 ms, so a second worker has claimed its own thought by then.
+      // A slow hemlock note answers its 500 after 1 s, so a second worker has claimed its own thought by then, on a slow runner too (review pass 4: 500 ms).
       if (poison && input.includes("hemlock")) {
-        if (input.includes("slow hemlock")) await Bun.sleep(500);
+        if (input.includes("slow hemlock")) await Bun.sleep(1000);
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
       }
       if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
@@ -4543,7 +4543,7 @@ if (want("9f")) {
     // Another worker's outage is joined unprobed (SMD-2636 PR 3b, as extract's, PR 3a's review pass 1): under two
     // workers a slow hemlock note's 500 begins an outage while a deadline thought's call is still in hand, which, met
     // after, goes back to the pool unrecorded, where a probe would answer and record it failed. The 500 comes after
-    // 500 ms: at once, it began the outage before the other worker claimed, which then claimed nothing.
+    // 1 s: at once, it began the outage before the other worker claimed, which then claimed nothing.
     const joining = liveFollower({ workers: 2 });
     await joining.idle();
     poison = true;
