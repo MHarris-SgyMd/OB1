@@ -5681,13 +5681,13 @@ console.log("\n[20bp] Migration 126: onto a populated brain at the file before i
     `without 123's ob1_item_blockers the file is refused by name, 124's agenda and the log's kinds left as they were (${without.slice(0, 80)} | ${await agendas()})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the126 });
-  type A = { items: { key: string }[]; keyed: { others: { key: string; settled: boolean }[]; missing: string[] } | null };
+  type A = { items: { key: string }[]; keyed: { others: { key: string; status: string | null; status_type: string | null; settled: boolean }[]; missing: string[] } | null };
   const read = async () => ((await sql`SELECT agenda('{"keys": ["SMD-9711", "SMD-9712", "SMD-9719"]}'::jsonb, NULL, 100, true, true, false, NULL, '2027-03-10T15:00:00Z', true) AS a`)[0] as { a: A }).a;
   const named = await read();
   const agendaRows = Number((await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'agenda'`)[0].n);
   const took = await sql`INSERT INTO query_log (kind, tool, query, match_count, result_ids, result_items) VALUES ('plan_context', 'plan_context', 'upgrade 126', 8, '{}', '[]'::jsonb)`.then(() => "ok", (e: Error) => e.message);
   assert(await agendas() === "9" && named.items.map((i) => i.key).join(" ") === "SMD-9711"
-      && named.keyed?.others.map((o) => `${o.key} ${o.status}/${(o as { status_type?: string }).status_type} ${o.settled}`).join(", ") === "SMD-9712 Done/completed true"
+      && named.keyed?.others.map((o) => `${o.key} ${o.status}/${o.status_type} ${o.settled}`).join(", ") === "SMD-9712 Done/completed true"
       && JSON.stringify(named.keyed?.missing) === '["SMD-9719"]'
       && agendaRows === 1 && took === "ok",
     `applied: one agenda, of nine arguments, the named open ticket listed, the Done one and the unknown key beside; the agenda row logged before kept; a plan_context row taken (${named.items.map((i) => i.key)} | ${JSON.stringify(named.keyed)} | ${agendaRows} | ${took})`);
