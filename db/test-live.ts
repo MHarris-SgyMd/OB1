@@ -6159,6 +6159,113 @@ if (want("10")) {
     if (note) await sql`SELECT delete_thought(${note}::uuid, NULL::jsonb)`;
   }
 
+  // SMD-2636 PR 4: a database error at the write is read as re-embed's is ([9f]): a deadlock sends the thought back
+  // unrecorded, extracted once it clears; a function's own guard is the thought's, recorded failed, the follower running
+  // on; a statement past its statement_timeout ends the follower, thrown 57014, its row failed, the thought not
+  // recorded. Before, every one was recorded failed, the follower running on. A trigger on thought_entities raises them
+  // for a marker in the thought's text.
+  {
+    const raises = (deadlock: boolean) => `CREATE OR REPLACE FUNCTION zz_extract_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE c text; BEGIN
+        SELECT content INTO c FROM thoughts WHERE id = NEW.thought_id;
+        ${deadlock ? "IF c LIKE '%zz-write-deadlock%' THEN RAISE EXCEPTION 'zz: deadlock detected' USING ERRCODE = '40P01'; END IF;" : ""}
+        IF c LIKE '%zz-write-timeout%' THEN RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
+        IF c LIKE '%zz-write-guard%' THEN RAISE EXCEPTION 'zz: a guard refused this write' USING ERRCODE = 'P0001'; END IF;
+        RETURN NEW; END $$`;
+    await sql.unsafe(`${raises(true)};
+      CREATE TRIGGER zz_extract_write_error BEFORE INSERT ON thought_entities FOR EACH ROW EXECUTE FUNCTION zz_extract_write_error()`);
+    const statusOf = async (id: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined);
+    const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { ended?: boolean; outcome?: string };
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 45_000);
+    let deadlock = "", guard = "", timeout = "";
+    let deadlockSaid = false, deadlockHeld: Awaited<ReturnType<typeof statusOf>>, deadlockDone = false, guardFailed = false;
+    let code: number | string = -1;
+    let timedCode: number | string = -1;
+    try {
+      const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      deadlock = await seed("Anita migrated the zz-write-deadlock service last week.");
+      deadlockSaid = await pollUntil(async () => lines.some((l) => new RegExp(`the write met the database's moment \\(zz: deadlock detected\\) — ${deadlock} goes back to the pool unrecorded`).test(l)), 20_000);
+      deadlockHeld = await statusOf(deadlock);
+      // The lock gone — the trigger's deadlock clause dropped — the next poll extracts it.
+      await sql.unsafe(raises(false));
+      deadlockDone = await pollUntil(async () => (await statusOf(deadlock))?.status === "succeeded", 20_000);
+      guard = await seed("Anita migrated the zz-write-guard service last week.");
+      guardFailed = await pollUntil(async () => (await statusOf(guard))?.status === "failed", 20_000);
+      ac.abort();
+      code = await running;
+    } finally {
+      clearTimeout(backstop);
+      if (code === -1) {
+        ac.abort();
+        // Thrown before the timeout row: its trigger is dropped here, not left on thought_entities for later rows (review pass 1).
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_extract_write_error ON thought_entities; DROP FUNCTION IF EXISTS zz_extract_write_error()`);
+      }
+    }
+    const guardRow = await statusOf(guard);
+    assert(deadlockSaid && deadlockHeld?.status !== "failed" && deadlockDone && code === 0,
+           `under --follow a deadlock at the write sends the thought back unrecorded, said, and it is extracted once the lock is gone (SMD-2636 PR 4; said ${deadlockSaid}, held ${JSON.stringify(deadlockHeld)}, extracted ${deadlockDone}; exit ${code})`);
+    assert(guardFailed && /a guard refused this write/.test(guardRow?.last_error ?? "") && code === 0,
+           `…a function's own guard refusing the write records that thought failed, and the follower goes on (${JSON.stringify(guardRow)}; exit ${code})`);
+    // A statement past its statement_timeout at the write ends the follower, its row failed, the thought not recorded.
+    const ac2 = new AbortController();
+    const backstop2 = setTimeout(() => ac2.abort(), 30_000);
+    try {
+      const timed = runExtract({ url: URL_!, env, workers: 1, follow: 1, signal: ac2.signal, writer: { out: () => {}, err: () => {} } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      timeout = await seed("Anita migrated the zz-write-timeout service last week.");
+      timedCode = await timed;
+    } finally {
+      clearTimeout(backstop2);
+      if (timedCode === -1) {
+        ac2.abort();
+        // Thrown before the one-shot row: its trigger is dropped here too (review pass 2).
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_extract_write_error ON thought_entities; DROP FUNCTION IF EXISTS zz_extract_write_error()`);
+      }
+    }
+    const timedBeat = await beatOf();
+    const timedRow = await statusOf(timeout);
+    assert(timedCode === "threw 57014" && timedBeat.ended === true && timedBeat.outcome === "failed" && timedRow?.status !== "failed",
+           `…a statement timeout at the write ends the follower — thrown 57014, for the scheduler's budget — its row failed, the thought not recorded (${timedCode}; row ${JSON.stringify(timedBeat)}; claim ${JSON.stringify(timedRow)})`);
+    // A run without --follow keeps its rule: the same timeout at the write is the thought's, recorded failed, the run
+    // returning its code (review pass 1's mutant: the follower's reading applied to one-shot runs passed every row).
+    let oneShotCode: number | string = -1;
+    try {
+      oneShotCode = await runExtract({ url: URL_!, env, workers: 1, writer: { out: () => {}, err: () => {} } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_extract_write_error ON thought_entities; DROP FUNCTION IF EXISTS zz_extract_write_error()`);
+    }
+    const oneShotRow = await statusOf(timeout);
+    assert(typeof oneShotCode === "number" && oneShotRow?.status === "failed" && /statement timeout/.test(oneShotRow.last_error ?? ""),
+           `…and without --follow the same timeout at the write is the thought's, recorded failed, as before (exit ${oneShotCode}; claim ${JSON.stringify(oneShotRow)})`);
+    // A statement past its statement_timeout at the claim ends the follower too, as re-embed's claim does (review pass 1,
+    // the maintainer's call: it cost the poll, every poll, the scheduler's budget never told).
+    await sql.unsafe(`CREATE FUNCTION zz_extract_claim_error() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.status = 'claimed' AND (SELECT content FROM thoughts WHERE id = NEW.thought_id) LIKE '%zz-claim-timeout%' THEN
+          RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
+        RETURN NEW; END $$;
+      CREATE TRIGGER zz_extract_claim_error BEFORE UPDATE ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_extract_claim_error()`);
+    let claimTimeout = "";
+    let claimCode: number | string = -1;
+    const ac3 = new AbortController();
+    const backstop3 = setTimeout(() => ac3.abort(), 30_000);
+    try {
+      const claiming = runExtract({ url: URL_!, env, workers: 1, follow: 1, signal: ac3.signal, writer: { out: () => {}, err: () => {} } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      claimTimeout = await seed("Anita migrated the zz-claim-timeout service last week.");
+      claimCode = await claiming;
+    } finally {
+      clearTimeout(backstop3);
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_extract_claim_error ON thought_work_claims; DROP FUNCTION IF EXISTS zz_extract_claim_error()`);
+    }
+    const claimBeat = await beatOf();
+    assert(claimCode === "threw 57014" && claimBeat.ended === true && claimBeat.outcome === "failed",
+           `…and a statement timeout at the claim ends the follower too, thrown 57014, its row failed, as re-embed's claim does (${claimCode}; row ${JSON.stringify(claimBeat)})`);
+    for (const id of [deadlock, guard, timeout, claimTimeout]) if (id) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
   // A follower whose provider stays down (SMD-2261's heartbeat under
   // SMD-2599): past the pauses the thought goes back to the pool and the
   // follower waits, its heartbeat "failed" — the provider, not a document —
@@ -11037,7 +11144,7 @@ if (want("10h")) {
          WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}
            AND (${event}::text IS NULL OR wait_event = ${event}::text)`) as { n: number }[])[0].n > 0;
 
-      // A statement past a scheduler's budget over a thought is the thought's or the poll's, as a claim pass's is, not the
+      // A statement past a scheduler's budget over a thought is the thought's or the poll's, as a claim pass's was until SMD-2636 PR 4, not the
       // run's, which sleep read as its budget's (review pass 6, run-it). A thought's own write — the door's write of a
       // key, the finish of one named nothing, each waiting on the door's lock on the thought, which the case holds —
       // fails that thought, said once, and the run goes on, each answer judged as a failed one's is.
@@ -17292,6 +17399,121 @@ if (want("16")) {
         && (c.want !== "failed" || /a one-token call right after answered, so this thought's; --retry-failed revisits it/.test(lastError));
     assert(ok, `consolidate's judge ${c.status}${c.follow ? c.want === "failed" ? " probed first, answered: the thought's, recorded failed with the probe's note, the follower running on" : ", its probe meeting a 503: the provider's outage, waited out, the pair judged" : " without --follow: the request's, exit 2, nothing failed"} (SMD-2636 PR 3a, review pass 4; ${row}, exit ${code}, waited ${waited}; ${lines.filter((l) => /40[13]|refus|not answering/.test(l)).join(" | ").slice(0, 200)})`);
     for (const id of twinSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  }
+
+  // SMD-2636 PR 4: [10]'s twins for consolidate — a database error at a pair's write is read as re-embed's is: a
+  // deadlock sends the thought back unrecorded, judged once it clears; a function's own guard is the thought's,
+  // recorded failed, the follower running on; a statement past its statement_timeout ends the follower, thrown 57014,
+  // its row failed, the thought not recorded. Before, every one was recorded failed. A trigger on thought_facets raises
+  // them for a marker in the newer thought's text.
+  {
+    // Relation facets alone: the seed's record_thought_entities writes facets of its own.
+    const raises = (deadlock: boolean) => `CREATE OR REPLACE FUNCTION zz_consolidate_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE c text; BEGIN
+        IF NEW.kind <> 'relation' THEN RETURN NEW; END IF;
+        SELECT content INTO c FROM thoughts WHERE id = NEW.thought_id;
+        ${deadlock ? "IF c LIKE '%zz-write-deadlock%' THEN RAISE EXCEPTION 'zz: deadlock detected' USING ERRCODE = '40P01'; END IF;" : ""}
+        IF c LIKE '%zz-write-timeout%' THEN RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
+        IF c LIKE '%zz-write-guard%' THEN RAISE EXCEPTION 'zz: a guard refused this write' USING ERRCODE = 'P0001'; END IF;
+        RETURN NEW; END $$`;
+    await sql.unsafe(`${raises(true)};
+      CREATE TRIGGER zz_consolidate_write_error BEFORE INSERT OR UPDATE ON thought_facets FOR EACH ROW EXECUTE FUNCTION zz_consolidate_write_error()`);
+    const statusOf = async (id: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined);
+    const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { ended?: boolean; outcome?: string };
+    const writeSeeds: string[] = [];
+    const lines: string[] = [];
+    const ac = new AbortController();
+    const backstop = setTimeout(() => ac.abort(), 45_000);
+    let deadlock = "", guard = "", timeout = "";
+    let deadlockSaid = false, deadlockHeld: Awaited<ReturnType<typeof statusOf>>, deadlockDone = false, guardFailed = false;
+    let code: number | string = -1;
+    let timedCode: number | string = -1;
+    try {
+      const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      writeSeeds.push(await seed("The write log names the deadlock's pair, the first.", 83, 3, ["write-log-deadlock"]));
+      deadlock = await seed("The write log names the zz-write-deadlock pair, the second.", 83, 0, ["write-log-deadlock"]);
+      writeSeeds.push(deadlock);
+      deadlockSaid = await pollUntil(async () => lines.some((l) => new RegExp(`the write met the database's moment \\(zz: deadlock detected\\) — ${deadlock} goes back to the pool unrecorded`).test(l)), 20_000);
+      deadlockHeld = await statusOf(deadlock);
+      // The lock gone — the trigger's deadlock clause dropped — the next poll judges it.
+      await sql.unsafe(raises(false));
+      deadlockDone = await pollUntil(async () => (await statusOf(deadlock))?.status === "succeeded", 20_000);
+      writeSeeds.push(await seed("The write log names the guard's pair, the first.", 84, 3, ["write-log-guard"]));
+      guard = await seed("The write log names the zz-write-guard pair, the second.", 84, 0, ["write-log-guard"]);
+      writeSeeds.push(guard);
+      guardFailed = await pollUntil(async () => (await statusOf(guard))?.status === "failed", 20_000);
+      ac.abort();
+      code = await running;
+    } finally {
+      clearTimeout(backstop);
+      if (code === -1) {
+        ac.abort();
+        // Thrown before the timeout row: its trigger is dropped here, not left on thought_facets for later rows (review pass 1).
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_consolidate_write_error ON thought_facets; DROP FUNCTION IF EXISTS zz_consolidate_write_error()`);
+      }
+    }
+    const guardRow = await statusOf(guard);
+    assert(deadlockSaid && deadlockHeld?.status !== "failed" && deadlockDone && code === 0,
+           `under --follow a deadlock at a pair's write sends the thought back unrecorded, said, and it is judged once the lock is gone (SMD-2636 PR 4; said ${deadlockSaid}, held ${JSON.stringify(deadlockHeld)}, judged ${deadlockDone}; exit ${code})`);
+    assert(guardFailed && /a guard refused this write/.test(guardRow?.last_error ?? "") && code === 0,
+           `…a function's own guard refusing a pair's write records that thought failed, and the follower goes on (${JSON.stringify(guardRow)}; exit ${code})`);
+    const ac2 = new AbortController();
+    const backstop2 = setTimeout(() => ac2.abort(), 30_000);
+    try {
+      const timed = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac2.signal, writer: { out: () => {}, err: () => {} } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      writeSeeds.push(await seed("The write log names the timeout's pair, the first.", 85, 3, ["write-log-timeout"]));
+      timeout = await seed("The write log names the zz-write-timeout pair, the second.", 85, 0, ["write-log-timeout"]);
+      writeSeeds.push(timeout);
+      timedCode = await timed;
+    } finally {
+      clearTimeout(backstop2);
+      if (timedCode === -1) {
+        ac2.abort();
+        // Thrown before the one-shot row: its trigger is dropped here too (review pass 2).
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_consolidate_write_error ON thought_facets; DROP FUNCTION IF EXISTS zz_consolidate_write_error()`);
+      }
+    }
+    const timedBeat = await beatOf();
+    const timedRow = await statusOf(timeout);
+    assert(timedCode === "threw 57014" && timedBeat.ended === true && timedBeat.outcome === "failed" && timedRow?.status !== "failed",
+           `…a statement timeout at a pair's write ends the follower — thrown 57014, for the scheduler's budget — its row failed, the thought not recorded (${timedCode}; row ${JSON.stringify(timedBeat)}; claim ${JSON.stringify(timedRow)})`);
+    // A run without --follow keeps its rule: the same timeout at a pair's write is the thought's, recorded failed, the
+    // run returning its code (review pass 1's mutant: the follower's reading applied to one-shot runs passed every row).
+    let oneShotCode: number | string = -1;
+    try {
+      oneShotCode = await runConsolidate({ url: URL_!, env, workers: 1, timeout: 5, writer: { out: () => {}, err: () => {} } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_consolidate_write_error ON thought_facets; DROP FUNCTION IF EXISTS zz_consolidate_write_error()`);
+    }
+    const oneShotRow = await statusOf(timeout);
+    assert(typeof oneShotCode === "number" && oneShotRow?.status === "failed" && /statement timeout/.test(oneShotRow.last_error ?? ""),
+           `…and without --follow the same timeout at a pair's write is the thought's, recorded failed, as before (exit ${oneShotCode}; claim ${JSON.stringify(oneShotRow)})`);
+    // A statement past its statement_timeout at the claim ends the follower too, as re-embed's claim does (review pass 1,
+    // the maintainer's call: it cost the poll, every poll, the scheduler's budget never told).
+    await sql.unsafe(`CREATE FUNCTION zz_consolidate_claim_error() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.status = 'claimed' AND (SELECT content FROM thoughts WHERE id = NEW.thought_id) LIKE '%zz-claim-timeout%' THEN
+          RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
+        RETURN NEW; END $$;
+      CREATE TRIGGER zz_consolidate_claim_error BEFORE UPDATE ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_consolidate_claim_error()`);
+    let claimCode: number | string = -1;
+    const ac3 = new AbortController();
+    const backstop3 = setTimeout(() => ac3.abort(), 30_000);
+    try {
+      const claiming = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 5, signal: ac3.signal, writer: { out: () => {}, err: () => {} } })
+        .then((x) => x, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      writeSeeds.push(await seed("The write log names the claim timeout's pair, the first.", 86, 3, ["write-log-claim"]));
+      writeSeeds.push(await seed("The write log names the zz-claim-timeout pair, the second.", 86, 0, ["write-log-claim"]));
+      claimCode = await claiming;
+    } finally {
+      clearTimeout(backstop3);
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_consolidate_claim_error ON thought_work_claims; DROP FUNCTION IF EXISTS zz_consolidate_claim_error()`);
+    }
+    const claimBeat = await beatOf();
+    assert(claimCode === "threw 57014" && claimBeat.ended === true && claimBeat.outcome === "failed",
+           `…and a statement timeout at the claim ends the follower too, thrown 57014, its row failed, as re-embed's claim does (${claimCode}; row ${JSON.stringify(claimBeat)})`);
+    for (const id of writeSeeds) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   }
 
   // SMD-2636 PR 2, review pass 5: consolidate counts thoughts finished having asked the judge, not pairs. A thought put
