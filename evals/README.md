@@ -4811,7 +4811,8 @@ chooses the order. The rule was pre-registered on the ticket before any build or
   thought it was read from. It uses the agenda read's flags at the cap of 100.
 * **The chooser.** The eval has no client model to choose the order, so a keyword rule stands in (`DUE_WORDS`): a
   query naming due, a deadline, overdue, soon, today, tomorrow or this week gets `due`; any other gets `priority`.
-  It reads the query's words alone.
+  It reads the query's words alone, and misses phrasings a model would read as about time, such as "next week",
+  "this month", "upcoming" or "expiring" (review pass 1); a wider rule would be a new read.
 * **Disclosed before the run.** The read was designed with every read's per-prompt results in view, and the rule was
   written with the seven queries in front of it. The ticket predicted top-1 on `next-ticket`, `highest-value`,
   `matters-most`, `blocking` and `due-soon`, and losses on `this-week` (the gutters before the bill) and `promised`.

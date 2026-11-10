@@ -35,7 +35,8 @@
 -- SAFETY
 --   One function replaced, STABLE. 126's nine-argument agenda is dropped
 --   first, and 123's eight-argument one, as 124 and 126 drop it, so a call of
---   up to ten arguments names one function. A server before this one calls
+--   up to ten arguments names one function (124 or 126 re-applied alone after
+--   this file puts a second back: re-apply every migration). A server before this one calls
 --   with nine and gets the priority order, the default. No ACL is carried, as
 --   124 and 126 carried none. The comment is re-issued only when it differs,
 --   so a re-apply writes nothing. No row is touched. MINOR under the version
@@ -65,7 +66,10 @@ END
 $qc$;
 
 -- 126's nine-argument agenda and 123's eight-argument one, dropped, so a call
--- of up to ten arguments names one function, whichever file ran last.
+-- of up to ten arguments names one function. Only while this file ran last of
+-- the agenda's: 124 or 126 re-applied alone after it puts a nine-argument one
+-- back beside it, and a nine-argument call then names two (42725); the server
+-- says to re-apply every migration (review pass 1).
 DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean);
 DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz);
 

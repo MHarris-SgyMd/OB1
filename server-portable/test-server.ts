@@ -7046,10 +7046,15 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     try { normaliseAgenda(answer("soonest"), "agenda"); } catch (e) { bad = (e as Error).message; }
     const saidDue = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [item], total: 1 }, "agenda") } as never));
     const saidPriority = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer(), items: [item], total: 1 }, "agenda") } as never));
+    // A due time past the week takes no urgency term: the line says it (review pass 1).
+    const saidFar = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, due_at: "2027-02-01T00:00:00Z" }], total: 1 }, "agenda") } as never));
     const pre129 = "function agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text) does not exist";
     assert(normaliseAgenda(answer(), "agenda").order === "priority" && normaliseAgenda(answer("due"), "agenda").order === "due" && /no agenda this server reads/.test(bad)
         && /^1 of 1 item, soonest due first, the undated after:/.test(saidDue) && /^1 of 1 item, most pressing first:/.test(saidPriority)
-        && /order due needs migration 129/.test(agendaHint(pre129)) && agendaHint("permission denied for table open_items") === "",
+        && /order due needs migration 129/.test(agendaHint(pre129)) && agendaHint("permission denied for table open_items") === ""
+        && agendaHint("function agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean) does not exist") === ""
+        && /re-apply every migration/.test(agendaHint("function agenda(jsonb, jsonb, integer, boolean, boolean, boolean, unknown, timestamp with time zone, boolean) is not unique"))
+        && /\[due by the end of 2027-01-31 \(UTC\)\]/.test(saidFar) && !/\[due /.test(saidPriority),
       `an answer without an order reads as priority, due as due, any other refused; the text says the order; a due read on a brain before 129 names the migration (${bad} | ${saidDue.split("\n")[0]} | ${agendaHint(pre129)})`);
   }
   // 124 (SMD-4162): a ticket's status said beside its key, the started tickets left out counted, and a brain recording

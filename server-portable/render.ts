@@ -2435,6 +2435,8 @@ function agendaLine(i: AgendaItem): string {
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
+    // A due time no urgency term states (past the week, or a level 0): said, so the due order's lead is seen (SMD-4192 review pass 1).
+    i.dueAt && !i.overdue && i.urgency === 0 ? `due ${dueText(i.dueAt)}` : null,
     i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
     i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
@@ -2465,10 +2467,16 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   return lines.join("\n");
 }, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
 
-/** The hint an agenda fault carries when it asked for the due order (SMD-4192): only migration 129's agenda takes it. */
+/**
+ * The hint an agenda fault carries (SMD-4192): the due order on a brain before 129, whose agenda takes no tenth
+ * argument; or two agendas, left by 124 or 126 re-applied alone after 129, so a nine-argument call names both (review
+ * pass 1).
+ */
 export const agendaHint = (msg: string): string =>
-  /function agenda\(/.test(msg) && /does not exist|could not find/i.test(msg)
+  /function agenda\(.*\btext\)/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — order due needs migration 129 (db/migrations/129_agenda_order.sql), which is not applied; ask with the priority order meanwhile"
+    : /function agenda\(/.test(msg) && /is not unique/i.test(msg)
+    ? " — the database holds two agenda functions: a migration before 129 (124 or 126) was re-applied alone after it; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply)"
     : "";
 
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */

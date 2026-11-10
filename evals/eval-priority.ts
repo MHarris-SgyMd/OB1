@@ -481,8 +481,8 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
       if (JSON.stringify(again.hits) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
     }
   } finally {
-    await store.close();
-    await readSql.close();
+    // Each closed whatever the other does, and the servers stopped after (review pass 1).
+    await Promise.allSettled([store.close(), readSql.close()]);
     server.stop(true);
     provider.stop(true);
   }

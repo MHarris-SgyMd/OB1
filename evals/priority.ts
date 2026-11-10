@@ -796,7 +796,9 @@ export const AGENDA_READ: MeasuredRead = {
 /**
  * The keyword rule standing in for the client that picks the agenda's order (SMD-4192, pre-registered on the ticket
  * on 2026-11-10, before any run): a question naming a time gets the due order, any other the priority order. It
- * reads the query's words alone. Written with the seven queries in view, as the ticket and the README say.
+ * reads the query's words alone. Written with the seven queries in view, as the ticket and the README say, and it
+ * misses phrasings a client's model would read as about time: "next week", "this month", "upcoming", "expiring", and
+ * "this week" with two spaces (review pass 1). Pre-registered, so it is not widened here: a wider rule is a new read.
  */
 export const DUE_WORDS = /\b(due|deadlines?|overdue|soon|today|tomorrow)\b|\bthis week\b/i;
 export const orderFor = (query: string): AgendaOrder => (DUE_WORDS.test(query) ? "due" : "priority");
