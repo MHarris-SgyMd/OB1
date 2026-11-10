@@ -39,7 +39,9 @@
  *   bun eval-plan-context.ts --self-check                                    # the rules, on hand-known answers; no brain, no model
  *
  * --draw reads Linear issue listings ({ issues: [{ id, title, createdAt, project }] }, the Backlog state's) and a file
- * of the ticket keys the brain holds. --run spawns `claude` per request and arm, in an order set by the request's
+ * of the ticket keys the brain holds. Its output holds the tickets' titles, the board's text, so it stays out of the
+ * repo (check-consistency refuses it under evals/fixtures, SMD-1295): the rule and the listings rebuild it exactly, and
+ * the drawn keys are on SMD-2684. --run spawns `claude` per request and arm, in an order set by the request's
  * hash, and skips a run whose stream already ended; --again moves an ended run aside (`.try1`) and runs it again.
  * --mcp-config is a Claude Code MCP config naming the brain `brain`: it holds a key, so keep it 0600 and out of the repo.
  * --rows is the text of the thoughts --ids lists ([{ id, created_at, type, content }]), read from the brain by its
@@ -57,7 +59,9 @@ import { summarise, type ActionRow, type SearchRow } from "./utilization.ts";
 export const SEED = "SMD-2684 PR 2";
 export const MODEL = "claude-sonnet-5-5";
 export const N_REQUESTS = 20;
-/** Tickets filed in this window, in a project whose name starts "Open Brain": the brain's own work. */
+/** The board's own projects are named with this prefix (data: Linear's project names, which board-sync matches). */
+export const PROJECT_PREFIX = "Open Brain";
+/** Tickets filed in this window, in a project whose name starts PROJECT_PREFIX: the brain's own work. */
 export const WINDOW = { from: "2026-09-01T00:00:00.000Z", to: "2026-11-10T00:00:00.000Z" } as const;
 export const B_CALLS = 10;
 export const UNCITED_SAMPLE = 8;
@@ -175,7 +179,7 @@ export type Ticket = { id: string; title: string; createdAt: string; project?: s
 export type Request = { n: number; key: string; title: string; text: string };
 
 export function eligible(t: Ticket): boolean {
-  return (t.project ?? "").startsWith("Open Brain") && t.createdAt >= WINDOW.from && t.createdAt < WINDOW.to
+  return (t.project ?? "").startsWith(PROJECT_PREFIX) && t.createdAt >= WINDOW.from && t.createdAt < WINDOW.to
     && !/^\s*tracking\s*:/i.test(t.title) && !/plan_context/i.test(t.title);
 }
 
@@ -569,7 +573,7 @@ export function selfCheck(): number {
   const near = (x: number, y: number): boolean => Math.abs(x - y) < 1e-9;
 
   // The draw.
-  const t = (id: string, over: Partial<Ticket> = {}): Ticket => ({ id, title: `title ${id}`, createdAt: "2026-10-01T00:00:00.000Z", project: "Open Brain — X", ...over });
+  const t = (id: string, over: Partial<Ticket> = {}): Ticket => ({ id, title: `title ${id}`, createdAt: "2026-10-01T00:00:00.000Z", project: `${PROJECT_PREFIX} — X`, ...over });
   ok(eligible(t("SMD-1")), "a brain ticket in the window is eligible");
   ok(!eligible(t("SMD-1", { project: "Accessibility & Compliance" })), "another project's ticket is not");
   ok(!eligible(t("SMD-1", { project: null })), "a ticket with no project is not");
