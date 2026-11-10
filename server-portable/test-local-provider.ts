@@ -3281,22 +3281,28 @@ console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): con
     assert(aged.ran === "extract1,extract2,consolidate" && unaged.ran === "extract1,consolidate,extract2" && aged.most === 1,
       `a call queued past --max-wait goes first whatever its pass (${aged.ran} under 0.3 s), consolidation's first within it (${unaged.ran} under the default)`);
     // A call passed over is told it waits once it has queued a second or more, as it would be behind a full share — here
-    // extraction's behind seven consolidation workers of 5 ms calls at chat=8, each taking a free slot at once, so no
-    // waiter finds the share full (review pass 2: untold for 10 s, N12's clock, the stall clock and a stop's sweep read
-    // it as running) — and not when passed over for less: a burst of six consolidation calls at once, every slot free,
-    // passes it for a few ms, and a stopping pass told it waits would give its thought back (review pass 3).
+    // extraction's behind consolidation calls issued faster than the turn passes, ten every 5 ms, at chat=8, each taking a
+    // free slot at once, so no waiter finds the share full (review pass 2: untold for 10 s, N12's clock, the stall clock
+    // and a stop's sweep read it as running) — and not when passed over for less: a burst of six consolidation calls at
+    // once, every slot free, passes it for a few ms, and a stopping pass told it waits would give its thought back
+    // (review pass 3). The calls are issued until it is told or 3 s pass, so the queue stays full on any runner (CI's ran
+    // dry between seven looping workers' calls).
     {
       const wide = installBackgroundSlots({ url: URL_!, raw: "chat=8", log: () => {} });
       const told = { starved: 0, brief: 0 };
       const ran: string[] = [];
+      let starvedMs = -1;
       try {
-        const until = performance.now() + 1600;
-        const loops = Array.from({ length: 7 }, () => asPass("consolidate", async () => {
-          while (performance.now() < until) await modelCall(call, () => Bun.sleep(5));
-        }));
-        await Bun.sleep(20);
-        const starved = withCallWaits({ waiting: () => { told.starved++; }, running: () => {} }, () => asPass("extract", () => modelCall(call, async () => { ran.push("starved"); })));
-        await Promise.all([...loops, starved]);
+        const nothing = async () => {};
+        const calls: Promise<unknown>[] = [asPass("consolidate", () => modelCall(call, nothing))];
+        const queuedAt = performance.now();
+        calls.push(withCallWaits({ waiting: () => { if (told.starved++ === 0) starvedMs = performance.now() - queuedAt; }, running: () => {} }, () => asPass("extract", () => modelCall(call, async () => { ran.push("starved"); }))));
+        const until = queuedAt + 3000;
+        while (told.starved === 0 && performance.now() < until) {
+          for (let k = 0; k < 10; k++) calls.push(asPass("consolidate", () => modelCall(call, nothing)));
+          await Bun.sleep(5);
+        }
+        await Promise.all(calls);
         const run = (label: string) => async () => { ran.push(label); await Bun.sleep(150); };
         const burst = [asPass("consolidate", () => modelCall(call, run("c0")))];
         burst.push(withCallWaits({ waiting: () => { told.brief++; }, running: () => {} }, () => asPass("extract", () => modelCall(call, run("brief")))));
@@ -3305,8 +3311,8 @@ console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): con
       } finally {
         await wide.uninstall();
       }
-      assert(ran[0] === "starved" && ran.at(-1) === "brief" && told.starved === 1 && told.brief === 0,
-        `extraction's call passed over a second and more behind consolidation's workers, every slot free, is told it waits (${told.starved}); one passed over for a burst's few ms, run last, is not (${told.brief})`);
+      assert(ran[0] === "starved" && ran.at(-1) === "brief" && told.starved === 1 && starvedMs >= 1000 && told.brief === 0,
+        `extraction's call passed over behind consolidation's, every slot free, is told it waits once it has queued a second (told ${told.starved}, at ${Math.round(starvedMs)} ms); one passed over for a burst's few ms, run last, is not (${told.brief})`);
     }
   } finally {
     await holder.close();
