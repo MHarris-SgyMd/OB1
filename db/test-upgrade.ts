@@ -734,7 +734,10 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // ([20bq]); 127 replaces effective_priority's default weights, level
   // first, refusing by name without 125 ([20br]); 128 moves its default
   // weights into ob1_priority_defaults and adds ob1_priority_span, refusing by
-  // name without effective_priority or 125's helpers ([20bs]); 130 makes a
+  // name without effective_priority or 125's helpers ([20bs]); 129 replaces the
+  // agenda under a tenth argument, its order, refusing by name without 034,
+  // 068, 115, 122 or 123 ([20bu]);
+  // 130 makes a
   // thought's subjects a set — 111's index replaced by one per thought and
   // key, statistics on a facet's key, a set door, a set close and the
   // threads' locks in key order — and redefines 113's two doors as sets of
@@ -744,7 +747,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 100, `030 is among the last one hundred migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 101, `030 is among the last one hundred and one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5908,6 +5911,47 @@ console.log("\n[20bt] Migration 130: refused by name without 111, 113 or 120; on
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the130 });
   assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === rowsAfter,
     "a re-apply is a no-op: every facet, edge, lineage row and thought as it was");
+  await sql.close();
+}
+
+console.log("\n[20bu] Migration 129: onto a populated brain at the file before it — refused by name without 123's ob1_item_blockers, nothing replaced; then applied: the ten-argument agenda and the nine-argument wrapper; a nine-argument call, as a server before 129 makes, reads as before, in the priority order; the due order lists the overdue ticket first; a re-apply a no-op (SMD-4192)");
+{
+  const the129 = MIGRATIONS.find((f) => /^\d{3}_agenda_order\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the129 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ticket = async (issue: string, level: number, due: string | null) => {
+    const content = `upgrade 129: ${issue}`;
+    const meta = { source: "linear", issue, status: "Backlog", status_type: "backlog", project: "Upgrade 129", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    await sql`SELECT assert_priority('ticket', ${issue}, ${level}::int, ${due}::timestamptz, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  };
+  // An Urgent with no date, a Low overdue.
+  await ticket("SMD-9731", 4, null); await ticket("SMD-9732", 1, "2027-03-01T00:00:00Z");
+  const agendas = async () => (await sql`SELECT pronargs::int AS n FROM pg_proc WHERE proname = 'agenda' ORDER BY pronargs`).map((r: { n: number }) => r.n).join(",");
+  type A = { items: { key: string }[]; order?: string };
+  const nine = async () => ((await sql`SELECT agenda('{"project": "Upgrade 129"}'::jsonb, NULL, 100, false, false, false, NULL, '2027-03-10T15:00:00Z', false) AS a`)[0] as { a: A }).a;
+  const keys = (a: A) => a.items.map((i) => i.key).join(" ");
+  const before = await nine();
+
+  // Without 123's blockers helper: refused by name, 126's agenda left as it was.
+  await sql`ALTER FUNCTION ob1_item_blockers(text, text) RENAME TO ob1_item_blockers_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the129 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_item_blockers_away(text, text) RENAME TO ob1_item_blockers`;
+  assert(/^migration 129 needs 034, 068, 115, 122 and 123 \(query_log and its result_items, /.test(without) && await agendas() === "9",
+    `without 123's ob1_item_blockers the file is refused by name, 126's agenda left as it was (${without.slice(0, 80)} | ${await agendas()})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the129 });
+  const after = await nine();
+  const due = ((await sql`SELECT agenda('{"project": "Upgrade 129"}'::jsonb, NULL, 100, false, false, false, NULL, '2027-03-10T15:00:00Z', false, 'due') AS a`)[0] as { a: A }).a;
+  assert(await agendas() === "9,10" && keys(before) === "SMD-9731 SMD-9732" && keys(after) === keys(before) && after.order === "priority" && before.order === undefined
+      && keys(due) === "SMD-9732 SMD-9731" && due.order === "due",
+    `applied: two agendas, the nine-argument wrapper and the ten-argument one; a nine-argument call reads as before, in the priority order; due lists the overdue Low first (${await agendas()} | ${keys(before)} → ${keys(after)} | ${keys(due)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the129 });
+  assert(JSON.stringify(await nine()) === JSON.stringify(after) && await agendas() === "9,10", "a re-apply is a no-op: the same read, the same two functions");
   await sql.close();
 }
 

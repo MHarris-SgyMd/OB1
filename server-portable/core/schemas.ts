@@ -11,7 +11,7 @@ import { SAID_BY, TRUST } from "./filter.ts";
 import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { PRIORITY_KINDS } from "../priority-kinds.ts";
-import { RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN } from "../store.ts";
+import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN } from "../store.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -789,7 +789,7 @@ export const SPECS = {
   agenda: {
     title: "Agenda",
     description:
-      "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), then, within a level, urgency from the due time (+0.4 by the end of tomorrow, +0.2 within the week, +0.6 overdue) and what it unblocks (+0.1, or +0.2 for three or more), which never lift an item past the next level — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so nothing was left out for a claim and claimed started work counts as started, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.",
+      "What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), then, within a level, urgency from the due time (+0.4 by the end of tomorrow, +0.2 within the week, +0.6 overdue) and what it unblocks (+0.1, or +0.2 for three or more), which never lift an item past the next level — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: \"mine\"` (work this key holds a live claim on). `order: \"due\"` lists the dated items first, soonest first, for a question about deadlines; the answer's `order` says which was applied. `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so nothing was left out for a claim and claimed started work counts as started, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       source: AGENDA_SCOPE.optional().describe("Only this source: linear (tickets), items (open items no plugin keeps), or a plugin's name"),
@@ -801,6 +801,7 @@ export const SPECS = {
       include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder, started or not"),
       include_proposed: z.boolean().optional().default(false).describe("Also list open items still proposed (an extraction nobody confirmed)"),
       include_started: z.boolean().optional().default(false).describe("Also list started tickets (In Progress, In Review: Linear's started type) that no live claim covers; a claimed one is include_claimed's (when claims can be read), and holder mine shows the key's own"),
+      order: z.enum(AGENDA_ORDERS).optional().default("priority").describe("priority (the default): by effective priority, for \"what next\". due: the items with a due time first, soonest first, so the longest overdue leads, then the undated by priority (a stated None counts as undated), for \"what's due\" or \"this week\". Applied before limit. Default priority"),
     },
   },
   plan_context: {

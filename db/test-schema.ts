@@ -18033,8 +18033,10 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const file = files.find((f) => /^\d{3}_agenda\.sql$/.test(f)) ?? "no NNN_agenda.sql";
   await reapply(file.slice(0, 4));
   // 124 (SMD-4162) replaced 123's agenda under a ninth argument; 123's re-apply puts its eight-argument one back beside
-  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's).
+  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's), and so
+  // does 129's ten-argument one (SMD-4192), so its shape row counts 123's alone; the restore makes both again.
   await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean)`);
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
   // or compares this section's own items among themselves.
   const P = "Agenda [110]";
@@ -18287,7 +18289,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
-  // The shipped agenda back: 124's, which drops 123's eight-argument one.
+  // The shipped agenda back: the last definer's (129's), which drops 123's eight-argument one.
   await restoreShipped("agenda");
 }
 
@@ -18295,6 +18297,9 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
 {
   const file = files.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f)) ?? "no NNN_agenda_unstarted.sql";
   await reapply(file.slice(0, 4));
+  // 129's ten-argument agenda (SMD-4192), which [110]'s restore made, goes while this section and [113] hold the
+  // nine-argument one, so their shape rows count one agenda. [117] puts it back.
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [111]";
   const NOW = "2027-03-10T15:00:00Z";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag111-op', 'operator')`);
@@ -18554,8 +18559,10 @@ console.log("\n[112] Migration 125: a note's open items reach its priority — a
 console.log("\n[113] Migration 126: the agenda's keys scope — the tickets named alone, no open item, under every other rule; a named ticket that is settled, or whose status type is unknown, and a key no thought records, said beside the list; query_log's plan_context kind and its shape; a re-apply a no-op (SMD-2684)");
 {
   const file = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
-  // [111] re-applied 124's agenda over this one (one signature): put 126's back first.
+  // [111] re-applied 124's agenda over this one (one signature): put 126's back first. 129's ten-argument one
+  // stays away until [117] ([111] dropped it).
   await reapply(file.slice(0, 4));
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [113]";
   const NOW = "2027-03-10T15:00:00Z";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag112-op', 'operator')`);
@@ -19075,6 +19082,98 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   assert(JSON.stringify(after) === JSON.stringify(before) && after.fns === 6 && after.old === 0, `130 applied again moves nothing: ${JSON.stringify(after)}`);
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
+}
+
+console.log("\n[117] Migration 129: the agenda takes an order — priority, the default, 126's order unchanged; due, the dated items first, soonest first so the longest overdue leads, a tie on the due time to the higher priority, then the undated by priority; the order applied before the limit; the answer says it; any other order refused; query_log.filter's comment names it; the shape; a re-apply a no-op (SMD-4192)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_order\.sql$/.test(f)) ?? "no NNN_agenda_order.sql";
+  // [111] and [113] re-applied 124's and 126's nine-argument agenda: put 129's back first, its wrapper in their place.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [117]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag116-op', 'operator')`);
+  const OP = { name: "ag116-op", scope: "write" };
+  type Ag = { items: { key: string; effective: number; due_at: string | null }[]; total: number; order?: string };
+  const ticket = async (issue: string, level: number | null, due: string | null) => {
+    const content = `${issue} — [117] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag116-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (level !== null || due !== null) {
+      await db.query(`SELECT assert_priority('ticket', $1, $2::int, $3::timestamptz, NULL, NULL, NULL, NULL, false, $4::jsonb)`, [issue, level, due, JSON.stringify(OP)]);
+    }
+  };
+  // An Urgent with no date; a High due tomorrow; a Medium and a Low overdue at one moment; a Medium due within the
+  // week; a High with no date.
+  await ticket("SMD-9951", 4, null); await ticket("SMD-9952", 3, "2027-03-11T00:00:00Z");
+  await ticket("SMD-9953", 2, "2027-03-01T00:00:00Z"); await ticket("SMD-9954", 1, "2027-03-01T00:00:00Z");
+  await ticket("SMD-9955", 2, "2027-03-15T00:00:00Z"); await ticket("SMD-9956", 3, null);
+  // A stated None due long ago (review pass 3): undated under due, as 122 gives it no urgency; last under both orders.
+  await ticket("SMD-9957", 0, "2027-02-01T00:00:00Z");
+  const scope = JSON.stringify({ project: P });
+  const nine = async (limit = 100) => (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false) AS a`, [scope, limit, NOW])).rows[0].a;
+  const ten = async (order: string | null, limit = 100) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false, $4) AS a`, [scope, limit, NOW, order])).rows[0].a;
+  const keys = (a: Ag) => a.items.map((i) => i.key.slice(4)).join(" ");
+
+  // The shape (review pass 2): the ten-argument agenda, plpgsql, no argument defaulted; and the nine-argument one, a
+  // SQL wrapper with 126's defaults calling it with priority. Both STABLE, each commented for 129.
+  const fns = (await db.query<{ n: number; v: string; l: string; d: string | null; c: string | null }>(
+    `SELECT p.pronargs::int AS n, p.provolatile::text AS v, l.lanname AS l, pg_get_function_arguments(p.oid) AS d, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname = 'agenda' ORDER BY p.pronargs`)).rows;
+  assert(fns.map((f) => `${f.n}:${f.l}:${f.v}`).join(" ") === "9:sql:s 10:plpgsql:s"
+      && /p_include_started boolean DEFAULT false$/.test(fns[0].d ?? "") && !/DEFAULT/.test(fns[1].d ?? "") && /p_order text$/.test(fns[1].d ?? "")
+      && /The agenda in the priority order: the ten-argument agenda with p_order priority/.test(fns[0].c ?? "") && /Migration 129 \(SMD-4192\)/.test(fns[0].c ?? "")
+      && /126 \(SMD-2684\) and 129 \(SMD-4192\)/.test(fns[1].c ?? "") && /sorted by p_order: priority by effective/.test(fns[1].c ?? ""),
+    `two agendas: nine arguments, a SQL wrapper with 126's defaults; ten, plpgsql, none defaulted; both STABLE and commented for 129 (${fns.map((f) => `${f.n}:${f.l}:${f.v}:${(f.d ?? "").slice(-36)}`).join(", ")})`);
+
+  // priority: 126's order, as a nine-argument call gets it — the Urgent, the High due tomorrow, the High, the
+  // overdue Medium (2.6), the Medium due within the week (2.2), the overdue Low.
+  const byNine = await nine(), byPriority = await ten("priority");
+  const strip = (a: Ag) => JSON.stringify({ ...a, order: undefined, now: undefined });
+  assert(keys(byNine) === "9951 9952 9956 9953 9955 9954 9957" && strip(byPriority) === strip(byNine) && byNine.order === "priority" && byPriority.order === "priority",
+    `the priority order is 126's, and a nine-argument call gets it, the answer saying priority (${keys(byNine)} | ${keys(byPriority)} | ${byNine.order})`);
+
+  // due: the overdue two first, the Medium before the Low (one moment, the higher priority first), then tomorrow's,
+  // then the week's; the undated after, the Urgent before the High.
+  const byDue = await ten("due");
+  assert(keys(byDue) === "9953 9954 9952 9955 9951 9956 9957" && byDue.order === "due" && byDue.total === 7,
+    `the due order: the dated first, soonest first, a tie on the moment to the higher priority, then the undated by priority, the stated None among them; the answer says due (${keys(byDue)} | ${byDue.order})`);
+
+  // The order is applied before the limit: due's first two are the overdue ones, not priority's first two re-sorted.
+  const dueTwo = await ten("due", 2), priorityTwo = await ten("priority", 2);
+  assert(keys(dueTwo) === "9953 9954" && keys(priorityTwo) === "9951 9952" && dueTwo.total === 7,
+    `the order is applied before the limit (${keys(dueTwo)} | ${keys(priorityTwo)})`);
+
+  // Refused 22023: any other order, NULL, a different case, padding, an empty string.
+  const code = async (order: string | null) => { try { await ten(order); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const refused = [await code("Due"), await code(null), await code("due "), await code(""), await code("soonest")];
+  assert(refused.join(",") === "22023,22023,22023,22023,22023", `an order that is not priority or due is refused 22023 (${refused.join(",")})`);
+
+  // query_log.filter's comment names the agenda row's order.
+  const filterComment = (await db.query<{ f: string | null }>(
+    `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
+  assert(/its order \(priority or due; migration 129\)/.test(filterComment) && /On a plan_context row/.test(filterComment),
+    `query_log.filter's comment names the agenda row's order, and keeps plan_context's row (${filterComment.slice(-160)})`);
+
+  // 126 re-applied alone after 129 (review pass 2): it replaces the wrapper with its own body, so a nine-argument
+  // call still names one function and reads in the priority order, and the ten-argument one still answers.
+  const the126 = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
+  await reapply(the126.slice(0, 4));
+  let after126 = "";
+  try { after126 = `${keys(await nine())} | ${keys(await ten("due"))}`; } catch (e) { after126 = `threw: ${(e as Error).message}`; }
+  const count126 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'agenda'`)).rows[0].n;
+  assert(after126 === `${keys(byNine)} | ${keys(byDue)}` && count126 === 2,
+    `126 re-applied after 129: a nine-argument call names one function, in the priority order, and due still answers (${after126}; ${count126} agendas)`);
+
+  // A re-apply is a no-op: the same reads.
+  await reapply(file.slice(0, 4));
+  assert(strip(await ten("due")) === strip(byDue) && strip(await nine()) === strip(byNine), "a re-apply is a no-op: the same reads under both orders");
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

@@ -46,6 +46,7 @@ import { recordStructure } from "../db/ingest-structure.ts";
 import { ACTOR_NAME as BOARD_SYNC, priorityStep } from "../db/sync-linear.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
+import type { AgendaOrder } from "../server-portable/store.ts";
 
 // ── The seeded corpus ───────────────────────────────────────────────────────
 
@@ -734,7 +735,11 @@ export const READS: readonly Read[] = [
  * search tool called over MCP as a baseline read is (its
  * thought ids, best first). Never the prompt's key or its gold.
  */
-export type MeasureInput = { query: string; embedding: number[]; store: SqlStore; callTool: (tool: SearchTool, args: Record<string, unknown>) => Promise<string[]> };
+export type MeasureInput = {
+  query: string; embedding: number[]; store: SqlStore; callTool: (tool: SearchTool, args: Record<string, unknown>) => Promise<string[]>;
+  /** The database itself, for what the store has no method for (SMD-4192: a ticket's head thought). */
+  sql: SQL;
+};
 
 /**
  * A read measured against the bar: any function from a prompt to thought ids,
@@ -789,6 +794,38 @@ export const AGENDA_READ: MeasuredRead = {
 };
 
 /**
+ * The keyword rule standing in for the client that picks the agenda's order (SMD-4192, pre-registered on the ticket
+ * on 2026-11-10, before any run): a question naming a time gets the due order, any other the priority order. It
+ * reads the query's words alone. Written with the seven queries in view, as the ticket and the README say, and it
+ * misses phrasings a client's model would read as about time: "next week", "this month", "upcoming", "expiring", and
+ * "this week" with two spaces (review pass 1). Pre-registered, so it is not widened here: a wider rule is a new read.
+ */
+export const DUE_WORDS = /\b(due|deadlines?|overdue|soon|today|tomorrow)\b|\bthis week\b/i;
+export const orderFor = (query: string): AgendaOrder => (DUE_WORDS.test(query) ? "due" : "priority");
+
+/**
+ * SMD-4192's read: the agenda taking the question (the maintainer's choice, 2026-11-10; the rule pre-registered on
+ * the ticket before any run). The order is DUE_WORDS's pick for the query; the agenda is the store's, with
+ * AGENDA_READ's flags at its cap of 100, and the read lists the agenda's own items, not search's hits — each ticket
+ * as its head thought (068's ob1_ticket_head), each open item as the thought it was read from, an item with none
+ * skipped. The query's words choose the order and nothing else.
+ */
+export const AGENDA_QUESTION_READ: MeasuredRead = {
+  name: "agenda_question", ticket: "SMD-4192",
+  run: async ({ query, store, sql }) => {
+    const agenda = await store.agenda({ limit: 100, includeBlocked: false, includeClaimed: false, includeProposed: false, order: orderFor(query) });
+    const tickets = agenda.items.filter((i) => i.kind === "ticket").map((i) => i.key);
+    const items = agenda.items.filter((i) => i.kind === "item").map((i) => i.key);
+    // The keys ride as JSON text (Bun binds a JS array to ::text[] as one comma-joined string: the second run's error).
+    const heads = new Map(((await sql`SELECT issue, head_id::text AS id FROM ob1_ticket_head WHERE issue IN (SELECT jsonb_array_elements_text((${JSON.stringify(tickets)}::text)::jsonb))`) as { issue: string; id: string }[])
+      .map((r) => [r.issue, r.id] as const));
+    const origins = new Map(((await sql`SELECT item_id::text AS key, origin_thought_id::text AS id FROM open_items WHERE item_id::text IN (SELECT jsonb_array_elements_text((${JSON.stringify(items)}::text)::jsonb)) AND origin_thought_id IS NOT NULL`) as { key: string; id: string }[])
+      .map((r) => [r.key, r.id] as const));
+    return agenda.items.map((i) => (i.kind === "ticket" ? heads.get(i.key) : origins.get(i.key))).filter((id): id is string => id !== undefined);
+  },
+};
+
+/**
  * The weight SMD-3668's read is measured at: pre-registered on SMD-3668 on 2026-11-08, before any run, as the value it
  * would ship with (the bar's rule for a read with a knob: measured once, no sweep reported as the verdict). The
  * maintainer's choice: meaning and priority counted alike.
@@ -810,7 +847,7 @@ export function priorityWeightRead(weight: number, name = "priority_weight"): Me
 export const PRIORITY_WEIGHT_READ: MeasuredRead = priorityWeightRead(PRIORITY_WEIGHT);
 
 /** The reads under measurement, each with its ticket. */
-export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ, PRIORITY_WEIGHT_READ];
+export const MEASURED: readonly MeasuredRead[] = [AGENDA_READ, PRIORITY_WEIGHT_READ, AGENDA_QUESTION_READ];
 
 /** A measured read's ids as scored: each once, first occurrence kept, the top READ_K. */
 export function measuredIds(ids: readonly string[]): string[] {
@@ -922,12 +959,13 @@ export function isDay(n: unknown): boolean {
  * the seeded set's reads, each by its procedure there — `agenda` is
  * AGENDA_READ's (search's hits ordered by the agenda), not the agenda tool's
  * own list, which would need a name of its own; `priority_weight` is
- * PRIORITY_WEIGHT_READ's (search_thoughts at the pre-registered weight) — and `ticket_rows`, search
+ * PRIORITY_WEIGHT_READ's (search_thoughts at the pre-registered weight); `agenda_question` is
+ * AGENDA_QUESTION_READ's (the agenda's own list, in the order DUE_WORDS picks, SMD-4192) — and `ticket_rows`, search
  * filtered to board-sync's ticket rows alone, the 2026-10-14 session's second
  * read. A new name is added here with what it is, so rows stay comparable read
  * by read; the self-check holds every seeded read's name among them.
  */
-export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "priority_weight", "ticket_rows"];
+export const DOGFOOD_READS: readonly string[] = ["plain", "current", "filter", "agenda", "priority_weight", "agenda_question", "ticket_rows"];
 
 /** What is wrong with the fixture's rows, as read from the file: not an array, or a row's problems. Never throws. */
 export function dogfoodProblems(raw: unknown): string[] {
