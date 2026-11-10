@@ -63,6 +63,8 @@ DESCRIBE THE EXACT WORK.
 
 Every brain records who holds which work, so two agents never build one change (SMD-3596). This repo's board syncs into the maintainer's **stable** brain, the one sessions capture on. Claim only through a connector named `open-brain` whose `brain_info` says the stable tier: on the maintainer's machine, or reaching its stable brain through a tunnel. Don't print the connector's config to check, since it holds the key. Any other brain is not this repo's claim domain, whatever its `search` finds: a canary, which syncs the same board, and a contributor's own brain included. With one of those, skip the claim steps and say so.
 
+**The agent runner claims differently** (SMD-4087, decision 6). It is the caller of the session it starts, and it holds the claim: it claims over the stable brain's REST core with its own agent-kind key (`POST /v1/claims`, not an `open-brain` connector) once `GET /v1/brain` names the stable tier, and keeps the token in its own directory (`~/.config/open-brain/agent-runner/claims/<id>.json`), beside its secrets and outside every worktree's `.work-claims/`. The agent session it starts works under that claim and neither renews nor releases it, as a subagent doesn't (step 2's subagent rule); the brief names the claim's id. The steps below are otherwise the runner's too — only the door (REST, not a connector) and the token's home differ.
+
 If `open-brain` has no `claim_work` tool, say why:
 - the brain's release predates SMD-3598, so neither `list_claims` nor `claim_work` is there;
 - the key lacks write scope, so `list_claims` is there but `claim_work` isn't;

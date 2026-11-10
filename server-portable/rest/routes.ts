@@ -144,6 +144,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },
   // The agenda (SMD-3669, migration 123): the scope and flags in the query string.
   agenda: { method: "GET", path: "/v1/agenda", ok: 200, call: CALLS.agenda },
+  // plan_context (SMD-2684): the request in the body, as a search's query is.
+  plan_context: { method: "POST", path: "/v1/plan-context", ok: 200, call: CALLS.plan_context },
   open_item: { method: "POST", path: "/v1/items", ok: 200, call: CALLS.open_item },
   item_history: { method: "GET", path: "/v1/items/{id}", ok: 200, call: CALLS.item_history },
   update_item: { method: "PATCH", path: "/v1/items/{id}", ok: 200, call: CALLS.update_item },

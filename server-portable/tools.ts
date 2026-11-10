@@ -51,6 +51,8 @@ export const TOOLS = [
   { name: "list_items", scope: "read" },
   // The agenda (SMD-3669, migration 123): a read over every kind of open item, ranked by effective priority.
   { name: "agenda", scope: "read" },
+  // plan_context (SMD-2684): what the brain holds for a request, in one read — knowledge, board, tools and gaps.
+  { name: "plan_context", scope: "read" },
   // Work threads (SMD-3306 PR 7a-2a).
   { name: "thread", scope: "read" },
   // Judged relations (SMD-2726; SMD-3306 PR 7a-2b).
