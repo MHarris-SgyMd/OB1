@@ -740,6 +740,13 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ok(r.out === cli.out && r.err === cli.err && cli.err.startsWith(first), `…in the scanner's words, the whole of both streams alike (${JSON.stringify(cli.err.split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
     ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
   }
+  // --max-wait (SMD-3379 PR 2c-2): the CLI's alone — the order of the slots' hook, which the CLI installs and run() does
+  // not — refused in its words before connecting, a second at least and a day at most.
+  for (const v of ["0", "86401", "1.5"]) {
+    const cli = await counted(["sleep.ts", "--url", AT, "--max-wait", v]);
+    ok(cli.code === 2 && cli.err.startsWith("--max-wait must be a decimal integer >= 1 and <= 86400") && cli.seen === 0 && !(cli.out + cli.err).includes(MARK),
+      `sleep.ts --max-wait ${v}: exit 2 in the scanner's words, before connecting (${cli.code}, ${JSON.stringify(cli.err.split("\n")[0].slice(0, 90))}, ${cli.seen})`);
+  }
   const session = budgetSession({ statementTimeout: 300, workMem: 4, maintenanceWorkMem: 64 });
   const noTimeout = budgetSession({ statementTimeout: 0, workMem: 1, maintenanceWorkMem: 1 });
   ok(JSON.stringify(session) === JSON.stringify({ statement_timeout: "300s", work_mem: "4MB", maintenance_work_mem: "64MB" }) && !("statement_timeout" in noTimeout)
