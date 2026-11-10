@@ -18,7 +18,7 @@
  *
  * What is counted: a plan cites a thought by its full id. A cite counts only if a tool showed that id in the same run
  * (seen); a cite of an id never shown is reported, not credited. The rows to label are, per request, every thought
- * either arm's plan cited, and UNCITED_SAMPLE thoughts that either arm saw and neither cited, mixed so a rater can't
+ * either arm's plan cited and saw, and UNCITED_SAMPLE thoughts that either arm saw and neither so cited, mixed so a rater can't
  * tell which were cited, by which arm, or why a row is there. A row is relevant (gold) when both raters say so.
  *
  * The verdict, fixed before any run (posted on SMD-2684 with this file's PREREGISTRATION hash):
@@ -215,6 +215,18 @@ export type Call = { tool: string; input: unknown; ids: string[]; returned: stri
 /** The tools that write a query_log search row (core/reads.ts runSearch, and plan_context's own kind, migration 126). */
 export const LOGGED_SEARCH_TOOLS: readonly string[] = ["search", "search_thoughts", "search_thoughts_keyword", "plan_context"];
 
+/**
+ * Whether the server writes a query_log search row for this call (core/reads.ts runSearch): a search tool, answered,
+ * without min_trust, and for search_thoughts not ranked by priority (priority_weight > 0 or min_priority given).
+ */
+export function logsSearchRow(c: Pick<Call, "tool" | "input" | "isError">): boolean {
+  if (!LOGGED_SEARCH_TOOLS.includes(c.tool) || c.isError) return false;
+  const i = (c.input && typeof c.input === "object" ? c.input : {}) as Record<string, unknown>;
+  if (i.min_trust !== undefined) return false;
+  if (c.tool === "search_thoughts" && ((typeof i.priority_weight === "number" && i.priority_weight > 0) || i.min_priority !== undefined)) return false;
+  return true;
+}
+
 /** A search tool's returned results, read from its structured value: plan_context's knowledge hits, search's results, search_thoughts' hits. */
 export function returnedOf(tool: string, text: string): string[] {
   if (!LOGGED_SEARCH_TOOLS.includes(tool)) return [];
@@ -408,7 +420,7 @@ export type Score = {
   why: string;
   either: { wins: number; losses: number; meanDiff: number; p: number };
   /** SMD-1719's numbers: `returned` sums each search call's distinct results (a thought two calls return counts twice), `used` is cited or fetched. */
-  utilization: Record<Arm, { returned: number; used: number; cited: number; utilization: number | null }>;
+  utilization: Record<Arm, { searches: number; returned: number; used: number; cited: number; utilization: number | null }>;
   citedRelevantShare: Record<Arm, number | null>;
   uncitedRelevant: { rated: number; relevant: number };
   runs: { key: string; arm: Arm; invalid: string[]; deviations: string[] }[];
@@ -493,7 +505,7 @@ export function score(
       if (!rec) continue;
       rec.calls.forEach((c, i) => {
         const at = new Date(Date.UTC(2026, 0, 1, 0, 0, i));
-        if (LOGGED_SEARCH_TOOLS.includes(c.tool) && !c.isError) {
+        if (logsSearchRow(c)) {
           searches.push({ id: `${req.key}.${arm}.${i}`, agentId: req.key, loggedAt: at, tool: c.tool, query: req.key, matchCount: null, threshold: null, recencyWeight: null, resultIds: c.returned.filter(isThought), resultTokens: null });
         }
         const target = (c.input as { id?: unknown } | null)?.id;
@@ -503,7 +515,7 @@ export function score(
       for (const id of rec.cited) if (seen.has(id) && isThought(id)) actions.push({ agentId: req.key, loggedAt: new Date(Date.UTC(2026, 0, 1, 0, 5, 0)), tool: "plan/derived_from", targetId: id });
     }
     const o = summarise(searches, actions, 30).overall;
-    utilization[arm] = { returned: o.returned, used: o.used, cited: o.cited, utilization: o.utilization };
+    utilization[arm] = { searches: o.searches, returned: o.returned, used: o.used, cited: o.cited, utilization: o.utilization };
   }
   const share = (arm: Arm): number | null => {
     const c = rows.reduce((s, r) => s + r[arm].cited, 0);
@@ -543,7 +555,7 @@ export function renderScore(s: Score): string {
     ...ARM_NAMES.map((arm) => `  ${arm} ${ARMS[arm].label}: utilization ${pct(s.utilization[arm].utilization)} (${s.utilization[arm].used} used, ${s.utilization[arm].cited} of them cited, of ${s.utilization[arm].returned} results returned, summed over search calls), ` +
       `relevant share of cites ${pct(s.citedRelevantShare[arm])}, unseen cites ${sum(arm, (x) => x.unseenCites)}, calls ${sum(arm, (x) => x.calls)}, cost $${sum(arm, (x) => x.costUsd).toFixed(2)}`),
     `  uncited sample: ${s.uncitedRelevant.relevant} of ${s.uncitedRelevant.rated} rows neither plan cited are relevant by both raters`,
-    ...(s.runs.length ? ["", "runs that broke a rule:", ...s.runs.map((r) => `  ${r.key} ${r.arm}: ${[...r.invalid.map((x) => `INVALID ${x}`), ...r.deviations].join("; ")}`)] : []),
+    ...(s.runs.length ? ["", "runs that were invalid (INVALID) or departed from their instructions:", ...s.runs.map((r) => `  ${r.key} ${r.arm}: ${[...r.invalid.map((x) => `INVALID ${x}`), ...r.deviations].join("; ")}`)] : []),
   ];
   return out.join("\n");
 }
@@ -588,14 +600,21 @@ export function moveAside(path: string): boolean {
   return true;
 }
 
-async function runOne(dir: string, req: Request, arm: Arm, mcpConfig: string): Promise<void> {
+/** A run's files, made ready: the planner's empty working directory, and any earlier stream moved aside. */
+export function runFiles(dir: string, key: string, arm: Arm): { cwd: string; out: string } {
   const cwd = join(dir, "cwd");
   mkdirSync(cwd, { recursive: true });
   if (readdirSync(cwd).length) throw new Error(`${cwd} must stay empty: the planner runs there`);
-  const out = runPath(dir, req.key, arm);
+  mkdirSync(join(dir, "runs"), { recursive: true });
+  const out = runPath(dir, key, arm);
   // A spawn writing into an existing file doesn't truncate it: an earlier stream's tail would follow the new one.
   moveAside(out);
   moveAside(`${out}.err`);
+  return { cwd, out };
+}
+
+async function runOne(dir: string, req: Request, arm: Arm, mcpConfig: string): Promise<void> {
+  const { cwd, out } = runFiles(dir, req.key, arm);
   const started = Date.now();
   const proc = Bun.spawn(claudeArgs(req, arm, mcpConfig), { cwd, stdout: Bun.file(out), stderr: Bun.file(`${out}.err`), stdin: "ignore" });
   const timer = setTimeout(() => proc.kill(), RUN_TIMEOUT_MS);
@@ -734,10 +753,14 @@ export function selfCheck(): number {
   ok(sc.requests[1].d === -1 && sc.wins === 0 && sc.losses === 1 && sc.ties === 1 && near(sc.meanDiff, -0.5), "the paired differences and their counts");
   ok(near(sc.kappa, 1) && sc.items === 6 && sc.agreeRelevant === 3, "κ over every rated row");
   ok(sc.utilization.A.returned === 4 && sc.utilization.A.used === 2 && near(sc.utilization.A.utilization ?? -1, 0.5), "utilization by SMD-1719's code: per request plan_context returned its 2 hits and the plan cited 1 of them (U3, a label's id, is no result)");
-  ok(sc.utilization.B.returned === 0 && sc.utilization.B.used === 0 && sc.utilization.B.utilization === null, "B's one call printed ids as plain text: no structured results, so no search row");
+  ok(sc.utilization.B.searches === 2 && sc.utilization.B.returned === 0 && sc.utilization.B.used === 0 && sc.utilization.B.utilization === null, "B's one call printed ids as plain text: a search row per request with no results, so nothing returned");
   const recF = parseRun(stream("B", { calls: [["search", `{"results":[{"id":"${U1}"},{"id":"${U2}"}]}`], ["fetch", `{"id":"${U2}","text":"x"}`, { id: U2 }], ["thread", `{"threads":[{"members":[{"id":"${U3}"}]}]}`, { key: "SMD-1" }]], plan: `## Steps\n[${U3}]` }));
   const sF = score([reqs[0]], new Map([["SMD-1", { A: rA, B: recF }]]), isT, { "SMD-1": { R01: U1, R02: U2, R03: U3 } }, { "SMD-1": { R01: 1, R02: 1, R03: 1 } }, { "SMD-1": { R01: 1, R02: 1, R03: 1 } });
-  ok(sF.utilization.B.returned === 2 && sF.utilization.B.used === 1 && sF.utilization.B.cited === 0, "a fetch is an opened use of the search that returned it; thread logs no search row, so its cited member is no use");
+  ok(sF.utilization.B.searches === 1 && sF.utilization.B.returned === 2 && sF.utilization.B.used === 1 && sF.utilization.B.cited === 0, "a fetch is an opened use of the search that returned it; fetch and thread log no search row, so thread's cited member is no use");
+  const recK = parseRun(stream("B", { calls: [["search_thoughts_keyword", `{"hits":[{"id":"${U1}"}]}`, { query: "q" }], ["search_thoughts", `{"hits":[{"id":"${U2}"}]}`, { query: "q", priority_weight: 0.5 }], ["search", `{"results":[{"id":"${U3}"}]}`, { query: "q", min_trust: "operator" }]], plan: `## Steps\n[${U1}] [${U2}]` }));
+  const sK = score([reqs[0]], new Map([["SMD-1", { A: rA, B: recK }]]), isT, { "SMD-1": { R01: U1, R02: U2 } }, { "SMD-1": { R01: 1, R02: 1 } }, { "SMD-1": { R01: 1, R02: 1 } });
+  ok(sK.utilization.B.searches === 1 && sK.utilization.B.returned === 1 && sK.utilization.B.used === 1, "a keyword search logs a row; a priority-ranked search_thoughts and one with min_trust log none, as the server does");
+  ok(logsSearchRow({ tool: "search_thoughts", input: { query: "q", priority_weight: 0 }, isError: false }) && !logsSearchRow({ tool: "search_thoughts", input: { query: "q", min_priority: 2 }, isError: false }) && !logsSearchRow({ tool: "plan_context", input: { request: "r" }, isError: true }), "priority_weight 0 still logs; min_priority, or an errored call, doesn't");
   const twice = parseRun(stream("B", { calls: [["search", `{"results":[{"id":"${U1}"}]}`], ["search", `{"results":[{"id":"${U1}"}]}`]], plan: `## Steps\n[${U1}]` }));
   ok(score([reqs[0]], new Map([["SMD-1", { A: rA, B: twice }]]), isT, { "SMD-1": { R01: U1 } }, { "SMD-1": { R01: 1 } }, { "SMD-1": { R01: 1 } }).utilization.B.returned === 2, "returned sums each search call's results: a thought two calls return counts twice, as SMD-1719 counts it");
   // The raters split on SMD-1's U1 and U3, both of which A cites: by both raters A cites no relevant row there (d −1),
@@ -760,10 +783,18 @@ export function selfCheck(): number {
   ok(claudeArgs(reqs[0], "A", "/x").join(" ").includes("--allowedTools mcp__brain__plan_context --disallowedTools"), "arm A allows plan_context alone");
   ok(ARM_NAMES.every((arm) => ARMS[arm].tools.every((x) => (READ_TOOL_NAMES as readonly string[]).includes(x))), "every tool an arm may call is a read-scope tool in the server's manifest");
   ok(PREREGISTRATION === "7815fb2226cf8f11534e9ca3ebfcb133564f097664ac358b1c9f59f8d4bbd7e6", "the preregistration hash is the one posted on SMD-2684 (comment b07d2d67)");
-  const tmp = join(process.env.TMPDIR ?? "/tmp", `epc-aside-${process.pid}`);
-  writeFileSync(tmp, "old stream");
-  ok(moveAside(tmp) && !existsSync(tmp) && !moveAside(tmp), "an earlier stream is moved aside before a run writes, and nothing is moved when there is none");
-  for (const f of readdirSync(process.env.TMPDIR ?? "/tmp")) if (f.startsWith(`epc-aside-${process.pid}.try`)) rmSync(join(process.env.TMPDIR ?? "/tmp", f));
+  const tmpDir = join(process.env.TMPDIR ?? "/tmp", `epc-run-${process.pid}`);
+  mkdirSync(join(tmpDir, "runs"), { recursive: true });
+  writeFileSync(join(tmpDir, "runs", "SMD-1.A.jsonl"), "old stream");
+  writeFileSync(join(tmpDir, "runs", "SMD-1.A.jsonl.err"), "old err");
+  const files = runFiles(tmpDir, "SMD-1", "A");
+  const moved = readdirSync(join(tmpDir, "runs")).filter((f) => f.includes(".try")).length;
+  ok(files.out === join(tmpDir, "runs", "SMD-1.A.jsonl") && !existsSync(files.out) && !existsSync(`${files.out}.err`) && moved === 2 && readdirSync(files.cwd).length === 0, "a run's files: an earlier stream and its errors moved aside before the run writes, the planner's directory empty");
+  writeFileSync(join(files.cwd, "stray"), "x");
+  let refused = false;
+  try { runFiles(tmpDir, "SMD-1", "B"); } catch { refused = true; }
+  ok(refused, "a planner directory with anything in it is refused");
+  rmSync(tmpDir, { recursive: true, force: true });
 
   console.log(fails ? `\n${fails} check(s) failed` : "\nall checks passed");
   return fails;

@@ -61,6 +61,8 @@ export const SEARCH_KINDS = ["search", "plan_context"] as const;
  * or the other, so a new kind can't go unread without a decision.
  */
 export const NOT_SEARCH_KINDS = ["action", "agenda"] as const;
+/** SEARCH_KINDS as the Postgres array literal both readers bind (`kind = ANY(${SEARCH_KINDS_LITERAL}::text[])`). */
+export const SEARCH_KINDS_LITERAL = `{${SEARCH_KINDS.join(",")}}`;
 
 export type SearchRow = {
   id: string;
@@ -138,7 +140,9 @@ export function toSearchRow(r: SearchDbRow): SearchRow {
   const resultIds = parsePgUuidArray(r.result_ids);
   const surviving = Number(r.surviving);
   const returned = new Set(resultIds).size;
-  const whole = r.chars !== null && returned > 0 && surviving === returned;
+  // A plan_context call hands over each hit cut to its share of a budget (core/plan.ts, SMD-4191), so the stored
+  // text's length is no estimate of what it returned: no token estimate for its row (SMD-2684 PR 2, review pass 2).
+  const whole = r.chars !== null && returned > 0 && surviving === returned && r.tool !== "plan_context";
   return {
     id: r.id,
     agentId: r.agent_id,
@@ -164,6 +168,23 @@ export function toActionRow(r: ActionDbRow): ActionRow {
  * a hand-labelled set calls relevant. `relevant` is an array in a fresh export
  * and may be the `{a,b}` literal in a re-serialised one; both read.
  */
+/**
+ * The export's click-through labels: each attributed use, under the query of the search it attributes to. A
+ * plan_context row takes its uses (SEARCH_KINDS), so a touch after it is never an earlier search's, but its request is
+ * no search eval-replay can run, so it labels no query (SMD-2684 PR 2).
+ */
+export function queryLabels(searches: SearchRow[], bySearch: Map<string, Uses>): { query: string; target_id: string }[] {
+  const byId = new Map(searches.map((s) => [s.id, s]));
+  const links: { query: string; target_id: string }[] = [];
+  for (const [searchId, uses] of bySearch) {
+    const s = byId.get(searchId);
+    if (!s || s.query === null || s.query === undefined) continue; // a search row always carries its query (034's CHECK)
+    if (s.tool === "plan_context") continue;
+    for (const target_id of uses.used) links.push({ query: s.query, target_id });
+  }
+  return links;
+}
+
 export function goldFromFixture(fx: { queries?: { query: string; relevant: unknown }[] }): Map<string, Set<string>> {
   const gold = new Map<string, Set<string>>();
   // Lower-cased: the log holds ids as Postgres emits them, and a hand-labelled

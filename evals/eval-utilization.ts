@@ -30,7 +30,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { posInt, requireQueryLog } from "./query-log.ts";
-import { goldFromFixture, renderReport, SEARCH_KINDS, summarise, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
+import { goldFromFixture, renderReport, SEARCH_KINDS_LITERAL, summarise, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
 
 loadEnv();
 
@@ -98,7 +98,7 @@ const searchRows = await sql<SearchDbRow[]>`
       SELECT sum(length(t.content))::bigint AS chars, count(*)::int AS surviving
         FROM thoughts t WHERE t.id = ANY(s.result_ids)
     ) c
-   WHERE s.kind = ANY(${`{${SEARCH_KINDS.join(",")}}`}::text[])`;
+   WHERE s.kind = ANY(${SEARCH_KINDS_LITERAL}::text[])`;
 const actionRows = await sql<ActionDbRow[]>`
   SELECT agent_id, logged_at, (extract(epoch FROM logged_at)::numeric * 1000000)::bigint AS at_us, tool, target_id
     FROM query_log WHERE kind = 'action'`;
