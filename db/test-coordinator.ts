@@ -105,9 +105,10 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
   ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
     "extract: --follow with its seconds only when set, one worker unless set");
   ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");
-  ok(args("sleep") === "--follow --capture 20 --abort-after 60 --rescan 3600 --poll 5 --workers 1 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64"
+  ok(args("sleep") === "--follow --capture 20 --abort-after 60 --max-wait 60 --rescan 3600 --poll 5 --workers 1 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64"
       && args("sleep", { OB1_SLEEP_CAPTURE: "45" }).includes("--capture 45") && CHILDREN.sleep.digits.includes("OB1_SLEEP_CAPTURE")
       && args("sleep", { OB1_SLEEP_ABORT_AFTER: "90" }).includes("--abort-after 90") && CHILDREN.sleep.digits.includes("OB1_SLEEP_ABORT_AFTER")
+      && args("sleep", { OB1_SLEEP_MAX_WAIT: "120" }).includes("--max-wait 120") && CHILDREN.sleep.digits.includes("OB1_SLEEP_MAX_WAIT")
       && args("sleep", { OB1_SLEEP_RESCAN: "600" }).includes("--rescan 600") && CHILDREN.sleep.digits.includes("OB1_SLEEP_RESCAN")
       && !args("sleep", { OB1_SLEEP_QUIET: "300", OB1_SLEEP_BUDGET: "60" }).includes("--quiet") && !args("sleep", { OB1_SLEEP_BUDGET: "60" }).includes("--budget"),
     `sleep: the service's defaults (${args("sleep")})`);
@@ -116,7 +117,7 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
     "sleep: --dump-dir only when set, the path one argument with its space; a 0 kept, not the default");
   ok(CHILDREN.sleep.requireKey && CHILDREN.extract.requireKey && CHILDREN.consolidate.requireKey && !CHILDREN["board-sync"].requireKey,
     "the key guard on the three that name themselves by OB1_WORKER_KEY, not on board-sync");
-  ok(CHILDREN.sleep.digits.length === 8 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
+  ok(CHILDREN.sleep.digits.length === 9 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
 }
 
 // ---------------------------------------------------------------------------

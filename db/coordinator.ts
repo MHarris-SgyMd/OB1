@@ -132,7 +132,7 @@ const boardEvery = (env: Record<string, string | undefined>): number | undefined
 };
 
 const SLEEP_DIGITS = [
-  "OB1_SLEEP_CAPTURE", "OB1_SLEEP_ABORT_AFTER", "OB1_SLEEP_RESCAN", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS",
+  "OB1_SLEEP_CAPTURE", "OB1_SLEEP_ABORT_AFTER", "OB1_SLEEP_MAX_WAIT", "OB1_SLEEP_RESCAN", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS",
   "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM",
 ] as const;
 
@@ -169,6 +169,7 @@ export const CHILDREN: Record<ChildName, Child> = {
       "--follow",
       "--capture", or(env, "OB1_SLEEP_CAPTURE", "20"),
       "--abort-after", or(env, "OB1_SLEEP_ABORT_AFTER", "60"),
+      "--max-wait", or(env, "OB1_SLEEP_MAX_WAIT", "60"),
       "--rescan", or(env, "OB1_SLEEP_RESCAN", "3600"),
       "--poll", or(env, "OB1_SLEEP_POLL", "5"),
       "--workers", or(env, "OB1_SLEEP_WORKERS", "1"),
