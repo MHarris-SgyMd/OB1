@@ -888,7 +888,7 @@ export async function resetCaptureStamp(ctx: Ctx, principal: Principal, { id }: 
 
 /** What an evidence append did (SMD-2690 PR 3b): whether it added the entry or found it there, the list's length after, and the thought's stamp. */
 export type EvidenceAppended = { id: string; byClientKey?: string; action: "appended" | "already_exists"; evidenceCount: number; updatedAt?: string };
-export type EvidenceCode = "NOT_FOUND" | "REFUSED_THOUGHT_EVIDENCE" | "REFUSED_STALE_READ";
+export type EvidenceCode = "NOT_FOUND" | "REFUSED_THOUGHT_EVIDENCE" | "THOUGHT_EVIDENCE_BUSY";
 
 /**
  * An entry's identity: sha256 of its label, its excerpt and the thought's id,
@@ -913,7 +913,8 @@ const EVIDENCE_BACKOFF_MS = 15;
  * write the list back through update_thought with the row's stamp as
  * if_unchanged_since — an edit the event log records as any metadata edit is.
  * A write between the read and the edit is a STALE_READ, and the append reads
- * again, so appends at once each keep the others' entries.
+ * again, so appends at once each keep the others' entries; past its tries it
+ * answers THOUGHT_EVIDENCE_BUSY, retryable, as the same call can then land.
  */
 export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id: name, source_label, excerpt, source, extracted_at }: Input<"append_thought_evidence">): Promise<Outcome<EvidenceAppended, EvidenceCode>> {
   // A name that is no uuid names no thought, by id or by key; else the thought by id, else by client_key (SMD-3314).
@@ -941,15 +942,19 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
     if (held.some((e) => e !== null && typeof e === "object" && (e as Record<string, unknown>)._identity === identity)) {
       return ok({ id, ...named, action: "already_exists", evidenceCount: held.length, ...stamp });
     }
+    // update_thought compares COALESCE(updated_at, created_at): a raw writer's row with neither has nothing an edit is
+    // checked against, so appends at once would each answer "appended" over the others (review pass 2). Refused.
+    const stampedAt = row.updated_at ?? row.created_at;
+    if (!stampedAt) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "unstamped" });
     if (held.length >= EVIDENCE_LIMITS.entries) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "full", count: held.length });
     // The vendored append's entry, its keys all present: a reader of either finds one shape.
     const entry = { _identity: identity, source: source ?? null, extracted_at: extracted_at ?? new Date().toISOString(), excerpt, source_label };
     const result = await store.updateThought({
       id,
       metadataPatch: { evidence: [...held, entry] },
-      // A row with no stamp (a raw writer's) is compared by its created_at, as update_thought compares
-      // COALESCE(updated_at, created_at) (review pass 1: with neither checked, appends at once lost entries).
-      ...((row.updated_at ?? row.created_at) ? { ifUnchangedSince: (row.updated_at ?? row.created_at)! } : {}),
+      // A row with no updated_at (a raw writer's) is compared by its created_at, as update_thought compares
+      // COALESCE(updated_at, created_at) (review pass 1: unchecked, appends at once lost entries).
+      ifUnchangedSince: stampedAt,
       actor: actorOf(ctx, principal),
     });
     // update_thought merges no patch into a SQL NULL: nothing was written (a store that reads no type reaches here).
@@ -959,7 +964,8 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
       await Bun.sleep(Math.random() * EVIDENCE_BACKOFF_MS * tries);
       continue;
     }
-    if (result.error === "STALE_READ") return refuse({ code: "REFUSED_STALE_READ", retryable: false, id, ...(result.currentUpdatedAt ? { currentUpdatedAt: result.currentUpdatedAt } : {}) });
+    // Not the caller's old read, as update_thought's stale read is, but other writes in the way: retryable (review pass 2).
+    if (result.error === "STALE_READ") return refuse({ code: "THOUGHT_EVIDENCE_BUSY", retryable: true, id });
     if (result.error === "NOT_FOUND") return refuse({ code: "NOT_FOUND", retryable: false, id });
     // An edit with no content and no pointer refuses nothing else: anything more is a fault, not a refusal of the caller's.
     throw new Error(`update_thought refused an evidence append on ${id}: ${result.error}`);

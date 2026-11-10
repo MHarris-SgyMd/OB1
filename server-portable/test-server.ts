@@ -5134,23 +5134,27 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
   const full = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "full", count: 100 });
   const notList = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "not_list" });
   const notObject = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "metadata_not_object" });
-  const stale = refusal({ code: "REFUSED_STALE_READ", id: ID, currentUpdatedAt: "2026-11-10T09:00:00.000Z" });
+  const unstamped = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "unstamped" });
+  const busyReply = said({ ok: false, refusal: { code: "THOUGHT_EVIDENCE_BUSY", retryable: true, id: ID } });
+  const busy = busyReply.content[0].text;
   const gone = refusal({ code: "NOT_FOUND", id: ID });
   assert(/already holds 100 evidence entries, the most a thought keeps \(100\)/.test(full) && /metadata\.evidence is not a list/.test(notList) && /metadata is not an object/.test(notObject)
-      && /edited by another write each of the 10 times the append read it \(it is now 2026-11-10T09:00:00\.000Z\)\. Retry: an entry already added is not added twice\./.test(stale) && !/if_unchanged_since/.test(stale)
+      && /has neither an updated_at nor a created_at .* Any update_thought of it stamps it; then append again\./.test(unstamped)
+      && /^Not yet: .* was edited by another write each of the 10 times the append read it\. Retry in a moment: an entry already added is not added twice\./.test(busy) && !/if_unchanged_since/.test(busy)
+      && (busyReply.structuredContent as { retryable?: unknown }).retryable === true
       && /^No thought with id /.test(gone),
-    `each refusal said by what holds the list; a stale read as another writer's, never the caller's if_unchanged_since (${stale})`);
+    `each refusal said by what holds the list; a busy thought as other writers', retryable, never the caller's if_unchanged_since (${busy})`);
 
   // The retry (review pass 1), against a store that answers STALE_READ a set number of times: an append
   // lands on its tenth read and no later, and waits, at random but longer each time, between reads.
   const { createCore } = await import("./core/index.ts");
   const { EVIDENCE_LIMITS } = await import("./core/refusal.ts");
-  const staleFor = (n: number) => {
+  const staleFor = (n: number, landed: Record<string, unknown> = { updatedAt: "2026-11-10T09:00:02.000Z" }, typed = true) => {
     let reads = 0, writes = 0;
     const store = {
       thoughtsNamed: async () => new Map(),
-      getThought: async () => { reads++; return { id: ID, content: "c", metadata: {}, metadataType: "object", created_at: "2026-11-10T09:00:00.000Z", updated_at: "2026-11-10T09:00:00.000Z" }; },
-      updateThought: async () => (++writes <= n ? { ok: false, error: "STALE_READ", currentUpdatedAt: "2026-11-10T09:00:01.000Z" } : { ok: true, id: ID, updatedAt: "2026-11-10T09:00:02.000Z" }),
+      getThought: async () => { reads++; return { id: ID, content: "c", metadata: {}, ...(typed ? { metadataType: "object" } : {}), created_at: "2026-11-10T09:00:00.000Z", updated_at: "2026-11-10T09:00:00.000Z" }; },
+      updateThought: async () => (++writes <= n ? { ok: false, error: "STALE_READ", currentUpdatedAt: "2026-11-10T09:00:01.000Z" } : { ok: true, id: ID, ...landed }),
     };
     const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
     return { core, reads: () => reads };
@@ -5164,8 +5168,12 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
   const refusedAt = await never.core.appendThoughtEvidence(writer, input);
   const waited = performance.now() - started;
   assert(EVIDENCE_LIMITS.tries === 10 && landed.ok && landed.value.action === "appended" && lands.reads() === 10
-      && !refusedAt.ok && refusedAt.refusal.code === "REFUSED_STALE_READ" && never.reads() === 10 && waited > 20,
-    `an append stale nine times lands on its tenth read; stale every time, it is refused after ten, having waited between reads (${lands.reads()} reads, ${never.reads()} reads, ${Math.round(waited)} ms)`);
+      && !refusedAt.ok && refusedAt.refusal.code === "THOUGHT_EVIDENCE_BUSY" && refusedAt.refusal.retryable === true && never.reads() === 10 && waited > 20,
+    `an append stale nine times lands on its tenth read; stale every time, it is refused busy, retryable, after ten, having waited between reads (${lands.reads()} reads, ${never.reads()} reads, ${Math.round(waited)} ms)`);
+  // A store that reads no type, and an update that merged nothing (a SQL NULL set under the read): refused, not "appended" (review pass 2).
+  const dropped = await staleFor(0, { patchDropped: true }, false).core.appendThoughtEvidence(writer, input);
+  assert(!dropped.ok && dropped.refusal.code === "REFUSED_THOUGHT_EVIDENCE" && dropped.refusal.problem === "metadata_not_object",
+    `an update that dropped the patch is refused as metadata that is no object (${JSON.stringify(dropped)})`);
 }
 
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");

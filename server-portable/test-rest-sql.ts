@@ -530,14 +530,18 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     const jsonNull = await rawRow("psi: a raw writer's JSON null metadata", "metadata = 'null'::jsonb");
     const sqlNull = await rawRow("psi: a raw writer's SQL NULL metadata", "metadata = NULL");
     const unstamped = await rawRow("psi: a raw writer's row with no updated_at", "updated_at = NULL");
+    // Neither stamp (review pass 2): nothing an edit is checked against, so refused rather than racing.
+    const noStamps = await rawRow("psi: a raw writer's row with neither stamp", "updated_at = NULL, created_at = NULL");
+    const onNoStamps = await rest("POST", `/v1/thoughts/${noStamps}/evidence`, entry);
     const onJsonNull = await rest("POST", `/v1/thoughts/${jsonNull}/evidence`, entry);
     const onSqlNull = await rest("POST", `/v1/thoughts/${sqlNull}/evidence`, entry);
     const [kept] = await sql`SELECT jsonb_typeof((SELECT metadata FROM thoughts WHERE id = ${jsonNull}::uuid)) AS j, (SELECT metadata IS NULL FROM thoughts WHERE id = ${sqlNull}::uuid) AS s`;
     const unstampedRace = await Promise.all(["a", "b", "c", "d"].map((n) => rest("POST", `/v1/thoughts/${unstamped}/evidence`, { source_label: `raw ${n}`, excerpt: `passage ${n}` })));
     const unstampedHeld = ((await rest("GET", `/v1/thoughts/${unstamped}`)).body as { metadata?: { evidence?: unknown[] } }).metadata?.evidence ?? [];
     assert([onJsonNull, onSqlNull].every((b) => b.status === 409 && b.body.code === "REFUSED_THOUGHT_EVIDENCE" && b.body.problem === "metadata_not_object") && kept?.j === "null" && kept?.s === true
-        && unstampedRace.every((b) => b.status === 200 && b.body.action === "appended") && unstampedHeld.length === 4,
-      `…metadata a raw writer left a JSON null or a SQL NULL refused and left as it was; a row with no updated_at keeps all of four appends at once (${onJsonNull.status}:${onJsonNull.body.problem} ${onSqlNull.status}:${onSqlNull.body.problem} ${JSON.stringify(kept)}; ${unstampedHeld.length} held)`);
+        && unstampedRace.every((b) => b.status === 200 && b.body.action === "appended") && unstampedHeld.length === 4
+        && onNoStamps.status === 409 && onNoStamps.body.code === "REFUSED_THOUGHT_EVIDENCE" && onNoStamps.body.problem === "unstamped",
+      `…metadata a raw writer left a JSON null or a SQL NULL refused and left as it was; a row with no updated_at keeps all of four appends at once; one with neither stamp refused (${onNoStamps.status}:${onNoStamps.body.problem}; ${onJsonNull.status}:${onJsonNull.body.problem} ${onSqlNull.status}:${onSqlNull.body.problem} ${JSON.stringify(kept)}; ${unstampedHeld.length} held)`);
 
     // Its refusals: no thought 404, a read key 403, a list that is not one 409, a full list 409, an input past its bound 400.
     const noThought = await rest("POST", "/v1/thoughts/00000000-0000-4000-8000-0000000027a5/evidence", entry);

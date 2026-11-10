@@ -1095,20 +1095,24 @@ as "reset by <key>", and a decline's line names the reset as the way out.
 **write-scoped** tool (`POST /v1/thoughts/{id}/evidence` over REST): it records that a
 source also says what an existing thought says, as one entry in the thought's
 `metadata.evidence` list — the source's label, the excerpt that says it, the kind of
-source, and when it was read (now, unless given). smart-ingest's port calls it, through
-`ctx.call`, when a passage it extracts is a thought the brain already holds.
+source, and when it was read (now, unless given). smart-ingest's port (SMD-2690 PR 4) is
+to call it, through `ctx.call`, when a passage it extracts is a thought the brain
+already holds.
 
 The append is an edit through `update_thought`: it reads the list, adds the entry, and
 writes the list back with the row's stamp as `if_unchanged_since`, so the event log
 records it as any metadata edit, under the caller's key. A write between the read and
 the edit is a stale read, and it reads again after a short random wait (ten reads at
-most, then `REFUSED_STALE_READ`), so appends at once each keep the others' entries. An entry's
+most, then `THOUGHT_EVIDENCE_BUSY`, 503 and retryable), so appends at once each keep the
+others' entries. An entry's
 identity is the sha256 of its label, its excerpt and the thought's id, kept as
 `_identity` — the vendored `schemas/smart-ingest` append's rule and shape — so the same
 entry is never added twice, and the reply says it already was. A label and a source
 are at most 200 characters and an excerpt 2,000; a thought keeps at most 100 entries,
 and `REFUSED_THOUGHT_EVIDENCE` (409) names a full list, a `metadata.evidence` another
-writer set to something that is no list, or metadata that is no object.
+writer set to something that is no list, metadata that is no object, or a raw writer's
+row with neither an `updated_at` nor a `created_at`, which no edit can be checked
+against.
 
 ## Deciding a supersession proposal (SMD-3338)
 

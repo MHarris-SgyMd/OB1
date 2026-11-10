@@ -1948,9 +1948,10 @@ export const resetHint = (msg: string): string =>
 
 /**
  * append_thought_evidence's reply: the entry added, or found there already,
- * and the list's length — the thought named as the caller named it. A refusal
- * names what holds the list and what to do; a stale read here is another
- * writer's three edits in a row, not the caller's old read.
+ * and the list's length — the thought by its id, lower-case as the brain
+ * writes it, and the client_key that named it. A refusal names what holds the
+ * list and what to do; a busy thought is other writers' edits in the way of
+ * each of the append's reads, never the caller's old read, and retryable.
  */
 export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, EvidenceCode>): Reply {
   return render(o, (v) => {
@@ -1966,10 +1967,11 @@ export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, Evidenc
           case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; a write key may prune metadata.evidence with update_thought.`;
           case "not_list": return `Refused: ${r.id}'s metadata.evidence is not a list, so no entry can join it. Another writer set it; update_thought's metadata_patch can set it to a list (or null) first.`;
           case "metadata_not_object": return `Refused: ${r.id}'s metadata is not an object (a raw writer's), so it holds no evidence list.`;
+          case "unstamped": return `Refused: ${r.id} has neither an updated_at nor a created_at (a raw writer's row), so an append could not be checked against another at the same moment. Any update_thought of it stamps it; then append again.`;
         }
         break;
-      case "REFUSED_STALE_READ":
-        return `Refused: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it${r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""}. Retry: an entry already added is not added twice.`;
+      case "THOUGHT_EVIDENCE_BUSY":
+        return `Not yet: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it. Retry in a moment: an entry already added is not added twice.`;
       default: return mutationRefusalText(r);
     }
     return mutationRefusalText(r);
