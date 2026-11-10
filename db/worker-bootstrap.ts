@@ -357,11 +357,13 @@ export function missingModelIs(e: unknown, model: string): boolean {
 }
 
 /**
- * Whose one thought's error is, for a --follow worker with no pauses before
- * an outage (db/reembed.ts's, SMD-2679 PR 4a-2b review pass 4): an error is
- * the thought's only when it names the thought, or when the provider answers
- * a probe's constant text right after it (`probe-decides`, the caller's
- * probe); anything else is the database's state or the provider's.
+ * Whose one thought's error is, for a --follow worker (db/reembed.ts's first,
+ * SMD-2679 PR 4a-2b review pass 4; a provider error is read through `fault`
+ * on this split, extract's and consolidate's since SMD-2636 PR 3a, re-embed's
+ * since PR 3b, re-embed's database error here directly): an error is the thought's only when it names the
+ * thought, or when the provider answers a probe's constant text right after
+ * it (`probe-decides`, the caller's probe); anything else is the database's
+ * state, the provider's, or, a probe refused, the request's.
  * - `db-wait`: the database not answering — the worker stops, recording
  *   nothing, and the follower waits it out (databaseUnavailable).
  * - `db-end`: a privilege or a function gone, a feature the server lacks
@@ -378,7 +380,7 @@ export function missingModelIs(e: unknown, model: string): boolean {
  *   nothing about the thought in hand.
  * - `maybe-poison`: any other 5xx, a 408, a timeout, no connection — an
  *   outage whose thought in hand is a suspect, as a document that crashes the
- *   provider gives.
+ *   provider gives; a timeout with no answer `fault` probes first (SMD-2636).
  * - `thought`: the error names the thought — its length (refusesLength), the
  *   egress gate's refusal of it, its data (22xxx, 23xxx, 54xxx) — or is any
  *   other database error: a function's own guard (P0001), an invariant
@@ -432,8 +434,8 @@ export function followClassify(e: unknown): FollowVerdict {
 }
 
 /**
- * What a follower does with a provider error (SMD-2636 PR 3a: one copy for extract and consolidate, re-embed's in
- * PR 3b), read through followClassify's split (SMD-3311) on the maintainer's rules (2026-11-05):
+ * What a follower does with a provider error (SMD-2636: one copy, extract's and consolidate's since PR 3a, re-embed's
+ * since PR 3b), read through followClassify's split (SMD-3311) on the maintainer's rules (2026-11-05):
  * - `pause`: the provider busy or failing — a 429, a 503, any other 5xx, a 408, no connection — paused for, then,
  *   past the pauses, an outage;
  * - `outage`: the model not served, or a deadline the probe already found unanswered (`ProviderDown`): an outage at
