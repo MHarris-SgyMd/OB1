@@ -8399,6 +8399,69 @@ The consent-page mutants above hold its pages too.
   limits are `deploy/auth/limits.ts`; `/mcp`, `/api` and the proxy take none,
   by design (`deploy/README.md`, "No rate limits on `/mcp`").
 
+## Does one `plan_context` call help an agent plan? (SMD-2684 PR 2)
+
+`plan_context` (SMD-2684 PR 1, migration 126) hands an agent starting a request what the brain holds on it in one call. The ticket's last Verify bullet asks whether that helps. On a fixed set of requests, does a plan written after one `plan_context` call cite more of the brain's relevant rows than a plan written after free searching? Turning the tool on by default, or recommending it in the client skills, waits on this number. `eval-plan-context.ts` measures it. The maintainer chose its shape on 2026-11-10, and SMD-2684's comment b07d2d67 preregistered it before any measured run (hash `7815fb2226cf`).
+
+**How it ran.**
+- **Planner:** headless Claude Code (`claude -p`, `claude-sonnet-5-5`) against the canary at 627f614f, once per request and arm.
+- **The arms:** they differ only in the brain tools the planner may see and call.
+  - A: `plan_context`, called once.
+  - B: `search`, `search_thoughts`, `search_thoughts_keyword`, `fetch`, `agenda`, `relations` and `thread`, at most 10 calls.
+- **In both arms:**
+  - every other brain tool is hidden, no built-in tool is given, and no settings or CLAUDE.md load;
+  - the system prompt and the plan format are the same;
+  - the plan cites each thought it relies on by its full ID.
+- **The requests:** 20 tickets drawn by rule, with "Go ahead with KEY: title" as each request:
+  - Backlog tickets in the board's own projects, filed 2026-09-01 to 11-09;
+  - trackers and `plan_context`'s own tickets left out;
+  - ordered by a seeded hash; 638 were eligible.
+- **The rows:** a cite counts only if a tool showed that ID in the same run: printed it anywhere in its reply, a result's ID or one a label names, such as a relation's other end or a superseding thought. Each request's sheet holds every thought either plan cited after a tool showed its ID, plus 8 that either arm saw and neither so cited. It is mixed in a hashed order, and names no arm or cite.
+- **The raters:** two blind raters, one on Opus and one on Sonnet, labelled all 307 rows under the rules fixed in `RATER_RULES`. A row is relevant when both say so.
+
+**Result: not shown.**
+
+| | A, one `plan_context` call | B, free searching |
+|---|---|---|
+| Relevant rows cited, over 20 requests | 56 | 42 |
+| Requests where the arm cited more relevant rows | 11 | 5 (4 tied) |
+| Thoughts cited (each one's ID shown in the run) | 130 | 50 |
+| Share of cites that are relevant | 43.1% | 84.0% |
+| Utilization (SMD-1719: results a search call returned that the plan cited or fetched, summed over calls) | 78.8% (126 of 160) | 22.9% (35 of 153) |
+| Brain calls | 20 | 86 |
+| Cost | $0.92 | $1.33 |
+
+- **κ:** 0.933 over 307 rows. 78 are relevant by both raters, and the raters split on 8.
+- **Sign test:** 11 requests better against 5 worse gives p 0.21, above the bar of 0.10. The mean difference is +0.70 relevant rows per request.
+- **The either-rater reading** gives the same split (p 0.21, mean +0.80).
+- **The uncited sample:** 9 of its 160 rows are relevant by both raters.
+- **Runs:** no run was invalid (another model or tool set, or no end). In 16 of B's 20 runs, the planner first called a bare tool name (`search`, `thread`, `fetch`), which Claude Code refused before the brain. These calls are reported and not counted.
+
+**What it says.**
+- **Not shown is not "no effect":** A cited more relevant rows on 11 of 20 requests, short of the preregistered bar.
+- **The arms differ in how they cite:**
+  - A cites most of what its one call returned: 126 of its 160 hits, all 8 on 11 requests, with 43% of its cites relevant.
+  - B makes 3 to 5 calls, never reaching its cap of 10, cites 1 to 7 thoughts, and 84% of those are relevant. 35 of its 50 cites are results a search returned; the other 15 it reached through `fetch`, `thread` or `relations`, which return no search results, so utilization doesn't count them.
+  - So A's 14 extra relevant rows come with 74 irrelevant cites, against B's 8. A plan built on `plan_context` cites its hits wholesale.
+- **The board section:** the count of thoughts can't credit it, since tickets aren't thoughts.
+
+**An exploratory check, not preregistered.** Both arms saw and cited the requested ticket's own board record on all 20 requests. In the rehearsal, `plan_context`'s board section missed the ticket named in the request. It lists only the tickets its hits name. That miss didn't change what either planner could cite.
+
+**Caveats.**
+- **Variance:** one run per request and arm, so the planner's own variance is in the number.
+- **Raters:** both raters are Claude models. A κ of 0.93 says the rules held between them, not that a person would agree.
+- **The metric:** it rewards citing relevant rows, not a better plan. A plan's steps, its feasibility call, and whether it caught a blocker are not scored.
+- **The brain:** this is the canary's, one maintainer's, at one moment.
+
+**Reproduce.**
+- `--draw` rebuilds the request file from Linear's Backlog listings and the brain's held keys. It holds the board's titles, so it stays out of the repo.
+- The runs, the rows, the sheets and the labels hold the brain's text and stay out of the repo too.
+- `bun eval-plan-context.ts --self-check` holds the rules on hand-known answers, in CI.
+
+**Beside it.** `eval-utilization.ts` now reads a logged `plan_context` call as a search (`SEARCH_KINDS`), so live use of the tool has SMD-1719's rate too. `export-queries.ts` attributes over the same rows, so the report and the fixture still agree, and labels no query from a `plan_context` request, which is no search the replay can run. test-schema [39] holds every kind `query_log` allows to the search kinds, or to the kinds named as not searches. Neither reader runs in CI, so it also holds both readers' search-row selects to `SEARCH_KINDS_LITERAL` by their source. A `plan_context` row carries no token estimate in the report: the tool cuts each hit to a budget, so the stored text's length says nothing about what it returned.
+
+The table's utilization is the rate over the rows `query_log` would hold for the runs: a search row per call of `search`, `search_thoughts`, `search_thoughts_keyword` or `plan_context` that the server logs (not one with `min_trust`, or a priority-ranked `search_thoughts`; no B planner passed either), with the results it returned; a fetch as an opened action; each credited cite as a cite row. Review pass 1 corrected it: the first report fed every ID a reply printed as a result, and every call as a search, and read 29.6% of 439 for A and 13.7% of 365 for B. The verdict, which counts relevant cites, did not change.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

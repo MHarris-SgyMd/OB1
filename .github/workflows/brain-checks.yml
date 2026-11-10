@@ -591,6 +591,15 @@ jobs:
         working-directory: evals
         run: bun board-replay.ts --self-check
 
+      # Whether one plan_context call helps an agent plan (SMD-2684 PR 2): the
+      # draw of the requests, a run's stream read (model, tool set, calls, ids
+      # seen and cited), the blind sheets, κ, the sign test and the verdict at
+      # its edges, and the planner's command line — probed with hand-known
+      # answers. No brain, no model; the runs themselves are by hand.
+      - name: Plan-context eval rules
+        working-directory: evals
+        run: bun eval-plan-context.ts --self-check
+
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
       # - the brain-key rule (write refused, the declared scope held, a key
