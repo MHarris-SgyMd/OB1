@@ -3281,28 +3281,36 @@ console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): con
     assert(aged.ran === "extract1,extract2,consolidate" && unaged.ran === "extract1,consolidate,extract2" && aged.most === 1,
       `a call queued past --max-wait goes first whatever its pass (${aged.ran} under 0.3 s), consolidation's first within it (${unaged.ran} under the default)`);
     // A call passed over is told it waits once it has queued a second or more, as it would be behind a full share — here
-    // extraction's behind consolidation calls issued faster than the turn passes, ten every 5 ms, at chat=8, each taking a
-    // free slot at once, so no waiter finds the share full (review pass 2: untold for 10 s, N12's clock, the stall clock
-    // and a stop's sweep read it as running) — and not when passed over for less: a burst of six consolidation calls at
-    // once, every slot free, passes it for a few ms, and a stopping pass told it waits would give its thought back
-    // (review pass 3). The calls are issued until it is told or 3 s pass, so the queue stays full on any runner (CI's ran
-    // dry between seven looping workers' calls).
+    // extraction's behind consolidation calls at chat=8, each taking a free slot at once, so no waiter finds the share
+    // full (review pass 2: untold for 10 s, N12's clock, the stall clock and a stop's sweep read it as running) — and not
+    // when passed over for less: a burst of six consolidation calls at once, every slot free, passes it for a few ms, and
+    // a stopping pass told it waits would give its thought back (review pass 3). Four consolidation calls queue behind
+    // it, and each that runs queues another, until it is told or 3 s pass: four always queued as each turn passes, on
+    // any runner. A feed on a clock, ten every 5 ms, ran dry on CI's Linux runner, the turn passing faster than the calls
+    // came, and the call ran untold (SMD-4200).
     {
       const wide = installBackgroundSlots({ url: URL_!, raw: "chat=8", log: () => {} });
       const told = { starved: 0, brief: 0 };
       const ran: string[] = [];
       let starvedMs = -1;
       try {
-        const nothing = async () => {};
-        const calls: Promise<unknown>[] = [asPass("consolidate", () => modelCall(call, nothing))];
+        let until = Infinity;
+        const calls: Promise<unknown>[] = [];
+        // Run, it queues the next before it ends: its turn has passed by then, and the next turn passes only once the
+        // call that took it has asked the database, so the one queued here is in the queue for it.
+        const fed = (): Promise<unknown> => asPass("consolidate", () => modelCall(call, async () => {
+          if (told.starved === 0 && !ran.includes("starved") && performance.now() < until) calls.push(fed());
+        }));
+        calls.push(fed());
         const queuedAt = performance.now();
+        until = queuedAt + 3000;
         calls.push(withCallWaits({ waiting: () => { if (told.starved++ === 0) starvedMs = performance.now() - queuedAt; }, running: () => {} }, () => asPass("extract", () => modelCall(call, async () => { ran.push("starved"); }))));
-        const until = queuedAt + 3000;
-        while (told.starved === 0 && performance.now() < until) {
-          for (let k = 0; k < 10; k++) calls.push(asPass("consolidate", () => modelCall(call, nothing)));
-          await Bun.sleep(5);
+        for (let k = 0; k < 4; k++) calls.push(fed());
+        // The feed ends when the call is told or runs, or at 3 s; the calls it queued meanwhile are awaited too.
+        for (let n = 0; n < calls.length; ) {
+          n = calls.length;
+          await Promise.all(calls);
         }
-        await Promise.all(calls);
         const run = (label: string) => async () => { ran.push(label); await Bun.sleep(150); };
         const burst = [asPass("consolidate", () => modelCall(call, run("c0")))];
         burst.push(withCallWaits({ waiting: () => { told.brief++; }, running: () => {} }, () => asPass("extract", () => modelCall(call, run("brief")))));
