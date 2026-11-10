@@ -93,7 +93,7 @@ import {
   BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, LIFECYCLE_FILTERS, LIFECYCLE_TYPES, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
-import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, NOT_SEARCH_KINDS, queryLabels, renderReport, SEARCH_KINDS, SEARCH_KINDS_LITERAL, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
@@ -4738,6 +4738,30 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
   const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
+
+  // SMD-2684 PR 2: a plan_context row is a search to the report and the export (its knowledge hits in result_ids), and
+  // every kind query_log allows is read as a search or named as not one — a new kind needs a decision. Neither reader
+  // runs in CI, so their search-row selects are held to SEARCH_KINDS_LITERAL by their source, and the literal on the
+  // database (review pass 2: the literal alone passed with either reader reverted to kind = 'search').
+  const picked = (await db.query<{ k: string }>(`SELECT k FROM unnest(ARRAY['search', 'plan_context', 'agenda', 'action']) AS k WHERE k = ANY($1::text[]) ORDER BY k`, [SEARCH_KINDS_LITERAL])).rows.map((r) => r.k);
+  assert(JSON.stringify(picked) === JSON.stringify(["plan_context", "search"]), `the readers' kinds literal picks search and plan_context rows, not agenda or action rows (${picked.join(",")})`);
+  const readerSrc = (f: string) => readFileSync(join(import.meta.dir, "..", "evals", f), "utf8");
+  const count = (s: string, needle: string) => s.split(needle).length - 1;
+  const util = readerSrc("eval-utilization.ts");
+  const exp = readerSrc("export-queries.ts");
+  assert(count(util, "kind = ANY(${SEARCH_KINDS_LITERAL}::text[])") === 1 && count(util, "kind = 'search'") === 0, "eval-utilization.ts selects its search rows by SEARCH_KINDS_LITERAL, and nowhere by kind = 'search'");
+  assert(count(exp, "kind = ANY(${SEARCH_KINDS_LITERAL}::text[])") === 1 && count(exp, "kind = 'search'") === 1, "export-queries.ts attributes over SEARCH_KINDS_LITERAL's rows, and keeps kind = 'search' for its baselines alone");
+  // The export's labels: a fetch after a plan_context call is its use, and labels no query; a search's use labels its query.
+  const labelSearches = [search("ls1", AG, 0, "what about X", [A], null), search("lpc", AG, 1, "go ahead with X", [A], null, "plan_context"), search("ls2", AG, 2, "and Y", [B], null)];
+  const labelUses = attribute(labelSearches, [act(AG, 3, "fetch", A), act(AG, 4, "fetch", B)], 30).bySearch;
+  assert(JSON.stringify(queryLabels(labelSearches, labelUses)) === JSON.stringify([{ query: "and Y", target_id: B }]), `the export labels a search's use under its query, and none from a plan_context request (${JSON.stringify(queryLabels(labelSearches, labelUses))})`);
+  // A plan_context row's hits are cut to a budget, so the stored text estimates nothing it returned.
+  assert(dbRow({ tool: "plan_context" }).resultTokens === null && dbRow().resultTokens === 300, "a plan_context row carries no token estimate; a search row keeps its own");
+  const [{ def }] = (await db.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'query_log_kind_check' AND conrelid = 'query_log'::regclass`)).rows;
+  const allowed = [...def.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]).sort();
+  const decided = [...SEARCH_KINDS, ...NOT_SEARCH_KINDS].sort();
+  assert(allowed.length > 0 && JSON.stringify(allowed) === JSON.stringify(decided), `every query_log kind is read as a search or named as not one (allowed ${allowed.join(",")}; decided ${decided.join(",")})`);
+  assert((SEARCH_KINDS as readonly string[]).includes("plan_context"), "plan_context is among the search kinds");
 }
 
 // ── 40. The community schemas on a plain-Postgres brain ──────────────────────
