@@ -2510,8 +2510,8 @@ export interface ThoughtStore {
     includeStarted?: boolean; now?: string;
     /**
      * The order (129, SMD-4192): `priority`, the default, by effective priority; `due`, the dated items first, soonest
-     * first (the longest overdue leads), then the undated by effective priority. Applied before `limit`. `due` needs
-     * migration 129; `priority` reads any brain from 123.
+     * first (the longest overdue leads), then the undated by effective priority, a stated None among them. Applied
+     * before `limit`. `due` needs migration 129; `priority` reads any brain from 123.
      */
     order?: AgendaOrder;
     /** A ceiling on the call's statement, in ms (plan_context's deadline, SMD-2684); a stricter role or database setting is kept. Past it the call throws 57014. */

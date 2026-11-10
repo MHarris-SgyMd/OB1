@@ -1195,7 +1195,8 @@ export class SqlStore implements ThoughtStore {
     return span;
   }
 
-  // SMD-3669, SMD-4162: 124's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
+  // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope and the
+  // holder ride as JSON text, cast in SQL.
   async agenda(opts: {
     scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string; timeoutMs?: number;

@@ -2536,12 +2536,12 @@ Migration 129 gives the agenda an order (SMD-4192). `priority`, the default, is
 126's order. `due` lists the items with a due time first, soonest first, so the
 longest overdue leads, then the undated ones by effective priority; a tie on the
 due time goes to the higher priority, and a stated None counts as undated, as it
-takes no urgency. The order is applied before the limit. The
-agenda takes it as the tenth argument of a ten-argument form with no defaults,
-and the nine-argument agenda becomes a wrapper calling it with `priority`, so a
-call from a server before 129 gets the priority order. Re-applying 124 or 126
-after 129 replaces only the wrapper (and puts back that file's comments). Every
-filter and term is 126's.
+takes no urgency. The order is applied before the limit. The agenda takes it as
+the tenth argument of a ten-argument form with no defaults, and the
+nine-argument agenda becomes a wrapper calling it with `priority`, so a call
+from a server before 129 gets the priority order. Re-applying 124 or 126 after
+129 replaces only the wrapper (and puts back that file's comments). Every filter
+and term is 126's.
 
 Migration 128 moves `effective_priority`'s default weights into a function of
 their own, `ob1_priority_defaults()` (SMD-4194). The read takes them from it,

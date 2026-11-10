@@ -19063,7 +19063,7 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
 console.log("\n[117] Migration 129: the agenda takes an order — priority, the default, 126's order unchanged; due, the dated items first, soonest first so the longest overdue leads, a tie on the due time to the higher priority, then the undated by priority; the order applied before the limit; the answer says it; any other order refused; query_log.filter's comment names it; the shape; a re-apply a no-op (SMD-4192)");
 {
   const file = files.find((f) => /^\d{3}_agenda_order\.sql$/.test(f)) ?? "no NNN_agenda_order.sql";
-  // [111] and [113] re-applied 124's and 126's nine-argument agenda: put 129's back first, which drops them.
+  // [111] and [113] re-applied 124's and 126's nine-argument agenda: put 129's back first, its wrapper in their place.
   await reapply(file.slice(0, 4));
   const P = "Agenda [117]";
   const NOW = "2027-03-10T15:00:00Z";

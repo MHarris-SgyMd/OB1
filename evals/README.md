@@ -4460,10 +4460,12 @@ query's words and vector, the store, and `callTool`, a search tool called over M
 `callTool`), and so does a read that isn't a search (SMD-3669's agenda). `--seeded` runs every measured read a second
 time with each gold replaced by the items outside it and each item's facts moved to the next item. A read whose answer
 moves consults the answer, and fails the run. The ceiling, which reads the gold, is that check's control. A second
-pass that errors is reported as an error, not as reading the answer. A read that copies the answer when its module
+pass that errors is reported as an error, not as reading the answer, and fails the run, since the check never ran
+for that read (SMD-4192). A read that copies the answer when its module
 loads is the reviewer's to catch. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
 verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
-the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same
+the bar says, and the run lists the error; its verdict doesn't fail the run, but a read that errors on every prompt
+does, since nothing was measured (SMD-4192). The gold ceiling runs through the same
 path on every run, so the path is exercised whatever the measured reads do.
 
 **The agenda read** (SMD-3669, `priority.ts`'s `AGENDA_READ`) is the first measured read. The agenda takes no query,

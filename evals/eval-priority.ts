@@ -40,12 +40,14 @@
  *       verdict: a sweep over these prompts picks nothing (BAR's rule).
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
- * current, filter), and its MEASURED: SMD-3669's agenda and SMD-3668's
+ * current, filter), and its MEASURED: SMD-3669's agenda, SMD-3668's
  * priority_weight at its pre-registered 0.5 (which sees the tickets' levels
- * and none of the notes' facts: priority.ts's Facts), and the run prints each
- * one's verdict against the baselines of the
- * same run. A measured read's verdict does not fail the run; the gold
- * ceiling's, which runs the same path, does.
+ * and none of the notes' facts: priority.ts's Facts) and SMD-4192's
+ * agenda_question, and the run prints each one's verdict against the
+ * baselines of the same run. A measured read's verdict does not fail the
+ * run; the gold ceiling's, which runs the same path, does, and so does a
+ * measured read that errored on every prompt or with the answer moved
+ * (SMD-4192), which was never measured or never checked.
  *
  * The dogfood rows (fixtures/priority-dogfood.json) are recorded by hand in
  * the session that asked, and printed beside the seeded table.
