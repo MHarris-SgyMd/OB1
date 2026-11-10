@@ -85,6 +85,8 @@ export type EmbedEnv = {
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
   OB1_SUBJECT_REASONING?: string;
+  /** 1/on: a capture asks the metadata model for the priority and due time its text states, stated inferred (SMD-3670). Off when unset. */
+  OB1_INFER_PRIORITY?: string;
   OB1_LLM_TIMEOUT?: string;
 };
 
@@ -666,6 +668,12 @@ export type EmbedConfig = {
   /** Extra chat-completion fields controlling reasoning; see reasoningFields. */
   metadataReasoning: Record<string, unknown>;
   /**
+   * Whether a capture asks the metadata model for the priority and due time its text states (OB1_INFER_PRIORITY,
+   * SMD-3670), stated at tier 4, flagged inferred, which no ranking counts until the measurement clears its bar.
+   * Off by default: one more chat call per capture, beside the tags'.
+   */
+  inferPriority: boolean;
+  /**
    * The same fields for the subject question alone (subject.ts's askOwnSubject, SMD-3306): OB1_SUBJECT_REASONING,
    * read as OB1_METADATA_REASONING is but on when unset; see reasoningFields.
    */
@@ -774,6 +782,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: reasoningFields(env.OB1_METADATA_REASONING, "off"),
+    inferPriority: flagOn(env.OB1_INFER_PRIORITY),
     subjectReasoning: reasoningFields(env.OB1_SUBJECT_REASONING, "on"),
     // Seconds, as --ttl and --timeout are elsewhere in Daemonic Brain; a
     // timeout of zero would fail every call, so zero means the default too.
