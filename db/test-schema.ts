@@ -15898,7 +15898,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
   assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
-  // 111 re-applied alone put its door and its validator back: the shipped ones are 113's and 120's, which the sections
+  // 111 re-applied alone put its door and its validator back: the shipped ones are 127's and 120's, which the sections
   // after read.
   await restoreShipped("record_thought_subject", "thought_facets_validate");
 
@@ -18381,7 +18381,7 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
     `a NULL include_started is refused (22023), and a re-apply is a no-op: the same read (${nullFlag})`);
 }
 
-console.log("\n[112] Migration 127: a thought's own subjects are a set — one standing per thought and key (111's index on the thought alone dropped), at most three, one way and one pass; record_thought_subjects keeps a subject the set names found the same way by the same pass, closes the rest, writes each key it lacks with its lineage, closes all on an empty set, refuses as 113's door refuses (a text moved, a filed ticket disagreeing) and refuses a malformed set as a parameter error; the threads of every key it moves locked in key order before its first write, a kept key not; record_thought_subject and close_thought_subject its sets of one, their answers 113's; close_thought_subjects closing only the set read; a thought standing in each key's thread; a raw replace's close locking its key and the keys its transaction wrote, a kept one not; a re-apply a no-op (SMD-3306)");
+console.log("\n[112] Migration 127: a thought's own subjects are a set — one standing per thought and key (111's index on the thought alone dropped), at most three, one way and one pass; record_thought_subjects keeps a subject the set names found the same way by the same pass, closes the rest, writes each key it lacks with its lineage, closes all on an empty set, refuses as 113's door refuses (a text moved, a filed ticket disagreeing) and refuses a malformed set as a parameter error; no thread lock at the write, and at the commit the locks of every key it moved, a kept key's not; record_thought_subject and close_thought_subject its sets of one, their answers 113's; close_thought_subjects closing only the set read; a thought standing in each key's thread; a raw replace's close locking its key and the keys its transaction wrote, a kept one not; a re-apply a no-op (SMD-3306)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -18560,6 +18560,13 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
   assert(part.action === "none" && part.moved === true && JSON.stringify(part.ids) === JSON.stringify(s7) && wider.action === "none" && wider.moved === true
          && wrapPart.action === "none" && wrapPart.moved === true && wrapPart.id === s7[0] && wrapFirst.moved === true && wrapFirst.id === s7[1] && staleClose.stale === true && (await standing(t7)).length === 2,
     `not closed: one facet of the two read, a facet beside them that no longer stands, close_thought_subject's one facet (moved, naming a facet standing beside it, never the one passed), a text moved (${[part, wider, wrapPart, staleClose].map((c) => c.action + (c.moved ? "/moved" : c.stale ? "/stale" : "")).join(", ")})`);
+  // Of three standing, the one named is the first by key other than the facet passed, not the last (review pass 2).
+  const t11 = await thought("three standing, one closed"); names.set(t11, "t11");
+  await sets(t11, [A, B, C]);
+  const s11 = (await standing(t11)).map((s) => s.id);
+  const midOne = await closeOne(t11, s11[1]);
+  assert(s11.length === 3 && midOne.moved === true && midOne.id === s11[0] && (await standing(t11)).length === 3,
+    `close_thought_subject's moved id on a set of three is the first by key other than the facet passed (${JSON.stringify(midOne)})`);
   const closedSet = await closes(t7, [s7[1], s7[0], s7[1]]);
   const noneLeft = await closes(t7, s7);
   assert(closedSet.action === "closed" && JSON.stringify(closedSet.ids) === JSON.stringify(s7) && (await standing(t7)).length === 0 && noneLeft.action === "none" && noneLeft.moved === undefined,

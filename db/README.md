@@ -2528,7 +2528,8 @@ judge's question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is
 a no-op. A re-apply of 111 makes its index again until 127 runs, and fails once
 a thought holds a set (so does `--reapply`, which already fails at 064 on any
 brain holding a subject, SMD-3149).
-test-schema [112], test-upgrade [20bp], test-live [47] and [48].
+test-schema [112], test-upgrade [20bp], test-live [47] and [48], test-rest-sql
+[16].
 
 Migration 124 replaces the agenda under a ninth argument, `include_started`
 (SMD-4162). A ticket's row carries its head's `status` and `status_type`. A

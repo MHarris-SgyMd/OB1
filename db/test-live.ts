@@ -30065,7 +30065,7 @@ if (want("47b")) {
 }
 
 if (want("48")) {
-  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (127) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken, a raw writer's inserts in any order too; a delete of a neighbour standing in two of those keys waiting on the commit, not deadlocking with it; a writer above READ COMMITTED refused at its commit without waiting on a held key; a close a delete's own close reached first counted as none (SMD-3306)");
+  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (127) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken, a raw writer's inserts in any order too; a delete of a neighbour standing in two of those keys waiting on the commit, not deadlocking with it — the thought's previous, its next, one in the later two of three keys, one beside it only in keys it left; a third key moved first, the window's partition, order and standing filter held, a neighbour's row left editable; the lock taken again in a later transaction, for a second thought and for a key moved after the triggers fired; a writer under REPEATABLE READ or SERIALIZABLE refused at its commit without waiting on a held key; a close a delete's own close reached first counted as none (SMD-3306)");
   // Its own clients: [24] closed the suite's.
   const owner = new SQL({ url: URL_!, max: 1 });
   const SERVER = "ob1_live_threads_server";
@@ -30426,24 +30426,196 @@ if (want("48")) {
         await dDeleter.close();
       }
 
+      // Each part of the neighbour lock, held by a schedule that deadlocks without it (review pass 2): the neighbour that
+      // is the thought's next, not its previous, in both keys; a neighbour standing only in the second and third keys of a
+      // raw writer's three; a neighbour beside the thought only in keys it left (a bridge's end). Each as above: another
+      // session holds dr, pausing the re-link of the key that writes the edge again at an edge its thread lacks, the
+      // delete of the neighbour coming while the commit is between its re-links; dr's id sorts first.
+      const nbSchedule = async (label: string, n: number, keys: string[], setup: (ids: Record<string, string>) => Promise<void>,
+                                write: (c: SQL, ids: Record<string, string>) => Promise<unknown>, pauseKey: string) => {
+        const id = (lead: string, i: number) => `${lead}0000000-0000-4000-8000-0000009490${n}${i}`;
+        const ids = { dr: id("1", 1), dq: id("2", 2), z: id("3", 3), nx: id("5", 4), q: id("6", 5), da: id("f", 6) };
+        await setup(ids);
+        await owner`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${pauseKey} AND thought_id = ${ids.dr}::uuid`;
+        const mover = new SQL({ url: URL_!, max: 1 }), deleter = new SQL({ url: URL_!, max: 1 }), pauser = new SQL({ url: URL_!, max: 1 });
+        try {
+          const mPid = await pidOf(mover), dPid = await pidOf(deleter);
+          await pauser`BEGIN`;
+          await pauser`SELECT 1 FROM thoughts WHERE id = ${ids.dr}::uuid FOR UPDATE`;
+          await mover`BEGIN`;
+          await write(mover, ids);
+          const moved = settled(async () => { await mover`COMMIT`; });
+          const mWaits = await pollUntil(() => waitsOn(mPid), 5000);
+          const deleted = settled(async () => { await deleter`SELECT delete_thought(${ids.nx}::uuid)`; });
+          const dWaits = await pollUntil(() => waitsOn(dPid), 5000);
+          const behind = ((await owner`SELECT unnest(pg_blocking_pids(${dPid}::int)) AS p`) as { p: number }[]).map((r) => Number(r.p));
+          await pauser`ROLLBACK`;
+          const mEnd = await moved, dEnd = await deleted;
+          const off: string[] = [];
+          for (const k of keys) {
+            const r = ((await owner`SELECT thread_relink(${k}, true) AS r`)[0] as { r: { added: number; closed: number } }).r;
+            if (r.added || r.closed) off.push(`${k} ${JSON.stringify(r)}`);
+          }
+          assert(mWaits && dWaits && behind.includes(mPid) && mEnd === "ok" && dEnd === "ok" && off.length === 0,
+            `${label}: the delete of the neighbour waits on the commit, both end, each thread exact (waited ${mWaits}/${dWaits}, behind ${behind.includes(mPid) ? "the mover" : behind.join(",") || "none"}; ${mEnd} / ${dEnd}; ${off.join("; ") || "exact"})`);
+        } finally {
+          await pauser.close();
+          await mover.close();
+          await deleter.close();
+        }
+      };
+      const at = async (ids: Record<string, string>, which: [string, number][]) => { for (const [w, h] of which) await thoughtAs(ids[w], `nb ${w}`, h); };
+      const rawClose = (c: SQL, t: string, key: string) =>
+        c`UPDATE thought_facets SET valid_until = now() WHERE thought_id = ${t}::uuid AND kind = 'subject' AND valid_until IS NULL AND payload->>'key' = ${key}`;
+      {
+        // The next: da then nx in N1; nx, dq, dr in N3. da moves N1 → N3, joining before nx: N1's re-link closes nx→da, N3's
+        // writes it again.
+        const N1 = "ticket:SMD-94901", N3 = "ticket:SMD-94903";
+        await nbSchedule("the neighbour that comes next", 1, [N1, N3], async (ids) => {
+          await at(ids, [["da", 1], ["nx", 2], ["dq", 3], ["dr", 4]]);
+          await setOn(owner, ids.nx, [N1, N3]); await setOn(owner, ids.da, [N1]); await setOn(owner, ids.dq, [N3]); await setOn(owner, ids.dr, [N3]);
+        }, (c, ids) => setOn(c, ids.da, [N3]), N3);
+      }
+      {
+        // Three keys, raw: da stands in M1 (beside z) and M2; nx, before da, in M2 and M3. da's M1 and M2 closed, M3 written,
+        // the triggers queued in that order: M1 re-links first (z alone), M2 closes da→nx, M3 writes it again.
+        const M1 = "ticket:SMD-94911", M2 = "ticket:SMD-94912", M3 = "ticket:SMD-94913";
+        await nbSchedule("a neighbour in the second and third of three keys", 2, [M1, M2, M3], async (ids) => {
+          await at(ids, [["z", 0], ["nx", 1], ["da", 2], ["dq", 3], ["dr", 4]]);
+          await setOn(owner, ids.nx, [M2, M3]); await setOn(owner, ids.z, [M1]); await setOn(owner, ids.da, [M1, M2]); await setOn(owner, ids.dq, [M3]); await setOn(owner, ids.dr, [M3]);
+        }, async (c, ids) => {
+          await rawClose(c, ids.da, M1); await rawClose(c, ids.da, M2);
+          await c`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${ids.da}::uuid, 'subject', ${{ key: M3, by: "model", judge_key: "subject:qwen3.8:27b@p3r" }}::jsonb)`;
+        }, M3);
+      }
+      {
+        // Keys left: da leaves L1 and L2; nx before da in both, da last in L1. L1's re-link closes da→nx and writes no
+        // bridge; L2's writes the bridge q→nx, nx standing beside da only in keys da left.
+        const L1 = "ticket:SMD-94921", L2 = "ticket:SMD-94922";
+        await nbSchedule("a neighbour beside the thought only in keys it left", 3, [L1, L2], async (ids) => {
+          await at(ids, [["nx", 1], ["da", 2], ["q", 3], ["dq", 4], ["dr", 5]]);
+          await setOn(owner, ids.nx, [L1, L2]); await setOn(owner, ids.da, [L1, L2]); await setOn(owner, ids.q, [L2]); await setOn(owner, ids.dq, [L2]); await setOn(owner, ids.dr, [L2]);
+        }, async (c, ids) => { await rawClose(c, ids.da, L1); await rawClose(c, ids.da, L2); }, L2);
+      }
+
+      // The neighbour lock's other parts (review pass 2's mutation tester): a third key moved first, a thought of a key not
+      // the neighbour's between them in time, a closed subject between, and ids against time (the window's partition, its
+      // order, its standing filter, every moved key's neighbours at the first re-link); and KEY SHARE: a neighbour's row
+      // stays editable while the commit runs.
+      const closeKey = (c: SQL, id: string, key: string) =>
+        c`UPDATE thought_facets SET valid_until = now() WHERE thought_id = ${id}::uuid AND kind = 'subject' AND valid_until IS NULL AND payload->>'key' = ${key}`;
+      const addKey = (c: SQL, id: string, key: string) =>
+        c`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${id}::uuid, 'subject', ${{ key, by: "model", judge_key: "subject:qwen3.8:27b@p3r" }}::jsonb)`;
+      const pausedDelete = async (move: (c: SQL) => Promise<unknown>, pause: string, victim: string, probe?: string) => {
+        const mover = new SQL({ url: URL_!, max: 1 }), deleter = new SQL({ url: URL_!, max: 1 }), pauser = new SQL({ url: URL_!, max: 1 }), prober = new SQL({ url: URL_!, max: 1 });
+        try {
+          const mPid = await pidOf(mover), xPid = await pidOf(deleter);
+          await pauser`BEGIN`;
+          await pauser`SELECT 1 FROM thoughts WHERE id = ${pause}::uuid FOR UPDATE`;
+          await mover`BEGIN`;
+          await move(mover);
+          const moved = settled(async () => { await mover`COMMIT`; });
+          const mWaits = await pollUntil(() => waitsOn(mPid), 5000);
+          const deleted = settled(async () => { await deleter`SELECT delete_thought(${victim}::uuid)`; });
+          const xWaits = await pollUntil(() => waitsOn(xPid), 5000);
+          const behind = ((await owner`SELECT unnest(pg_blocking_pids(${xPid}::int)) AS p`) as { p: number }[]).map((r) => Number(r.p));
+          let editable = "not probed";
+          if (probe) {
+            await prober`BEGIN`;
+            editable = await settled(async () => { await prober`SELECT 1 FROM thoughts WHERE id = ${probe}::uuid FOR NO KEY UPDATE NOWAIT`; });
+            await prober`ROLLBACK`;
+          }
+          await pauser`ROLLBACK`;
+          return { mWaits, xWaits, behindMover: behind.includes(mPid), moved: await moved, deleted: await deleted, editable };
+        } finally {
+          await pauser.close();
+          await mover.close();
+          await deleter.close();
+          await prober.close();
+        }
+      };
+      const ended = (r: Awaited<ReturnType<typeof pausedDelete>>) => r.mWaits && r.xWaits && r.behindMover && r.moved === "ok" && r.deleted === "ok";
+      // Three keys: fv leaves F0 (its first re-link, fy alone its neighbour) and F1 for F3; fx precedes it in F1 and F3, fy
+      // (F0) and fw (F1 and F3, both closed) come between them in time, and fz, fq sort between fx and fv by id.
+      const F0 = "ticket:SMD-94880", F1 = "ticket:SMD-94881", F3 = "ticket:SMD-94883";
+      const fz = await thoughtAs("80000000-0000-4000-8000-000000948803", "fz", 0), fx = await thoughtAs("50000000-0000-4000-8000-000000948802", "fx", 1);
+      const fy = await thoughtAs("30000000-0000-4000-8000-000000948806", "fy", 2), fw = await thoughtAs("60000000-0000-4000-8000-000000948807", "fw", 2);
+      const fv = await thoughtAs("f0000000-0000-4000-8000-000000948801", "fv", 3), fq = await thoughtAs("90000000-0000-4000-8000-000000948804", "fq", 4);
+      const fr = await thoughtAs("10000000-0000-4000-8000-000000948805", "fr", 5);
+      await setOn(owner, fx, [F1, F3]);
+      await subjectOn(owner, fz, F1);
+      await setOn(owner, fw, [F1, F3]);
+      await owner`UPDATE thought_facets SET valid_until = now() WHERE thought_id = ${fw}::uuid AND kind = 'subject' AND valid_until IS NULL`;
+      await subjectOn(owner, fy, F0);
+      await setOn(owner, fv, [F0, F1]);
+      await subjectOn(owner, fq, F3);
+      await subjectOn(owner, fr, F3);
+      await owner`DELETE FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${F3} AND thought_id = ${fr}::uuid`;
+      const fEnd = await pausedDelete(async (c) => { await closeKey(c, fv, F0); await closeKey(c, fv, F1); await addKey(c, fv, F3); }, fr, fx, fq);
+      assert(ended(fEnd) && fEnd.editable === "ok" && (await pairs(F0)) === "" && (await pairs(F1)) === "" && (await pairs(F3)) === "fq→fv fr→fq",
+        `three keys moved, the first not the neighbour's: a delete of the neighbour in the other two waits on the commit, and a neighbour's row stays editable (${JSON.stringify(fEnd)}; ${await pairs(F0)} | ${await pairs(F1)} | ${await pairs(F3)})`);
+
+      // The mark: per transaction, per thought, per set of keys moved. Each probe a neighbour no re-link's write locks
+      // (the thought last in its thread, its edge to it only closed), read with the triggers fired early.
+      const MK = "ticket:SMD-94889", MK2 = "ticket:SMD-94890";
+      const mp = await thoughtAs("a0000000-0000-4000-8000-000000948891", "mp", 1), mv = await thoughtAs("a1000000-0000-4000-8000-000000948892", "mv", 2);
+      const ma = await thoughtAs("a2000000-0000-4000-8000-000000948893", "ma", 3), mw = await thoughtAs("a3000000-0000-4000-8000-000000948894", "mw", 4);
+      const mb = await thoughtAs("a4000000-0000-4000-8000-000000948895", "mb", 5), mc = await thoughtAs("a5000000-0000-4000-8000-000000948896", "mc", 6);
+      const mu = await thoughtAs("a6000000-0000-4000-8000-000000948897", "mu", 7);
+      const marker = new SQL({ url: URL_!, max: 1 }), lockProbe = new SQL({ url: URL_!, max: 1 });
+      const locked = async (id: string) => {
+        await lockProbe`BEGIN`;
+        const r = await settled(async () => { await lockProbe`SELECT 1 FROM thoughts WHERE id = ${id}::uuid FOR UPDATE NOWAIT`; });
+        await lockProbe`ROLLBACK`;
+        return r !== "ok";
+      };
+      try {
+        await subjectOn(owner, mp, MK);
+        // A later transaction of the same session moving the same keys: mv joins MK, commits, then leaves it.
+        await marker`BEGIN`; await addKey(marker, mv, MK); await marker`COMMIT`;
+        await marker`BEGIN`; await closeKey(marker, mv, MK); await marker`SET CONSTRAINTS ALL IMMEDIATE`;
+        const nextTx = await locked(mp);
+        await marker`COMMIT`;
+        // Two thoughts in one transaction, the same keys moved: ma, mw, mb, mc in MK2; ma and mc, its ends, leave it (the
+        // re-link closes mw→ma and mc→mb, writing nothing: mb is mc's neighbour alone).
+        for (const id of [ma, mw, mb, mc]) await subjectOn(owner, id, MK2);
+        await marker`BEGIN`; await closeKey(marker, ma, MK2); await closeKey(marker, mc, MK2); await marker`SET CONSTRAINTS ALL IMMEDIATE`;
+        const secondThought = await locked(mb);
+        await marker`COMMIT`;
+        // A key moved after the triggers fired: mu leaves MK (fired), then MK2 (mw, mb, mu: mu last, after mb).
+        await subjectOn(owner, mu, MK);
+        await setOn(owner, mu, [MK, MK2]);
+        await marker`BEGIN`; await closeKey(marker, mu, MK); await marker`SET CONSTRAINTS ALL IMMEDIATE`;
+        await closeKey(marker, mu, MK2); await marker`SET CONSTRAINTS ALL IMMEDIATE`;
+        const laterKey = await locked(mb);
+        await marker`COMMIT`;
+        assert(nextTx && secondThought && laterKey,
+          `the neighbour lock is taken again in a later transaction of the session (${nextTx}), for a second thought moving the same keys in one transaction (${secondThought}), and for a key moved after the triggers fired (${laterKey})`);
+      } finally {
+        await marker.close();
+        await lockProbe.close();
+      }
+
       // A writer above READ COMMITTED is refused at its commit, as 120 refuses it, without first waiting on a key another
       // session holds (review pass 1: 127's locks came before the refusal, so it waited the holder out).
       const RK = "ticket:SMD-94897";
-      const rrT = await thought("rr", 1);
+      for (const level of ["REPEATABLE READ", "SERIALIZABLE"]) {
+      const rrT = await thought(`rr ${level}`, 1);
       const rrWriter = new SQL({ url: URL_!, max: 1 });
       try {
         await holder`BEGIN`;
         await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${RK}::text, 0))`;
-        await rrWriter`BEGIN ISOLATION LEVEL REPEATABLE READ`;
+        await rrWriter.unsafe(`BEGIN ISOLATION LEVEL ${level}`);
         await subjectOn(rrWriter, rrT, RK);
         const began = Date.now();
         const rrEnd = await Promise.race([settled(async () => { await rrWriter`COMMIT`; }), Bun.sleep(3000).then(() => "still waiting after 3 s")]);
         const tookMs = Date.now() - began;
         await holder`COMMIT`;
         assert(/thread_relink must run under READ COMMITTED/.test(rrEnd) && tookMs < 2000,
-          `a subject written under REPEATABLE READ is refused at its commit at once, the key held elsewhere not waited on (${rrEnd}; ${tookMs} ms)`);
+          `a subject written under ${level} is refused at its commit at once, the key held elsewhere not waited on (${rrEnd}; ${tookMs} ms)`);
       } finally {
         await rrWriter.close();
+      }
       }
 
       // A close counts once it lands. A stray edge under the key, from a thread's thought to one outside it: the owner

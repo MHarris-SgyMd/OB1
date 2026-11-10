@@ -39,7 +39,7 @@
 --     ticket than it is filed under now, or any other way's set on a thought
 --     filed since). Under the door's advisory lock on the thought, the thought
 --     locked FOR KEY SHARE first (111's order); it closes before it writes,
---     each in key order, and its threads re-link at its commit (120's
+--     the writes in key order, and its threads re-link at its commit (120's
 --     triggers, below).
 --   * record_thought_subject — 113's door, its signature and refusals kept,
 --     now the set door with one key (or NULL, closing every standing
@@ -66,7 +66,7 @@
 --     deadlocked with the second's waiting on it to write the edge again
 --     (review pass 1); locked first, the delete waits for the commit, 120's
 --     write-before-close carried across the keys. All this once a
---     transaction and thought (a local setting under its name marks it),
+--     transaction and thought (a local setting, ob1.thread_mark, marks it),
 --     the rest finding the locks held, so a door's set, written or closed in
 --     any order, a raw writer's included, queues behind another on the same
 --     keys. Its timing is 120's: from the commit's first re-link to the
@@ -101,23 +101,30 @@
 --     (db/subject-sweep.ts), which PR 7a-3b changes before anything writes a
 --     set. On a set its candidate read returns a row a subject (a dry run
 --     counting the thought once for each), its rules write one key, and a
---     non-current set the model names nothing for is closed one facet at a
---     time: close_thought_subject answers moved, the claim goes back to
---     pending, and the thought is asked again every round.
+--     non-current set the model names nothing for is never closed:
+--     close_thought_subject, given one facet of it, answers moved and closes
+--     none, the claim goes back to pending, and the thought is asked again
+--     every round.
 --   * ob1_item_serves (122) reads one ticket subject of a thought (LIMIT 1);
 --     with a set it serves one of them. SMD-4149's 125 redefines it: the set
 --     reading follows that.
---   * A transaction that writes the subjects of several thoughts, or writes
---     one inside a savepoint (its rows' xmin a subtransaction's, which the
---     trigger does not read as its own), locks each key as its re-link comes,
---     so two such can deadlock, Postgres ending one (120's NOT HERE). No
+--   * A transaction that writes the subjects of several thoughts locks each
+--     thought's keys as its first re-link comes, and one that writes inside a
+--     savepoint (its rows' xmin a subtransaction's, which the trigger does not
+--     read as its own) each key as its re-link comes, so two such can
+--     deadlock, Postgres ending one (120's NOT HERE). No
 --     writer of the stack does either: each writes one thought's subjects a
---     transaction, outside any savepoint.
+--     transaction, outside any savepoint. The first of several thoughts
+--     locks its own neighbours alone, so a delete of a later thought's
+--     neighbour can deadlock with the commit too.
 --   * An edge a moved key's thread lacks away from the moved thought (a
 --     thread the upgrade to 120 left unlinked, or a gap a delete left) joins
 --     thoughts the neighbour locks do not cover: a delete of one of them,
 --     waiting on an edge an earlier key's re-link closed, can still deadlock
 --     with the commit, Postgres ending one. db/threads.ts links such gaps.
+--     So can a raw write of the moved thought's created_at in the same
+--     transaction (120's NOT HERE: no writer of the stack moves one): the
+--     neighbours are read at its new place, its old ones' bridge unlocked.
 --
 -- SAFETY
 --   One index made and 111's dropped (by name: the new one stands first, so
@@ -550,21 +557,28 @@ BEGIN
     --    key moved are locked first, in id order, before any re-link closes an
     --    edge: a delete of one waits for the commit, as 120's write-before-close
     --    makes it wait within one key.
-    -- The keys moved, as an array's text, mark the transaction (a local
-    -- setting under the thought's name): the next re-link of its subjects
-    -- finds them taken, unless a write since moved another key.
+    -- The thought and the keys moved mark the transaction (one local setting,
+    -- ob1.thread_mark): the next re-link of its subjects finds them taken,
+    -- unless a write since moved another key. One name, not one a thought: a
+    -- name a thought left a placeholder for the session's life (review pass 2:
+    -- 9 MB after 20,000 thoughts). A transaction writing several thoughts'
+    -- subjects locks again at each change of thought, the locks held already.
     SELECT array_agg(DISTINCT k ORDER BY k) INTO v_moved
       FROM (SELECT s.payload->>'key' AS k
               FROM thought_facets s
              WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.xmin = pg_current_xact_id()::xid
             UNION
             SELECT v_key) m;
-    v_mark := 'ob1.thread_' || replace(v_thought::text, '-', '');
-    IF current_setting(v_mark, true) IS DISTINCT FROM v_moved::text THEN
+    v_mark := v_thought::text || ':' || v_moved::text;
+    IF current_setting('ob1.thread_mark', true) IS DISTINCT FROM v_mark THEN
       PERFORM ob1_thread_lock_keys(v_moved);
+      -- The thought itself in the IN list, not an OR beside it: an OR planned a
+      -- scan of every thought on every commit (review pass 2: 85 ms at a
+      -- million thoughts, 2 ms as one list probed by the key).
       PERFORM 1 FROM thoughts t
-       WHERE t.id = v_thought
-          OR t.id IN (SELECT x
+       WHERE t.id IN (SELECT v_thought
+                      UNION ALL
+                      SELECT x
                         FROM (SELECT o.id, lag(o.id) OVER w AS prev, lead(o.id) OVER w AS next
                                 FROM (SELECT s.payload->>'key' AS k, h.id, h.created_at
                                         FROM thought_facets s JOIN thoughts h ON h.id = s.thought_id
@@ -577,7 +591,7 @@ BEGIN
                        WHERE around.id = v_thought AND x IS NOT NULL)
        ORDER BY t.id
          FOR KEY SHARE OF t;
-      PERFORM set_config(v_mark, v_moved::text, true);
+      PERFORM set_config('ob1.thread_mark', v_mark, true);
     END IF;
     PERFORM thread_relink(v_key);
   -- A standing subject deleted with its thought: its edges are closed by 084's
@@ -600,7 +614,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_thread_relink_subject() IS
-  'Constraint triggers AFTER INSERT, AFTER UPDATE OF valid_until and AFTER DELETE on thought_facets for a subject (thought_facets_thread_written, _closed and _deleted, 120), deferred to the writer''s commit: re-links the subject''s key''s thread (thread_relink) once the transaction''s subjects are final, so a replace (a close and an insert on one key) moves no edge. A subject written or closed locks, before its re-link, every subject key the same transaction wrote or closed on the thought, in key order (ob1_thread_lock_keys over the thought''s subject rows of the transaction''s making; since 127 a thought''s subjects are a set, and a subject kept standing beside a replace is not locked), as db/threads.ts locks its batches'' keys, so two writers moving thoughts across the same keys queue rather than deadlock; with them the thought and its neighbours in those keys'' threads (KEY SHARE, in id order), so a delete of a neighbour standing in two of them waits for the commit rather than deadlocking with its re-links; once a transaction and thought (a local setting marks it), and above READ COMMITTED not at all (the re-link''s refusal first). A delete — the subject''s thought deleted — re-links only when the deleting role may make a re-link''s writes (INSERT and UPDATE on thought_facets, UPDATE on thoughts for the row locks, and INSERT, UPDATE and SELECT on derivations), the transaction is READ COMMITTED and no other transaction holds the key''s lock (pg_try_advisory_xact_lock): a delete never waits on the key''s lock; otherwise the key''s next re-link, or db/threads.ts''s, links its neighbours. Runs as the writer. Migrations 120, 127 / SMD-3306.';
+  'Constraint triggers AFTER INSERT, AFTER UPDATE OF valid_until and AFTER DELETE on thought_facets for a subject (thought_facets_thread_written, _closed and _deleted, 120), deferred to the writer''s commit: re-links the subject''s key''s thread (thread_relink) once the transaction''s subjects are final, so a replace (a close and an insert on one key) moves no edge. A subject written or closed locks, before its re-link, every subject key the same transaction wrote or closed on the thought, in key order (ob1_thread_lock_keys over the thought''s subject rows of the transaction''s making; since 127 a thought''s subjects are a set, and a subject kept standing beside a replace is not locked), as db/threads.ts locks its batches'' keys, so two writers moving thoughts across the same keys queue rather than deadlock; with them the thought and its neighbours in those keys'' threads (KEY SHARE, in id order), so a delete of a neighbour standing in two of them waits for the commit rather than deadlocking with its re-links; once a transaction and thought (the local setting ob1.thread_mark marks it), and above READ COMMITTED not at all (the re-link''s refusal first). A delete — the subject''s thought deleted — re-links only when the deleting role may make a re-link''s writes (INSERT and UPDATE on thought_facets, UPDATE on thoughts for the row locks, and INSERT, UPDATE and SELECT on derivations), the transaction is READ COMMITTED and no other transaction holds the key''s lock (pg_try_advisory_xact_lock): a delete never waits on the key''s lock; otherwise the key''s next re-link, or db/threads.ts''s, links its neighbours. Runs as the writer. Migrations 120, 127 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 7. The catalog's copy of the vocabulary
