@@ -898,6 +898,9 @@ services:
       OB1_METADATA_TEMPERATURE: ${OB1_METADATA_TEMPERATURE:-}
       OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
       OB1_SUBJECT_REASONING: ${OB1_SUBJECT_REASONING:-}
+      # The priority a capture's text states, asked of the metadata model and
+      # stated inferred (SMD-3670): off unless deploy/.env says on.
+      OB1_INFER_PRIORITY: ${OB1_INFER_PRIORITY:-}
       # The opt-in query log (migration 034): off unless deploy/.env says on,
       # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
       # SETUP.md's switch never reached the container. Every knob the server
@@ -1487,6 +1490,7 @@ services:
       OB1_CONSOLIDATE_WORKERS: ${OB1_CONSOLIDATE_WORKERS:-}
       OB1_SLEEP_CAPTURE: ${OB1_SLEEP_CAPTURE:-}
       OB1_SLEEP_ABORT_AFTER: ${OB1_SLEEP_ABORT_AFTER:-}
+      OB1_SLEEP_MAX_WAIT: ${OB1_SLEEP_MAX_WAIT:-}
       OB1_SLEEP_RESCAN: ${OB1_SLEEP_RESCAN:-}
       OB1_SLEEP_POLL: ${OB1_SLEEP_POLL:-}
       OB1_SLEEP_WORKERS: ${OB1_SLEEP_WORKERS:-}

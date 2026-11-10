@@ -4192,6 +4192,23 @@ console.log("\n[25] priority_weight and min_priority over the live database (SMD
     assert(!full.isError && ids(full)[0] === rowOf[last] && JSON.stringify(ids(full).slice(1)) === JSON.stringify(ids(base).filter((id) => id !== rowOf[last]))
         && ids(below).indexOf(rowOf[last]) === 3 && ids(mid).indexOf(rowOf[last]) === 2,
       `11-02's case: the High due tomorrow, last by meaning, comes first at weight 1, the other three in their own order; still last at 0.75, third at 0.82 (${ids(below).indexOf(rowOf[last])}, ${ids(mid).indexOf(rowOf[last])})`);
+    // The blend divides by the brain's own span (128, SMD-4194; review pass 2: a server dividing by 5.8 passed every
+    // suite, each brain's span being 5.8). With unknown at 10 the span is 10.8 and no effective number here moves (all
+    // four are stated Highs): at 0.82 the High due tomorrow then stays last (0.045 + 0.82 × 3.4/10.8 = 0.303 under the
+    // third's 0.090 + 0.82 × 3/10.8 = 0.318). The function put back after, whatever happens.
+    const shipped = String((await sql`SELECT pg_get_functiondef('ob1_priority_defaults()'::regprocedure) AS d`)[0].d);
+    let wider: Awaited<ReturnType<typeof result>> | null = null;
+    try {
+      await sql.unsafe(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql STABLE AS $f$
+        SELECT '{"unknown": 10, "hop": 1, "hops": 2, "soon": 0.4, "soon_days": 1, "week": 0.2, "week_days": 7, "overdue": 0.6,
+                 "unblocks_one": 0.1, "unblocks_many": 0.2, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
+      wider = await result("search_thoughts", { query, limit: 4, threshold: -1, filter, priority_weight: 0.82 });
+    } finally {
+      await sql.unsafe(shipped);
+    }
+    const spanBack = Number((await sql`SELECT ob1_priority_span()::text AS s`)[0].s);
+    assert(wider !== null && !wider.isError && ids(wider).indexOf(rowOf[last]) === 3 && spanBack === 5.8,
+      `a brain whose span is 10.8 keeps the High due tomorrow last at 0.82, where 5.8's puts it third: the search divides by the brain's span; the function put back (${wider ? ids(wider).indexOf(rowOf[last]) : "none"}, span ${spanBack})`);
     // The filter holds the window to this section's four thoughts: 4 read of a window of 16, every one a known High.
     assert(p?.weight === 1 && p.min === null && p.window === 16 && p.read === 4 && p.kept === 4 && p.known === 4
         && full.text.includes("Ranked by priority (priority_weight 1): the top 4 matches ordered by") && full.text.includes("4 of them carry a known priority.")

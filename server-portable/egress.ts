@@ -1,7 +1,8 @@
 /**
  * egress.ts — what content may leave the box for a model call (SMD-1903).
  *
- * Every embedding and chat call carries a thought's full text to whatever
+ * Every embedding and chat call carries a thought's full text (or, for a
+ * plugin's model call, the text its operation sends) to whatever
  * `OB1_LLM_BASE_URL` (and, since SMD-1902, `OB1_CHAT_BASE_URL`) names. With a
  * hosted provider that is every capture, every consolidation pair, every
  * entity pass, and the only policy was which URL the operator typed. For a
@@ -68,9 +69,20 @@ export const DEFAULT_EGRESS_MODE: EgressMode = "deny";
  * gate — the handler keeps it OFF the capture subject entirely, so no `source:`
  * term can match it, and WHO may capture is named with `actor`, which the key
  * proves (SMD-1941). `marker` is a literal the text contains — `#public`,
- * `[phi]` — the one unit a writer controls per thought.
+ * `[phi]` — the one unit a writer controls per thought. `plugin` names the
+ * plugin whose operation asks the model (ctx.model, SMD-2690 PR 3a): its own
+ * unit, never `source`, which a plugin's captures carry too (a `source:` term
+ * written for the passes would otherwise release the plugin's calls, and a
+ * `plugin:` term the rows it labelled). Under deny a `plugin:` term is the
+ * only one that releases a plugin's call: its text is whatever the plugin
+ * read, other keys' rows among them, so neither the caller's `actor:` term
+ * nor a `marker:` one row of a bundle carries may let it out (the
+ * maintainer's call, PR 3a's third review pass). Under allow a deny term on
+ * its key, its plugin or a marker holds it; a `source:`, `type:` or `topic:`
+ * term never does, nor another key's `actor:`, since the gate cannot see whose
+ * rows the text holds (SMD-4195; preflight warns).
  */
-export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker"] as const;
+export const EGRESS_UNITS = ["actor", "source", "type", "topic", "marker", "plugin"] as const;
 export type EgressUnit = (typeof EGRESS_UNITS)[number];
 
 /**
@@ -80,6 +92,13 @@ export type EgressUnit = (typeof EGRESS_UNITS)[number];
  * them (boyscout: each had its own copy).
  */
 export const ROW_UNITS = ["source", "type", "topic", "marker"] as const satisfies readonly EgressUnit[];
+
+/**
+ * The units a keyed caller's calls carry: its key and a row's own, and
+ * refusesEverything's default. A plugin's model call, which carries `plugin`,
+ * never asks that check, so a `plugin:` term never reads as "a row might pass".
+ */
+export const KEYED_UNITS = ["actor", ...ROW_UNITS] as const satisfies readonly EgressUnit[];
 
 export type EgressTerm = { unit: EgressUnit; value: string };
 
@@ -160,16 +179,19 @@ export function resolveEgressPolicy(env: EgressEnv): EgressPolicy {
  * What is about to be sent, in the terms the policy reads. `kind` names the
  * call for the reason text; the rest is whatever the caller knows — a capture
  * knows its actor and text, a pass knows the row's metadata, a query knows
- * the actor and the query text.
+ * the actor and the query text, a plugin's model call its actor, its plugin
+ * and the text it sends.
  */
 export type EgressSubject = {
-  kind: "capture" | "edit" | "query" | "re-embed" | "judge" | "extraction" | "decision" | "digest" | "finding";
+  kind: "capture" | "edit" | "query" | "re-embed" | "judge" | "extraction" | "decision" | "digest" | "finding" | "plugin";
   /** The access key's name — the `actor` unit. Absent for a pass with no worker key. */
   actor?: string;
   /** The row's metadata — the `source`, `type` and `topic` units. */
   metadata?: Record<string, unknown>;
   /** The text — the `marker` unit. */
   content?: string;
+  /** The plugin whose operation asks the model (kind `plugin`) — the `plugin` unit. */
+  plugin?: string;
 };
 
 export type EgressDecision = {
@@ -204,8 +226,8 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
       // The row's own label, server-written — an edit, the re-embed and
       // consolidation passes, and db/sync-linear.ts's authoritative captures.
       // capture_thought keeps its caller-claimed source OFF the subject, so it
-      // never reaches here; the gate does NOT branch on kind (SMD-1941; the
-      // rationale is on EGRESS_UNITS).
+      // never reaches here; termMatches does NOT branch on kind (SMD-1941;
+      // the rationale is on EGRESS_UNITS).
       return lower(subject.metadata?.source) === want;
     case "type":
       return lower(subject.metadata?.type) === want;
@@ -215,6 +237,8 @@ export function termMatches(term: EgressTerm, subject: EgressSubject): boolean {
     }
     case "marker":
       return (subject.content ?? "").toLowerCase().includes(want);
+    case "plugin":
+      return lower(subject.plugin) === want;
   }
 }
 
@@ -234,7 +258,8 @@ export function hostOf(base: string): string {
 /**
  * The gate. One pure function: the subject, the endpoint it would be sent to
  * (only `base` and `local` are read), the policy, and optionally a second
- * opinion that can only tighten the answer.
+ * opinion that can only tighten the answer. A plugin's model call is released
+ * under deny by a `plugin:` term alone (EGRESS_UNITS says why).
  */
 export function mayLeaveBox(
   subject: EgressSubject,
@@ -251,13 +276,15 @@ export function mayLeaveBox(
   if (policy.mode === "off") {
     decision = { allowed: true, rule: "off", reason: `OB1_EGRESS_POLICY=off — the gate is off; the text leaves to ${host}` };
   } else if (policy.mode === "deny") {
-    const hit = policy.allow.find((t) => termMatches(t, subject));
+    const releases = subject.kind === "plugin" ? policy.allow.filter((t) => t.unit === "plugin") : policy.allow;
+    const hit = releases.find((t) => termMatches(t, subject));
+    const pluginOnly = subject.kind === "plugin" ? "; only a plugin: term releases a plugin's call" : "";
     decision = hit
       ? { allowed: true, rule: "allow-term", reason: `allowed to leave to ${host} by OB1_EGRESS_ALLOW ${showTerm(hit)}` }
       : {
           allowed: false,
           rule: "no-allow-term",
-          reason: `OB1_EGRESS_POLICY=deny${policy.configured === undefined && !closed ? " (the default)" : ""}${closed} and no OB1_EGRESS_ALLOW term matches this ${subject.kind}${policy.allow.length ? ` (${policy.allow.map(showTerm).join(", ")})` : " (none set)"} — the text was not sent to ${host}`,
+          reason: `OB1_EGRESS_POLICY=deny${policy.configured === undefined && !closed ? " (the default)" : ""}${closed} and no OB1_EGRESS_ALLOW term matches this ${subject.kind}${policy.allow.length ? ` (${policy.allow.map(showTerm).join(", ")})` : " (none set)"}${pluginOnly} — the text was not sent to ${host}`,
         };
   } else {
     const hit = policy.deny.find((t) => termMatches(t, subject));
@@ -324,7 +351,7 @@ export function decideCalls(
  * nothing this one line does not (first review pass). Null when some row
  * might pass: a term might match, or the mode lets text through.
  */
-export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy, units: readonly EgressUnit[] = EGRESS_UNITS): string | null {
+export function refusesEverything(endpoint: Pick<ProviderEndpoint, "base" | "local">, policy: EgressPolicy, units: readonly EgressUnit[] = KEYED_UNITS): string | null {
   if (endpoint.local) return null;
   const host = hostOf(endpoint.base);
   if (policy.problems.length) return `the egress policy did not parse (${policy.problems.join("; ")}), so the gate fails closed and every call to ${host} is refused`;

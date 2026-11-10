@@ -13,6 +13,7 @@ import { z } from "zod";
 import type { Scope } from "./auth.ts";
 import type { ToolName } from "./tools.ts";
 import type { CoreAnswer } from "./core/calls.ts";
+import type { ModelAnswer, ModelRefusal, ModelRequest } from "./core/model.ts";
 import type { SPECS } from "./core/schemas.ts";
 import { UUID_RE, type PluginSql } from "./store.ts";
 import { ITEM_STATUSES, type ItemStatus } from "./open-items.ts";
@@ -20,7 +21,7 @@ import { dueInstant, levelOf, reasonOf, type PriorityScale } from "./priority-sc
 import { withCallWaits, type CallWaits } from "./model-call.ts";
 
 export { z };
-export type { PluginSql, PriorityScale };
+export type { PluginSql, PriorityScale, ModelAnswer, ModelRefusal, ModelRequest };
 
 /** The scope an operation needs, as a core tool's group: read, capture, or write (a forwarder's key is no caller). */
 export type PluginScope = Exclude<Scope, "forward">;
@@ -76,6 +77,23 @@ export interface PluginContext {
    * migrations', which the migrator applies while the plugin is enabled.
    */
   readonly db: { tx<T>(fn: (sql: PluginSql) => Promise<T>): Promise<T> };
+  /**
+   * A model call (SMD-2690 PR 3a): `model.chat({ system?, user, json?,
+   * temperature?, max_tokens? })` asks the brain's classifier model
+   * (OB1_METADATA_MODEL) through the brain's own provider path, never a
+   * provider of the plugin's. The egress gate judges it as the caller's key
+   * (`actor`) for this plugin (`plugin`) before anything is sent: under deny
+   * only a `plugin:` allow term lets it out; under allow a deny term on the
+   * key, the plugin or a marker holds it (a marker read in the system prompt
+   * too; a row's `source:`, `type:` or `topic:` never does), so the
+   * brain's text and the caller's go in `user`, never `system`. The
+   * model-call seam holds and measures it, and OB1_LLM_TIMEOUT bounds it. Its
+   * answer is the model's text (and the object parsed from it, with `json`),
+   * or a refusal: REFUSED_INPUT, REFUSED_EGRESS, PROVIDER_UNAVAILABLE (the
+   * one retryable: answer it 503 PROVIDER_UNAVAILABLE), PROVIDER_REFUSED,
+   * NOT_JSON. The text is the model's: treat it as untrusted input.
+   */
+  readonly model: { chat(req: ModelRequest): Promise<ModelAnswer> };
 }
 
 export type Method = "GET" | "POST" | "PATCH" | "DELETE";

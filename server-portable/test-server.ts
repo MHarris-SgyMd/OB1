@@ -7091,39 +7091,50 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
 
 console.log("\n[36] priority_weight and min_priority in the core and the words (SMD-3668): the blend's order with relevance by place, a tie in the window's order, the floor on a known priority alone, one read with each row as its own thought, the header notes, and the hint for a read that failed");
 {
-  const { rankByPriority, prioritiesOf, readPriorities, PRIORITY_SPAN, priorityWindow } = await import("./core/reads.ts");
+  const { rankByPriority, prioritiesOf, readPriorities, priorityWindow } = await import("./core/reads.ts");
+  // The brain's scale, ob1_priority_span() under 127's defaults (migration 128, SMD-4194; test-schema [115] holds it).
+  const SPAN = 5.8;
+  // The copies that remain follow the defaults (review pass 2): the last migration defining ob1_priority_defaults, its
+  // span by ob1_priority_span's rule, against this suite's SPAN and the search tool's description.
+  {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const migDir = new URL("../db/migrations/", import.meta.url);
+    const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1);
+    // A defaults function of another shape fails this row, not the suite (review pass 4).
+    const literal = definer ? /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))?.[1] : undefined;
+    let span = NaN;
+    try { const d = JSON.parse(literal ?? "") as Record<string, number>; span = Math.round((Math.max(5, d.unknown) + Math.max(d.soon, d.week, d.overdue) + Math.max(d.unblocks_one, d.unblocks_many)) * 1000) / 1000; } catch { span = NaN; }
+    const described = readFileSync(new URL("./core/schemas.ts", import.meta.url), "utf8");
+    assert(span === SPAN && described.includes(`(ob1_priority_span, ${SPAN})`),
+      `the span ${definer ?? "no migration"}'s defaults allow is this suite's ${SPAN}, and the search description says it (${literal === undefined ? "its defaults read as no jsonb literal: teach this row their shape" : span})`);
+  }
   const { priorityNote } = await import("./render.ts");
   const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
   const prio = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 5, known: true } };
-  const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n).map((r) => r.id).join("");
+  const order = (w: number, min: number | null = null, n = 4, p: Record<string, { effective: number; known: boolean }> = prio) => rankByPriority(rows, p, w, min, n, SPAN).map((r) => r.id).join("");
   // 11-02's case in miniature: four Highs, the one with urgency last by meaning.
   assert(order(0) === "abcd" && order(1) === "dabc" && order(0.6) === "adbc",
     `four of one level: at 0 the window's order, at 1 the higher priority first and the rest in theirs, at 0.6 the urgent one no longer last (${order(0)}, ${order(1)}, ${order(0.6)})`);
   // (1 − w) × relevance + w × priority, relevance by place (n − i) / n, priority over 5.8 (127's largest, SMD-4177):
   // d's 0.2 × 1/4 + 0.8 × 5/5.8 = 0.740 over a's 0.2 × 1 + 0.8 × 3/5.8 = 0.614; at 0.1, a's 0.952 over d's 0.311.
-  assert(PRIORITY_SPAN === 5.8 && order(0.8) === "dabc" && order(0.1) === "abcd",
-    `the blend weighs relevance by place and priority over ${PRIORITY_SPAN} (${order(0.8)}, ${order(0.1)})`);
+  assert(order(0.8) === "dabc" && order(0.1) === "abcd",
+    `the blend weighs relevance by place and priority over the span (${order(0.8)}, ${order(0.1)})`);
   // Within one level (127, SMD-4177): a High due tomorrow (3.4) last by place among three Highs passes the third and
   // second at 0.9 (d's 0.025 + 0.9 × 3.4/5.8 = 0.553 over b's 0.540), not at 0.7 (0.485 under c's 0.512). Over 9 it
   // would pass only the third at 0.9 (0.365 over 0.350, under b's 0.375).
   const within = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 3.4, known: true } };
-  assert(order(0.9, null, 4, within) === "adbc" && order(0.7, null, 4, within) === "abcd",
-    `a tenth of a level within one level moves a row at a high weight and not at a lower one (${order(0.9, null, 4, within)}, ${order(0.7, null, 4, within)})`);
-  // The scale is the defaults' largest: a critical level, the largest urgency term and unblocking many, as the last
-  // migration defining effective_priority sets them (review: a hand-copied 5.8 would outlive the next retune).
-  const { readdirSync, readFileSync } = await import("node:fs");
-  const migDir = new URL("../db/migrations/", import.meta.url);
-  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION effective_priority\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
-  const defaults = JSON.parse(/c_defaults CONSTANT jsonb := '([^']*)'/.exec(readFileSync(new URL(definer, migDir), "utf8"))![1]) as Record<string, number>;
-  const largest = Math.round((5 + Math.max(defaults.soon, defaults.week, defaults.overdue) + defaults.unblocks_many) * 1000) / 1000;
-  assert(PRIORITY_SPAN === largest, `PRIORITY_SPAN is ${definer}'s largest effective priority under its defaults (${PRIORITY_SPAN}, ${largest})`);
+  const over9 = rankByPriority(rows, within, 0.9, null, 4, 9).map((r) => r.id).join("");
+  const badSpan = [0, -1, NaN, Infinity].map((s) => { try { rankByPriority(rows, within, 0.5, null, 4, s); return "ranked"; } catch { return "refused"; } });
+  assert(badSpan.every((r) => r === "refused"), `a span that is no positive number is refused, never ranked by (${badSpan.join(", ")})`);
+  assert(order(0.9, null, 4, within) === "adbc" && order(0.7, null, 4, within) === "abcd" && over9 === "abdc",
+    `a tenth of a level within one level moves a row at a high weight and not at a lower one; the span given is the one divided by (${order(0.9, null, 4, within)}, ${order(0.7, null, 4, within)}; over 9 ${over9})`);
   // Relevance is place, not score (review pass 2): a text match and a literal-only query's rows without the literal all
   // score 0, ordered by newness or similarity, and a score over the top's left them to priority alone at any weight.
   // At 0.01 the window's order holds; a score-based relevance would put z4, the most urgent, first.
   const zeros = [{ id: "z1", score: 0 }, { id: "z2", score: 0 }, { id: "z3", score: 0 }, { id: "z4", score: 0 }];
   const zp = { z1: { effective: 1, known: true }, z2: { effective: 2, known: true }, z3: { effective: 3, known: true }, z4: { effective: 5, known: true } };
-  assert(rankByPriority(zeros, zp, 0.01, null, 4).map((r) => r.id).join(",") === "z1,z2,z3,z4" && rankByPriority(zeros, zp, 1, null, 4).map((r) => r.id).join(",") === "z4,z3,z2,z1",
-    `rows that all score 0 keep the window's order at a small weight, and take priority's at 1 (${rankByPriority(zeros, zp, 0.01, null, 4).map((r) => r.id).join(",")})`);
+  assert(rankByPriority(zeros, zp, 0.01, null, 4, SPAN).map((r) => r.id).join(",") === "z1,z2,z3,z4" && rankByPriority(zeros, zp, 1, null, 4, SPAN).map((r) => r.id).join(",") === "z4,z3,z2,z1",
+    `rows that all score 0 keep the window's order at a small weight, and take priority's at 1 (${rankByPriority(zeros, zp, 0.01, null, 4, SPAN).map((r) => r.id).join(",")})`);
   const mixed = { a: { effective: 2, known: false }, b: { effective: 1, known: true }, c: { effective: 3, known: true }, d: { effective: 4, known: true } };
   assert(order(0, 3, 4, mixed) === "cd" && order(0, 1, 4, mixed) === "bcd" && order(0, 0, 4, mixed) === "bcd" && order(0, 5, 4, mixed) === "",
     `the floor keeps a known priority at or above it alone, in the window's order at weight 0; an unknown, ordered as 2, never passes, not even at 0 (${order(0, 3, 4, mixed)}, ${order(0, 1, 4, mixed)}, ${order(0, 0, 4, mixed)})`);
@@ -7131,12 +7142,18 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
     `the top limit after the order, of a window of min(100, 4 × limit) (${order(1, null, 2)}, ${priorityWindow(10)}, ${priorityWindow(30)})`);
   // Fusion-sized scores (about 0.016 to 0.03) weigh nothing: place does, so the order is the same as for any scores.
   const fusion = [{ id: "a", score: 0.03 }, { id: "b", score: 0.028 }, { id: "c", score: 0.025 }, { id: "d", score: 0.02 }];
-  assert(rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("") === "abcd" && rankByPriority(fusion, prio, 1, null, 4).map((r) => r.id).join("") === "dabc",
-    `on fusion-sized scores meaning holds at 0.1 and priority leads at 1, as on any (${rankByPriority(fusion, prio, 0.1, null, 4).map((r) => r.id).join("")})`);
+  assert(rankByPriority(fusion, prio, 0.1, null, 4, SPAN).map((r) => r.id).join("") === "abcd" && rankByPriority(fusion, prio, 1, null, 4, SPAN).map((r) => r.id).join("") === "dabc",
+    `on fusion-sized scores meaning holds at 0.1 and priority leads at 1, as on any (${rankByPriority(fusion, prio, 0.1, null, 4, SPAN).map((r) => r.id).join("")})`);
   // The hint for a ranked search whose read failed (review pass 2): a brain short of 122, a role granted before 116.
   const { searchHint, priorityHint } = await import("./render.ts");
   const hintW = searchHint({ priority_weight: 0.5 }), hintM = searchHint({ min_priority: 3 }), hintNone = searchHint({ priority_weight: 0 });
-  assert(/migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
+  assert(/migration 128/.test(hintW?.("function ob1_priority_span() does not exist") ?? "")
+      && /min_priority/.test(hintM?.("permission denied for function ob1_priority_defaults") ?? "")
+      && /re-apply every migration/.test(hintW?.("ob1_priority_span answered no span this server reads") ?? "")
+      && /re-apply every migration/.test(hintM?.("ob1_priority_defaults() lacks weight(s): overdue; re-apply every migration so the last to define it stands") ?? "")
+      && /missing or lacks a weight/.test(hintW?.("function ob1_priority_defaults() does not exist") ?? "")
+      && /default privileges/.test(hintW?.("permission denied for function ob1_priority_span") ?? "")
+      && /migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
       && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
       && hintNone === undefined && priorityHint("some other fault") === "",
     "a ranked search's fault names migration 122 or the grants it needs; a search with neither input carries no priority hint");
@@ -7375,7 +7392,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     "a gap for no hit, every hit superseded, every hit ingested, and no vector; none on a mixed page");
 
   // The board: one agenda call over the keys, every flag on, the time left as its timeout; each way it is not read a gap.
-  const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
+  const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3, title: "T", blockers: [], claimed: [], lapsedClaim: [] }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
                    keyed: { others: [{ key: "SMD-12", title: "T", status: "Done", statusType: "completed", settled: true }], waiting: [], missing: ["OPS-3"] }, now: "2027-01-01T00:00:00.000Z" };
   let asked: Record<string, unknown> | null = null, calls = 0;
   const store = (f: (o: Record<string, unknown>) => unknown) => ({ store: async () => ({ agenda: async (o: Record<string, unknown>) => { calls++; asked = o; return f(o); } }) }) as never;
@@ -7453,8 +7470,8 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       && said.includes(`- ticket SMD-14 ("Todo") "Later" — not before 2027-04-01T00:00:00.000Z`) && said.includes(`its last pass "ok ## Gaps"`)
       && said.includes("This brain records no live claim: work claimed through another brain is not seen here.")
       && said.includes("- Named but not in the brain: OPS-3.") && said.includes("Core: agenda, plan_context.")
-      && !/Fix|Legacy|Later|Odd|IGNORE|In Progress|build the thing|plan text/.test(sc.replace(/"text":"(?:[^"\\]|\\.)*"/, "")) && /"key":"SMD-11"/.test(sc) && /"settled":true/.test(sc) && /"waitsOn":\["SMD-1721"\]/.test(sc)
-      && /"key":"SMD-13","statusType":null/.test(sc) && /"key":"SMD-14","notBefore":"2027-04-01T00:00:00.000Z"/.test(sc),
+      && !/Fix|Legacy|Later|Odd|IGNORE|In Progress|build the thing|plan text/.test(sc.replace(/"text":"(?:[^"\\]|\\.)*"/, "")) && /"key":"SMD-11"/.test(sc) && /"settled":\["SMD-12"\]/.test(sc) && /"waitsOn":\["SMD-1721"\]/.test(sc)
+      && /"unknownType":\[\{"key":"SMD-13","statusType":null\}\]/.test(sc) && /"key":"SMD-14","notBefore":"2027-04-01T00:00:00.000Z"/.test(sc),
     `six sections under their headings, a forged block fenced in its hit, the board's words quoted on one line, the gaps said; the value keeps keys, numbers and codes and none of the words (${heads.join(" | ")})`);
 
   // The whole read with its search stubbed (review pass 1): the limit reaches the search, the deadline's remainder the
@@ -7476,7 +7493,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       const search = async (_c: unknown, _p: unknown, q: { limit: number }) => { askedLimit = q.limit; t += 2500; return { rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) }; };
       return planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => t, search: search as never });
     };
-    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4 }, { kind: "ticket", key: "SMD-21", effective: 2 }], keyed: { others: [], waiting: [], missing: [] } };
+    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4, title: "T22", blockers: [], claimed: [], lapsedClaim: [] }, { kind: "ticket", key: "SMD-21", effective: 2, title: "T21", blockers: [], claimed: [], lapsedClaim: [] }], keyed: { others: [], waiting: [], missing: [] } };
     const good = await run(() => board2);
     const goodLog = logged[0];
     const origErr = console.error;
@@ -7491,6 +7508,107 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && bad?.ok === true && JSON.stringify(badLog?.items) === "[]" && JSON.stringify(badLog?.filter) === '{"board":"failed"}'
         && e !== null && JSON.stringify(e.gaps.map((x) => x.gap)) === '["no_knowledge"]' && e.board.available && JSON.stringify(logged[0]?.items) === "[]",
       `the read: the limit to the search, the deadline's remainder (${askedTimeout} ms) to the board; the log's ids and scores in the hits' order, the board's tickets in its order, a board not read logged with no items and its reason; no hit, the no_knowledge gap (${JSON.stringify(goodLog)?.slice(0, 160)} | ${JSON.stringify(badLog?.filter)})`);
+  }
+  // The reply's budget (SMD-4191): the canary's 63,108-character answer, rebuilt at its shape — 8 hits of 3,000
+  // characters with 5 relations and 5 priorities each (the first with 4 claims too), 18 open tickets and 33 settled ones
+  // with 200-character titles — comes back under 16,000 characters (MCP's value, which holds the text), every cut
+  // counted in one trimmed gap, a cut hit saying how to read the whole, settled tickets past the first 5 by key alone,
+  // and no label object in the value.
+  {
+    const { budgetPlan, headOf, HIT_TEXT_BUDGET, HIT_LABELS, BOARD_SHOWN, BOARD_TITLE, OTHERS_TITLED } = await import("./core/plan.ts");
+    const long = (n: number, tag: string) => `${tag} ` + "word ".repeat(Math.ceil(n / 5)).slice(0, n - tag.length - 1);
+    const id = (n: number) => `${String(n % 10).repeat(8)}-${String(1000 + n).slice(-4)}-4111-8111-111111111111`;
+    const rel = (n: number) => ({ id: id(900 + n), relation: "related", otherIs: "older", other: { id: id(800 + n), trust: "agent", created_at: "2026-11-01T00:00:00.000Z", supersededBy: null }, confidence: 0.5, judgedAt: "2026-11-02T00:00:00.000Z", stale: false });
+    const prio = (n: number) => ({ kind: "ticket", key: `SMD-${100 + n}`, effective: 2, level: 2, terms: [{ term: "level", value: 2, detail: { level: 2 } }] });
+    const claim = (n: number) => ({ id: id(700 + n), ticket: `SMD-${200 + n}`, piece: null, holder: "k", ownKey: false, label: null, claimedAt: "2026-11-01T00:00:00.000Z", expiresAt: "2026-11-20T00:00:00.000Z", state: "live" });
+    const hits = Array.from({ length: 8 }, (_, i) => ({
+      id: id(i), content: long(3000, `hit-${i}`), metadata: { type: "task", trust: "agent", actor_kind: "agent", actor_name: "session-hook" }, created_at: "2026-11-01T00:00:00.000Z",
+      similarity: 0.7, matchedNeedles: [], score: 0.01, fused: 0.01, demoted: [], supersededBy: null, moved: [], movedNotRead: 0,
+      claimed: [], claimedMore: 0, claimedNotRead: 0,
+      relations: Array.from({ length: 5 }, (_, j) => rel(j)), relationsMore: 1, priority: Array.from({ length: 5 }, (_, j) => prio(j)), priorityMore: 0, priorityNotRead: 0,
+    }));
+    const ticket = (i: number) => ({ rank: i + 1, kind: "ticket", key: `SMD-${3000 + i}`, source: "linear", title: long(200, `SMD-${3000 + i} —`), project: null, status: "Backlog", statusType: "backlog", owner: null,
+      effective: 2, level: 2, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 2, detail: { level: 2 } }], winner: null, claimed: [], lapsedClaim: [], blockers: [] });
+    const settled = (i: number) => ({ key: `SMD-${4000 + i}`, title: long(200, `SMD-${4000 + i} —`), status: "Done", statusType: "completed", settled: true });
+    const raw = {
+      request: "what next", knowledge: { hits, preferCurrent: true as const },
+      board: { available: true as const, tickets: Array.from({ length: 18 }, (_, i) => ticket(i)), others: Array.from({ length: 33 }, (_, i) => settled(i)), waiting: [], claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" } },
+      specs: { available: false as const, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+      procedures: { available: false as const, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
+      tools: { scope: "write" as const, core: Array.from({ length: 41 }, (_, i) => `tool_${i}`), plugins: [], elsewhere: "unknown" as const },
+      gaps: [], deadlineMs: 10_000,
+    };
+    const before = say.renderPlanContext({ ok: true, value: { ...raw, knowledge: { ...raw.knowledge, hits: hits.map((h) => ({ ...h, contentChars: h.content.length })) } } } as never);
+    const v = budgetPlan(raw as never);
+    const r = say.renderPlanContext({ ok: true, value: v } as never);
+    // What a client takes: MCP's value, which holds the text as its last field.
+    const size = (x: typeof r) => JSON.stringify(x.structuredContent).length;
+    const t = text(r), sc = JSON.stringify(r.structuredContent);
+    const g = v.gaps.find((x) => x.gap === "trimmed") as { hitText: number; labels: number; tickets: number; titles: number } | undefined;
+    const share = Math.floor(HIT_TEXT_BUDGET / 8);
+    const h0 = v.knowledge.hits[0];
+    const withClaims = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], claimed: Array.from({ length: 4 }, (_, j) => claim(j)) }, ...hits.slice(1)]
+      .map((h) => ({ ...h, metadata: { ...h.metadata, topics: ["SMD-1", "agenda", "plan", "board", "review"], people: ["maintainer"], action_items: ["review for issues"] } })) } } as never);
+    const c0 = withClaims.knowledge.hits[0];
+    const withClaimsSize = size(say.renderPlanContext({ ok: true, value: withClaims } as never));
+    assert(size(before) > 40_000 && size(r) < 16_000 && withClaimsSize < 18_000
+        && h0.content.length === share && h0.contentChars === 3000 && h0.relations?.length === HIT_LABELS.relations && h0.relationsMore === 4 && c0.claimed?.length === HIT_LABELS.claimed && c0.claimedMore === 2
+        && h0.priority?.length === HIT_LABELS.priority && h0.priorityMore === 2
+        && v.board.available && v.board.tickets.length === BOARD_SHOWN && v.board.tickets[0].title.length === BOARD_TITLE && v.board.others.filter((o) => o.title !== "").length === OTHERS_TITLED
+        && JSON.stringify(g) === JSON.stringify({ gap: "trimmed", hitText: 8, labels: 8 * (3 + 2), boardLabels: 0, tickets: 3, titles: BOARD_SHOWN + 33, unlisted: 0 })
+        && t.includes(`… cut at ${share} of 3000 characters: fetch ${id(0)} for the whole text.`) && /\n- and 28 more: SMD-4005 \("Done"\), SMD-4006/.test(t)
+        && /- Cut to keep this reply readable: 8 hits' text to its head .*3 open tickets past the board's first 15, listed by key alone/.test(t) && /- and 3 more open, in agenda order: SMD-3015, SMD-3016, SMD-3017\./.test(t) && !/"relation":"related"/.test(sc) && !/"holder"/.test(sc) && /"contentChars":3000,"moved":0,"claimed":0,"relations":6,"priority":5/.test(sc)
+        && /"settled":\["SMD-4000","SMD-4001"/.test(sc),
+      `a canary-sized answer held to its budget: ${size(before)} → ${size(r)} characters, ${withClaimsSize} with claims and metadata; each cut counted (${JSON.stringify(g)})`);
+    // Under the caps nothing is cut and no trimmed gap is said.
+    const small = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "short", claimed: [], relations: [], priority: [] }] }, board: { ...raw.board, tickets: [{ ...ticket(0), title: "SMD-3000 — short" }], others: [] } } as never);
+    assert(!small.gaps.some((x) => x.gap === "trimmed") && small.knowledge.hits[0].content === "short" && small.knowledge.hits[0].contentChars === 5,
+      "an answer under every cap is unchanged, and says nothing was cut");
+    // Review pass 1. The worst the reach allows stays bounded: 20 hits of 60,000 characters with every label, 100 open,
+    // 400 settled, 100 waiting and 300 missing tickets. The open tickets past 15 by key; the rest counted.
+    const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
+    const huge = budgetPlan({ ...raw,
+      knowledge: { ...raw.knowledge, hits: many(20, (i) => ({ ...hits[i % 8], id: id(i), content: long(60_000, `huge-${i}`), claimed: many(12, claim), claimedMore: 0,
+        metadata: { ...hits[0].metadata, topics: many(30, (j) => long(80, `t${j}`)), people: many(30, (j) => long(80, `p${j}`)), action_items: many(20, (j) => long(200, `a${j}`)) } })) },
+      board: { ...raw.board, tickets: many(100, (i) => ({ ...ticket(i), blockers: many(12, (j) => long(80, `B-${j}`)), claimed: many(3, (j) => ({ holder: long(200, `h${j}`), piece: null, label: null, at: "2027-01-01T00:00:00.000Z" })),
+                                                        lapsedClaim: many(3, (j) => ({ holder: long(200, `l${j}`), piece: null, label: null, at: "2026-01-01T00:00:00.000Z" })) })), others: many(400, settled), waiting: many(100, (i) => ({ key: `SMD-${5000 + i}`, title: long(200, "w"), status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" })) },
+      gaps: [{ gap: "tickets_missing", keys: many(300, (i) => `SMD-${6000 + i}`) }] } as never);
+    const hr = say.renderPlanContext({ ok: true, value: huge } as never);
+    const hg = huge.gaps.find((x) => x.gap === "trimmed") as { tickets: number; unlisted: number; labels: number; boardLabels: number } | undefined;
+    const hm = huge.gaps.find((x) => x.gap === "tickets_missing") as { keys: string[]; more?: number } | undefined;
+    // Labels cut: per hit 10 claims, 3 relations, 2 priorities, 27 topics, 27 people and 18 actions. Board labels: per shown
+    // open ticket 9 blockers and 2 + 2 holders, each line saying how many, the value counting them all, identities whole.
+    const ht = huge.board.available ? huge.board.tickets[0] : null;
+    const hsc = JSON.stringify(hr.structuredContent);
+    assert(size(hr) < 60_000 && ht?.blockers.length === 3 && ht.blockers[0] === long(80, "B-0") && ht.claimed.length === 1 && ht.lapsedClaim.length === 1
+        && huge.board.available && JSON.stringify(huge.board.ticketMore?.["SMD-3000"]) === '{"blockers":9,"claimed":2,"lapsedClaim":2}'
+        && /blocked by "B-0[^\n]* and 9 more\]/.test(text(hr)) && /claimed by "h0[^"]*" and 2 more;/.test(text(hr)) && /"key":"SMD-3000","statusType":"backlog","effective":2,"blockers":12,/.test(hsc)
+        && hg?.boardLabels === 15 * (9 + 2 + 2) && hg?.tickets === 85 && hg?.unlisted === 360 + 90 + 280 && hg?.labels === 20 * (10 + 3 + 2 + 27 + 27 + 18) && hm?.keys.length === 20 && hm?.more === 280
+        && /- and 85 more open, in agenda order: SMD-3015, SMD-3016/.test(text(hr)) && /Not ranked \(400\):/.test(text(hr)) && /- and 360 more, not listed\./.test(text(hr))
+        && /Named but not in the brain: SMD-6000, .* and 280 more\./.test(text(hr)),
+      `the worst the reach allows is bounded (${size(hr)} characters): open tickets past 15 by key, the other lists past their first few counted (${JSON.stringify(hg)})`);
+    // A cut never leaves half of a surrogate pair, in a hit's text or a title; an exact match past the head is said so.
+    const emoji = "a".repeat(199) + "😀" + "b".repeat(2000);
+    const cutEmoji = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: hits.map((h) => ({ ...h, content: emoji, matchedNeedles: ["SMD-77"] })).map((h, i) => i === 0 ? { ...h, content: emoji + " SMD-77" } : h) },
+      board: { ...raw.board, tickets: [{ ...ticket(0), title: "t".repeat(78) + "😀" + "x".repeat(50) }] } } as never);
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const ce = say.renderPlanContext({ ok: true, value: cutEmoji } as never);
+    assert(headOf("ab😀", 3) === "ab" && headOf("ab😀", 4) === "ab😀" && !cutEmoji.knowledge.hits.some((h) => lone.test(h.content)) && cutEmoji.board.available && !lone.test(cutEmoji.board.tickets[0].title)
+        && !lone.test(text(ce)) && /Contains \(in the whole text, past what is shown\): SMD-77/.test(text(ce)),
+      "a cut through an emoji drops the whole character, in a hit's text and in a title; an exact match past the head is said to be in the whole text");
+    // An exact match in the head is said as shown, one past it as in the whole text (review pass 2: all were said past).
+    const split = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "SMD-1 " + "x".repeat(3000) + " SMD-2", matchedNeedles: ["SMD-1", "SMD-2"] }] } } as never);
+    const st = text(say.renderPlanContext({ ok: true, value: split } as never));
+    assert(/\nContains: SMD-1\nContains \(in the whole text, past what is shown\): SMD-2\n/.test(st), `a shown match said as shown, one past the head as in the whole text (${st.match(/Contains.*\n.*/)?.[0]})`);
+    // Review pass 3: a quoted span holding `$'` is a needle, not a replacement pattern; the fenced text is said once. Empty
+    // metadata entries take no slot of a real one.
+    const dollar = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "SMD-1 head " + "x".repeat(3000) + " $'", matchedNeedles: ["SMD-1", "$'"],
+      metadata: { ...hits[0].metadata, people: [null, "", null, "Alice", "Bob"] } }] } } as never);
+    const dt = text(say.renderPlanContext({ ok: true, value: dollar } as never));
+    assert(/\nContains: SMD-1\nContains \(in the whole text, past what is shown\): \$'\n/.test(dt) && dt.split("│ SMD-1 head").length === 2 && /\nPeople: Alice, Bob\n/.test(dt),
+      `a needle holding $' is said as itself and the text once; empty people entries take no slot (${dt.match(/Contains.*\n.*/)?.[0]} | ${dt.match(/People: .*/)?.[0]})`);
+    // A budget cut is no coverage gap: with nothing else found, the weighing line still stands.
+    assert(/- Nothing else found\. How close the hits are to the request is each hit's match/.test(t), "with only a cut among the gaps, the reply still says nothing else was found and to weigh the hits");
   }
   // 126's keyed, read strictly (review pass 1): a malformed others, waiting or missing is refused in the store's words.
   {

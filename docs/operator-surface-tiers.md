@@ -213,7 +213,7 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
   - **The boundary is Postgres's.** Neither role reaches a core table or another plugin's, so SQL that undoes the plugin's role still cannot: its login role may `SET ROLE` to its own plugin's role alone. The plugin's TypeScript runs in the server's process and could reach anything the server can, so curation is what holds hostile code. Check 31 of the consistency checker is the accident guard in front of both: a role, session or transaction change, a core table or another schema named, an import past the SDK, or a global past `ctx` fails a push so that review sees it.
 - **GUI pages.** The manifest declares each page (a path and a label), and the REST core lists the enabled plugins and their pages at `GET /v1/plugins`. That is the registry the GUI's nav reads; the pages themselves are SMD-2280's to render.
 - **Webhooks.** A manifest declares `hooks`. The REST core serves each at `/hooks/<plugin>/<name>`, but only for a plugin `OB1_HOOKS` names, and the proxy reaches them only with `deploy/compose.hooks-public.yaml`: off by default, on per plugin, like `/api`. A hook takes no key; it verifies its sender against the secret `OB1_HOOK_SECRETS` gives its plugin, and runs as `hook:<plugin>`, of capture scope alone.
-- **Egress.** A plugin is given no outbound call (check 31 refuses `fetch` and its kin). A model call through the shared gate, offered as a core service, comes with the first plugin that needs one: smart-ingest's port, SMD-2690.
+- **Egress.** A plugin is given no outbound call (check 31 refuses `fetch` and its kin). A model call goes through the shared gate as a core service, `ctx.model.chat` (SMD-2690 PR 3a), for smart-ingest's port and any plugin after it.
 
 ## Migration order
 
