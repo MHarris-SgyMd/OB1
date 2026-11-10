@@ -7244,14 +7244,126 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   assert(re === "Current first (prefer_current): 7 of the top 40 matches are settled, superseded or about finished tickets, their score ×0.25 before the priority ranking below orders them; 12 carry a lifecycle." && !/holding the query's literal|are demoted ones/.test(re ?? ""),
     `re-ranked, the current-first note says what the demotion did and not where the rows sit (${re})`);
   // The header note.
-  const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6 });
-  const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5 });
-  const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0 });
+  const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6, weights: null, span: 5.8 });
+  const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5, weights: null, span: null });
+  const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0, weights: null, span: 5.8 });
   assert(priorityNote(null) === null && priorityNote(undefined) === null
       && ranked === "Ranked by priority (priority_weight 0.5): the top 23 matches ordered by (1 − 0.5) × relevance + 0.5 × each one's own effective priority (a ticket's row reads as its ticket); 6 of them carry a known priority."
       && floored === "Read the top 40 matches for their priority; 5 of them carry a known priority; kept 2 at high (3) or above (min_priority, a known priority alone). A match past the top 40 was not read — raise limit to read further."
       && capped!.endsWith("kept 0 at urgent (4) or above (min_priority, a known priority alone). A match past the top 100 was not read — the window is capped at 100."),
     `the note: the blend and the known count; a floor's level and what it kept; a full window says a match past it was not read, and whether a larger limit reads further (${ranked} | ${floored} | ${capped})`);
+}
+
+console.log("\n[36c] A read's own priority weights in the core and the words (SMD-4193): the input's names those of the brain's defaults; the query string's weights[name]=value read by each weight's type, the document's deepObject; the database's refusal of them mapped to REFUSED_WEIGHTS naming the weight, any other fault left one; the agenda passing them, logging and echoing them, the text saying them; search refusing them without a ranking before it reads, reading its window, labels and span under them, and its note saying them; a brain before 131 named by the hint");
+{
+  const { PRIORITY_WEIGHT_NAMES, SPECS } = await import("./core/schemas.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const { weightsRefused } = await import("./core/weights.ts");
+  const { inputFromQuery } = await import("./rest/app.ts");
+  const { openApiDocument } = await import("./rest/openapi.ts");
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { z } = await import("zod");
+  // The names: the last migration defining ob1_priority_defaults, its literal's keys, every one and no other.
+  const migDir = new URL("../db/migrations/", import.meta.url);
+  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1);
+  const literal = definer ? /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))?.[1] : undefined;
+  let names: string[] = [];
+  try { names = Object.keys(JSON.parse(literal ?? "") as object).sort(); } catch { names = []; }
+  assert(names.length === 14 && JSON.stringify([...PRIORITY_WEIGHT_NAMES].sort()) === JSON.stringify(names),
+    `the input's weights are ${definer ?? "no migration"}'s defaults' names, every one and no other (${names.join(", ")} | ${PRIORITY_WEIGHT_NAMES.join(", ")})`);
+
+  // The query string: each weight its own parameter, read by its type; the bare field, a repeat, or a value of the wrong
+  // type refused, by the reader or by the schema naming the weight.
+  const agendaIn = z.object(SPECS.agenda.inputSchema).strict();
+  const viaQuery = (q: string) => {
+    const r = inputFromQuery("agenda", new URLSearchParams(q));
+    if ("problem" in r) return `problem: ${r.problem}`;
+    const p = agendaIn.safeParse(r.input);
+    return p.success ? JSON.stringify(p.data.weights ?? null) : p.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  };
+  const reads = ["weights[overdue]=3&weights[count_inferred]=true&weights[hops]=1", "weights=3", "weights[overdue]=3&weights[overdue]=4", "weights[overdu]=3", "weights[overdue]=11", "weights[hops]=1.5", "weights[count_inferred]=yes", "limit=5"].map(viaQuery);
+  assert(reads[0] === '{"hops":1,"overdue":3,"count_inferred":true}' && /^problem: weights is an object: give each of its fields as its own parameter, weights\[name\]=value$/.test(reads[1])
+      && /^problem: weights\[overdue\] is given more than once$/.test(reads[2]) && /^weights: .*overdu/.test(reads[3]) && /^weights\.overdue: /.test(reads[4])
+      && /^weights\.hops: /.test(reads[5]) && /^weights\.count_inferred: /.test(reads[6]) && reads[7] === "null",
+    `weights[name]=value read by each weight's type; the bare field, a repeat refused by the reader; an unknown name, a value out of range, a fraction for a whole number, a word for a boolean refused by the schema, naming the weight; none given, none read (${reads.join(" | ")})`);
+  const doc = openApiDocument() as { paths: Record<string, Record<string, { parameters?: { name: string; style?: string; explode?: boolean; schema?: { type?: string } }[] }>> };
+  const wp = doc.paths["/v1/agenda"]?.get?.parameters?.find((p) => p.name === "weights");
+  const lp = doc.paths["/v1/agenda"]?.get?.parameters?.find((p) => p.name === "limit");
+  assert(wp?.style === "deepObject" && wp.explode === true && wp.schema?.type === "object" && lp !== undefined && lp.style === undefined,
+    `the document gives the agenda's weights as a deepObject query parameter, which openapi-fetch sends as weights[name]=value; a plain field keeps the default style (${JSON.stringify(wp)?.slice(0, 120)})`);
+
+  // The database's refusal: 22023 in 122's words, the weights it names from the known names alone.
+  const raise = (message: string, errno = "22023") => Object.assign(new Error(message), { errno });
+  const W = { cap: 2 };
+  const capped = weightsRefused(raise("a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached"), W);
+  const ranged = weightsRefused(raise("a weight out of range: hops, overdue (count_inferred a boolean; hops a whole number 0 to 2, depth 0 to 5, cap 1 to 1000, soon_days, week_days and unblocks_many_at whole numbers to 366; every other a number 0 to 10)"), W);
+  const unknown = weightsRefused(raise("not a weight: overdu (the weights are cap, count_inferred, depth, hop, hops, overdue, soon, soon_days, unblocks_many, unblocks_many_at, unblocks_one, unknown, week, week_days)"), W);
+  const others = [weightsRefused(raise("an agenda's keys scope is 1 to 500 ticket keys, such as SMD-1234"), W), weightsRefused(raise("a weight out of range: cap is below unblocks_many_at", "42883"), W), weightsRefused(raise("a weight out of range: cap is below unblocks_many_at"), undefined)];
+  assert(capped?.code === "REFUSED_WEIGHTS" && capped.problem === "rule" && JSON.stringify(capped.named) === '["unblocks_many_at","cap"]'
+      && JSON.stringify(ranged?.named) === '["hops","overdue"]' && JSON.stringify(unknown?.named) === "[]" && /^not a weight: overdu/.test(unknown?.message ?? "")
+      && others.every((o) => o === null),
+    `122's refusal maps to REFUSED_WEIGHTS, naming the weights it names (the database's words in the message); another 22023, another code, or a read given no weights is no weights refusal (${JSON.stringify(capped?.named)} ${JSON.stringify(ranged?.named)} ${JSON.stringify(unknown?.named)} | ${others.join(",")})`);
+
+  // The agenda: the weights reach the store and the log, the answer echoes them (null without), the text says them, and
+  // the store's 22023 is REFUSED_WEIGHTS, said in the database's words.
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const asked: Record<string, unknown>[] = [];
+    const logged: unknown[][] = [];
+    const value = { items: [{ rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", statusType: "unstarted", effective: 5, level: 2, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 3, overdue: true, unblocks: 0, terms: [{ term: "level", value: 2, detail: {} }, { term: "overdue", value: 3, detail: {} }], winner: null, passedOver: [], claimed: [], lapsedClaim: [], blockers: [] }],
+                    total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 1, now: "2027-01-01T00:00:00.000Z", order: "priority" };
+    const ctx = (fail?: Error) => ({
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked.push(o); if (fail) throw fail; return value; } }),
+      logAgenda: async (...a: unknown[]) => { logged.push(a); },
+    });
+    const P = { name: "k", scope: "read", agentId: "a1" } as never;
+    const base = { limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false, order: "priority" };
+    const weighed = await agendaRead(ctx() as never, P, { ...base, weights: { overdue: 3 } } as never);
+    const plain = await agendaRead(ctx() as never, P, base as never);
+    const refused = await agendaRead(ctx(raise("a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached")) as never, P, { ...base, weights: { cap: 2 } } as never)
+      .catch((e: Error) => ({ ok: true as const, value: null, thrown: e.message }));
+    const fault = await agendaRead(ctx(raise("a weight out of range: cap is below unblocks_many_at")) as never, P, base as never).then(() => "answered", (e: Error) => e.message);
+    const saidWeighed = weighed.ok ? text(say.renderAgenda(weighed as never)) : "";
+    const saidPlain = plain.ok ? text(say.renderAgenda(plain as never)) : "";
+    const saidRefused = refused.ok ? `not refused: ${(refused as { thrown?: string }).thrown ?? "answered"}` : text(say.renderAgenda(refused as never));
+    assert(JSON.stringify(asked[0]?.weights) === '{"overdue":3}' && !("weights" in (asked[1] ?? {})) && JSON.stringify((logged[0]?.[1] as Record<string, unknown> | undefined)?.weights) === '{"overdue":3}'
+        && !("weights" in ((logged[1]?.[1] as Record<string, unknown> | undefined) ?? {}))
+        && weighed.ok && JSON.stringify((weighed.value as { weights: unknown }).weights) === '{"overdue":3}' && plain.ok && (plain.value as { weights: unknown }).weights === null
+        && /\nUnder this call's weights, overdue 3 \(the rest the brain's defaults\): a term may cross a level\.\n/.test(saidWeighed) && !/Under this call's weights/.test(saidPlain)
+        && !refused.ok && /^Refused: a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached$/.test(saidRefused)
+        && /cap is below/.test(fault),
+      `the agenda passes the weights to the store and the log and echoes them, null without; the text says them; 122's refusal is REFUSED_WEIGHTS in its words, and the same error without weights stays a fault (${JSON.stringify(asked.map((a) => a.weights ?? null))} | ${saidWeighed.split("\n").find((l: string) => l.startsWith("Under")) ?? "no line"} | ${saidRefused})`);
+  }
+
+  // Search: weights with no ranking refused before anything is read; with one, the window read, the labels and the span
+  // take them; the database's refusal from either read is REFUSED_WEIGHTS; the note says them and the scale.
+  {
+    const { searchThoughts, readPriorities, priorityOf } = await import("./core/reads.ts");
+    let touched = 0;
+    const untouched = { store: async () => { touched++; return {}; } } as never;
+    const unranked = await searchThoughts(untouched, { name: "k", scope: "read" } as never, { query: "q", limit: 10, threshold: 0.3, recency_weight: 0, prefer_current: false, priority_weight: 0, weights: { overdue: 3 } } as never)
+      .catch((e: Error) => ({ ok: true as const, value: null, thrown: e.message }));
+    const saidUnranked = unranked.ok ? `not refused: ${(unranked as { thrown?: string }).thrown ?? "answered"}` : text(say.renderSearchThoughts(unranked as never, false));
+    assert(!unranked.ok && (unranked as { refusal: { code: string; problem: string } }).refusal.problem === "unranked" && touched === 0
+        && /^Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither/.test(saidUnranked),
+      `weights with neither priority_weight above 0 nor min_priority are refused, before the store is touched, said in words (${saidUnranked})`);
+    const calls: { items: number; opts: unknown }[] = [];
+    const store = { effectivePriority: async (items: unknown[], opts?: unknown) => { calls.push({ items: items.length, opts: opts ?? null }); return []; } };
+    await readPriorities(store as never, [{ id: "t1", content: "x" }], { tickets: false, weights: { overdue: 3 } });
+    await readPriorities(store as never, [{ id: "t2", content: "x" }], { tickets: false });
+    await priorityOf(store as never, [{ id: "t3", content: "on SMD-5" }], new Map(), { soon: 2 });
+    assert(JSON.stringify(calls.map((c) => c.opts)) === '[{"weights":{"overdue":3}},null,{"weights":{"soon":2}}]',
+      `the window read and the label read pass the call's weights to the store, and a read without them calls it as before (${JSON.stringify(calls)})`);
+    const { priorityNote, priorityHint } = await import("./render.ts");
+    const noted = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6, weights: { overdue: 3, soon: 2 }, span: 8 });
+    const floorOnly = priorityNote({ weight: 0, min: 3, window: 40, read: 12, kept: 2, known: 5, weights: { overdue: 3 }, span: null });
+    assert(noted?.endsWith(" Under this call's weights, overdue 3, soon 2 (the rest the brain's defaults), the blend's scale 8; a term may cross a level.") === true
+        && floorOnly?.endsWith(" Under this call's weights, overdue 3 (the rest the brain's defaults); a term may cross a level.") === true,
+      `the note says the call's weights and, when a weight blended, the scale divided by (${noted} | ${floorOnly})`);
+    assert(/migration 131/.test(priorityHint("function ob1_priority_span(jsonb) does not exist")) && /migration 128/.test(priorityHint("function ob1_priority_span() does not exist")),
+      "a brain before 131 is named for a weighted blend's missing span; one before 128 still for the plain span");
+  }
 }
 
 console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2): one read for the page, a row's own thought and the tickets it is filed under or names (the first 50); only a known priority labelled, itself first then the most pressing, ten named and the rest counted; a ticket's own row once, as its ticket; the read's reach of 1000 counted, not exceeded; a failed read null and said; the line, the field and the titles");

@@ -18755,7 +18755,7 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
   // commented; effective_priority reads the defaults and holds no literal.
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
-      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') ORDER BY 1`)).rows;
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') AND p.pronargs = 0 ORDER BY 1`)).rows;  // 128's; 131's span of a read's weights is [118]'s
   const def = (await db.query<{ d: string }>(`SELECT pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0].d;
   assert(fns.length === 2 && fns.every((f) => f.v === "s" && /Migration 128 \/ SMD-4194/.test(f.c ?? "")) && /c_defaults CONSTANT jsonb := ob1_priority_defaults\(\);/.test(def) && !/"overdue":/.test(def),
     `ob1_priority_defaults and ob1_priority_span are STABLE and commented; effective_priority reads its defaults from the function and holds no literal (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
@@ -19174,6 +19174,51 @@ console.log("\n[117] Migration 129: the agenda takes an order — priority, the 
   // A re-apply is a no-op: the same reads.
   await reapply(file.slice(0, 4));
   assert(strip(await ten("due")) === strip(byDue) && strip(await nine()) === strip(byNine), "a re-apply is a no-op: the same reads under both orders");
+}
+
+console.log("\n[118] Migration 131: the span under a read's own weights — ob1_priority_span(jsonb), 128's composition over the defaults with the weights laid over them, NULL the defaults' span; a bad weight refused 22023 by effective_priority's rule, naming it, cap below unblocks_many_at among them; 128's ob1_priority_span() unchanged; query_log.filter's comment names the agenda row's weights; the shape; a re-apply a no-op (SMD-4193)");
+{
+  const file = files.find((f) => /^\d{3}_priority_span_weights\.sql$/.test(f)) ?? "no NNN_priority_span_weights.sql";
+  await reapply(file.slice(0, 4));
+  // 122's own weights (migration 122, before SMD-4177 scaled the terms by 0.2).
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const span = async (w: unknown) =>
+    String((await db.query<{ s: string | null }>(`SELECT ob1_priority_span($1::jsonb)::text AS s`, [w === null ? null : JSON.stringify(w)])).rows[0].s);
+  const span0 = async () => String((await db.query<{ s: string | null }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s);
+
+  // The shape: 128's function and 131's beside it, both STABLE, each commented by its migration.
+  const fns = (await db.query<{ a: string; v: string; c: string | null }>(
+    `SELECT pg_get_function_identity_arguments(p.oid) AS a, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname = 'public' AND p.proname = 'ob1_priority_span' ORDER BY 1`)).rows;
+  assert(fns.length === 2 && fns[0].a === "" && fns[1].a === "p_weights jsonb" && fns.every((f) => f.v === "s")
+         && /Migration 128 \/ SMD-4194/.test(fns[0].c ?? "") && /Migration 131 \/ SMD-4193/.test(fns[1].c ?? ""),
+    `ob1_priority_span() is 128's and ob1_priority_span(jsonb) 131's, both STABLE and commented (${fns.map((f) => `(${f.a}):${f.v}`).join(", ")})`);
+
+  // The values: the defaults' span with none or none overridden; 122's weights 5 + overdue 3 + unblocks_many 1; unknown
+  // past a critical level taken; every term zeroed leaves the level's 5. 128's function unchanged.
+  const vals = [await span(null), await span({}), await span(W122), await span({ unknown: 7 }), await span({ soon: 0, week: 0, overdue: 0, unblocks_one: 0, unblocks_many: 0 }), await span({ soon: 4 }), await span0()].map(Number);
+  assert(vals.join(" ") === "5.8 5.8 9 7.8 5 9.2 5.8",
+    `the span: the defaults' 5.8 for NULL and {}, 9 under 122's weights, 7.8 with unknown 7, 5 with every term zeroed, 9.2 with soon 4 (the largest urgency term), and ob1_priority_span() still 5.8 (${vals.join(" ")})`);
+
+  // Refused 22023 by effective_priority's own rule, in its words, naming the weight.
+  const refusal = async (w: unknown) => {
+    try { await span(w); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split(" (")[0]}`; }
+  };
+  const refused = [await refusal({ overdu: 1 }), await refusal({ overdue: 11 }), await refusal({ hops: 1.5 }), await refusal({ cap: 2 }), await refusal([])];
+  assert(refused[0] === "22023 not a weight: overdu" && refused[1] === "22023 a weight out of range: overdue" && refused[2] === "22023 a weight out of range: hops"
+         && /^22023 a weight out of range: cap is below unblocks_many_at/.test(refused[3]) && /^22023 effective_priority's weights are a JSON object/.test(refused[4]),
+    `a bad weight is refused 22023 in effective_priority's words, naming it: an unknown name, a value out of range, a fraction where a whole number goes, cap below the default unblocks_many_at, an array (${refused.join(" | ")})`);
+
+  // query_log.filter's comment names the agenda row's weights, and keeps 129's order and 126's plan_context row.
+  const filterComment = async () => (await db.query<{ f: string | null }>(
+    `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
+  const comment = await filterComment();
+  assert(/the weights it overrode, when it passed any \(migration 131\)/.test(comment) && /its order \(priority or due; migration 129\)/.test(comment) && /On a plan_context row/.test(comment),
+    `query_log.filter's comment names the agenda row's weights, and keeps its order and plan_context's row (${comment.slice(-200)})`);
+
+  // A re-apply is a no-op: the same spans, the same comment.
+  await reapply(file.slice(0, 4));
+  assert(Number(await span(W122)) === 9 && Number(await span0()) === 5.8 && (await filterComment()) === comment, "a re-apply is a no-op: the same spans, the same comment");
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

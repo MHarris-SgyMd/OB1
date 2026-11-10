@@ -89,6 +89,11 @@ export type Refusal =
   // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
   | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
   | { code: "ORDER_UNAVAILABLE"; retryable: false } // order due on a brain before migration 129 (SMD-4192), whose agenda has the priority order alone
+  // A read's own priority weights (SMD-4193): the agenda's and search_thoughts'. `rule`: the database refused them by
+  // 122's rule (SQLSTATE 22023; the schema refuses a name or a range first, so in practice cap below
+  // unblocks_many_at), message its words, naming the weight; `unranked`: search_thoughts given weights with neither
+  // priority_weight above 0 nor min_priority, so nothing would read them. `named`: the weights the refusal names.
+  | { code: "REFUSED_WEIGHTS"; retryable: false; problem: "rule" | "unranked"; message: string; named: string[] }
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
   | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
@@ -202,6 +207,8 @@ const FACTS: Facts = {
   CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
   CLAIMS_UNREADABLE: none,
   ORDER_UNAVAILABLE: none,
+  // The weights it names, from the known names alone: the database's words ride the text.
+  REFUSED_WEIGHTS: (r) => ({ problem: r.problem, named: r.named }),
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),
