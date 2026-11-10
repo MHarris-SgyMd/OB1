@@ -6165,12 +6165,13 @@ if (want("10")) {
   // recorded. Before, every one was recorded failed, the follower running on. A trigger on thought_entities raises them
   // for a marker in the thought's text.
   {
-    await sql.unsafe(`CREATE FUNCTION zz_extract_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE c text; BEGIN
+    const raises = (deadlock: boolean) => `CREATE OR REPLACE FUNCTION zz_extract_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE c text; BEGIN
         SELECT content INTO c FROM thoughts WHERE id = NEW.thought_id;
-        IF c LIKE '%zz-write-deadlock%' THEN RAISE EXCEPTION 'zz: deadlock detected' USING ERRCODE = '40P01'; END IF;
+        ${deadlock ? "IF c LIKE '%zz-write-deadlock%' THEN RAISE EXCEPTION 'zz: deadlock detected' USING ERRCODE = '40P01'; END IF;" : ""}
         IF c LIKE '%zz-write-timeout%' THEN RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
         IF c LIKE '%zz-write-guard%' THEN RAISE EXCEPTION 'zz: a guard refused this write' USING ERRCODE = 'P0001'; END IF;
-        RETURN NEW; END $$;
+        RETURN NEW; END $$`;
+    await sql.unsafe(`${raises(true)};
       CREATE TRIGGER zz_extract_write_error BEFORE INSERT ON thought_entities FOR EACH ROW EXECUTE FUNCTION zz_extract_write_error()`);
     const statusOf = async (id: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined);
     const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { ended?: boolean; outcome?: string };
@@ -6188,11 +6189,7 @@ if (want("10")) {
       deadlockSaid = await pollUntil(async () => lines.some((l) => new RegExp(`the write met the database's moment \\(zz: deadlock detected\\) — ${deadlock} goes back to the pool unrecorded`).test(l)), 20_000);
       deadlockHeld = await statusOf(deadlock);
       // The lock gone — the trigger's deadlock clause dropped — the next poll extracts it.
-      await sql.unsafe(`CREATE OR REPLACE FUNCTION zz_extract_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE c text; BEGIN
-          SELECT content INTO c FROM thoughts WHERE id = NEW.thought_id;
-          IF c LIKE '%zz-write-timeout%' THEN RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
-          IF c LIKE '%zz-write-guard%' THEN RAISE EXCEPTION 'zz: a guard refused this write' USING ERRCODE = 'P0001'; END IF;
-          RETURN NEW; END $$`);
+      await sql.unsafe(raises(false));
       deadlockDone = await pollUntil(async () => (await statusOf(deadlock))?.status === "succeeded", 20_000);
       guard = await seed("Anita migrated the zz-write-guard service last week.");
       guardFailed = await pollUntil(async () => (await statusOf(guard))?.status === "failed", 20_000);
