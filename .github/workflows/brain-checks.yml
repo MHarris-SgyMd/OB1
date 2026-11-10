@@ -265,6 +265,12 @@ jobs:
       # link. No network and no key; the live run that calls it is cut 2c-3.
       - name: The agent runner's claim client
         run: bun scripts/agent-runner/claims-check.ts --self-check
+      # SMD-4087 cut 2c-2: the runner's Linear moves on a stubbed GraphQL client —
+      # the move to In Progress at the claim, and the hand-back to Backlog
+      # (relabelled for a person on a work failure, the label kept on an
+      # environment failure). No key; the live run that calls it is cut 2c-3.
+      - name: The agent runner's Linear moves
+        run: bun scripts/agent-runner/board-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.

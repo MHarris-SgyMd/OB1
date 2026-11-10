@@ -1187,6 +1187,14 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
   }
 
+  // SMD-4194: 128's span, the largest effective priority the brain's defaults allow, read as text (numeric).
+  async prioritySpan(): Promise<number> {
+    const [r] = (await this.sql`SELECT ob1_priority_span()::text AS span`) as { span: string }[];
+    const span = Number(r?.span);
+    if (!Number.isFinite(span) || span <= 0) throw new Error("ob1_priority_span answered no span this server reads");
+    return span;
+  }
+
   // SMD-3669, SMD-4162: 124's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
   async agenda(opts: {
     scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
