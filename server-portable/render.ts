@@ -2500,10 +2500,12 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     const blocks = hitBlocks(k.hits, literal).map((b, i) => {
       const h = k.hits[i];
       if (h.contentChars <= h.content.length) return b;
-      // An exact match past the head is in the whole text, not in what is shown (review pass 1).
+      // An exact match past the head is in the whole text, not in what is shown (review pass 1); a shown one stays said
+      // as shown (review pass 2). Lower-cased as the search's ILIKE folds ASCII, which keys and quoted spans are.
       const shown = h.content.toLowerCase();
-      const past = h.matchedNeedles.some((n) => !shown.includes(n.toLowerCase()));
-      return `${past ? b.replace(/^Contains: /m, "Contains (in the whole text, past what is shown): ") : b}\n… cut at ${h.content.length} of ${h.contentChars} characters: fetch ${h.id} for the whole text.`;
+      const inHead = h.matchedNeedles.filter((n) => shown.includes(n.toLowerCase())), past = h.matchedNeedles.filter((n) => !shown.includes(n.toLowerCase()));
+      const contains = [inHead.length ? `Contains: ${inHead.join(", ")}` : null, past.length ? `Contains (in the whole text, past what is shown): ${past.join(", ")}` : null].filter(Boolean).join("\n");
+      return `${past.length ? b.replace(/^Contains: .*$/m, contains) : b}\n… cut at ${h.content.length} of ${h.contentChars} characters: fetch ${h.id} for the whole text.`;
     });
     out.push(...notes, "", blocks.join("\n\n"));
   }

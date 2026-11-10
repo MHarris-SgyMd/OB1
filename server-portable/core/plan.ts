@@ -39,17 +39,30 @@ export const BOARD_KEYS = 500;
 export const BOARD_LIMIT = 100;
 
 /**
- * The reply's budget (SMD-4191: one canary answer ran to 63,108 characters for 8 hits): about 16,000 characters at the
- * default 8 hits, and under 40,000 at the most a read can be — 20 hits with every label, and every list full. Every cap here is applied in
+ * The reply's budget (SMD-4191: one canary answer ran to 63,108 characters for 8 hits): about 15,500 characters for that
+ * answer's shape at the default 8 hits, 17,200 with claims and every hit's topics; every list capped by count and every
+ * item by length, so a reply is bounded — the largest shape tested, 20 hits and every list full of items at their
+ * longest, comes to about 52,000. Every cap here is applied in
  * the core, so REST and MCP still give one record, and each cut is counted in the `trimmed` gap.
  * - HIT_TEXT_BUDGET: the knowledge's text, shared across the hits, each at least HIT_TEXT_MIN, cut to its head;
  * - HIT_LABELS: a hit's labels, past which the rest are counted in its `…More`, as search_thoughts counts its own;
  * - BOARD_SHOWN: the open tickets listed, the rest counted; BOARD_TITLE: a title's characters;
  * - OTHERS_TITLED: the settled and unknown-type tickets listed with their titles, the rest by key and status.
  */
-export const HIT_TEXT_BUDGET = 1_400;
+export const HIT_TEXT_BUDGET = 1_200;
 export const HIT_TEXT_MIN = 100;
 export const HIT_LABELS = { claimed: 2, relations: 2, priority: 3 } as const;
+/**
+ * The lists a thought's metadata and a board line carry (review pass 2: an importer's 30 topics on every hit made a
+ * reply of 220,703 characters, and 12 blockers on every open ticket 59,058): a hit's topics, people and action items,
+ * and an open ticket's blockers and its live and lapsed claims' holders, each to its first few, the cut counted.
+ */
+export const HIT_META = { topics: 3, people: 3, action_items: 2 } as const;
+/** A metadata item's characters, past which it is cut (the block's own one-line caps are 80 and 200). */
+export const HIT_META_ITEM = 60;
+export const TICKET_LABELS = { blockers: 3, claimed: 1, lapsedClaim: 1 } as const;
+/** A holder's name and a blocker's identity on a board line, past which they are cut. */
+export const TICKET_LABEL_ITEM = 40;
 export const BOARD_SHOWN = 15;
 export const BOARD_TITLE = 72;
 export const OTHERS_TITLED = 5;
@@ -94,8 +107,16 @@ export function budgetPlan(v: Omit<PlanContextResult, "knowledge"> & { knowledge
     const relations = capped(h.relations, h.relationsMore ?? 0, HIT_LABELS.relations);
     const priority = capped(h.priority, h.priorityMore ?? 0, HIT_LABELS.priority);
     trimmed.labels += claimed.cut + relations.cut + priority.cut;
+    // The metadata lists the block prints, each to its first few (a copy: the thought's own metadata is untouched).
+    const metadata: Record<string, unknown> = { ...(h.metadata ?? {}) };
+    for (const [k, n] of Object.entries(HIT_META)) {
+      const list = metadata[k];
+      if (!Array.isArray(list)) continue;
+      if (list.length > n) trimmed.labels += list.length - n;
+      metadata[k] = list.slice(0, n).map((x) => (typeof x === "string" && x.length > HIT_META_ITEM ? `${headOf(x, HIT_META_ITEM - 1)}…` : x));
+    }
     return {
-      ...h, content: headOf(h.content, share), contentChars,
+      ...h, metadata, content: headOf(h.content, share), contentChars,
       claimed: claimed.list, claimedMore: claimed.more, relations: relations.list, relationsMore: relations.more, priority: priority.list, priorityMore: priority.more,
     };
   });
@@ -105,7 +126,16 @@ export function budgetPlan(v: Omit<PlanContextResult, "knowledge"> & { knowledge
     // Past the list, by key (review pass 1: the agenda tool takes no keys, so a cut ticket was out of reach).
     const moreOpen = board.tickets.slice(BOARD_SHOWN).map((t) => t.key);
     trimmed.tickets = moreOpen.length;
-    const tickets = shown.map((t) => { const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title }; });
+    const tickets = shown.map((t) => {
+      const c = shortTitle(t.title);
+      if (c.cut) trimmed.titles++;
+      // A line's blockers and holders to their first few, the cut counted (review pass 2).
+      const item = (x: string) => (x.length > TICKET_LABEL_ITEM ? `${headOf(x, TICKET_LABEL_ITEM - 1)}…` : x);
+      const cut = { blockers: t.blockers.slice(0, TICKET_LABELS.blockers).map(item), claimed: t.claimed.slice(0, TICKET_LABELS.claimed).map((c) => ({ ...c, holder: item(c.holder) })),
+                    lapsedClaim: t.lapsedClaim.slice(0, TICKET_LABELS.lapsedClaim).map((c) => ({ ...c, holder: item(c.holder) })) };
+      trimmed.labels += t.blockers.length - cut.blockers.length + t.claimed.length - cut.claimed.length + t.lapsedClaim.length - cut.lapsedClaim.length;
+      return { ...t, ...cut, title: c.title };
+    });
     const waitingMore = Math.max(0, board.waiting.length - WAITING_LISTED);
     const waiting = board.waiting.slice(0, WAITING_LISTED).map((t) => { const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title }; });
     const othersMore = Math.max(0, board.others.length - OTHERS_LISTED);

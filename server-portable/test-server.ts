@@ -7375,7 +7375,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     "a gap for no hit, every hit superseded, every hit ingested, and no vector; none on a mixed page");
 
   // The board: one agenda call over the keys, every flag on, the time left as its timeout; each way it is not read a gap.
-  const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3, title: "T" }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
+  const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3, title: "T", blockers: [], claimed: [], lapsedClaim: [] }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
                    keyed: { others: [{ key: "SMD-12", title: "T", status: "Done", statusType: "completed", settled: true }], waiting: [], missing: ["OPS-3"] }, now: "2027-01-01T00:00:00.000Z" };
   let asked: Record<string, unknown> | null = null, calls = 0;
   const store = (f: (o: Record<string, unknown>) => unknown) => ({ store: async () => ({ agenda: async (o: Record<string, unknown>) => { calls++; asked = o; return f(o); } }) }) as never;
@@ -7476,7 +7476,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       const search = async (_c: unknown, _p: unknown, q: { limit: number }) => { askedLimit = q.limit; t += 2500; return { rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) }; };
       return planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => t, search: search as never });
     };
-    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4, title: "T22" }, { kind: "ticket", key: "SMD-21", effective: 2, title: "T21" }], keyed: { others: [], waiting: [], missing: [] } };
+    const board2 = { ...answer, items: [{ kind: "ticket", key: "SMD-22", effective: 4, title: "T22", blockers: [], claimed: [], lapsedClaim: [] }, { kind: "ticket", key: "SMD-21", effective: 2, title: "T21", blockers: [], claimed: [], lapsedClaim: [] }], keyed: { others: [], waiting: [], missing: [] } };
     const good = await run(() => board2);
     const goodLog = logged[0];
     const origErr = console.error;
@@ -7530,9 +7530,11 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     const g = v.gaps.find((x) => x.gap === "trimmed") as { hitText: number; labels: number; tickets: number; titles: number } | undefined;
     const share = Math.floor(HIT_TEXT_BUDGET / 8);
     const h0 = v.knowledge.hits[0];
-    const withClaims = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], claimed: Array.from({ length: 4 }, (_, j) => claim(j)) }, ...hits.slice(1)] } } as never);
+    const withClaims = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], claimed: Array.from({ length: 4 }, (_, j) => claim(j)) }, ...hits.slice(1)]
+      .map((h) => ({ ...h, metadata: { ...h.metadata, topics: ["SMD-1", "agenda", "plan", "board", "review"], people: ["maintainer"], action_items: ["review for issues"] } })) } } as never);
     const c0 = withClaims.knowledge.hits[0];
-    assert(size(before) > 40_000 && size(r) < 16_000
+    const withClaimsSize = size(say.renderPlanContext({ ok: true, value: withClaims } as never));
+    assert(size(before) > 40_000 && size(r) < 16_000 && withClaimsSize < 18_000
         && h0.content.length === share && h0.contentChars === 3000 && h0.relations?.length === HIT_LABELS.relations && h0.relationsMore === 4 && c0.claimed?.length === HIT_LABELS.claimed && c0.claimedMore === 2
         && h0.priority?.length === HIT_LABELS.priority && h0.priorityMore === 2
         && v.board.available && v.board.tickets.length === BOARD_SHOWN && v.board.tickets[0].title.length === BOARD_TITLE && v.board.others.filter((o) => o.title !== "").length === OTHERS_TITLED
@@ -7540,7 +7542,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && t.includes(`… cut at ${share} of 3000 characters: fetch ${id(0)} for the whole text.`) && /\n- and 28 more: SMD-4005 \("Done"\), SMD-4006/.test(t)
         && /- Cut to keep this reply readable: 8 hits' text to its head .*3 open tickets past the board's first 15, listed by key alone/.test(t) && /- and 3 more open, in agenda order: SMD-3015, SMD-3016, SMD-3017\./.test(t) && !/"relation":"related"/.test(sc) && !/"holder"/.test(sc) && /"contentChars":3000,"moved":0,"claimed":0,"relations":6,"priority":5/.test(sc)
         && /"settled":\["SMD-4000","SMD-4001"/.test(sc),
-      `a canary-sized answer held to its budget: ${size(before)} → ${size(r)} characters; each cut counted (${JSON.stringify(g)})`);
+      `a canary-sized answer held to its budget: ${size(before)} → ${size(r)} characters, ${withClaimsSize} with claims and metadata; each cut counted (${JSON.stringify(g)})`);
     // Under the caps nothing is cut and no trimmed gap is said.
     const small = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "short", claimed: [], relations: [], priority: [] }] }, board: { ...raw.board, tickets: [{ ...ticket(0), title: "SMD-3000 — short" }], others: [] } } as never);
     assert(!small.gaps.some((x) => x.gap === "trimmed") && small.knowledge.hits[0].content === "short" && small.knowledge.hits[0].contentChars === 5,
@@ -7549,13 +7551,18 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     // 400 settled, 100 waiting and 300 missing tickets. The open tickets past 15 by key; the rest counted.
     const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
     const huge = budgetPlan({ ...raw,
-      knowledge: { ...raw.knowledge, hits: many(20, (i) => ({ ...hits[i % 8], id: id(i), content: long(60_000, `huge-${i}`), claimed: many(12, claim), claimedMore: 0 })) },
-      board: { ...raw.board, tickets: many(100, ticket), others: many(400, settled), waiting: many(100, (i) => ({ key: `SMD-${5000 + i}`, title: long(200, "w"), status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" })) },
+      knowledge: { ...raw.knowledge, hits: many(20, (i) => ({ ...hits[i % 8], id: id(i), content: long(60_000, `huge-${i}`), claimed: many(12, claim), claimedMore: 0,
+        metadata: { ...hits[0].metadata, topics: many(30, (j) => long(80, `t${j}`)), people: many(30, (j) => long(80, `p${j}`)), action_items: many(20, (j) => long(200, `a${j}`)) } })) },
+      board: { ...raw.board, tickets: many(100, (i) => ({ ...ticket(i), blockers: many(12, (j) => long(80, `B-${j}`)), claimed: many(3, (j) => ({ holder: long(200, `h${j}`), piece: null, label: null, at: "2027-01-01T00:00:00.000Z" })),
+                                                        lapsedClaim: many(3, (j) => ({ holder: long(200, `l${j}`), piece: null, label: null, at: "2026-01-01T00:00:00.000Z" })) })), others: many(400, settled), waiting: many(100, (i) => ({ key: `SMD-${5000 + i}`, title: long(200, "w"), status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" })) },
       gaps: [{ gap: "tickets_missing", keys: many(300, (i) => `SMD-${6000 + i}`) }] } as never);
     const hr = say.renderPlanContext({ ok: true, value: huge } as never);
-    const hg = huge.gaps.find((x) => x.gap === "trimmed") as { tickets: number; unlisted: number } | undefined;
+    const hg = huge.gaps.find((x) => x.gap === "trimmed") as { tickets: number; unlisted: number; labels: number } | undefined;
     const hm = huge.gaps.find((x) => x.gap === "tickets_missing") as { keys: string[]; more?: number } | undefined;
-    assert(size(hr) < 40_000 && hg?.tickets === 85 && hg?.unlisted === 360 + 90 + 280 && hm?.keys.length === 20 && hm?.more === 280
+    // Labels cut: per hit 10 claims, 3 relations, 2 priorities, 27 topics, 27 people and 18 actions; per shown open ticket 9 blockers and 2 + 2 holders.
+    const ht = huge.board.available ? huge.board.tickets[0] : null;
+    assert(size(hr) < 55_000 && ht?.blockers.length === 3 && ht.blockers.every((b) => b.length <= 40) && ht.claimed.length === 1 && ht.claimed[0].holder.length <= 40 && ht.lapsedClaim[0].holder.length <= 40
+        && hg?.tickets === 85 && hg?.unlisted === 360 + 90 + 280 && hg?.labels === 20 * (10 + 3 + 2 + 27 + 27 + 18) + 15 * (9 + 2 + 2) && hm?.keys.length === 20 && hm?.more === 280
         && /- and 85 more open, in agenda order: SMD-3015, SMD-3016/.test(text(hr)) && /Not ranked \(400\):/.test(text(hr)) && /- and 360 more, not listed\./.test(text(hr))
         && /Named but not in the brain: SMD-6000, .* and 280 more\./.test(text(hr)),
       `the worst the reach allows is bounded (${size(hr)} characters): open tickets past 15 by key, the other lists past their first few counted (${JSON.stringify(hg)})`);
@@ -7568,6 +7575,10 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     assert(headOf("ab😀", 3) === "ab" && headOf("ab😀", 4) === "ab😀" && !cutEmoji.knowledge.hits.some((h) => lone.test(h.content)) && cutEmoji.board.available && !lone.test(cutEmoji.board.tickets[0].title)
         && !lone.test(text(ce)) && /Contains \(in the whole text, past what is shown\): SMD-77/.test(text(ce)),
       "a cut through an emoji drops the whole character, in a hit's text and in a title; an exact match past the head is said to be in the whole text");
+    // An exact match in the head is said as shown, one past it as in the whole text (review pass 2: all were said past).
+    const split = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "SMD-1 " + "x".repeat(3000) + " SMD-2", matchedNeedles: ["SMD-1", "SMD-2"] }] } } as never);
+    const st = text(say.renderPlanContext({ ok: true, value: split } as never));
+    assert(/\nContains: SMD-1\nContains \(in the whole text, past what is shown\): SMD-2\n/.test(st), `a shown match said as shown, one past the head as in the whole text (${st.match(/Contains.*\n.*/)?.[0]})`);
     // A budget cut is no coverage gap: with nothing else found, the weighing line still stands.
     assert(/- Nothing else found\. How close the hits are to the request is each hit's match/.test(t), "with only a cut among the gaps, the reply still says nothing else was found and to weigh the hits");
   }
