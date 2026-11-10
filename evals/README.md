@@ -4897,6 +4897,37 @@ as pre-registered). A level now decides the place, and urgency and unblocks orde
 So the Verify still fails on SMD-2908, for the same reason: its deadline was never stated where the agenda reads.
 Level first narrows the gap from five tickets ahead of it to two.
 
+## Does the inferred priority match the operator's reading? (SMD-3670)
+
+`eval-inferred-priority.ts`, its rules in `inferred-priority.ts`. With `OB1_INFER_PRIORITY` on, a capture asks the
+metadata model for the level and the due day its text states, and states them inferred (tier 4, SMD-3670 PR 1).
+`effective_priority` passes them over until this measurement clears its bar (`count_inferred`, PR 3).
+
+```bash
+bun eval-inferred-priority.ts --self-check     # the rules, the registration's hash and the fixture's shape; no database, no model
+bun eval-inferred-priority.ts --print-sql      # the population's SQL, for a brain whose database only a container reaches
+bun eval-inferred-priority.ts --run <run.jsonl> --texts <texts.jsonl>          # the shipped inferPriority over every text
+bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> --texts <texts.jsonl>   # the blind labelling sheet
+bun eval-inferred-priority.ts --freeze <run.jsonl> <gold.md> <second.md> --note "…"     # → fixtures/inferred-priority.json
+bun eval-inferred-priority.ts                  # the report and the verdict, from the fixture
+```
+
+* **The population** is every current thought written through the capture path (`actor_kind` agent): an ingested row
+  never reaches the inference. On stable, 2026-11-10, that is 1,394 thoughts, 1,262 of them session-hook summaries.
+* **The draw** is 60 of the texts the model read a level or a due day from (calls) and 60 it read nothing from
+  (others), by a hash of a fixed seed, shuffled together. The operator labels the sheet blind (the text and its capture
+  day, never the model's answer) and a second blind rater labels a copy for a κ. The operator's labels are the gold.
+* **The bar** (the maintainer, 2026-11-10, registered before any label was read): at least 0.80 of the level calls
+  carry a level the operator read, at least 0.90 of the due calls a day the operator read, and fewer than 0.05 of the
+  level calls are High where the operator read no level, each half on at least 10 calls. Misses carry no bar: a miss
+  leaves unknown, which counts as Medium.
+* **The registration** is `inferred-priority.ts` from "The registration" to "End of the registered section", hashed and
+  pinned (`1239b47ca93a5870`) before the sheet was drawn. The conventions the raters label by are in it, the
+  maintainer's call on a quoted ticket label (a citation, not a stated level) among them.
+
+The run file holds the model's phrases and the sheet the text, so both are refused inside the repo; the fixture holds
+ids and numbers only.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
