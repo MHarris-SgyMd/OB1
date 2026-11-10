@@ -30,6 +30,7 @@ import { listCursor, parseRelationsCursor, relationsCursor, threadCursor } from 
 import * as say from "./render.ts";
 import { REFUSAL_STATUS } from "./rest/app.ts";
 import { TOOL_NAMES } from "./tools.ts";
+import { INFER_PROMPT } from "./priority-infer.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { checkerOver, subjectHash, tokenSettings } from "./oauth-token.ts";
 
@@ -52,6 +53,7 @@ const STUB_BASE = "https://stub.invalid/v1";
 const KNOWN: Record<string, number> = { alpha: 0, beta: 1, gamma: 2 };
 const axisFor = (text: string) => KNOWN[Object.keys(KNOWN).find((k) => text.toLowerCase().includes(k)) ?? ""] ?? 3;
 const realFetch = globalThis.fetch;
+let inferCalls = 0;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
@@ -60,6 +62,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const v = new Array(EMBEDDING_DIM).fill(0);
       v[axisFor(String(body.input))] = 1;
       return new Response(JSON.stringify({ data: [{ embedding: v }] }), { headers: { "Content-Type": "application/json" } });
+    }
+    // The priority inference's call (SMD-3670's [20]): a capture marked "[20]" whose text says "Urgent" reads High on it,
+    // due "by Friday"; any other text reads nothing. Counted, so a capture with the knob off is seen to make none.
+    if (body.messages?.[0]?.content === INFER_PROMPT) {
+      inferCalls++;
+      const said = String(body.messages[1]?.content ?? "");
+      const answer = said.includes("[20]") && said.includes("Urgent") ? { level: "urgent", level_phrase: "Urgent", due_phrase: "by Friday", due_date: null } : { level: null };
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(answer) } }] }), { headers: { "Content-Type": "application/json" } });
     }
     // A capture marked "rho: remind me" reads action items (SMD-3665 PR 3a's [15]): a repeat in another case, a blank and a number among them;
     // one marked "rho: a long list" reads 25 texts, each twice in two cases, so the 20 proposed are 20 distinct.
@@ -80,6 +90,7 @@ process.env.MCP_ACCESS_KEY = "legacy-raw"; // the legacy single key: full write,
 delete process.env.OB1_QUERY_LOG; // off: a read through one door must leave nothing the other door's read would see
 process.env.DATABASE_URL = URL_;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0"; // a revocation reaches the next request
+process.env.OB1_INFER_PRIORITY = "on"; // [20]: every capture asks; only a "[20]" text's answer states anything (the env is frozen at the first request)
 const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw", forwarder: "forwarder-raw", forwarderGone: "forwarder-gone-raw", fresh: "fresh-raw", rival: "rival-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [
   `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
@@ -2840,6 +2851,68 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   await sql`DELETE FROM thoughts WHERE content LIKE '%[19] the priority label%'`;
   // The key's kind as [11] left it, before [17] classified it (review pass 1: left as operator for a section after).
   await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+}
+
+console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_INFER_PRIORITY on, \"Urgent: … by Friday\" is stated High, due Friday, quoting both phrases, at the inferred tier by the capturing key — on the thought, or on each item the capture proposed from it; an operator's Low wins and the inferred statement stays in the history; effective_priority passes it over unless count_inferred; a re-capture makes no call and states nothing again; a capture key's on its own thought (the knob off: test-thoughts [18])");
+{
+  type A = { id: string; item: { kind: string; key: string }; level: number; dueAt: string | null; reason: string | null; inferred: boolean; maker: { name: string; scope: string | null }; tierName: string; closedAt: string | null };
+  const hist = async (kind: string, key: string) => (await rest("GET", `/v1/priorities/${kind}/${key}`)).body as { level: number | null; winner: A | null; history: A[] };
+  // The next Friday after a UTC day (a week on from a Friday), counted here rather than by the rules under test
+  // (review pass 1); either the day the section starts or the day it is checked, so a run across midnight holds.
+  const fridayAfter = (day: string) => { const t = Date.parse(`${day}T00:00:00Z`); const dow = new Date(t).getUTCDay(); return new Date(t + (((5 - dow + 7) % 7) || 7) * 86_400_000).toISOString().slice(0, 10); };
+  const startDay = new Date().toISOString().slice(0, 10);
+  const stated = (a: A | undefined, kind: string, key: string, maker: string, scope: string) => [startDay, new Date().toISOString().slice(0, 10)].map(fridayAfter).some((friday) =>
+    a !== undefined && a.item.kind === kind && a.item.key === key && a.level === 3
+    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v1): urgent from "Urgent"; due ${friday} from "by Friday"`
+    && a.inferred === true && a.tierName === "inferred" && a.maker.name === maker && a.maker.scope === scope && a.closedAt === null);
+  const friday = fridayAfter(startDay);
+  await sql`SELECT set_agent_kind('rival', 'operator')`;
+  try {
+    // The ticket's Verify 1: High, due Friday, quoting the phrase, inferred, by the capturing key, on the thought (it proposed no item).
+    const cap = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: landlord wants an answer by Friday" });
+    const tid = String(cap.body.id);
+    const h1 = await hist("thought", tid);
+    assert(cap.status === 201 && h1.history.length === 1 && stated(h1.history[0], "thought", tid, "writer", "write") && h1.winner?.id === h1.history[0].id,
+      `"Urgent: … by Friday" is stated on the thought: High, due by the end of ${friday}, both phrases quoted, inferred, by the writer (${JSON.stringify(h1.history[0])})`);
+    // Verify 2: an operator's Low on the same item wins; the inferred statement stays in the history, passed over.
+    const low = await rest("POST", `/v1/priorities/thought/${tid}`, { level: 1, reason: "[20] not urgent at all" }, KEYS.rival);
+    const h2 = await hist("thought", tid);
+    assert(low.status === 200 && h2.winner?.maker.name === "rival" && h2.winner.level === 1 && h2.winner.tierName === "operator" && h2.level === 1
+        && h2.history.length === 2 && h2.history.some((a) => a.id === h1.history[0].id && a.closedAt === null && a.tierName === "inferred"),
+      `an operator's Low wins, and the inferred High stays in the history, open (${h2.winner?.maker.name} ${h2.level} | ${h2.history.map((a) => `${a.maker.name}:${a.tierName}:${a.closedAt ? "closed" : "open"}`)})`);
+    // Nothing ranks on it unless count_inferred: the inferred High alone on a second thought reads unknown, passed over.
+    const cap2 = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the plumber needs a date by Friday" });
+    const t2 = String(cap2.body.id);
+    const items = JSON.stringify([{ kind: "thought", key: t2 }]);
+    const [plain] = await sql`SELECT level, jsonb_array_length(passed_over) AS passed FROM effective_priority((${items}::text)::jsonb)`;
+    const [counted] = await sql`SELECT level FROM effective_priority((${items}::text)::jsonb, '{"count_inferred": true}'::jsonb)`;
+    assert(plain?.level === null && plain?.passed === 1 && counted?.level === 3,
+      `effective_priority passes the inferred statement over by default (level unknown, one passed over) and counts it with count_inferred (${JSON.stringify(plain)} | ${JSON.stringify(counted)})`);
+    // A re-capture of the same text asks nothing and states nothing again (review pass 1: it asked, for nothing).
+    const callsBeforeAgain = inferCalls;
+    const again = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the plumber needs a date by Friday" });
+    assert(String(again.body.id) === t2 && inferCalls === callsBeforeAgain && (await hist("thought", t2)).history.length === 1,
+      `a re-capture makes no inference call and states nothing again (${inferCalls - callsBeforeAgain} calls)`);
+    // A capture that proposed items: the statement on each item, none on the thought.
+    const withItems = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: rho: remind me to call the dentist and book the vet by Friday" });
+    const wid = String(withItems.body.id);
+    const proposed = ((await rest("GET", `/v1/items?status=all&origin_thought=${wid}`)).body.items ?? []) as { id: string }[];
+    const onItems = await Promise.all(proposed.map((i) => hist("item", i.id)));
+    const onThought = await hist("thought", wid);
+    assert(proposed.length === 2 && onItems.every((h, i) => h.history.length === 1 && stated(h.history[0], "item", proposed[i].id, "writer", "write")) && onThought.history.length === 0,
+      `a capture that proposed two items states the inferred High on each, not on the thought (${proposed.length} | ${onItems.map((h) => h.history.length)} | ${onThought.history.length})`);
+    // A capture-only key's capture: on its own thought, at capture scope.
+    const hooked = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the hook says answer by Friday" }, KEYS.hook);
+    const hh = await hist("thought", String(hooked.body.id));
+    assert(hooked.status === 201 && hh.history.length === 1 && stated(hh.history[0], "thought", String(hooked.body.id), "hook", "capture"),
+      `a capture key's capture states it on its own thought, at capture scope (${JSON.stringify(hh.history[0]?.maker)})`);
+    // A text that states nothing: a call, and no statement.
+    const before = inferCalls;
+    const plainCap = await rest("POST", "/v1/thoughts", { content: "[20] a note that says nothing about when" });
+    assert(inferCalls === before + 1 && (await hist("thought", String(plainCap.body.id))).history.length === 0, "a text the model reads nothing in states nothing");
+  } finally {
+    await sql`SELECT set_agent_kind('rival', 'agent')`;
+  }
 }
 
 apiServer.stop();
