@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 127 SMD-3306).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 130 SMD-3306).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2143,7 +2143,7 @@ segment of the same work, which is a property of each thought's own subject, and
 asked of one thought alone the judge model names the ticket blind raters agree
 on for 241 to 242 of the 245 thoughts whose subject is a ticket (versions 2 and
 3 of the test's step 1). A `subject` facet holds it, one standing per thought (a
-partial unique index; per thought and key since 127, a set), with a probe on its
+partial unique index; per thought and key since 130, a set), with a probe on its
 key for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
 `pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>`, one shape
 for the validator and the writer (`subject_key_valid`) — how it was found
@@ -2505,7 +2505,7 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
-Migration 127 makes a thought's own subjects a set (SMD-3306 PR 7a-3a): one
+Migration 130 makes a thought's own subjects a set (SMD-3306 PR 7a-3a): one
 standing `subject` per thought and key, at most three, found one way by one
 pass, so a multi-ticket session stands in each of its tickets' threads (the
 maintainer, 2026-11-05 and 2026-11-09). 111's index on the thought alone gives
@@ -2527,9 +2527,9 @@ thread by its rows, not as 0.5% of the table. A thought in several threads
 counts in each of `threads.ts --status`'s and `brain_info`'s thought counts, a
 place in each thread. Nothing finds a set yet: the rules and the judge's
 question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is a no-op. A
-re-apply of 111 makes its index again until 127 runs, and fails once a thought
+re-apply of 111 makes its index again until 130 runs, and fails once a thought
 holds a set (so does `--reapply`, which already fails at 064 on any brain
-holding a subject, SMD-3149). test-schema [112], test-upgrade [20bp], test-live
+holding a subject, SMD-3149). test-schema [116], test-upgrade [20bt], test-live
 [47] and [48], test-rest-sql [16].
 
 Migration 124 replaces the agenda under a ninth argument, `include_started`
@@ -2653,7 +2653,7 @@ bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after
 `--status`'s census is the one `brain_info`'s `Threads` row and preflight's
 `threads` row read, which stop at the first 10,000 subjects and thread edges in
 key order; `--status` reads it with no bound (SMD-3306 PR 7a-2c). A thought
-with a set of subjects (127) stands in each key's thread; the thread's read
+with a set of subjects (130) stands in each key's thread; the thread's read
 and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the re-link,
 the validator, the judge's door beside a thread, the deletes with and without

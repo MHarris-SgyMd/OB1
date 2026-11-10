@@ -1945,7 +1945,7 @@ const capture = async (content: string, metadata?: Record<string, unknown>) => S
 const subject = async (id: string, key: string | null, by: "metadata" | "model") =>
     ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, ${by}::text, 'subject:test@p2', NULL::uuid, (SELECT content_fingerprint FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb) AS r`)[0] as { r: { ok: boolean } }).r;
 
-console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status as the row records it; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought with a set of subjects (127) read in both its threads; a thought in no thread, a phrase key's value, and each refusal by its rule");
+console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticket's thread read by key — the ticket alone or with its prefix — in created_at order from its standing subjects, paged by its cursor; a superseded member labelled and kept; the ticket's own row with its status as the row records it; the threads its board links reach, either direction, and none across a duplicate_of; read by a thought's id around it; fetch's continues and continued by; a thought with a set of subjects (130) read in both its threads; a thought in no thread, a phrase key's value, and each refusal by its rule");
 {
   // The ticket's own row, two notes on it, the rows of its parent, blocker, duplicate and child, a loose thought and one on a phrase.
   const [row, note1, note2, parent, blocker, dup, loose, phrased, child] = await Promise.all([
@@ -2008,7 +2008,7 @@ console.log("\n[16] Work threads through both doors (SMD-3306 PR 7a-2a): a ticke
       && ft2?.continues?.id === note1 && ft2.continues.supersededBy === note2 && ft2.continuedBy === null && !("threads" in fLoose.body)
       && same((JSON.parse(fMcp.text) as { threads?: FT[] }).threads?.[0]?.continues?.id, row),
     `fetch says what a thought continues and what continues it, a superseded neighbour labelled; none on a thought in no thread (${JSON.stringify(ft1)} ${JSON.stringify(Object.keys(fLoose.body))})`);
-  // A thought with a set of subjects (127) stands in each key's thread: an id's read gives both, keyed in order, and
+  // A thought with a set of subjects (130) stands in each key's thread: an id's read gives both, keyed in order, and
   // fetch says where it stands in each. Its set closed after, so the reads below see the threads as they were.
   const session = await capture("Session summary — SMD-9700, SMD-9701 — the parent and its child's note, one session");
   await at(session, "2026-10-04T00:00:00Z");

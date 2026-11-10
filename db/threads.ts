@@ -32,7 +32,7 @@
  * said and run again, three tries in all.
  *
  * --status reads, writing nothing: the threads (keys held by two thoughts or more), the thoughts in them (a thought
- * with a set of subjects, 127, counted in each of its threads), the edges standing against those a whole linking leaves
+ * with a set of subjects, 130, counted in each of its threads), the edges standing against those a whole linking leaves
  * (each thread's thoughts less one), and the keys whose standing edges are not the ones their thread wants, compared
  * edge by edge — a thread the upgrade has not linked yet, a gap a delete left (by a role that cannot write a facet,
  * above READ COMMITTED, or beside a held key), or a raw writer's change (a created_at moved, a subject facet deleted

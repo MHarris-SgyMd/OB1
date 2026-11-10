@@ -726,11 +726,11 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // reads alone, and query_log's agenda kind and result_items, refusing by
   // name without 006, 034, 058, 071, 115, 117 or 122 ([20bn]); 124
   // replaces the agenda under a ninth argument, its ticket rows with their
-  // status, refusing by name without 068, 115, 122 or 123 ([20bo]); 127
+  // status, refusing by name without 068, 115, 122 or 123 ([20bo]); 130
   // makes a thought's subjects a set — 111's index replaced by one per
   // thought and key, a set door, a set close and the threads' locks in key
   // order — and redefines 113's two doors as sets of one and 120's trigger
-  // function, refusing by name without 111, 113 or 120 ([20bp]) — all
+  // function, refusing by name without 111, 113 or 120 ([20bt]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
@@ -5657,29 +5657,29 @@ console.log("\n[20bo] Migration 124: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20bp] Migration 127: refused by name without 111, 113 or 120; onto a populated brain at the file before it — thoughts with their subjects, a thread's edges and their lineage standing as they were, 111's index on the thought alone replaced by one on the thought and key; after it a thought's set stands in each key's thread, a set replaced moving the thought between threads, and 113's door on it a set of one; a re-apply a no-op (SMD-3306)");
+console.log("\n[20bt] Migration 130: refused by name without 111, 113 or 120; onto a populated brain at the file before it — thoughts with their subjects, a thread's edges and their lineage standing as they were, 111's index on the thought alone replaced by one on the thought and key; after it a thought's set stands in each key's thread, a set replaced moving the thought between threads, and 113's door on it a set of one; a re-apply a no-op (SMD-3306)");
 {
-  const the127 = MIGRATIONS.find((f) => f.endsWith("_subject_sets.sql"))!;  // by name: renumbered when main takes its number
+  const the130 = MIGRATIONS.find((f) => f.endsWith("_subject_sets.sql"))!;  // by name: renumbered when main takes its number
   // Each prerequisite in turn, the first missing named.
   for (const [stop, needs] of [
-    ["111", "migration 127 needs 111 (record_thought_subject); this schema lacks it"],
-    ["113", "migration 127 needs 113 (close_thought_subject); this schema lacks it"],
-    ["120", "migration 127 needs 120 (thread_relink); this schema lacks it"],
+    ["111", "migration 130 needs 111 (record_thought_subject); this schema lacks it"],
+    ["113", "migration 130 needs 113 (close_thought_subject); this schema lacks it"],
+    ["120", "migration 130 needs 120 (thread_relink); this schema lacks it"],
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 }).then(() => "applied", (e: Error) => e.message);
-    assert(refused === needs, `127 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the130 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `130 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
   }
 
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the127 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the130 });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
   const actor = { name: "laptop", via: "open-brain" };
   const capture = async (i: number) =>
-    ((await sql`SELECT upsert_thought(${`upgrade 127: a session note, the ${i}th`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id;
+    ((await sql`SELECT upsert_thought(${`upgrade 130: a session note, the ${i}th`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id;
   const t: string[] = [];
   for (let i = 0; i < 4; i++) t.push(await capture(i));
   const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
@@ -5697,7 +5697,7 @@ console.log("\n[20bp] Migration 127: refused by name without 111, 113 or 120; on
   const facetsBefore = await facets(), lineageBefore = await lineage(), before = await rows(), auditBefore = await audits();
   const oldIndex = String((await sql`SELECT pg_get_indexdef(to_regclass('thought_facets_subject_active_uniq')) AS d`)[0].d ?? "");
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the130 });
 
   const [idx] = (await sql`SELECT pg_get_indexdef(to_regclass('thought_facets_subject_key_uniq')) AS uniq, to_regclass('thought_facets_subject_active_uniq')::text AS old`) as { uniq: string | null; old: string | null }[];
   assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before && (await audits()) === auditBefore
@@ -5729,7 +5729,7 @@ console.log("\n[20bp] Migration 127: refused by name without 111, 113 or 120; on
   assert(one.action === "replaced" && typeof one.id === "string" && left === K2 && (await edges(K3)) === "",
     `record_thought_subject on a thought's set narrows it to its one key, 113's answer (${JSON.stringify(one)})`);
   const facetsAfter = await facets(), lineageAfter = await lineage(), rowsAfter = await rows();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the127 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the130 });
   assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === rowsAfter,
     "a re-apply is a no-op: every facet, edge, lineage row and thought as it was");
   await sql.close();

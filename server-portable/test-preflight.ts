@@ -1530,7 +1530,7 @@ else {
   const sub111 = await recordSubject();
   await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = '${sub111.id}'::uuid`);
   const noSubject = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
-  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written with it by 127's record_thought_subjects \(111's record_thought_subject its set of one\): close the facet/.test(noSubject.out),
+  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written with it by 130's record_thought_subjects \(111's record_thought_subject its set of one\): close the facet/.test(noSubject.out),
          `an own subject without its lineage row does not start, the subject named, and the remedy is the subject's own (exit ${noSubject.code}: ${noSubject.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
   await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${sub111.id}'::uuid`);
   const reRecorded = await recordSubject();

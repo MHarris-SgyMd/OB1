@@ -17659,7 +17659,7 @@ if (want("16")) {
     // the shipped ones restored — 111's, with 113's door after it, which 111's re-apply replaces, and 120's validator
     // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
-    // 127's doors, trigger function and index, which those re-applies undo (PR 7a-3a).
+    // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a).
     await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
@@ -29620,7 +29620,7 @@ if (want("46")) {
 }
 
 if (want("47")) {
-  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a thought with a set of subjects (127) standing in each key's thread, counted a place in each; a writing run as a role short of a re-link's writes refused by name, every lack named under its group, its dry run read under READ COMMITTED whatever the role's default; a dry run visiting exactly the keys with work, a batch a key; a key whose re-link only closes ending its batch too, a run visiting each key with work once; a page's keys in key order under a hashed union and hashed arms; --batch at most 200; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
+  console.log("\n[47] db/threads.ts on a real Postgres (migration 120): --status counts the threads, the keys whose edges differ and the keys no thought holds still carrying edges; a run over every key, a batch a transaction, links the threads an upgrade left and closes an orphan's edges, its dry run counting first and writing nothing, and a key whose re-link writes ends its batch, the next taking the page's rest; --key re-links one thread; --status names the keys that differ; a thought with a set of subjects (130) standing in each key's thread, counted a place in each; a writing run as a role short of a re-link's writes refused by name, every lack named under its group, its dry run read under READ COMMITTED whatever the role's default; a dry run visiting exactly the keys with work, a batch a key; a key whose re-link only closes ending its batch too, a run visiting each key with work once; a page's keys in key order under a hashed union and hashed arms; --batch at most 200; usage refused before any connection, a malformed key among it; a brain without 120 refused by name (SMD-3306)");
   // Its own client: [24] closed the suite's.
   const sql = new SQL({ url: URL_!, max: 1 });
   const threads = async (opts: Omit<ThreadsOptions, "writer">) => {
@@ -29693,7 +29693,7 @@ if (want("47")) {
       `the run, a key a transaction, links both threads, each edge origin thread, and closes the orphan's edge (${ran.out.trim()}; origin ${origins})`);
     const done = await threads({ status: true });
     assert(/^ {2}linked: {4}every thread — nothing to do$/m.test(done.out), `--status after it: nothing to do (${done.out.trim().split("\n").at(-1)})`);
-    // A thought standing in two threads (127): a session on both tickets, captured after them, its set written. Each
+    // A thought standing in two threads (130): a session on both tickets, captured after them, its set written. Each
     // thread links it at the write's commit; --status counts it in each, a place in each thread wanting its edge;
     // unlinked, a run links it in both. Its set closed, both threads stand as before.
     const c1 = await thought("c1", "2026-11-04T01:00:00Z");
@@ -30065,7 +30065,7 @@ if (want("47b")) {
 }
 
 if (want("48")) {
-  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (127) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken, a raw writer's inserts in any order too, and a replace in a savepoint beside a writer moving the other way; a delete of a neighbour standing in two of those keys waiting on the commit, not deadlocking with it — the thought's previous, its next, one in the later two of three keys, one beside it only in keys it left; a third key moved first, the window's partition, order and standing filter held, a neighbour's row left editable; the lock taken again in a later transaction, for a second thought and for a key moved after the triggers fired; a writer under REPEATABLE READ or SERIALIZABLE refused at its commit without waiting on a held key; a close a delete's own close reached first counted as none (SMD-3306)");
+  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (130) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken, a raw writer's inserts in any order too, and a replace in a savepoint beside a writer moving the other way; a delete of a neighbour standing in two of those keys waiting on the commit, not deadlocking with it — the thought's previous, its next, one in the later two of three keys, one beside it only in keys it left; a third key moved first, the window's partition, order and standing filter held, a neighbour's row left editable; the lock taken again in a later transaction, for a second thought and for a key moved after the triggers fired; a writer under REPEATABLE READ or SERIALIZABLE refused at its commit without waiting on a held key; a close a delete's own close reached first counted as none (SMD-3306)");
   // Its own clients: [24] closed the suite's.
   const owner = new SQL({ url: URL_!, max: 1 });
   const SERVER = "ob1_live_threads_server";
@@ -30317,7 +30317,7 @@ if (want("48")) {
         await moverB.close();
       }
 
-      // A thought's set replaced (127): the first re-link at the commit locks every key the transaction moved on the
+      // A thought's set replaced (130): the first re-link at the commit locks every key the transaction moved on the
       // thought, in key order, before any re-link, so a writer holding one of them is waited on with none after it taken.
       // The holder keeps the third of four keys; the replace closes the first and the third and writes the second and the
       // fourth. Waiting, the mover holds the first two and not the fourth, which another session takes and lets go at
@@ -30594,7 +30594,7 @@ if (want("48")) {
       }
 
       // A writer above READ COMMITTED is refused at its commit, as 120 refuses it, without first waiting on a key another
-      // session holds (review pass 1: 127's locks came before the refusal, so it waited the holder out).
+      // session holds (review pass 1: 130's locks came before the refusal, so it waited the holder out).
       const RK = "ticket:SMD-94897";
       for (const level of ["REPEATABLE READ", "SERIALIZABLE"]) {
         const rrT = await thought(`rr ${level}`, 1);

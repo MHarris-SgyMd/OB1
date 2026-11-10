@@ -1105,7 +1105,7 @@ const THREADS_LINK = "cd db && bun threads.ts --url <the owner's connection stri
 
 /**
  * The census as read: the threads (keys held by two thoughts or more) and the thoughts in them (a place in each thread:
- * a thought with a set of subjects, 127, counts in each of its threads); the edges standing and the edges a whole
+ * a thought with a set of subjects, 130, counts in each of its threads); the edges standing and the edges a whole
  * linking leaves (each thread's thoughts less one); the keys whose edges differ (`unlinked`, a key a thought holds;
  * `orphaned`, one none holds) and the first of them, in key order; how many subject keys were read (an orphaned key
  * before the cut is read too, and counted in `orphaned` and `standing` alone); and whether the census read every

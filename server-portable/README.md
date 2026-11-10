@@ -747,7 +747,7 @@ three of its intervals, with the last pass's outcome and a tripped malformed
 alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
 `Threads` (SMD-3306 PR 7a-2c) is the work threads' census: the threads (subject keys two thoughts or more hold), the
-thoughts in them (a thought with a set of subjects, migration 127, counted in each of its threads), and whether every
+thoughts in them (a thought with a set of subjects, migration 130, counted in each of its threads), and whether every
 thread's standing edges (migration 120) are the ones its thoughts want, compared edge by edge. A key whose edges differ
 is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw write's; a key no thought holds that
 still carries edges is counted beside it. The row names the run that links either,
