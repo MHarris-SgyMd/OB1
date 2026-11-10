@@ -63,6 +63,15 @@
  * role's or a database's own, and client_connection_check_interval to 1 s, so
  * a process gone while waiting leaves the queue within a second.
  *
+ * In a process a share's calls are ordered (PR 2c-2): consolidation's go
+ * first, then the rest in the order they asked, and a call that has waited
+ * --max-wait (OB1_SLEEP_MAX_WAIT, 60 s) goes first whatever its pass, at the
+ * next turn — the waiter takes a slot — after older ones that go first; across
+ * processes the queue is in the order each process's next call asked. Which
+ * model the server has loaded is not read: one brain's order cannot see the
+ * other brains' or clients' loads on a server they share, so it is PR 3's
+ * host broker's (the maintainer, 2026-11-09).
+ *
  * The defaults (PR 2b-2b, the maintainer, 2026-11-06): a local model server —
  * an endpoint OB1_LLM_LOCAL, OB1_CHAT_LOCAL or OB1_JEV_LOCAL declares — answers
  * OB1_MODEL_SLOTS calls at once per model (4 unset; compose hands the bundled
@@ -103,7 +112,8 @@ export const MAX_SLOTS = 16;
 const POLL_MS = 250;
 /**
  * How often the share's head tries its slots again untold, in ms, jittered to twice it: a slot let go by a process that
- * died, or by one from before PR 2c-1, is told to no one.
+ * died, or by one from before PR 2c-1, is told to no one. Also how long a call passed over has queued before it is
+ * told it waits (passTurn, PR 2c-2).
  */
 const RECHECK_MS = 1000;
 /** The application_name of the semaphore's connections. */
@@ -271,13 +281,35 @@ function sessionEnded(e: unknown): boolean {
 }
 
 /**
+ * A call queued behind a share's waiter in this process: how to hand it the turn (`go`) and to tell it it waits
+ * (`waiting`), whether its pass goes first (`first`), and when it queued (`at`, performance.now()), so the turn is
+ * passed in order (PR 2c-2).
+ */
+type Turn = { go: () => void; waiting: () => void; first: boolean; at: number };
+/**
  * A share's calls in this process: whether one of them waits for a slot, those queued behind it, in order, the waiter's
  * backend (`pid`), the slots told let go to it (`freed`, this process's and, through the channel, another's), whether
  * it waits (`busy`: in the share's queue, or at its head with no slot free, its queue told), and how to wake it from
  * its nap — a slot let go goes to the head at once, not at its next try (review pass 6: 424 embeddings at embed=1, two
  * workers, took 36 s against 0.6 with a poll a handoff).
  */
-type Local = { key: string; limit: number; waiter: boolean; queue: { go: () => void; waiting: () => void }[]; pid: number; freed: number; busy: boolean; wake?: () => void };
+type Local = { key: string; limit: number; waiter: boolean; queue: Turn[]; pid: number; freed: number; busy: boolean; wake?: () => void };
+
+/**
+ * The passes whose calls go first in a share, in a process (SMD-3379 PR 2c-2, draft 5's order): consolidation's, once it
+ * has joined extraction — the sleep scheduler runs it beside extraction only then, so a consolidation call waiting at
+ * all is one that has joined — a thought's pairs then judged before the next thought's windows are read, the passes'
+ * work finished in the order it was started. Others' calls go in the order they asked.
+ */
+const FIRST_PASSES: ReadonlySet<string> = new Set(["consolidate"]);
+/**
+ * --max-wait's default, in s (OB1_SLEEP_MAX_WAIT unset): how long a call queues before it goes first at the next turn
+ * whatever its pass, after older ones that go first. It reorders a share's calls and never more — the share is the
+ * same — and no pass's calls wait behind another's for good.
+ */
+export const DEFAULT_MAX_WAIT_S = 60;
+/** Most seconds --max-wait takes: a day, as the sleep scheduler's other bounds. */
+export const MAX_MAX_WAIT_S = 86_400;
 
 /**
  * A share's queue (PR 2c-1): a lock a process's waiting call takes with pg_advisory_lock, Postgres granting it in the
@@ -297,10 +329,11 @@ const LISTEN_RETRY_MS = 2000;
  * database. Returns `uninstall`, which puts back the hook it replaced and ends
  * every wait, a call already running keeping its slot until it ends; and the
  * settings' problems, said through `log`, the defaults then standing in.
- * Under `off` no hook is set. `connectS` bounds a connection's opening and
- * each statement, CONNECT_S unless a test asks for less.
+ * Under `off` no hook is set. `maxWaitS` is --max-wait's, DEFAULT_MAX_WAIT_S
+ * unless given, or not a finite number. `connectS` bounds a connection's
+ * opening and each statement, CONNECT_S unless a test asks for less.
  */
-export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
+export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));
   const setting = slotsSettingFrom(opts.raw, opts.modelSlots);
   for (const p of setting.problems) log(p);
@@ -324,8 +357,13 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (!l) locals.set(key, (l = { key, limit, waiter: false, queue: [], pid: 0, freed: 0, busy: false }));
     return l;
   };
-  /** The share's turn to wait for a slot in this process: at once when no call of it has it, else in order; a stop takes a call out of the queue. */
-  const takeTurn = (l: Local, signal: AbortSignal, waiting: () => void): Promise<void> => {
+  // A bound that is no finite number of seconds stands as the default: NaN or Infinity would age no call (review pass 1).
+  const maxWaitMs = (typeof opts.maxWaitS === "number" && Number.isFinite(opts.maxWaitS) ? opts.maxWaitS : DEFAULT_MAX_WAIT_S) * 1000;
+  /**
+   * The share's turn to wait for a slot in this process: at once when no call of it has it, else queued, `first` where
+   * its pass goes first (passTurn's order); a stop takes a call out of the queue.
+   */
+  const takeTurn = (l: Local, signal: AbortSignal, waiting: () => void, first: boolean): Promise<void> => {
     if (!l.waiter) {
       l.waiter = true;
       return Promise.resolve();
@@ -336,7 +374,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (l.busy) waiting();
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(signal.reason);
-      const entry = { waiting, go: () => { signal.removeEventListener("abort", onAbort); resolve(); } };
+      const entry: Turn = { waiting, first, at: performance.now(), go: () => { signal.removeEventListener("abort", onAbort); resolve(); } };
       const onAbort = () => { l.queue.splice(l.queue.indexOf(entry), 1); reject(signal.reason); };
       signal.addEventListener("abort", onAbort, { once: true });
       l.queue.push(entry);
@@ -360,11 +398,29 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     // entry skipped, one running its call through a stop).
     for (const e of [...l.queue]) e.waiting();
   };
-  /** The turn handed to the next call queued, or given up. */
+  /**
+   * The turn handed to the next call queued, or given up: the longest queued of those whose pass goes first or that
+   * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked, so the first
+   * such is the longest queued. The waiter is never passed over: a call queued after it waits for its slot. A call
+   * passed over that has queued RECHECK_MS or more is told it waits — not only once a waiter finds no slot free, which a
+   * share with slots to spare never does (review pass 2: an extraction call behind seven consolidation workers waited
+   * 10 s on the hook untold, N12's clock, the stall clock and a stop's sweep reading it as running) — and one passed
+   * over for less is not: queued only behind others' statements, a slot free, a stopping pass would give its thought
+   * back (review pass 3; PR 2b-1 review pass 7's case). The turn is handed on first, so a call that telling stops leaves
+   * a queue the turn is no longer in.
+   */
   const passTurn = (l: Local) => {
-    const next = l.queue.shift();
-    if (next) next.go();
-    else l.waiter = false;
+    if (l.queue.length === 0) {
+      l.waiter = false;
+      return;
+    }
+    const now = performance.now();
+    const i = Math.max(0, l.queue.findIndex((e) => e.first || now - e.at >= maxWaitMs));
+    const passed = l.queue.slice(0, i).filter((e) => now - e.at >= RECHECK_MS);
+    const [next] = l.queue.splice(i, 1);
+    next.go();
+    // Telling can stop a call, which takes it out of the queue as this goes: from a copy.
+    for (const e of passed) e.waiting();
   };
   /** A connection's state: whether it has closed since it opened, and how to wake a head napping on it. */
   type Conn = { lost: boolean; wake?: () => void };
@@ -532,11 +588,11 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     );
   });
   /** A slot of the share, held on a connection of its own; null where the semaphore fails open. A stop rejects with its reason. */
-  const acquire = async (l: Local, signal: AbortSignal, waiting: () => void): Promise<Held | null> => {
+  const acquire = async (l: Local, signal: AbortSignal, waiting: () => void, first: boolean): Promise<Held | null> => {
     // Stopped already — a pass's first stop aborts a call's wait as it comes: no turn, no kept session spent.
     if (signal.aborted) throw signal.reason;
     if (Date.now() < downUntil) return null;
-    await takeTurn(l, signal, waiting);
+    await takeTurn(l, signal, waiting, first);
     let client: SQL | undefined;
     try {
       // Queued behind a waiter that found the database down: run without a slot as well.
@@ -696,7 +752,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     };
     let held: Held | null;
     try {
-      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told);
+      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told, call.pass !== undefined && FIRST_PASSES.has(call.pass));
     } catch (e) {
       noteSlotWait(call, performance.now() - asked, "stopped", waited);
       throw e;

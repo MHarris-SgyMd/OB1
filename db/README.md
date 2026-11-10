@@ -4777,6 +4777,7 @@ bun sleep.ts --url …               # one period, if there is work, until its p
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
 #   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
@@ -4785,8 +4786,8 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 (`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_RESCAN`, `OB1_SLEEP_POLL` and
-`OB1_SLEEP_WORKERS` for its five numbers, and
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_MAX_WAIT`, `OB1_SLEEP_RESCAN`,
+`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its six numbers, and
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;

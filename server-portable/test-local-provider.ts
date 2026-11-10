@@ -3225,6 +3225,100 @@ console.log("\n[15] The background slots on by default (SMD-3379 PR 2b-2b): a lo
     `a live genre call at a one-at-a-time tier waits at most the background call in hand, the second background call held for its slot behind it: the live call waited ${Math.round(waited)} ms for a ${PER_MS} ms call (first ${Math.round(first)}, live ${Math.round(live)}, second ${Math.round(second)} ms)`);
 }
 
+console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): consolidation's before the other passes', the rest in the order they asked, and a call that has waited --max-wait first whatever its pass; never more than the share; a call passed over a second or more told it waits");
+{
+  const { installBackgroundSlots, shareOf, backgroundSlotsFrom, SLOTS_CHANNEL } = await import("./slots.ts");
+  const { modelCall, asPass, withCallWaits } = await import("./model-call.ts");
+  const call = { type: "chat" as const, model: META_MODEL, base: PROVIDER, purpose: "test" };
+  const key = shareOf(backgroundSlotsFrom("chat=1").slots!, { ...call, cls: "background" })!.key;
+  const holder = new SQL({ url: URL_, max: 1 });
+  /**
+   * The order a plan's calls run in at chat=1: the slot held elsewhere while they queue, each `after` ms after the one
+   * before, in its pass (none for a call of no pass), then let go as another process of PR 2c-1's does, told; the most
+   * running at once alongside.
+   */
+  const orderOf = async (plan: { label: string; pass?: string; after?: number }[], maxWaitS?: number) => {
+    const inst = installBackgroundSlots({ url: URL_!, raw: "chat=1", log: () => {}, ...(maxWaitS === undefined ? {} : { maxWaitS }) });
+    const ran: string[] = [];
+    let inFlight = 0, most = 0;
+    try {
+      await holder`SELECT pg_advisory_lock(hashtext(${key}), 0)`;
+      const calls: Promise<unknown>[] = [];
+      for (const p of plan) {
+        if (p.after) await Bun.sleep(p.after);
+        const one = () => modelCall(call, async () => { inFlight++; most = Math.max(most, inFlight); ran.push(p.label); await Bun.sleep(20); inFlight--; });
+        calls.push(p.pass ? asPass(p.pass, one) : one());
+      }
+      await Bun.sleep(100);
+      await holder`SELECT pg_advisory_unlock(hashtext(${key}), 0), pg_notify(${SLOTS_CHANNEL}, ${key})`;
+      await Promise.all(calls);
+    } finally {
+      await inst.uninstall();
+    }
+    return { ran: ran.join(","), most };
+  };
+  try {
+    // The first call waits at the head, never passed over; behind it consolidation's call goes first, then the rest in
+    // the order they asked — another pass's, and a call of no pass (a timer's, a request's) alike.
+    const ordered = await orderOf([
+      { label: "extract1", pass: "extract" }, { label: "extract2", pass: "extract", after: 20 }, { label: "subjects", pass: "subjects", after: 20 },
+      { label: "consolidate", pass: "consolidate", after: 20 }, { label: "none", after: 20 }, { label: "extract3", pass: "extract", after: 20 },
+    ]);
+    assert(ordered.ran === "extract1,consolidate,extract2,subjects,none,extract3" && ordered.most === 1,
+      `consolidation's call, queued fourth, runs next after the head, the rest in the order they asked, the share's one slot held (${ordered.ran}; ${ordered.most} at most)`);
+    // Two consolidation calls between them keep the order they asked, both ahead of extraction's.
+    const twoFirst = await orderOf([
+      { label: "extract1", pass: "extract" }, { label: "extract2", pass: "extract", after: 20 },
+      { label: "consolidateA", pass: "consolidate", after: 20 }, { label: "consolidateB", pass: "consolidate", after: 20 },
+    ]);
+    assert(twoFirst.ran === "extract1,consolidateA,consolidateB,extract2", `two consolidation calls keep their own order, both before extraction's (${twoFirst.ran})`);
+    // --max-wait: a call that has waited this long goes first whatever its pass — here extraction's second, queued some
+    // 500 ms before the turn passes (consolidation's 400 ms after it, the slot let go 100 ms on), under a bound of 300 ms —
+    // so no pass waits behind another's for good; under the default 60 s the same plan runs consolidation's first.
+    const plan = [{ label: "extract1", pass: "extract" }, { label: "extract2", pass: "extract", after: 20 }, { label: "consolidate", pass: "consolidate", after: 400 }];
+    const aged = await orderOf(plan, 0.3);
+    const unaged = await orderOf(plan);
+    assert(aged.ran === "extract1,extract2,consolidate" && unaged.ran === "extract1,consolidate,extract2" && aged.most === 1,
+      `a call queued past --max-wait goes first whatever its pass (${aged.ran} under 0.3 s), consolidation's first within it (${unaged.ran} under the default)`);
+    // A call passed over is told it waits once it has queued a second or more, as it would be behind a full share — here
+    // extraction's behind consolidation calls issued faster than the turn passes, ten every 5 ms, at chat=8, each taking a
+    // free slot at once, so no waiter finds the share full (review pass 2: untold for 10 s, N12's clock, the stall clock
+    // and a stop's sweep read it as running) — and not when passed over for less: a burst of six consolidation calls at
+    // once, every slot free, passes it for a few ms, and a stopping pass told it waits would give its thought back
+    // (review pass 3). The calls are issued until it is told or 3 s pass, so the queue stays full on any runner (CI's ran
+    // dry between seven looping workers' calls).
+    {
+      const wide = installBackgroundSlots({ url: URL_!, raw: "chat=8", log: () => {} });
+      const told = { starved: 0, brief: 0 };
+      const ran: string[] = [];
+      let starvedMs = -1;
+      try {
+        const nothing = async () => {};
+        const calls: Promise<unknown>[] = [asPass("consolidate", () => modelCall(call, nothing))];
+        const queuedAt = performance.now();
+        calls.push(withCallWaits({ waiting: () => { if (told.starved++ === 0) starvedMs = performance.now() - queuedAt; }, running: () => {} }, () => asPass("extract", () => modelCall(call, async () => { ran.push("starved"); }))));
+        const until = queuedAt + 3000;
+        while (told.starved === 0 && performance.now() < until) {
+          for (let k = 0; k < 10; k++) calls.push(asPass("consolidate", () => modelCall(call, nothing)));
+          await Bun.sleep(5);
+        }
+        await Promise.all(calls);
+        const run = (label: string) => async () => { ran.push(label); await Bun.sleep(150); };
+        const burst = [asPass("consolidate", () => modelCall(call, run("c0")))];
+        burst.push(withCallWaits({ waiting: () => { told.brief++; }, running: () => {} }, () => asPass("extract", () => modelCall(call, run("brief")))));
+        for (let k = 1; k < 7; k++) burst.push(asPass("consolidate", () => modelCall(call, run(`c${k}`))));
+        await Promise.all(burst);
+      } finally {
+        await wide.uninstall();
+      }
+      assert(ran[0] === "starved" && ran.at(-1) === "brief" && told.starved === 1 && starvedMs >= 1000 && told.brief === 0,
+        `extraction's call passed over behind consolidation's, every slot free, is told it waits once it has queued a second (told ${told.starved}, at ${Math.round(starvedMs)} ms); one passed over for a burst's few ms, run last, is not (${told.brief})`);
+    }
+  } finally {
+    await holder.close();
+  }
+}
+
 server.stop();
 provider.stop();
 
