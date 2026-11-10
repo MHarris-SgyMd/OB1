@@ -5118,6 +5118,30 @@ console.log("\n[23] reset_capture_stamp's reply says the ways on by the trust th
     "…and neither the key's name nor its kind is in the refusal's structured content");
 }
 
+console.log("\n[23b] append_thought_evidence's reply: the entry added or found, the list's length, the thought as the caller named it, and each refusal by what holds the list (SMD-2690 PR 3b)");
+{
+  const ID = "00000000-0000-4000-8000-0000000027a6";
+  const { renderAppendThoughtEvidence } = await import("./render.ts");
+  const said = (o: unknown) => renderAppendThoughtEvidence(o as never);
+  const added = said({ ok: true, value: { id: ID, action: "appended", evidenceCount: 1, updatedAt: "2026-11-10T09:00:00.000Z" } });
+  const byKey = said({ ok: true, value: { id: ID, byClientKey: "k-1", action: "appended", evidenceCount: 3 } });
+  const found = said({ ok: true, value: { id: ID, action: "already_exists", evidenceCount: 2 } });
+  assert(added.content[0].text === `Appended the evidence to ${ID}: it holds 1 evidence entry.` && /\(client_key k-1\): it holds 3 evidence entries\./.test(byKey.content[0].text)
+      && found.content[0].text.startsWith(`${ID} already holds that evidence (the same source label and excerpt): nothing written. It holds 2`)
+      && JSON.stringify(added.structuredContent) === JSON.stringify({ id: ID, action: "appended", evidenceCount: 1, updatedAt: "2026-11-10T09:00:00.000Z", text: added.content[0].text }),
+    `the entry added or found, its count in the singular or plural, a client_key named, the value's fields (${added.content[0].text} | ${found.content[0].text})`);
+  const refusal = (r: Record<string, unknown>) => said({ ok: false, refusal: { retryable: false, ...r } }).content[0].text;
+  const full = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "full", count: 100 });
+  const notList = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "not_list" });
+  const notObject = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "metadata_not_object" });
+  const stale = refusal({ code: "REFUSED_STALE_READ", id: ID, currentUpdatedAt: "2026-11-10T09:00:00.000Z" });
+  const gone = refusal({ code: "NOT_FOUND", id: ID });
+  assert(/already holds 100 evidence entries, the most a thought keeps \(100\)/.test(full) && /metadata\.evidence is not a list/.test(notList) && /metadata is not an object/.test(notObject)
+      && /edited by another write each time the append read it \(it is now 2026-11-10T09:00:00\.000Z\)\. Retry: an entry already added is not added twice\./.test(stale) && !/if_unchanged_since/.test(stale)
+      && /^No thought with id /.test(gone),
+    `each refusal said by what holds the list; a stale read as another writer's, never the caller's if_unchanged_since (${stale})`);
+}
+
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
 {
   const { keptStampKeys } = await import("./core/writes.ts");

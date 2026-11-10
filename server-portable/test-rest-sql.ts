@@ -475,6 +475,51 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   assert(rs.status === 200 && rs.body.reset === false && rsr.content[0].text === rsm.text && same(rsr.structuredContent, rsm.sc),
     `reset_capture_stamp: the same reply (${rs.status} ${JSON.stringify(rs.body).slice(0, 90)}; first difference: ${firstDiff(rsr.structuredContent, rsm.sc)})`);
 
+  // append_thought_evidence (SMD-2690 PR 3b): each door appends to its own
+  // thought, so both say "appended"; the second append of an entry finds it.
+  {
+    const evRest = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought a source supports, for REST's evidence" })).body.id);
+    const evMcp = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought a source supports, for MCP's evidence" })).body.id);
+    const entry = { source_label: "notes.pdf", excerpt: "the passage that says it", source: "smart_ingest", extracted_at: "2026-11-10T09:00:00Z" };
+    const er = await rest("POST", `/v1/thoughts/${evRest}/evidence`, entry);
+    const em = await mcp("append_thought_evidence", { id: evMcp, ...entry });
+    const err = rendered((v) => say.renderAppendThoughtEvidence(ok(v)), swap(er.body, em.sc));
+    const again = await rest("POST", `/v1/thoughts/${evRest}/evidence`, entry);
+    const stored = (await rest("GET", `/v1/thoughts/${evRest}`)).body as { metadata?: { evidence?: Record<string, unknown>[] }; updated_at?: string };
+    const held = stored.metadata?.evidence ?? [];
+    // The vendored append's identity (schemas/smart-ingest): sha256 of the label, the excerpt and the id.
+    const identity = new Bun.CryptoHasher("sha256").update(entry.source_label + entry.excerpt + evRest).digest("hex");
+    assert(er.status === 200 && er.body.action === "appended" && er.body.evidenceCount === 1 && err.content[0].text === em.text && same(err.structuredContent, em.sc)
+        && again.status === 200 && again.body.action === "already_exists" && again.body.evidenceCount === 1
+        && held.length === 1 && held[0]._identity === identity && held[0].source === "smart_ingest" && held[0].source_label === "notes.pdf" && held[0].excerpt === entry.excerpt && held[0].extracted_at === entry.extracted_at,
+      `append_thought_evidence: the same reply through both doors; the entry stored in metadata.evidence under the vendored append's identity; sent again, found and not added (${er.status} ${JSON.stringify(er.body)} | ${again.body.action} | ${JSON.stringify(held)} | first difference: ${firstDiff(err.structuredContent, em.sc)})`);
+    // The edit is the event log's: an update audit row under the writer, its metadata now holding the list.
+    const [audit] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = ${evRest}::uuid AND action = 'update' AND actor_name = 'writer' AND diff ? 'metadata' AND (diff->'metadata')::text LIKE '%the passage that says it%'`;
+    assert(audit?.n === 1,
+      `…recorded once in the audit trail, as an update by the writer whose metadata diff holds the entry — the second append wrote nothing (${JSON.stringify(audit)})`);
+    // Two appends at once each keep the other's entry: the one whose read went stale reads again.
+    const both = await Promise.all(["one", "two", "three"].map((n) => rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: `race ${n}`, excerpt: `passage ${n}` })));
+    const afterRace = ((await rest("GET", `/v1/thoughts/${evRest}`)).body as { metadata?: { evidence?: Record<string, unknown>[] } }).metadata?.evidence ?? [];
+    // An entry sent with no source and no time keeps the vendored shape: source null, extracted_at the server's now.
+    const bare = afterRace.slice(1);
+    assert(both.every((b) => b.status === 200 && b.body.action === "appended") && afterRace.length === 4
+        && bare.every((e) => "source" in e && e.source === null && typeof e.extracted_at === "string" && Math.abs(Date.parse(e.extracted_at) - Date.now()) < 60_000),
+      `…three appends at once each land, none lost to another's write; one sent with no source or time is stored with source null and the server's time (${both.map((b) => `${b.status}:${b.body.action ?? b.body.code}`).join(",")}; ${afterRace.length} held; ${JSON.stringify(bare[0])})`);
+    // Its refusals: no thought 404, a read key 403, a list that is not one 409, a full list 409, an input past its bound 400.
+    const noThought = await rest("POST", "/v1/thoughts/00000000-0000-4000-8000-0000000027a5/evidence", entry);
+    const asReader = await rest("POST", `/v1/thoughts/${evRest}/evidence`, entry, KEYS.reader);
+    await rest("PATCH", `/v1/thoughts/${evMcp}`, { metadata_patch: { evidence: "not a list" } });
+    const notList = await rest("POST", `/v1/thoughts/${evMcp}/evidence`, entry);
+    await rest("PATCH", `/v1/thoughts/${evMcp}`, { metadata_patch: { evidence: Array.from({ length: 100 }, (_, i) => ({ _identity: `x${i}` })) } });
+    const full = await rest("POST", `/v1/thoughts/${evMcp}/evidence`, entry);
+    const tooLong = await rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: "x", excerpt: "y".repeat(2_001) });
+    assert(noThought.status === 404 && noThought.body.code === "NOT_FOUND" && asReader.status === 403 && asReader.body.code === "FORBIDDEN"
+        && notList.status === 409 && notList.body.code === "REFUSED_THOUGHT_EVIDENCE" && notList.body.problem === "not_list"
+        && full.status === 409 && full.body.code === "REFUSED_THOUGHT_EVIDENCE" && full.body.problem === "full" && full.body.count === 100
+        && tooLong.status === 400,
+      `append_thought_evidence's refusals: no thought 404, a read key 403, a list that is no list 409, a full one 409 with its count, an excerpt past 2,000 characters 400 (${noThought.status} ${asReader.status} ${notList.status}:${notList.body.problem} ${full.status}:${full.body.problem}/${full.body.count} ${tooLong.status})`);
+  }
+
   // Each door acts on its own seeded pool or holder, so both act on a row.
   const workers: [string, Record<string, unknown>, Record<string, unknown>, string, (v: never) => say.Reply, string[]][] = [
     ["retry_failed", { work_type: "extract:rest@p1" }, { work_type: "extract:mcp@p1" }, "/v1/workers/retry", (v) => say.renderRetryFailed(ok(v)), ["workType", "ids"]],
@@ -756,6 +801,8 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     // The writer is unclassified: the database refuses it the reset (SMD-2744).
     ["reset_capture_stamp", { id: ids[0] }, "POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {}],
     ["reset_capture_stamp", { id: "not-a-uuid" }, "POST", "/v1/thoughts/not-a-uuid/reset-capture-stamp", {}],
+    // SMD-2690 PR 3b: an evidence append to no thought.
+    ["append_thought_evidence", { id: missing, source_label: "notes.pdf", excerpt: "a passage" }, "POST", `/v1/thoughts/${missing}/evidence`, { source_label: "notes.pdf", excerpt: "a passage" }],
     // SMD-3338: refusals that write nothing — the seeded undirected proposal, no such proposal, an argument a reject does not take.
     ["review_supersession_proposal", { id: proposalIds[0], decision: "accept" }, "POST", `/v1/proposals/${proposalIds[0]}/review`, { decision: "accept" }],
     ["review_supersession_proposal", { id: missing, decision: "reject" }, "POST", `/v1/proposals/${missing}/review`, { decision: "reject" }],
@@ -800,7 +847,7 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
   const renderOf: Record<string, (o: never) => say.Reply> = {
     fetch: say.renderFetch, thought_changes: say.renderThoughtChanges, list_thought_ids: say.renderThoughtIds, list_logged_searches: say.renderLoggedSearches,
     search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete,
-    reset_capture_stamp: say.renderResetCaptureStamp, review_supersession_proposal: say.renderReviewProposal, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
+    reset_capture_stamp: say.renderResetCaptureStamp, append_thought_evidence: say.renderAppendThoughtEvidence, review_supersession_proposal: say.renderReviewProposal, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
   };
   // A capture-only key's refusals too (review pass 1), the words its facts
   // leave out included — the value quoted back, a malformed key named — as

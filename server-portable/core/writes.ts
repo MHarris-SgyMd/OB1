@@ -5,6 +5,7 @@
 // MCP registration renders it in the words it always has (render.ts), and the
 // REST core (SMD-2284) answers it as JSON.
 
+import { createHash } from "node:crypto";
 import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
@@ -18,7 +19,7 @@ import { decideCalls, type EgressSubject } from "../egress.ts";
 import { UUID_RE, type ActorStamp, type Citation, type RecaptureLabel, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
-import { META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
+import { EVIDENCE_LIMITS, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { PASS_SETTLED_PREFIX } from "../consolidate.ts";
 import type { Reviewer } from "../proposal-review.ts";
@@ -883,6 +884,67 @@ export async function resetCaptureStamp(ctx: Ctx, principal: Principal, { id }: 
   // No action-log row: 034's log is click-through relevance, and a reset is
   // a ruling on a label, not a sign the caller found what it searched for.
   return ok({ id, reset: result.reset, restored: result.restored, movedBy: result.movedBy, declines: result.declines, declinedBy: result.declinedBy, stamp: result.stamp, caller: principal.name });
+}
+
+/** What an evidence append did (SMD-2690 PR 3b): whether it added the entry or found it there, the list's length after, and the thought's stamp. */
+export type EvidenceAppended = { id: string; byClientKey?: string; action: "appended" | "already_exists"; evidenceCount: number; updatedAt?: string };
+export type EvidenceCode = "NOT_FOUND" | "REFUSED_THOUGHT_EVIDENCE" | "REFUSED_STALE_READ";
+
+/**
+ * An entry's identity: sha256 of its label, its excerpt and the thought's id,
+ * in hex — schemas/smart-ingest's append's rule, so an entry that append wrote
+ * is found here too.
+ */
+export function evidenceIdentity(sourceLabel: string, excerpt: string, id: string): string {
+  return createHash("sha256").update(sourceLabel + excerpt + id, "utf8").digest("hex");
+}
+
+/** How often an append reads the thought again after another write moved it under its read. */
+const EVIDENCE_TRIES = 3;
+
+/**
+ * Append an evidence entry to a thought's metadata.evidence (SMD-2690 PR 3b):
+ * read the list, add the entry unless one with its identity is there, and
+ * write the list back through update_thought with the row's stamp as
+ * if_unchanged_since — an edit the event log records as any metadata edit is.
+ * A write between the read and the edit is a STALE_READ, and the append reads
+ * again, so two appends at once each keep the other's entry.
+ */
+export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id: name, source_label, excerpt, source, extracted_at }: Input<"append_thought_evidence">): Promise<Outcome<EvidenceAppended, EvidenceCode>> {
+  // A name that is no uuid names no thought, by id or by key; else the thought by id, else by client_key (SMD-3314).
+  if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
+  const { id, byClientKey } = await targetNamed(ctx, principal, name);
+  const store = await ctx.store();
+  const identity = evidenceIdentity(source_label, excerpt, id);
+  const named = byClientKey ? { byClientKey } : {};
+  for (let tries = 1; ; tries++) {
+    const row = await store.getThought(id);
+    if (!row) return refuse({ code: "NOT_FOUND", retryable: false, id });
+    const meta: unknown = row.metadata;
+    if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "metadata_not_object" });
+    const held: unknown = (meta as Record<string, unknown>).evidence ?? [];
+    if (!Array.isArray(held)) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "not_list" });
+    const stamp = row.updated_at ? { updatedAt: row.updated_at } : {};
+    if (held.some((e) => e !== null && typeof e === "object" && (e as Record<string, unknown>)._identity === identity)) {
+      return ok({ id, ...named, action: "already_exists", evidenceCount: held.length, ...stamp });
+    }
+    if (held.length >= EVIDENCE_LIMITS.entries) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "full", count: held.length });
+    // The vendored append's entry, its keys all present: a reader of either finds one shape.
+    const entry = { _identity: identity, source: source ?? null, extracted_at: extracted_at ?? new Date().toISOString(), excerpt, source_label };
+    const result = await store.updateThought({
+      id,
+      metadataPatch: { evidence: [...held, entry] },
+      // A row with no stamp (a raw writer's) has nothing to compare: the edit then has no check, as update_thought's caller without one has none.
+      ...(row.updated_at ? { ifUnchangedSince: row.updated_at } : {}),
+      actor: actorOf(ctx, principal),
+    });
+    if (result.ok) return ok({ id, ...named, action: "appended", evidenceCount: held.length + 1, ...(result.updatedAt !== undefined ? { updatedAt: result.updatedAt } : {}) });
+    if (result.error === "STALE_READ" && tries < EVIDENCE_TRIES) continue;
+    if (result.error === "STALE_READ") return refuse({ code: "REFUSED_STALE_READ", retryable: false, id, ...(result.currentUpdatedAt ? { currentUpdatedAt: result.currentUpdatedAt } : {}) });
+    if (result.error === "NOT_FOUND") return refuse({ code: "NOT_FOUND", retryable: false, id });
+    // An edit with no content and no pointer refuses nothing else: anything more is a fault, not a refusal of the caller's.
+    throw new Error(`update_thought refused an evidence append on ${id}: ${result.error}`);
+  }
 }
 
 /**

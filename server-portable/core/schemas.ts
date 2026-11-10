@@ -8,7 +8,7 @@
 import { z } from "zod";
 import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
-import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
+import { EVIDENCE_LIMITS, META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { PRIORITY_KINDS } from "../priority-kinds.ts";
 import { RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN } from "../store.ts";
@@ -524,6 +524,33 @@ export const SPECS = {
     },
     inputSchema: {
       id: z.string().describe("UUID of the thought whose label to reset — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, list_thoughts or thought_changes result"),
+    },
+  },
+  // SMD-2690 PR 3b: an evidence entry on a thought, through update_thought, so
+  // the event log records it as the edit it is (schemas/smart-ingest's append
+  // was a raw UPDATE the trigger audited). Its entry and identity are that
+  // append's, so a list it wrote dedupes the same.
+  append_thought_evidence: {
+    title: "Append Thought Evidence",
+    description:
+      `Record that a source also says what an existing thought says: append one evidence entry — the source's label, the excerpt that says it, and when it was read — to the thought's metadata.evidence list. Idempotent: an entry with the same label and excerpt on the same thought is not added twice, and the reply says it already was. The thought's text is untouched; the entry is an edit of its metadata, recorded in the audit trail under your key, and it moves updated_at. A thought holds at most ${EVIDENCE_LIMITS.entries} entries. Requires a write key.`,
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // Recoverable from the audit trail, which records the list it replaced.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      id: z.string().describe("UUID of the thought the source supports — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved; or the `client_key` a thought was captured with, when no thought has it as its id"),
+      source_label: z.string().min(1).max(EVIDENCE_LIMITS.label)
+        .describe(`What the evidence came from, as a reader should see it: a document's title or file name, a URL, a meeting. At most ${EVIDENCE_LIMITS.label} characters`),
+      excerpt: z.string().min(1).max(EVIDENCE_LIMITS.excerpt)
+        .describe(`The passage of the source that says what the thought says. At most ${EVIDENCE_LIMITS.excerpt} characters`),
+      source: z.string().min(1).max(EVIDENCE_LIMITS.source).optional()
+        .describe("The kind of source, or the tool that read it (e.g. `smart_ingest`). Omit for none"),
+      extracted_at: z.iso.datetime({ offset: true }).optional()
+        .describe("When the source was read, ISO 8601 with a zone. Omit for now"),
     },
   },
   // SMD-3338: db/consolidate.ts --accept/--reject over the contract, its checks and its force.
