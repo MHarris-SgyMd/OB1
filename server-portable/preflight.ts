@@ -28,7 +28,7 @@ import { createStore, databaseUrl, DEFAULT_STORE, maskUrl, missingDatabaseUrl, P
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { isRedirect, resolveEmbedConfig, resolveProviderEndpoints, shownBase, shownLocation, stringOr, type ProviderEndpoint } from "./embed.ts";
-import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
+import { EGRESS_UNITS, KEYED_UNITS, hostOf, localKnob, type EgressTerm, type EgressUnit } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
@@ -1010,6 +1010,25 @@ if (!egress.problems.length) {
     add("egress policy", "warn", `${sourceTerms.length} source: term(s) (${sourceTerms.map((t) => `source:${t.value}`).join(", ")}) do NOT gate a capture_thought capture — its \`source\` is the caller's claim, kept off the gate (SMD-1941); they gate a row's stored label at an edit and the re-embed/consolidation passes, and db/sync-linear.ts's captures`,
         "Gate who may capture with actor:<key name>; keep source: terms for what a row's label says, not for who may send.");
   }
+  // A plugin: term names the plugin whose model call it gates. One naming no
+  // plugin OB1_PLUGINS enables matches nothing — a typo that lets out, or
+  // holds back, nothing it was written for (PR 3a's second review pass).
+  const enabled = new Set(pluginNames(env.OB1_PLUGINS).map((n) => n.toLowerCase()));
+  const strayPlugins = [...egress.allow, ...egress.deny].filter((t) => t.unit === "plugin" && !enabled.has(t.value.toLowerCase()));
+  if (strayPlugins.length && egress.mode !== "off") {
+    add("egress policy", "warn", `${strayPlugins.map((t) => `plugin:${t.value}`).join(", ")} name(s) no plugin OB1_PLUGINS enables (${[...enabled].join(", ") || "none"}) — such a term matches no call`,
+        "Name an enabled plugin, as plugins/registry.ts spells it, or drop the term.");
+  }
+  // Under allow, a plugin's model call is one subject — its key, its plugin, its
+  // text — though its text may hold rows other keys wrote: a row's deny term,
+  // or one naming another key, never holds it (PR 3a's fourth review pass; the
+  // gate judging each row it carries is SMD-4195). A chat endpoint declared
+  // local is never judged, so nothing is said of it (PR 3a's fifth pass).
+  const rowDeny = egress.deny.filter((t) => ["actor", "source", "type", "topic"].includes(t.unit));
+  if (egress.mode === "allow" && rowDeny.length && enabled.size && !chatEndpoint.local) {
+    add("egress policy", "warn", `${rowDeny.map((t) => `${t.unit}:${t.value}`).join(", ")} hold(s) no plugin's model call (ctx.model) whose text carries such a row — the gate sees the call's key, plugin and text, not whose rows the plugin read (SMD-4195); an actor: term holds that key's own calls alone`,
+        "Hold a plugin's calls with OB1_EGRESS_DENY=plugin:<name>, or a marker its text carries; or run under deny, where only an OB1_EGRESS_ALLOW plugin: term lets one out.");
+  }
   // Terms in the knob the mode does not read decide nothing — a natural
   // misreading (deny + OB1_EGRESS_DENY) that fails closed and silently
   // (first review pass). Said, with the knob the mode reads.
@@ -1026,16 +1045,28 @@ const MEND = mendIntervalFrom(env.OB1_VECTOR_MEND_INTERVAL);
 const EMB_REFUSED = MEND.intervalS > 0
   ? "captures land without a vector, findable by exact text only, until the gate allows the call (a changed policy takes a restart) — the servers' vector mender then embeds them (SMD-2889)"
   : "captures land without a vector, findable by exact text only — OB1_VECTOR_MEND_INTERVAL is off, so only a db/reembed.ts pass against an endpoint the gate allows embeds them";
-const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity and consolidation passes fail every row they claim";
+const CHAT_REFUSED = "captures land untagged (no topics, no type), the entity and consolidation passes fail every row they claim, and an enabled plugin's model call (ctx.model) is refused unless an OB1_EGRESS_ALLOW plugin: term names it";
 /**
  * One row per endpoint: declared local (the gate does not apply), or what
  * leaves and under what rule. An endpoint the credential rule above CALLS
  * local but nothing declared so is the upgrade case — every stack from
  * before the gate — said with its one-line fix: the gate treats it as remote,
  * declared and not guessed, and under the default that refuses every call.
+ * `chat`: the endpoint takes the chat calls, a plugin's model call among them.
  */
-function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: string, refusedMeans: string): void {
+function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: string, refusedMeans: string, chat: boolean): void {
   const host = hostOf(at.base);
+  // An allow term over a unit no capture or pass carries lets none of their
+  // calls out: a plugin: term reaches a plugin's model call alone, and that
+  // goes to the chat endpoint (PR 3a's second review pass — such a term read
+  // as "some capture might pass").
+  const keyed = egress.allow.filter((t) => (KEYED_UNITS as readonly EgressUnit[]).includes(t.unit));
+  const pluginOnly = egress.allow.filter((t) => t.unit === "plugin").map((t) => `plugin:${t.value}`).join(", ");
+  const pluginNote = pluginOnly && !keyed.length
+    ? chat
+      ? `; its only OB1_EGRESS_ALLOW terms (${pluginOnly}) let out those plugins' model calls (ctx.model) and nothing else`
+      : `; its only OB1_EGRESS_ALLOW terms (${pluginOnly}) reach a plugin's model call on the chat endpoint, never this one`
+    : "";
   if (at.local) {
     add(row, "ok", `${shownBase(at)} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);
     return;
@@ -1047,9 +1078,11 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
     const consequence = egress.problems.length
       ? `, and while the policy does not parse every ${calls} call is refused: ${refusedMeans}`
       : egress.mode === "deny"
-        ? egress.allow.length
+        ? keyed.length
           ? `, and under deny every ${calls} call no OB1_EGRESS_ALLOW term matches is refused: ${refusedMeans}`
-          : `, and under deny with no allow term every ${calls} call is refused: ${refusedMeans}`
+          : pluginNote
+            ? `, and under deny with no allow term a capture or pass can match, every ${calls} call they make is refused${pluginNote}: ${refusedMeans}`
+            : `, and under deny with no allow term every ${calls} call is refused: ${refusedMeans}`
         : egress.mode === "allow"
           ? `, and under allow any ${calls} call an OB1_EGRESS_DENY term matches is refused`
           : "; the gate is off, so nothing is refused today — a later deny would refuse every call";
@@ -1069,18 +1102,20 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
       add(row, "ok", `the full text of every ${calls} call leaves to ${host}${egress.deny.length ? " unless an OB1_EGRESS_DENY term matches" : " — no OB1_EGRESS_DENY term holds any back"}`);
       return;
     case "deny":
-      if (egress.allow.length) add(row, "ok", `the ${calls} text leaves to ${host} only under an OB1_EGRESS_ALLOW term; otherwise ${refusedMeans}`);
-      else add(row, "warn", `every ${calls} call to ${host} is refused — deny with no OB1_EGRESS_ALLOW term — so ${refusedMeans}`,
+      if (keyed.length) add(row, "ok", `the ${calls} text leaves to ${host} only under an OB1_EGRESS_ALLOW term; otherwise ${refusedMeans}`);
+      else add(row, "warn", pluginNote
+                 ? `every ${calls} call a capture or pass makes to ${host} is refused — deny with no OB1_EGRESS_ALLOW term over ${KEYED_UNITS.join(", ")}${pluginNote} — so ${refusedMeans}`
+                 : `every ${calls} call to ${host} is refused — deny with no OB1_EGRESS_ALLOW term — so ${refusedMeans}`,
                `Declare the endpoint local (${knob}=1) if it is, name what may leave in OB1_EGRESS_ALLOW (actor:<key name>, marker:<tag>, …), or set OB1_EGRESS_POLICY=allow or off — in words, in deploy/.env.`);
   }
 }
 if (chatEndpoint === embEndpoint) {
   // One endpoint, either knob declares it; the row names the one that did
   // (the endpoint carries it), or OB1_LLM_LOCAL as the one to set.
-  egressRow("embeddings egress", embEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "embeddings"), "embeddings and chat", `${EMB_REFUSED}; ${CHAT_REFUSED}`);
+  egressRow("embeddings egress", embEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "embeddings"), "embeddings and chat", `${EMB_REFUSED}; ${CHAT_REFUSED}`, true);
 } else {
-  egressRow("embeddings egress", embEndpoint, "OB1_LLM_LOCAL", "embeddings", EMB_REFUSED);
-  egressRow("chat egress", chatEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "chat"), "chat", CHAT_REFUSED);
+  egressRow("embeddings egress", embEndpoint, "OB1_LLM_LOCAL", "embeddings", EMB_REFUSED, false);
+  egressRow("chat egress", chatEndpoint, localKnob({ embeddings: embEndpoint, chat: chatEndpoint }, "chat"), "chat", CHAT_REFUSED, true);
 }
 
 // ── Stop grace ───────────────────────────────────────────────────────────────
@@ -2692,7 +2727,7 @@ if (configFailed) {
               // 120 (SMD-3306): a thread's edge and its row are thread_relink's, written together; a re-link writes a closed one again.
               + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
-              + (Number(c.subjects) ? " An own subject's row is written by 111's record_thought_subject: close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
+              + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -5847,7 +5882,7 @@ async function tierRows(t: TierProbe): Promise<void> {
       add(TIER, t.down, `nothing answers at ${at} — ${why} (GET /info, ${LOCAL_PROBE_SECONDS} timeout)${route}`, viaProxy + (host === t.serviceHost ? t.notListening : t.start));
     }
   }
-  egressRow(`${t.row} egress`, t.cfg.endpoint, t.localKnob, "decision", t.refusedMeans);
+  egressRow(`${t.row} egress`, t.cfg.endpoint, t.localKnob, "decision", t.refusedMeans, false);
   if (!deep) {
     add(`${t.row} decision`, "skip", "not checked — pass --deep to make one decision");
   } else if (!results.some((r) => r.name === TIER && r.status === "ok")) {

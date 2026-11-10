@@ -55,7 +55,7 @@ chat only, beside Ollama:
 | `OB1_CONSOLIDATE_DECIDER_URL` / `OB1_CONSOLIDATE_DECIDER_LOCAL` | unset (decide mode asks the shared tier at `OB1_JEV_BASE_URL`) | Decide mode's own tier (a tier per caller, SMD-3326): H2O-Lightning-4B served on the host by `jev/h2o/serve.py` (port 8022), reached as `http://host.containers.internal:8022` under podman machine, and `1` declaring it on this machine, as `OB1_JEV_LOCAL` declares the shared tier. Held to the decider, so an answer from another model is refused. Preflight's decide tier row dials it on every start and warns when it does not answer: the server starts, and the consolidation pass decides nothing until it does (`jev/h2o/README.md`, "When the tier is down") |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
-| `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
+| `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text), `plugin` (a plugin whose operation asks the model, `ctx.model`) — read under `deny` and `allow` respectively |
 
 The two calls fail differently and deliberately. A metadata failure lets the
 capture succeed and records why, because the content is the durable part and the
@@ -755,9 +755,10 @@ three of its intervals, with the last pass's outcome and a tripped malformed
 alarm; preflight's `workers` row warns on the same and names the restart
 (`db/README.md`, "Long-running workers report their liveness").
 `Threads` (SMD-3306 PR 7a-2c) is the work threads' census: the threads (subject keys two thoughts or more hold), the
-thoughts in them, and whether every thread's standing edges (migration 120) are the ones its thoughts want, compared
-edge by edge. A key whose edges differ is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw
-write's; a key no thought holds that still carries edges is counted beside it. The row names the run that links either,
+thoughts in them (a thought with a set of subjects, migration 130, counted in each of its threads), and whether every
+thread's standing edges (migration 120) are the ones its thoughts want, compared edge by edge. A key whose edges differ
+is a thread the upgrade to 120 has not linked yet, a gap a delete left, or a raw write's; a key no thought holds that
+still carries edges is counted beside it. The row names the run that links either,
 `cd db && bun threads.ts --url <the owner's connection string>`. The census is bounded and exact: the first 10,000
 standing subjects and thread edges in key order, a key the bound cuts left out; a `phrase:` key sorts before `pr:`,
 `ticket:` and `version:`, so on a brain past the bound the phrases are read first. Past the bound its counts are of the

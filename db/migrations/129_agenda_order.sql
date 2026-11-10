@@ -49,7 +49,7 @@
 --   this one calls with nine and gets the priority order. No ACL is carried,
 --   as 124 and 126 carried none. The comment is re-issued only when it differs,
 --   so a re-apply writes nothing. No row is touched. MINOR under the version
---   rules. test-schema [116], test-upgrade [20bt].
+--   rules. test-schema [117], test-upgrade [20bu].
 --
 -- Prerequisites
 --   034 (query_log), 068 (ob1_ticket_head), 115 (work_claims), 122

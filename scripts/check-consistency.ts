@@ -9457,7 +9457,7 @@ function pluginTsProblems(text: string, core: ReadonlySet<string>, opts: { regis
     else if (!opts.testFile && PLUGIN_TEST_FILE.test(spec)) hits.push({ line: lineAt(m.index!), what: `imports the test file ${spec} from code that runs in the server` });
   }
   for (const m of code.matchAll(PLUGIN_GLOBALS)) {
-    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call and its tables through ctx.db, nothing else (a local of that name is renamed)` });
+    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call, its tables through ctx.db and a model through ctx.model.chat, nothing else (a local of that name is renamed)` });
   }
   for (const t of taggedTemplates(commentsGone)) {
     for (const h of pluginSqlProblems(t.body, core, lineAt(t.index))) hits.push(h);

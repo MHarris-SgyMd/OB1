@@ -489,6 +489,11 @@ const FUNCTIONS = [
   // 129 (SMD-4192): the agenda under a tenth argument, its order (124's nine-argument one above, dropped by 129, kept
   // for a schema reset before 129).
   "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text)",
+  // 130 (SMD-3306): a thought's subjects as a set — the set door, the set close and the threads' locks in key order; the
+  // index goes with thought_facets.
+  "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)",
+  "close_thought_subjects(uuid, uuid[], text)",
+  "ob1_thread_lock_keys(text[])",
 ];
 
 /**

@@ -1530,7 +1530,7 @@ else {
   const sub111 = await recordSubject();
   await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = '${sub111.id}'::uuid`);
   const noSubject = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
-  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written by 111's record_thought_subject: close the facet/.test(noSubject.out),
+  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written with it by 130's record_thought_subjects \(111's record_thought_subject its set of one\): close the facet/.test(noSubject.out),
          `an own subject without its lineage row does not start, the subject named, and the remedy is the subject's own (exit ${noSubject.code}: ${noSubject.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
   await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${sub111.id}'::uuid`);
   const reRecorded = await recordSubject();
@@ -5405,7 +5405,7 @@ if (want("8")) {
   // A knob that does not parse fails by name, and the endpoint row says the
   // gate is closed meanwhile.
   const bad = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi,nonsense" });
-  assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
+  assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker, plugin\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
          "a term that does not parse fails by name");
   assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused while the policy does not parse/.test(bad.out), "…and the endpoint row says every call is refused meanwhile");
   // Terms in the knob the mode does not read: a warning naming both knobs.
@@ -5436,6 +5436,47 @@ if (want("8")) {
   const inherit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_API_KEY: "k" });
   assert(new RegExp(String.raw`✓\s+chat egress\s+${rx(LOCAL)} is declared local \(OB1_LLM_LOCAL\)`).test(inherit.out),
          "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
+
+  // A plugin: term reaches a plugin's model call alone (SMD-2690 PR 3a): it
+  // lets no capture or pass out, so it is no "some call might pass" on a row,
+  // and it never reaches the embeddings endpoint at all.
+  const pluginOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+embeddings egress\s+every embeddings and chat call a capture or pass makes to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term over actor, source, type, topic, marker; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land without a vector/.test(pluginOnly.out),
+         "plugin: terms alone under deny: the shared endpoint's row warns that every capture's and pass's call is refused, and says what the terms do let out");
+  const pluginOnlySplit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_CHAT_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+embeddings egress\s+every embeddings call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) reach a plugin's model call on the chat endpoint, never this one — so/.test(pluginOnlySplit.out),
+         "…and an embeddings endpoint of its own is told the terms never reach it");
+  const HOSTED_CHAT = { OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" };
+  const pluginOnlyChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+chat egress\s+every chat call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land untagged/.test(pluginOnlyChat.out),
+         "…while a chat endpoint of its own is told what they let out");
+  const undeclaredPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/looks local but is not declared so — the gate treats it as remote, and under deny with no allow term a capture or pass can match, every embeddings and chat call they make is refused; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out/.test(undeclaredPlugin.out),
+         "…and the upgrade-case row says the same");
+  // A plugin: term naming no enabled plugin matches nothing: warned by name.
+  const strayPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:exampel, actor:chatgpt" });
+  assert(/!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables \(example\) — such a term matches no call/.test(strayPlugin.out)
+         && /✓\s+embeddings egress\s+the embeddings and chat text leaves to openrouter\.ai only under an OB1_EGRESS_ALLOW term/.test(strayPlugin.out),
+         "a plugin: term naming no enabled plugin is warned by name; an actor: term beside it keeps the endpoint row ok");
+  assert(!/no plugin OB1_PLUGINS enables/.test(pluginOnly.out), "…and no such warning for an enabled plugin's name");
+  const caseOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:EXAMPLE" });
+  const offStray = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "off", OB1_EGRESS_ALLOW: "plugin:exampel" });
+  assert(!/no plugin OB1_PLUGINS enables/.test(caseOnly.out) && !/no plugin OB1_PLUGINS enables/.test(offStray.out),
+         "…nor for the name in another case (the gate matches it so), nor under off, where no term is read");
+  // Under allow a row's deny term, or a key's, holds no plugin's call carrying such a row (SMD-4195): said while a plugin is enabled.
+  const allowRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice, marker:#phi, plugin:exampel" });
+  const allowRowsNoPlugins = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice" });
+  const allowMarkerOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi" });
+  // A chat endpoint declared local is never judged; under deny OB1_EGRESS_DENY is unread: nothing to say in either.
+  const allowRowsLocalChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi" });
+  const denyRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_DENY: "type:phi" });
+  assert(/!\s+egress policy\s+type:phi, actor:alice hold\(s\) no plugin's model call \(ctx\.model\) whose text carries such a row — .*\(SMD-4195\)/.test(allowRows.out)
+         && /!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables/.test(allowRows.out)
+         && [allowRowsNoPlugins, allowMarkerOnly, allowRowsLocalChat, denyRows].every((r) => !/hold\(s\) no plugin's model call/.test(r.out)),
+         "under allow, a row's or a key's deny term is said to hold no plugin's call carrying such a row while a plugin is enabled and the chat endpoint is judged (not for a marker, a local chat endpoint, or under deny); a stray name in OB1_EGRESS_DENY is warned too");
+  // The chat row's consequence names what a plugin's call needs.
+  assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — .* an enabled plugin's model call \(ctx\.model\) is refused unless an OB1_EGRESS_ALLOW plugin: term names it/.test(split.out),
+         "…and the chat row says a plugin's call needs a plugin: term");
 }
 
 if (want("9")) {
