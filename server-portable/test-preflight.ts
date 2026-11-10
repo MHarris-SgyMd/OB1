@@ -5417,7 +5417,8 @@ if (want("8")) {
   const pluginOnlySplit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_CHAT_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
   assert(/!\s+embeddings egress\s+every embeddings call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) reach a plugin's model call on the chat endpoint, never this one — so/.test(pluginOnlySplit.out),
          "…and an embeddings endpoint of its own is told the terms never reach it");
-  const pluginOnlyChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  const HOSTED_CHAT = { OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" };
+  const pluginOnlyChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
   assert(/!\s+chat egress\s+every chat call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land untagged/.test(pluginOnlyChat.out),
          "…while a chat endpoint of its own is told what they let out");
   const undeclaredPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
@@ -5434,7 +5435,6 @@ if (want("8")) {
   assert(!/no plugin OB1_PLUGINS enables/.test(caseOnly.out) && !/no plugin OB1_PLUGINS enables/.test(offStray.out),
          "…nor for the name in another case (the gate matches it so), nor under off, where no term is read");
   // Under allow a row's deny term, or a key's, holds no plugin's call carrying such a row (SMD-4195): said while a plugin is enabled.
-  const HOSTED_CHAT = { OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" };
   const allowRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice, marker:#phi, plugin:exampel" });
   const allowRowsNoPlugins = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice" });
   const allowMarkerOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi" });

@@ -99,11 +99,10 @@ export type ModelCaller = { actor: string; plugin: string };
  * subject is the plugin's: its actor, the plugin (the `plugin` unit:
  * `OB1_EGRESS_ALLOW=plugin:<name>` alone lets it out under deny; under allow
  * a deny term on the key, the plugin or a marker holds it), and the user text
- * as its content. The system prompt
- * is the plugin's own words, so the subject leaves it out; a deny marker is
- * also read against it, where keeping a call in fails safe: brain text a
- * plugin put there (as it must not) is still held back. The brain's or the
- * caller's text belongs in `user`.
+ * as its content. The system prompt is the plugin's own words, so the subject
+ * leaves it out; a deny marker is also read against it, where keeping a call
+ * in fails safe: brain text a plugin put there (as it must not) is still held
+ * back. The brain's or the caller's text belongs in `user`.
  */
 export async function pluginChat(cfg: EmbedConfig, { actor, plugin }: ModelCaller, req: ModelRequest): Promise<ModelAnswer> {
   const problem = requestProblem(req);

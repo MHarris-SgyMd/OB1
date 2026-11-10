@@ -43,9 +43,10 @@ export function egressDescription(endpoint: ProviderEndpoint, policy: EgressPoli
  * least one would go through. `units` are what a row of the pass carries; left
  * undefined it is every unit a keyed caller carries (KEYED_UNITS: an actor
  * credited optimistically before a worker key has, or has not, resolved, and a
- * row's units; never plugin, which names a plugin's model call alone). A caller that wants the worker's full "Nothing
- * would be <verb>" sentence uses blanketGate; sync-linear.ts, and reembed.ts's
- * blurbs warning, wrap the bare reason in their own text and use this.
+ * row's units; never plugin, which names a plugin's model call alone). A
+ * caller that wants the worker's full "Nothing would be <verb>" sentence uses
+ * blanketGate; sync-linear.ts, and reembed.ts's blurbs warning, wrap the bare
+ * reason in their own text and use this.
  */
 export function egressRefusal(
   endpoint: Pick<ProviderEndpoint, "base" | "local">,

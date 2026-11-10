@@ -94,9 +94,9 @@ export type EgressUnit = (typeof EGRESS_UNITS)[number];
 export const ROW_UNITS = ["source", "type", "topic", "marker"] as const satisfies readonly EgressUnit[];
 
 /**
- * The units a keyed caller's calls carry: its key and a row's own. Every
- * caller of refusesEverything but a plugin's model call, which no blanket
- * check asks about, so a `plugin:` term never reads as "a row might pass".
+ * The units a keyed caller's calls carry: its key and a row's own, and
+ * refusesEverything's default. A plugin's model call, which carries `plugin`,
+ * never asks that check, so a `plugin:` term never reads as "a row might pass".
  */
 export const KEYED_UNITS = ["actor", ...ROW_UNITS] as const satisfies readonly EgressUnit[];
 

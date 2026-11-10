@@ -1052,6 +1052,7 @@ const CHAT_REFUSED = "captures land untagged (no topics, no type), the entity an
  * local but nothing declared so is the upgrade case — every stack from
  * before the gate — said with its one-line fix: the gate treats it as remote,
  * declared and not guessed, and under the default that refuses every call.
+ * `chat`: the endpoint takes the chat calls, a plugin's model call among them.
  */
 function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: string, refusedMeans: string, chat: boolean): void {
   const host = hostOf(at.base);
@@ -1060,11 +1061,11 @@ function egressRow(row: string, at: ProviderEndpoint, knob: string, calls: strin
   // goes to the chat endpoint (PR 3a's second review pass — such a term read
   // as "some capture might pass").
   const keyed = egress.allow.filter((t) => (KEYED_UNITS as readonly EgressUnit[]).includes(t.unit));
-  const pluginOnly = egress.allow.filter((t) => t.unit === "plugin");
-  const pluginNote = pluginOnly.length && !keyed.length
+  const pluginOnly = egress.allow.filter((t) => t.unit === "plugin").map((t) => `plugin:${t.value}`).join(", ");
+  const pluginNote = pluginOnly && !keyed.length
     ? chat
-      ? `; its only OB1_EGRESS_ALLOW terms (${pluginOnly.map((t) => `plugin:${t.value}`).join(", ")}) let out those plugins' model calls (ctx.model) and nothing else`
-      : `; its only OB1_EGRESS_ALLOW terms (${pluginOnly.map((t) => `plugin:${t.value}`).join(", ")}) reach a plugin's model call on the chat endpoint, never this one`
+      ? `; its only OB1_EGRESS_ALLOW terms (${pluginOnly}) let out those plugins' model calls (ctx.model) and nothing else`
+      : `; its only OB1_EGRESS_ALLOW terms (${pluginOnly}) reach a plugin's model call on the chat endpoint, never this one`
     : "";
   if (at.local) {
     add(row, "ok", `${shownBase(at)} is declared local (${knob}) — the ${calls} text stays on the box; the gate does not apply`);

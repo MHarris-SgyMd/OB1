@@ -192,7 +192,7 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
   assert(actorOnly !== null && /every OB1_EGRESS_ALLOW term \(actor:chatgpt\) names a unit this caller never carries \(it carries source, type, topic, marker\)/.test(actorOnly),
          `allow terms over a unit the caller never carries refuse everything up front (${actorOnly})`);
   assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:chatgpt,type:idea" }), passUnits) === null, "…one reachable term is enough");
-  assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:chatgpt" })) === null, "…and a caller that carries every unit (the server) is not refused up front");
+  assert(refusesEverything(remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:chatgpt" })) === null, "…and a keyed caller, the default KEYED_UNITS (the server), is not refused up front");
 
   // The plugin unit names a plugin's model call (SMD-2690 PR 3a) and nothing
   // else: not a capture's actor, not a row's source, not a search's text —
@@ -204,7 +204,7 @@ console.log("\n[3] The rules: every unit under deny and allow, with the reason n
   const heldRow = mayLeaveBox({ kind: "re-embed", metadata: { source: "x" } }, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "plugin:x" }));
   assert(!heldRow.allowed && heldRow.rule === "no-allow-term", `under deny, a plugin: term lets no row out, though the row's source is the plugin's name (${heldRow.reason})`);
   // Under deny a plugin's call is released by a plugin: term alone — not by its caller's actor: term, nor a marker
-  // its text carries, which still release that key's captures; under allow a deny term of any unit holds it.
+  // its text carries, which still release that key's captures; under allow its actor: or a marker: deny term holds it.
   const callAs = { kind: "plugin", actor: "k", plugin: "x", content: "a #public row" } as const;
   const byKey = mayLeaveBox(callAs, remote, resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:k,marker:#public" }));
   assert(!byKey.allowed && byKey.rule === "no-allow-term" && /only a plugin: term releases a plugin's call/.test(byKey.reason)
