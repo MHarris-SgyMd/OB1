@@ -125,6 +125,7 @@ home-maintenance's `maintenance_tasks` row becomes an open item when it's create
 - **SMD-2653's options.** Decision 8 settles it: the digest stops reading `importance` altogether, so no key's value of it steers the digest. That is close to the ticket's option 2, with nothing left to filter by key.
 - **SMD-1920's "value/priority" field.** The plugin keeps its column, and the brain's reads see only what the plugin states through the core (decision 8).
 - **SMD-2684's board section.** It takes the agenda's order (SMD-3669).
+- **The agenda's one order.** SMD-4192 lets the client choose it (migration 129). `priority`, the default, is SMD-3669's. `due` lists the items with a due time first, soonest first, then the undated ones by priority, a stated None among them, for a question about deadlines. The board section keeps `priority`.
 
 - **`operator-surface-tiers.md`'s "Not decided here"** listed the importance scale as non-core schema whose adoption is "a migration decision of its own", and **`operator-gui-dashboards-analysis.md`'s** open question 5 asked whether to drop importance or define one scale in core. This record answers both: the core gets this scale (SMD-3663's migration), and `importance` is retired. Each doc carries a note pointing here.
 - **Vendored readers of `importance`.** Retiring it means no core read and no priority read uses it. lint-sweep and brain-health-monitoring keep their own reads until each is ported or retired (lint-sweep is on SMD-3216's shim list), and neither port may carry the read into the core.

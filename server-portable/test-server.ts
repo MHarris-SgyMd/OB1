@@ -7023,12 +7023,57 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     };
     await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
-      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true, include_started: true } as never);
+      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true, include_started: true, order: "due" } as never);
     const a = asked as Record<string, unknown> | null;
     assert(a?.includeBlocked === true && a?.includeClaimed === false && a?.includeProposed === true && a?.includeStarted === true && a?.limit === 7 && JSON.stringify(a?.scope) === '{"project":"P"}'
+           && a?.order === "due" && (logged[0]?.[1] as Record<string, unknown> | undefined)?.order === "due"
            && logged.length === 1 && logged[0][2] === 7 && JSON.stringify(logged[0][3]) === '[{"kind":"ticket","key":"SMD-1","effective":4}]'
            && (logged[0][1] as Record<string, unknown>).include_blocked === true && (logged[0][1] as Record<string, unknown>).include_started === true,
       `each flag reaches its own argument, and one log row carries the scope, the limit and the items (${JSON.stringify(a)}; ${JSON.stringify(logged)})`);
+  }
+  // 129 (SMD-4192): the order. The store's reader takes an answer without one as priority (a brain before 129), reads
+  // due, and refuses any other; the text says which order it lists in; a due read on a brain before 129 is told so.
+  {
+    const { normaliseAgenda } = await import("./store.ts");
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const answer = (order?: unknown) => ({
+      items: [], total: 0, unknown: 0, left_out: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, board_sync: null, claims_read: true, claims_live: 0,
+      now: "2027-01-01T00:00:00Z", ...(order === undefined ? {} : { order }) });
+    const item = { rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", status_type: "unstarted", owner: null, effective: 2,
+                   level: 2, inherited_from: null, due_at: null, due_from: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 2 }], winner: null,
+                   claimed: null, lapsed_claim: null, blockers: [] };
+    let bad = "";
+    try { normaliseAgenda(answer("soonest"), "agenda"); } catch (e) { bad = (e as Error).message; }
+    const saidDue = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [item], total: 1 }, "agenda") } as never));
+    const saidPriority = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer(), items: [item], total: 1 }, "agenda") } as never));
+    // A due time past the week takes no urgency term: the line says it (review pass 1).
+    const saidFar = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, due_at: "2027-02-01T00:00:00Z" }], total: 1 }, "agenda") } as never));
+    // A level 0's past date, never overdue in 122's terms, said past against the answer's clock (review pass 3).
+    const saidPast = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, level: 0, effective: 0, due_at: "2026-12-01T00:00:00Z" }], total: 1 }, "agenda") } as never));
+    const pre129 = "function agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text) does not exist";
+    // A due read on a brain before 129 is refused ORDER_UNAVAILABLE, said in words; a priority read meeting the same
+    // error, or a due read meeting another missing function, stays a fault (review pass 2).
+    const failing = (message: string) => ({ store: async () => ({ agenda: async () => { throw Object.assign(new Error(message), { errno: "42883" }); } }), logAgenda: async () => {} });
+    const P0 = { name: "k", scope: "read", agentId: undefined } as never;
+    const asking = (order: string) => ({ limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false, order }) as never;
+    // Caught, so a mapping that is lost fails this row, not the suite.
+    const refusedDue = await agendaRead(failing(pre129) as never, P0, asking("due")).catch((e: Error) => ({ ok: true as const, value: null, thrown: e.message }));
+    const faults = await Promise.all([agendaRead(failing(pre129) as never, P0, asking("priority")), agendaRead(failing("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") as never, P0, asking("due"))]
+      .map((p) => p.then(() => "answered", (e: Error) => e.message)));
+    const localized = await agendaRead(failing("la función agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text) no existe") as never,
+      { name: "k", scope: "read", agentId: undefined } as never, ({ limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false, order: "due" }) as never)
+      .then((o) => (o.ok ? "answered" : o.refusal.code), (e: Error) => `threw ${e.message}`);
+    const saidRefused = refusedDue.ok ? `not refused: ${(refusedDue as { thrown?: string }).thrown ?? "answered"}` : text(say.renderAgenda(refusedDue as never));
+    const saidBoth = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, due_at: "2027-02-01T00:00:00Z" }, { ...item, key: "SMD-8", rank: 2 }], total: 2 }, "agenda") } as never));
+    const saidNone = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [item], total: 1 }, "agenda") } as never));
+    assert(normaliseAgenda(answer(), "agenda").order === "priority" && normaliseAgenda(answer("due"), "agenda").order === "due" && /no agenda this server reads/.test(bad)
+        && /^1 of 1 item, none due, most pressing first:/.test(saidDue) && /^1 of 1 item, most pressing first:/.test(saidPriority)
+        && !refusedDue.ok && (refusedDue as { refusal: { code: string } }).refusal.code === "ORDER_UNAVAILABLE" && /^Refused: order due needs migration 129/.test(saidRefused)
+        && faults[0] === pre129 && /effective_priority/.test(faults[1])
+        && /^2 of 2 items, soonest due first, the undated after:/.test(saidBoth) && /^1 of 1 item, none due, most pressing first:/.test(saidNone)
+        && /\[due by the end of 2027-01-31 \(UTC\)\]/.test(saidFar) && !/\[due /.test(saidPriority)
+        && /\[was due by the end of 2026-11-30 \(UTC\)\]/.test(saidPast) && localized === "ORDER_UNAVAILABLE",
+      `an answer without an order reads as priority, due as due, any other refused; the text says the order; a due read on a brain before 129 names the migration (${bad} | ${saidDue.split("\n")[0]} | ${saidRefused} | ${faults.join(" / ")})`);
   }
   // 124 (SMD-4162): a ticket's status said beside its key, the started tickets left out counted, and a brain recording
   // no live claim said so; with claims unread, that line and not this one. The store's reader refuses an answer
