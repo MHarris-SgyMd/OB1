@@ -7538,7 +7538,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && h0.content.length === share && h0.contentChars === 3000 && h0.relations?.length === HIT_LABELS.relations && h0.relationsMore === 4 && c0.claimed?.length === HIT_LABELS.claimed && c0.claimedMore === 2
         && h0.priority?.length === HIT_LABELS.priority && h0.priorityMore === 2
         && v.board.available && v.board.tickets.length === BOARD_SHOWN && v.board.tickets[0].title.length === BOARD_TITLE && v.board.others.filter((o) => o.title !== "").length === OTHERS_TITLED
-        && JSON.stringify(g) === JSON.stringify({ gap: "trimmed", hitText: 8, labels: 8 * (3 + 2), tickets: 3, titles: BOARD_SHOWN + 33, unlisted: 0 })
+        && JSON.stringify(g) === JSON.stringify({ gap: "trimmed", hitText: 8, labels: 8 * (3 + 2), boardLabels: 0, tickets: 3, titles: BOARD_SHOWN + 33, unlisted: 0 })
         && t.includes(`… cut at ${share} of 3000 characters: fetch ${id(0)} for the whole text.`) && /\n- and 28 more: SMD-4005 \("Done"\), SMD-4006/.test(t)
         && /- Cut to keep this reply readable: 8 hits' text to its head .*3 open tickets past the board's first 15, listed by key alone/.test(t) && /- and 3 more open, in agenda order: SMD-3015, SMD-3016, SMD-3017\./.test(t) && !/"relation":"related"/.test(sc) && !/"holder"/.test(sc) && /"contentChars":3000,"moved":0,"claimed":0,"relations":6,"priority":5/.test(sc)
         && /"settled":\["SMD-4000","SMD-4001"/.test(sc),
@@ -7557,12 +7557,16 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
                                                         lapsedClaim: many(3, (j) => ({ holder: long(200, `l${j}`), piece: null, label: null, at: "2026-01-01T00:00:00.000Z" })) })), others: many(400, settled), waiting: many(100, (i) => ({ key: `SMD-${5000 + i}`, title: long(200, "w"), status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" })) },
       gaps: [{ gap: "tickets_missing", keys: many(300, (i) => `SMD-${6000 + i}`) }] } as never);
     const hr = say.renderPlanContext({ ok: true, value: huge } as never);
-    const hg = huge.gaps.find((x) => x.gap === "trimmed") as { tickets: number; unlisted: number; labels: number } | undefined;
+    const hg = huge.gaps.find((x) => x.gap === "trimmed") as { tickets: number; unlisted: number; labels: number; boardLabels: number } | undefined;
     const hm = huge.gaps.find((x) => x.gap === "tickets_missing") as { keys: string[]; more?: number } | undefined;
-    // Labels cut: per hit 10 claims, 3 relations, 2 priorities, 27 topics, 27 people and 18 actions; per shown open ticket 9 blockers and 2 + 2 holders.
+    // Labels cut: per hit 10 claims, 3 relations, 2 priorities, 27 topics, 27 people and 18 actions. Board labels: per shown
+    // open ticket 9 blockers and 2 + 2 holders, each line saying how many, the value counting them all, identities whole.
     const ht = huge.board.available ? huge.board.tickets[0] : null;
-    assert(size(hr) < 55_000 && ht?.blockers.length === 3 && ht.blockers.every((b) => b.length <= 40) && ht.claimed.length === 1 && ht.claimed[0].holder.length <= 40 && ht.lapsedClaim[0].holder.length <= 40
-        && hg?.tickets === 85 && hg?.unlisted === 360 + 90 + 280 && hg?.labels === 20 * (10 + 3 + 2 + 27 + 27 + 18) + 15 * (9 + 2 + 2) && hm?.keys.length === 20 && hm?.more === 280
+    const hsc = JSON.stringify(hr.structuredContent);
+    assert(size(hr) < 60_000 && ht?.blockers.length === 3 && ht.blockers[0] === long(80, "B-0") && ht.claimed.length === 1 && ht.lapsedClaim.length === 1
+        && huge.board.available && JSON.stringify(huge.board.ticketMore?.["SMD-3000"]) === '{"blockers":9,"claimed":2,"lapsedClaim":2}'
+        && /blocked by "B-0[^\n]* and 9 more\]/.test(text(hr)) && /claimed by "h0[^"]*" and 2 more;/.test(text(hr)) && /"key":"SMD-3000","statusType":"backlog","effective":2,"blockers":12,/.test(hsc)
+        && hg?.boardLabels === 15 * (9 + 2 + 2) && hg?.tickets === 85 && hg?.unlisted === 360 + 90 + 280 && hg?.labels === 20 * (10 + 3 + 2 + 27 + 27 + 18) && hm?.keys.length === 20 && hm?.more === 280
         && /- and 85 more open, in agenda order: SMD-3015, SMD-3016/.test(text(hr)) && /Not ranked \(400\):/.test(text(hr)) && /- and 360 more, not listed\./.test(text(hr))
         && /Named but not in the brain: SMD-6000, .* and 280 more\./.test(text(hr)),
       `the worst the reach allows is bounded (${size(hr)} characters): open tickets past 15 by key, the other lists past their first few counted (${JSON.stringify(hg)})`);
@@ -7579,6 +7583,13 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     const split = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "SMD-1 " + "x".repeat(3000) + " SMD-2", matchedNeedles: ["SMD-1", "SMD-2"] }] } } as never);
     const st = text(say.renderPlanContext({ ok: true, value: split } as never));
     assert(/\nContains: SMD-1\nContains \(in the whole text, past what is shown\): SMD-2\n/.test(st), `a shown match said as shown, one past the head as in the whole text (${st.match(/Contains.*\n.*/)?.[0]})`);
+    // Review pass 3: a quoted span holding `$'` is a needle, not a replacement pattern; the fenced text is said once. Empty
+    // metadata entries take no slot of a real one.
+    const dollar = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "SMD-1 head " + "x".repeat(3000) + " $'", matchedNeedles: ["SMD-1", "$'"],
+      metadata: { ...hits[0].metadata, people: [null, "", null, "Alice", "Bob"] } }] } } as never);
+    const dt = text(say.renderPlanContext({ ok: true, value: dollar } as never));
+    assert(/\nContains: SMD-1\nContains \(in the whole text, past what is shown\): \$'\n/.test(dt) && dt.split("│ SMD-1 head").length === 2 && /\nPeople: Alice, Bob\n/.test(dt),
+      `a needle holding $' is said as itself and the text once; empty people entries take no slot (${dt.match(/Contains.*\n.*/)?.[0]} | ${dt.match(/People: .*/)?.[0]})`);
     // A budget cut is no coverage gap: with nothing else found, the weighing line still stands.
     assert(/- Nothing else found\. How close the hits are to the request is each hit's match/.test(t), "with only a cut among the gaps, the reply still says nothing else was found and to weigh the hits");
   }

@@ -2421,15 +2421,17 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   return title ? words : `${words}.`;
 }
 /** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
-function agendaLine(i: AgendaItem): string {
+function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }): string {
+  // `more`: what plan_context's budget left out of this line (SMD-4191), said as "and N more"; the agenda's own lines pass none.
+  const and = (n: number) => (n > 0 ? ` and ${n} more` : "");
   // A ticket's status is its board's word (124): quoted and cut, as a title is.
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
-    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
-    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
+    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.claimed)}` : null,
+    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
-    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${and(Math.max(0, i.blockers.length - 10) + more.blockers)}` : null,
   ].filter(Boolean);
   return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
 }
@@ -2444,7 +2446,8 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
     ? ["Nothing on the agenda in this scope."]
     : [
         `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
-        ...v.items.map(agendaLine),
+        // Wrapped: map's index must never reach agendaLine's `more`.
+        ...v.items.map((i) => agendaLine(i)),
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
@@ -2467,7 +2470,8 @@ const gapWords = (g: PlanGap): string => {
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
     case "trimmed": return `Cut to keep this reply readable: ${[
       g.hitText ? `${g.hitText} hit${g.hitText === 1 ? "'s" : "s'"} text to its head (fetch the id for the whole)` : null,
-      g.labels ? `${g.labels} label${g.labels === 1 ? "" : "s"} past a hit's first few (list_claims, relations and fetch read them)` : null,
+      g.labels ? `${g.labels} label${g.labels === 1 ? "" : "s"} or metadata item${g.labels === 1 ? "" : "s"} past a hit's first few (list_claims, relations and fetch read them)` : null,
+      g.boardLabels ? `${g.boardLabels} blocker${g.boardLabels === 1 ? "" : "s"} or holder${g.boardLabels === 1 ? "" : "s"} past a board line's first few, each line saying how many (list_claims and the ticket read them)` : null,
       g.tickets ? `${g.tickets} open ticket${g.tickets === 1 ? "" : "s"} past the board's first 15, listed by key alone` : null,
       g.titles ? `${g.titles} title${g.titles === 1 ? "" : "s"} shortened or left off` : null,
       g.unlisted ? `${g.unlisted} settled, not yet startable or unknown ticket${g.unlisted === 1 ? "" : "s"} past the lists, counted and not named` : null,
@@ -2505,7 +2509,8 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
       const shown = h.content.toLowerCase();
       const inHead = h.matchedNeedles.filter((n) => shown.includes(n.toLowerCase())), past = h.matchedNeedles.filter((n) => !shown.includes(n.toLowerCase()));
       const contains = [inHead.length ? `Contains: ${inHead.join(", ")}` : null, past.length ? `Contains (in the whole text, past what is shown): ${past.join(", ")}` : null].filter(Boolean).join("\n");
-      return `${past.length ? b.replace(/^Contains: .*$/m, contains) : b}\n… cut at ${h.content.length} of ${h.contentChars} characters: fetch ${h.id} for the whole text.`;
+      // A function, not a string: a quoted span holding `$'` or `$$` is a needle, never a replacement pattern (review pass 3).
+      return `${past.length ? b.replace(/^Contains: .*$/m, () => contains) : b}\n… cut at ${h.content.length} of ${h.contentChars} characters: fetch ${h.id} for the whole text.`;
     });
     out.push(...notes, "", blocks.join("\n\n"));
   }
@@ -2514,7 +2519,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   if (!b.available) out.push(b.reason === "deadline" ? "Not read: it ran out of time." : b.reason === "no_keys_scope" ? "Not available here: this brain's agenda predates migration 126." : "Not read: the agenda's read failed (the server's log says why).");
   else if (!b.tickets.length && !b.others.length && !b.waiting.length) out.push(b.claimsRead === null ? "The hits name no ticket." : "The hits name no ticket this brain holds.");
   else {
-    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map(agendaLine));
+    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map((t) => agendaLine(t, b.ticketMore?.[t.key])));
     if (b.moreOpen?.length) out.push(`- and ${b.moreOpen.length} more open, in agenda order: ${b.moreOpen.join(", ")}.`);
     if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length + (b.waitingMore ?? 0)}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`),
       ...(b.waitingMore ? [`- and ${b.waitingMore} more, not listed.`] : []));
@@ -2552,7 +2557,9 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
                })) },
   board: v.board.available
     ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,
-        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, blockers: i.blockers.length, claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+        // Counts as the ticket has them, not as the budget listed them (review pass 3).
+        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, blockers: i.blockers.length + ((v.board.available && v.board.ticketMore?.[i.key]?.blockers) || 0),
+                                              claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
         moreOpen: v.board.moreOpen ?? [], othersMore: v.board.othersMore ?? 0, waitingMore: v.board.waitingMore ?? 0,
         // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
         // Compact (SMD-4191): the settled by key; an unknown status type with its word, which guard() holds to a token.
