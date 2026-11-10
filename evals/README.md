@@ -8353,7 +8353,7 @@ The consent-page mutants above hold its pages too.
   - Backlog tickets in the board's own projects, filed 2026-09-01 to 11-09;
   - trackers and `plan_context`'s own tickets left out;
   - ordered by a seeded hash; 638 were eligible.
-- **The rows:** a cite counts only if a tool showed that ID in the same run. Each request's sheet holds every thought either plan cited, plus 8 that either arm saw and neither cited. It is mixed in a hashed order, and names no arm or cite.
+- **The rows:** a cite counts only if a tool showed that ID in the same run: printed it anywhere in its reply, a result's ID or one a label names, such as a relation's other end or a superseding thought. Each request's sheet holds every thought either plan cited, plus 8 that either arm saw and neither cited. It is mixed in a hashed order, and names no arm or cite.
 - **The raters:** two blind raters, one on Opus and one on Sonnet, labelled all 307 rows under the rules fixed in `RATER_RULES`. A row is relevant when both say so.
 
 **Result: not shown.**
@@ -8362,9 +8362,9 @@ The consent-page mutants above hold its pages too.
 |---|---|---|
 | Relevant rows cited, over 20 requests | 56 | 42 |
 | Requests where the arm cited more relevant rows | 11 | 5 (4 tied) |
-| Thoughts cited (all were shown in the run) | 130 | 50 |
+| Thoughts cited (each one's ID shown in the run) | 130 | 50 |
 | Share of cites that are relevant | 43.1% | 84.0% |
-| Utilization (SMD-1719: share of thoughts shown that the plan cited, per call) | 29.6% of 439 | 13.7% of 365 |
+| Utilization (SMD-1719: results a search call returned that the plan cited or fetched, summed over calls) | 78.8% (126 of 160) | 22.9% (35 of 153) |
 | Brain calls | 20 | 86 |
 | Cost | $0.92 | $1.33 |
 
@@ -8377,8 +8377,8 @@ The consent-page mutants above hold its pages too.
 **What it says.**
 - **Not shown is not "no effect":** A cited more relevant rows on 11 of 20 requests, short of the preregistered bar.
 - **The arms differ in how they cite:**
-  - A cites nearly everything it was shown: all 8 hits on 11 requests, with 43% of its cites relevant.
-  - B searches 3 to 5 times, never reaching its cap of 10, cites 1 to 7 thoughts, and 84% of those are relevant.
+  - A cites most of what its one call returned: 126 of its 160 hits, all 8 on 11 requests, with 43% of its cites relevant.
+  - B makes 3 to 5 calls, never reaching its cap of 10, cites 1 to 7 thoughts, and 84% of those are relevant. 35 of its 50 cites are results a search returned; the other 15 it reached through `fetch`, `thread` or `relations`, which return no search results, so utilization doesn't count them.
   - So A's 14 extra relevant rows come with 74 irrelevant cites, against B's 8. A plan built on `plan_context` cites its hits wholesale.
 - **The board section:** the count of thoughts can't credit it, since tickets aren't thoughts.
 
@@ -8395,7 +8395,9 @@ The consent-page mutants above hold its pages too.
 - The runs, the rows, the sheets and the labels hold the brain's text and stay out of the repo too.
 - `bun eval-plan-context.ts --self-check` holds the rules on hand-known answers, in CI.
 
-**Beside it.** `eval-utilization.ts` now reads a logged `plan_context` call as a search (`SEARCH_KINDS`), so live use of the tool has SMD-1719's rate too. test-schema [39] holds every kind `query_log` allows to the search kinds, or to the kinds named as not searches.
+**Beside it.** `eval-utilization.ts` now reads a logged `plan_context` call as a search (`SEARCH_KINDS`), so live use of the tool has SMD-1719's rate too. `export-queries.ts` attributes over the same rows, so the report and the fixture still agree, and labels no query from a `plan_context` request, which is no search the replay can run. test-schema [39] holds every kind `query_log` allows to the search kinds, or to the kinds named as not searches, and the literal both readers select with.
+
+The table's utilization is the rate over the rows `query_log` would hold for the runs: a search row per call of `search`, `search_thoughts`, `search_thoughts_keyword` or `plan_context`, with the results it returned; a fetch as an opened action; each credited cite as a cite row. Review pass 1 corrected it: the first report fed every ID a reply printed as a result, and every call as a search, and read 29.6% of 439 for A and 13.7% of 365 for B. The verdict, which counts relevant cites, did not change.
 
 ## Related
 

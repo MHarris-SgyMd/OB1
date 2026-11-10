@@ -26,14 +26,21 @@
  *   - κ below KAPPA_BAR: no verdict, the labels don't hold;
  *   - helps: more requests with d > 0 than d < 0, a two-sided exact sign test p ≤ P_BAR over the untied, and mean d > 0;
  *   - hurts: the mirror image; otherwise not shown.
- * Reported beside it, never deciding it: SMD-1719's utilization rate per arm (utilization.ts's summarise, the cites as
- * cite rows), the share of each plan's cites that are relevant, the relevant share of the uncited sample, cost, calls,
- * and every run that broke a rule.
+ * Reported beside it, never deciding it: SMD-1719's utilization rate per arm, by utilization.ts's summarise over the
+ * rows query_log would hold for the run (a search row per call of a tool that logs one, LOGGED_SEARCH_TOOLS, with the
+ * results it returned; a fetch as an opened action; each credited cite as a cite row), the share of each plan's cites
+ * that are relevant, the relevant share of the uncited sample, cost, calls, and every run that broke a rule.
  *
- *   bun eval-plan-context.ts --draw <linear-page.json>… --held <keys.txt> --out <requests.json>
+ * "Seen" is every thought id a tool printed in the run, its results' and the ids its labels name (a relation's other
+ * end, a superseding thought), as the preregistration worded it: "a tool showed that ID". A tool's returned results
+ * are the narrower set utilization counts. The PREREGISTRATION hash covers the constants, the arms, the prompts and the
+ * rater rules; the draw's rule, the score and the verdict code are fixed by the commit the preregistration names
+ * (f84d6023), and the self-check pins the hash.
+ *
+ *   bun eval-plan-context.ts --draw <linear-page.json>… [--draw <page.json>…] --held <keys.txt> --out <requests.json>
  *   bun eval-plan-context.ts --run --requests <requests.json> --mcp-config <file> --out <dir> [--only KEY] [--arm A|B] [--again]
  *   bun eval-plan-context.ts --status --requests … --out <dir>
- *   bun eval-plan-context.ts --ids --requests … --out <dir>                 # the thought ids every run saw, one per line
+ *   bun eval-plan-context.ts --ids --requests … --out <dir>                 # every id a run saw or cited, one per line
  *   bun eval-plan-context.ts --sheets --requests … --out <dir> --rows <rows.json>
  *   bun eval-plan-context.ts --score --requests … --out <dir> --rows <rows.json> --labels <r1.json> --labels <r2.json> [--json <file>]
  *   bun eval-plan-context.ts --self-check                                    # the rules, on hand-known answers; no brain, no model
@@ -42,16 +49,18 @@
  * of the ticket keys the brain holds. Its output holds the tickets' titles, the board's text, so it stays out of the
  * repo (check-consistency refuses it under evals/fixtures, SMD-1295): the rule and the listings rebuild it exactly, and
  * the drawn keys are on SMD-2684. --run spawns `claude` per request and arm, in an order set by the request's
- * hash, and skips a run whose stream already ended; --again moves an ended run aside (`.try1`) and runs it again.
+ * hash, and skips a run whose stream already ended; --again runs it again. A run's earlier stream, ended or not, is
+ * moved aside first (`.try<ms>`), since a spawn writing into an existing file doesn't truncate it.
  * --mcp-config is a Claude Code MCP config naming the brain `brain`: it holds a key, so keep it 0600 and out of the repo.
- * --rows is the text of the thoughts --ids lists ([{ id, created_at, type, content }]), read from the brain by its
- * operator. The runs, the rows, the sheets and the labels hold the brain's text: keep them out of the repo. --json
+ * --rows is the text of the thoughts among the ids --ids lists ([{ id, created_at, type, content }]; an id that is
+ * no thought, a claim's or an item's, has no row), read from the brain by its operator. The runs, the rows, the sheets and the labels hold the brain's text: keep them out of the repo. --json
  * writes the result as keys, counts and hashes only.
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { READ_TOOL_NAMES } from "../server-portable/tools.ts";
 import { summarise, type ActionRow, type SearchRow } from "./utilization.ts";
 
 // ── What was fixed before the run ─────────────────────────────────────────────
@@ -200,7 +209,21 @@ export function draw(tickets: Ticket[], held: Set<string>, n = N_REQUESTS): { re
 
 // ── A run's stream ────────────────────────────────────────────────────────────
 
-export type Call = { tool: string; input: unknown; ids: string[]; chars: number; isError: boolean };
+/** `ids`: every uuid the result printed (the run's "seen"). `returned`: the results a search tool returned, as its query_log row would list them. */
+export type Call = { tool: string; input: unknown; ids: string[]; returned: string[]; chars: number; isError: boolean };
+
+/** The tools that write a query_log search row (core/reads.ts runSearch, and plan_context's own kind, migration 126). */
+export const LOGGED_SEARCH_TOOLS: readonly string[] = ["search", "search_thoughts", "search_thoughts_keyword", "plan_context"];
+
+/** A search tool's returned results, read from its structured value: plan_context's knowledge hits, search's results, search_thoughts' hits. */
+export function returnedOf(tool: string, text: string): string[] {
+  if (!LOGGED_SEARCH_TOOLS.includes(tool)) return [];
+  let v: unknown;
+  try { v = JSON.parse(text); } catch { return []; }
+  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  const list = tool === "plan_context" ? (o.knowledge as Record<string, unknown> | undefined)?.hits : tool === "search" ? o.results : o.hits;
+  return Array.isArray(list) ? idsIn(list.map((h) => (h && typeof h === "object" && typeof (h as { id?: unknown }).id === "string" ? (h as { id: string }).id : "")).join(" ")) : [];
+}
 export type RunRecord = {
   ended: boolean;
   model: string | null;
@@ -250,7 +273,8 @@ export function parseRun(lines: string[]): RunRecord {
           const text = contentText(p.content);
           pending.delete(p.tool_use_id);
           if (call && !call.brain) { rec.misnamed.push(call.tool); continue; }
-          rec.calls.push({ tool: call?.tool ?? "?", input: call?.input, ids: idsIn(text), chars: text.length, isError: p.is_error === true });
+          const tool = call?.tool ?? "?";
+          rec.calls.push({ tool, input: call?.input, ids: idsIn(text), returned: p.is_error === true ? [] : returnedOf(tool, text), chars: text.length, isError: p.is_error === true });
         } else if (p.type === "text" && typeof p.text === "string" && ev.type === "assistant") {
           lastText = p.text;
         }
@@ -265,7 +289,7 @@ export function parseRun(lines: string[]): RunRecord {
     }
   }
   // A call whose result never came is still a call the run made.
-  for (const c of pending.values()) if (c.brain) rec.calls.push({ tool: c.tool, input: c.input, ids: [], chars: 0, isError: true });
+  for (const c of pending.values()) if (c.brain) rec.calls.push({ tool: c.tool, input: c.input, ids: [], returned: [], chars: 0, isError: true });
   if (!rec.plan) rec.plan = lastText;
   rec.seen = idsIn(rec.calls.map((c) => c.ids.join(" ")).join(" "));
   rec.cited = idsIn(rec.plan);
@@ -383,7 +407,8 @@ export type Score = {
   verdict: Verdict;
   why: string;
   either: { wins: number; losses: number; meanDiff: number; p: number };
-  utilization: Record<Arm, { returned: number; used: number; utilization: number | null }>;
+  /** SMD-1719's numbers: `returned` sums each search call's distinct results (a thought two calls return counts twice), `used` is cited or fetched. */
+  utilization: Record<Arm, { returned: number; used: number; cited: number; utilization: number | null }>;
   citedRelevantShare: Record<Arm, number | null>;
   uncitedRelevant: { rated: number; relevant: number };
   runs: { key: string; arm: Arm; invalid: string[]; deviations: string[] }[];
@@ -455,8 +480,10 @@ export function score(
   const eWins = eitherDiffs.filter((d) => d > 0).length;
   const eLosses = eitherDiffs.filter((d) => d < 0).length;
 
-  // SMD-1719's rate, by its own code: each call a search row returning the thoughts it showed, each credited cite a
-  // cite row (the `<writer>/<pointer>` shape), one agent per request so a cite attributes only to its own run.
+  // SMD-1719's rate, by its own code over the rows query_log would hold for the run: a search row per call of a tool
+  // that logs one, with the results it returned (not every id its labels print); a fetch as an opened action, as
+  // core/reads.ts logs it; each credited cite as a cite row (the `<writer>/<pointer>` shape). One agent per request,
+  // so a use attributes only to its own run.
   const utilization = {} as Score["utilization"];
   for (const arm of ARM_NAMES) {
     const searches: SearchRow[] = [];
@@ -464,25 +491,30 @@ export function score(
     for (const req of requests) {
       const rec = recs.get(req.key)?.[arm];
       if (!rec) continue;
-      rec.calls.forEach((c, i) => searches.push({
-        id: `${req.key}.${arm}.${i}`, agentId: req.key, loggedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)), tool: c.tool, query: req.key,
-        matchCount: null, threshold: null, recencyWeight: null, resultIds: c.ids.filter(isThought), resultTokens: null,
-      }));
+      rec.calls.forEach((c, i) => {
+        const at = new Date(Date.UTC(2026, 0, 1, 0, 0, i));
+        if (LOGGED_SEARCH_TOOLS.includes(c.tool) && !c.isError) {
+          searches.push({ id: `${req.key}.${arm}.${i}`, agentId: req.key, loggedAt: at, tool: c.tool, query: req.key, matchCount: null, threshold: null, recencyWeight: null, resultIds: c.returned.filter(isThought), resultTokens: null });
+        }
+        const target = (c.input as { id?: unknown } | null)?.id;
+        if (c.tool === "fetch" && !c.isError && typeof target === "string") actions.push({ agentId: req.key, loggedAt: at, tool: "fetch", targetId: target.toLowerCase() });
+      });
       const seen = new Set(rec.seen);
       for (const id of rec.cited) if (seen.has(id) && isThought(id)) actions.push({ agentId: req.key, loggedAt: new Date(Date.UTC(2026, 0, 1, 0, 5, 0)), tool: "plan/derived_from", targetId: id });
     }
     const o = summarise(searches, actions, 30).overall;
-    utilization[arm] = { returned: o.returned, used: o.used, utilization: o.utilization };
+    utilization[arm] = { returned: o.returned, used: o.used, cited: o.cited, utilization: o.utilization };
   }
   const share = (arm: Arm): number | null => {
     const c = rows.reduce((s, r) => s + r[arm].cited, 0);
     return c ? rows.reduce((s, r) => s + r[arm].relevant, 0) / c : null;
   };
-  // The uncited sample: rated rows neither plan cited.
+  // The uncited sample: rated rows neither plan cited and saw (rateSet's own definition of cited).
   let uRated = 0, uRel = 0;
+  const credited = (rec: RunRecord | undefined): string[] => (rec ? rec.cited.filter((id) => rec.seen.includes(id)) : []);
   for (const req of requests) {
     const rr = recs.get(req.key) ?? {};
-    const citedAny = new Set([...(rr.A?.cited ?? []), ...(rr.B?.cited ?? [])]);
+    const citedAny = new Set([...credited(rr.A), ...credited(rr.B)]);
     for (const id of Object.values(keyMap[req.key] ?? {})) if (!citedAny.has(id)) { uRated++; if (gold.get(req.key)!.has(id)) uRel++; }
   }
   return {
@@ -508,7 +540,7 @@ export function renderScore(s: Score): string {
     `  with either rater's relevant: ${s.either.wins} better, ${s.either.losses} worse, p ${s.either.p.toFixed(4)}, mean ${s.either.meanDiff.toFixed(2)}`,
     "",
     "beside it (not deciding it):",
-    ...ARM_NAMES.map((arm) => `  ${arm} ${ARMS[arm].label}: utilization ${pct(s.utilization[arm].utilization)} (${s.utilization[arm].used} of ${s.utilization[arm].returned} thoughts shown were cited), ` +
+    ...ARM_NAMES.map((arm) => `  ${arm} ${ARMS[arm].label}: utilization ${pct(s.utilization[arm].utilization)} (${s.utilization[arm].used} used, ${s.utilization[arm].cited} of them cited, of ${s.utilization[arm].returned} results returned, summed over search calls), ` +
       `relevant share of cites ${pct(s.citedRelevantShare[arm])}, unseen cites ${sum(arm, (x) => x.unseenCites)}, calls ${sum(arm, (x) => x.calls)}, cost $${sum(arm, (x) => x.costUsd).toFixed(2)}`),
     `  uncited sample: ${s.uncitedRelevant.relevant} of ${s.uncitedRelevant.rated} rows neither plan cited are relevant by both raters`,
     ...(s.runs.length ? ["", "runs that broke a rule:", ...s.runs.map((r) => `  ${r.key} ${r.arm}: ${[...r.invalid.map((x) => `INVALID ${x}`), ...r.deviations].join("; ")}`)] : []),
@@ -549,11 +581,21 @@ export function claudeArgs(req: Request, arm: Arm, mcpConfig: string): string[] 
   ];
 }
 
+/** Move an existing file aside as `<path>.try<ms>`; true when there was one. */
+export function moveAside(path: string): boolean {
+  if (!existsSync(path)) return false;
+  renameSync(path, `${path}.try${Date.now()}`);
+  return true;
+}
+
 async function runOne(dir: string, req: Request, arm: Arm, mcpConfig: string): Promise<void> {
   const cwd = join(dir, "cwd");
   mkdirSync(cwd, { recursive: true });
   if (readdirSync(cwd).length) throw new Error(`${cwd} must stay empty: the planner runs there`);
   const out = runPath(dir, req.key, arm);
+  // A spawn writing into an existing file doesn't truncate it: an earlier stream's tail would follow the new one.
+  moveAside(out);
+  moveAside(`${out}.err`);
   const started = Date.now();
   const proc = Bun.spawn(claudeArgs(req, arm, mcpConfig), { cwd, stdout: Bun.file(out), stderr: Bun.file(`${out}.err`), stdin: "ignore" });
   const timer = setTimeout(() => proc.kill(), RUN_TIMEOUT_MS);
@@ -581,24 +623,27 @@ export function selfCheck(): number {
   ok(!eligible(t("SMD-1", { createdAt: WINDOW.to })), "the window's end is exclusive");
   ok(!eligible(t("SMD-1", { title: "Tracking: the brain helps" })) && !eligible(t("SMD-1", { title: "plan_context's reply" })), "trackers and plan_context's own tickets are left out");
   const pool = Array.from({ length: 60 }, (_, i) => t(`SMD-${100 + i}`));
-  const held = new Set(pool.map((x) => x.id).filter((k) => k !== "SMD-105"));
+  const order = [...pool].sort((x, y) => (sha(`${SEED}|${x.id}`) < sha(`${SEED}|${y.id}`) ? -1 : 1)).map((x) => x.id);
+  // The brain lacks the first ticket in hash order and the fifth, so the draw must pass both over (review pass 1: the
+  // unheld ticket sat past the first 20 and the passing-over was never read).
+  const unheld = [order[0], order[4]];
+  const held = new Set(pool.map((x) => x.id).filter((k) => !unheld.includes(k)));
   const d1 = draw([...pool, ...pool], held);
   const d2 = draw([...pool].reverse(), held);
   ok(d1.requests.length === N_REQUESTS && d1.eligible === 60, "the draw takes N from the eligible, a ticket listed twice counted once");
   ok(JSON.stringify(d1.requests) === JSON.stringify(d2.requests), "the draw doesn't depend on the listing's order");
   ok(d1.requests.every((r, i) => r.n === i + 1 && r.text === `Go ahead with ${r.key}: ${r.title}`), "requests are numbered and worded by the template");
-  const order = [...pool].sort((x, y) => (sha(`${SEED}|${x.id}`) < sha(`${SEED}|${y.id}`) ? -1 : 1)).map((x) => x.id);
-  const firstN = order.filter((k) => held.has(k)).slice(0, N_REQUESTS);
-  ok(JSON.stringify(d1.requests.map((r) => r.key)) === JSON.stringify(firstN), "the draw is the hash order, the unheld passed over");
-  ok(order.indexOf("SMD-105") < N_REQUESTS ? d1.notHeld.includes("SMD-105") : !d1.notHeld.includes("SMD-105"), "an unheld ticket reached by the draw is named");
+  ok(JSON.stringify(d1.requests.map((r) => r.key)) === JSON.stringify(order.filter((k) => held.has(k)).slice(0, N_REQUESTS)) && d1.requests[0].key === order[1], "the draw is the hash order, the unheld passed over");
+  ok(JSON.stringify(d1.notHeld) === JSON.stringify(unheld), "the unheld tickets the draw reached are named, in order");
+  ok(JSON.stringify(argsAfter(["--draw", "p1", "p2", "--held", "h", "--draw", "p3"], "--draw")) === JSON.stringify(["p1", "p2", "p3"]), "--draw reads every page after it, and after a second --draw");
 
   // A run's stream.
   const U1 = "11111111-1111-4111-8111-111111111111", U2 = "22222222-2222-4222-8222-222222222222", U3 = "33333333-3333-4333-8333-333333333333";
-  const stream = (arm: Arm, over: { model?: string; tools?: string[]; plan?: string; calls?: [string, string][]; noEnd?: boolean } = {}): string[] => {
+  const stream = (arm: Arm, over: { model?: string; tools?: string[]; plan?: string; calls?: ([string, string] | [string, string, unknown])[]; noEnd?: boolean } = {}): string[] => {
     const tools = (over.tools ?? [...ARMS[arm].tools]).map((x) => `mcp__brain__${x}`);
     const lines: unknown[] = [{ type: "system", subtype: "init", model: over.model ?? MODEL, tools }];
-    (over.calls ?? [["plan_context", `{"knowledge":{"hits":[{"id":"${U1.toUpperCase()}"},{"id":"${U2}"}]}}`]]).forEach(([tool, result], i) => {
-      lines.push({ type: "assistant", message: { content: [{ type: "tool_use", id: `t${i}`, name: `mcp__brain__${tool}`, input: { request: "r" } }] } });
+    (over.calls ?? [["plan_context", `{"knowledge":{"hits":[{"id":"${U1.toUpperCase()}"},{"id":"${U2}"}]},"text":"ID ${U2} supersededBy ${U3.toUpperCase()}"}`]]).forEach(([tool, result, input], i) => {
+      lines.push({ type: "assistant", message: { content: [{ type: "tool_use", id: `t${i}`, name: `mcp__brain__${tool}`, input: input ?? { request: "r" } }] } });
       lines.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: `t${i}`, content: result }] } });
     });
     const plan = over.plan ?? `## Can it be done now\nyes [${U1}]\n## Steps\n1. do it [${U3}]\nCited: ${U1}, ${U3}`;
@@ -608,8 +653,12 @@ export function selfCheck(): number {
   };
   const rA = parseRun(stream("A"));
   ok(rA.ended && rA.model === MODEL && rA.calls.length === 1 && rA.calls[0].tool === "plan_context", "a stream's init, call and end are read");
-  ok(JSON.stringify(rA.seen) === JSON.stringify([U1, U2]), "ids seen are lower-cased and kept once");
+  ok(JSON.stringify(rA.seen) === JSON.stringify([U1, U2, U3]), "ids seen are every id printed, lower-cased, kept once (U2 printed twice)");
+  ok(JSON.stringify(rA.calls[0].returned) === JSON.stringify([U1, U2]), "a plan_context call returned its knowledge hits alone, not an id its text names");
   ok(JSON.stringify(rA.cited) === JSON.stringify([U1, U3]), "a plan's cites are its full ids, inline and on the Cited line, once each");
+  ok(JSON.stringify(parseRun(stream("A", { plan: `## Steps\n1. per [${U2}]\nCited: ${U1}` })).cited) === JSON.stringify([U2, U1]), "an inline cite left off the Cited line still counts");
+  ok(JSON.stringify(returnedOf("search", `{"results":[{"id":"${U2}","title":"t"}]}`)) === JSON.stringify([U2]) && JSON.stringify(returnedOf("search_thoughts", `{"hits":[{"id":"${U3}","relations":[{"id":"${U1}"}]}]}`)) === JSON.stringify([U3]), "search's results and search_thoughts' hits are what they returned, not a relation's id");
+  ok(returnedOf("fetch", `{"id":"${U1}"}`).length === 0 && returnedOf("relations", `{"hits":[{"id":"${U1}"}]}`).length === 0 && returnedOf("search", "not json").length === 0, "a tool that logs no search row returns nothing, even with a `hits` list, and an unreadable result nothing");
   ok(judgeRun(rA, "A").invalid.length === 0 && judgeRun(rA, "A").deviations.length === 0, "a clean arm-A run breaks no rule");
   ok(judgeRun(parseRun(stream("A", { model: "claude-opus-5-5" })), "A").invalid.length === 1, "another model makes the run invalid");
   ok(judgeRun(parseRun(stream("A", { tools: ["plan_context", "search"] })), "A").invalid.length === 1, "a run that listed another brain tool is invalid");
@@ -673,22 +722,34 @@ export function selfCheck(): number {
   const keyMap = { "SMD-1": { R01: U1, R02: U2, R03: U3 }, "SMD-2": { R01: U1, R02: U2, R03: U3 } };
   const lab: Labels = { "SMD-1": { R01: 1, R02: 1, R03: 0 }, "SMD-2": { R01: 0, R02: 1, R03: 0 } };
   const sc = score(reqs, recs, isT, keyMap, lab, lab);
-  // A cites U1 (seen) and U3 (unseen); B cites U2 (seen). SMD-1: gold {U1, U2} → A 1, B 1, d 0. SMD-2: gold {U2} → A 0, B 1, d −1.
-  ok(sc.requests[0].A.cited === 1 && sc.requests[0].A.unseenCites === 1 && sc.requests[0].A.relevant === 1 && sc.requests[0].B.relevant === 1 && sc.requests[0].d === 0, "a request's cites are credited only when seen, and scored on the gold");
+  // A cites U1 and U3 (both printed, U3 only in a label); B cites U2. SMD-1: gold {U1, U2} → A 1, B 1, d 0. SMD-2: gold {U2} → A 0, B 1, d −1.
+  ok(sc.requests[0].A.cited === 2 && sc.requests[0].A.unseenCites === 0 && sc.requests[0].A.relevant === 1 && sc.requests[0].B.relevant === 1 && sc.requests[0].d === 0, "a request's cites are scored on the gold");
+  const unseenRun = parseRun(stream("A", { calls: [["plan_context", `{"knowledge":{"hits":[{"id":"${U1}"}]}}`]], plan: `## Steps\n[${U1}] [${U2}]` }));
+  const sUnseen = score([reqs[0]], new Map([["SMD-1", { A: unseenRun, B: recB }]]), isT, { "SMD-1": { R01: U1, R02: U2 } }, { "SMD-1": { R01: 1, R02: 1 } }, { "SMD-1": { R01: 1, R02: 1 } });
+  ok(sUnseen.requests[0].A.cited === 1 && sUnseen.requests[0].A.unseenCites === 1 && sUnseen.requests[0].A.relevant === 1, "a cite of an id no tool printed is reported, not credited, though relevant");
+  // A cites U2 without seeing it; B saw U2 and cited nothing: U2 is uncited (rateSet's definition), so the sample counts it.
+  const sawOnly = parseRun(stream("B", { calls: [["search", `{"results":[{"id":"${U2}"}]}`]], plan: "## Steps\nCited: none" }));
+  const sU = score([reqs[0]], new Map([["SMD-1", { A: unseenRun, B: sawOnly }]]), isT, { "SMD-1": { R01: U1, R02: U2 } }, { "SMD-1": { R01: 1, R02: 1 } }, { "SMD-1": { R01: 1, R02: 1 } });
+  ok(sU.uncitedRelevant.rated === 1 && sU.uncitedRelevant.relevant === 1, "the uncited sample counts a row one arm cited unseen and the other saw uncited, as rateSet draws it");
   ok(sc.requests[1].d === -1 && sc.wins === 0 && sc.losses === 1 && sc.ties === 1 && near(sc.meanDiff, -0.5), "the paired differences and their counts");
   ok(near(sc.kappa, 1) && sc.items === 6 && sc.agreeRelevant === 3, "κ over every rated row");
-  ok(sc.utilization.A.returned === 4 && sc.utilization.A.used === 2 && near(sc.utilization.A.utilization ?? -1, 0.5), "utilization by SMD-1719's code: per request A saw 2 thoughts and its credited cite used 1 (4 and 2 over both)");
-  ok(sc.utilization.B.returned === 4 && sc.utilization.B.used === 2, "B's utilization the same way");
-  const split = score(reqs, recs, isT, keyMap, lab, { "SMD-1": { R01: 0, R02: 1, R03: 0 }, "SMD-2": { R01: 0, R02: 1, R03: 1 } });
-  ok(split.agreeRelevant === 2 && split.disagree === 2 && split.requests[0].A.relevant === 0, "gold is relevant by both; a split row is not gold");
-  ok(split.either.losses === 1 && split.either.wins === 0, "the either-rater reading counts a split row as relevant");
+  ok(sc.utilization.A.returned === 4 && sc.utilization.A.used === 2 && near(sc.utilization.A.utilization ?? -1, 0.5), "utilization by SMD-1719's code: per request plan_context returned its 2 hits and the plan cited 1 of them (U3, a label's id, is no result)");
+  ok(sc.utilization.B.returned === 0 && sc.utilization.B.used === 0 && sc.utilization.B.utilization === null, "B's one call printed ids as plain text: no structured results, so no search row");
+  const recF = parseRun(stream("B", { calls: [["search", `{"results":[{"id":"${U1}"},{"id":"${U2}"}]}`], ["fetch", `{"id":"${U2}","text":"x"}`, { id: U2 }], ["thread", `{"threads":[{"members":[{"id":"${U3}"}]}]}`, { key: "SMD-1" }]], plan: `## Steps\n[${U3}]` }));
+  const sF = score([reqs[0]], new Map([["SMD-1", { A: rA, B: recF }]]), isT, { "SMD-1": { R01: U1, R02: U2, R03: U3 } }, { "SMD-1": { R01: 1, R02: 1, R03: 1 } }, { "SMD-1": { R01: 1, R02: 1, R03: 1 } });
+  ok(sF.utilization.B.returned === 2 && sF.utilization.B.used === 1 && sF.utilization.B.cited === 0, "a fetch is an opened use of the search that returned it; thread logs no search row, so its cited member is no use");
+  const twice = parseRun(stream("B", { calls: [["search", `{"results":[{"id":"${U1}"}]}`], ["search", `{"results":[{"id":"${U1}"}]}`]], plan: `## Steps\n[${U1}]` }));
+  ok(score([reqs[0]], new Map([["SMD-1", { A: rA, B: twice }]]), isT, { "SMD-1": { R01: U1 } }, { "SMD-1": { R01: 1 } }, { "SMD-1": { R01: 1 } }).utilization.B.returned === 2, "returned sums each search call's results: a thought two calls return counts twice, as SMD-1719 counts it");
+  // The raters split on SMD-1's U1 and U3, both of which A cites: by both raters A cites no relevant row there (d −1),
+  // by either it cites two (d +1). SMD-2 is gold {U2} either way (d −1).
+  const split = score(reqs, recs, isT, keyMap, lab, { "SMD-1": { R01: 0, R02: 1, R03: 1 }, "SMD-2": { R01: 0, R02: 1, R03: 0 } });
+  ok(split.agreeRelevant === 2 && split.disagree === 2 && split.requests[0].A.relevant === 0 && split.wins === 0 && split.losses === 2, "gold is relevant by both; a split row is not gold");
+  ok(split.either.wins === 1 && split.either.losses === 1, "the either-rater reading counts a split row as relevant");
   let threw = false;
   try { score(reqs, recs, isT, keyMap, lab, { "SMD-1": { R01: 1 } }); } catch { threw = true; }
   ok(threw, "a row a rater left unlabelled stops the score");
   const noRun = score(reqs, new Map([["SMD-1", { A: rA }]]), isT, keyMap, lab, lab);
   ok(noRun.verdict === "no verdict" && noRun.runs.some((r) => r.invalid.includes("no run")), "a missing run gives no verdict");
-  // The drop-the-mechanism mutant: credit unseen cites and the score must move.
-  ok(sc.requests[0].A.cited !== rA.cited.length, "crediting a cite never seen would change the count (the seen rule has teeth)");
 
   // The command line the planner runs under.
   const args = claudeArgs(reqs[0], "B", "/x/mcp.json");
@@ -697,8 +758,12 @@ export function selfCheck(): number {
   ok(after("--allowedTools").split(",").length === ARMS.B.tools.length && !after("--disallowedTools").includes("mcp__brain__search,") && after("--disallowedTools").includes("mcp__brain__plan_context"), "arm B allows its read tools and hides plan_context");
   ok(after("--disallowedTools").split(",").length + ARMS.B.tools.length === BRAIN_TOOLS.length, "every brain tool is either allowed or hidden");
   ok(claudeArgs(reqs[0], "A", "/x").join(" ").includes("--allowedTools mcp__brain__plan_context --disallowedTools"), "arm A allows plan_context alone");
-  ok(!/capture_thought|update_thought|delete_thought/.test(after("--allowedTools")), "no write tool is allowed");
-  ok(/^[0-9a-f]{64}$/.test(PREREGISTRATION), "the preregistration hash is taken");
+  ok(ARM_NAMES.every((arm) => ARMS[arm].tools.every((x) => (READ_TOOL_NAMES as readonly string[]).includes(x))), "every tool an arm may call is a read-scope tool in the server's manifest");
+  ok(PREREGISTRATION === "7815fb2226cf8f11534e9ca3ebfcb133564f097664ac358b1c9f59f8d4bbd7e6", "the preregistration hash is the one posted on SMD-2684 (comment b07d2d67)");
+  const tmp = join(process.env.TMPDIR ?? "/tmp", `epc-aside-${process.pid}`);
+  writeFileSync(tmp, "old stream");
+  ok(moveAside(tmp) && !existsSync(tmp) && !moveAside(tmp), "an earlier stream is moved aside before a run writes, and nothing is moved when there is none");
+  for (const f of readdirSync(process.env.TMPDIR ?? "/tmp")) if (f.startsWith(`epc-aside-${process.pid}.try`)) rmSync(join(process.env.TMPDIR ?? "/tmp", f));
 
   console.log(fails ? `\n${fails} check(s) failed` : "\nall checks passed");
   return fails;
@@ -709,6 +774,15 @@ export function selfCheck(): number {
 function argList(args: string[], flag: string): string[] {
   const out: string[] = [];
   args.forEach((a, i) => { if (a === flag && args[i + 1] && !args[i + 1].startsWith("--")) out.push(args[i + 1]); });
+  return out;
+}
+/** Every token after each `flag` up to the next `--…`: `--draw p1.json p2.json` reads both pages. */
+export function argsAfter(args: string[], flag: string): string[] {
+  const out: string[] = [];
+  args.forEach((a, i) => {
+    if (a !== flag) return;
+    for (let j = i + 1; j < args.length && !args[j].startsWith("--"); j++) out.push(args[j]);
+  });
   return out;
 }
 const arg = (args: string[], flag: string): string | undefined => argList(args, flag)[0];
@@ -722,7 +796,7 @@ async function main(): Promise<void> {
   if (args.includes("--self-check")) process.exit(selfCheck() ? 1 : 0);
 
   if (args.includes("--draw")) {
-    const pages = argList(args, "--draw");
+    const pages = argsAfter(args, "--draw");
     const held = new Set(readFileSync(need(arg(args, "--held"), "--held"), "utf8").split("\n").map((s) => s.trim()).filter(Boolean));
     const tickets = pages.flatMap((p) => (JSON.parse(readFileSync(p, "utf8")) as { issues: Ticket[] }).issues);
     const d = draw(tickets, held);
@@ -751,7 +825,6 @@ async function main(): Promise<void> {
         if (armOnly && arm !== armOnly) continue;
         const prior = readRun(dir, req.key, arm);
         if (prior?.ended && !args.includes("--again")) { console.log(`${req.key} ${arm}: done already`); continue; }
-        if (prior && args.includes("--again")) renameSync(runPath(dir, req.key, arm), `${runPath(dir, req.key, arm)}.try${Date.now()}`);
         await runOne(dir, req, arm, mcp);
       }
     }

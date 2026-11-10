@@ -4739,10 +4739,13 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
 
-  // SMD-2684 PR 2: a plan_context row is a search to this report (its knowledge hits in result_ids), with an arm of
-  // its own, and every kind query_log allows is read as a search or named as not one — a new kind needs a decision.
-  const planned = summarise([search("pc1", AG, 0, "go ahead with SMD-1", [A, B], null, "plan_context")], [act(AG, 1, "fetch", B)], 30);
-  assert(planned.overall.used === 1 && [...planned.arms.keys()].some((k) => k.startsWith("plan_context ")), `a plan_context row's hit, fetched, is used, under an arm of its own (${[...planned.arms.keys()].join(" | ")})`);
+  // SMD-2684 PR 2: a plan_context row is a search to the report and the export (its knowledge hits in result_ids), and
+  // every kind query_log allows is read as a search or named as not one — a new kind needs a decision. The readers
+  // select `kind = ANY('{search,plan_context}'::text[])`, built from SEARCH_KINDS; the literal is held here as they
+  // build it (review pass 1: a pure summarise row could not tell the readers' predicate from the old one).
+  const kindsLiteral = `{${SEARCH_KINDS.join(",")}}`;
+  const picked = (await db.query<{ k: string }>(`SELECT k FROM unnest(ARRAY['search', 'plan_context', 'agenda', 'action']) AS k WHERE k = ANY($1::text[]) ORDER BY k`, [kindsLiteral])).rows.map((r) => r.k);
+  assert(JSON.stringify(picked) === JSON.stringify(["plan_context", "search"]), `the readers' kinds literal picks search and plan_context rows, not agenda or action rows (${picked.join(",")})`);
   const [{ def }] = (await db.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'query_log_kind_check' AND conrelid = 'query_log'::regclass`)).rows;
   const allowed = [...def.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]).sort();
   const decided = [...SEARCH_KINDS, ...NOT_SEARCH_KINDS].sort();

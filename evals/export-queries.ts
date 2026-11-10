@@ -42,7 +42,7 @@
 import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
 import { parsePgUuidArray, posInt, requireQueryLog } from "./query-log.ts";
-import { attribute, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
+import { attribute, SEARCH_KINDS, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
 
 loadEnv();
 
@@ -73,17 +73,21 @@ const searchRows = await sql<SearchDbRow[]>`
          -- before 045 reads NULL instead of failing (SMD-2255, first review pass).
          to_jsonb(query_log) ->> 'arm' AS arm, result_ids,
          NULL::bigint AS chars, 0::int AS surviving
-    FROM query_log WHERE kind = 'search'`;
+    FROM query_log WHERE kind = ANY(${`{${SEARCH_KINDS.join(",")}}`}::text[])`;
 const actionRows = await sql<ActionDbRow[]>`
   SELECT agent_id, logged_at, (extract(epoch FROM logged_at)::numeric * 1000000)::bigint AS at_us, tool, target_id
     FROM query_log WHERE kind = 'action'`;
 const searches = searchRows.map(toSearchRow);
 const { bySearch } = attribute(searches, actionRows.map(toActionRow), WINDOW_MIN);
 const queryOf = new Map(searches.map((s) => [s.id, s.query]));
+const toolOf = new Map(searches.map((s) => [s.id, s.tool]));
 const links: { query: string; target_id: string }[] = [];
 for (const [searchId, uses] of bySearch) {
   const query = queryOf.get(searchId);
   if (query === null || query === undefined) continue; // a search row always carries its query (034's CHECK)
+  // A plan_context row is attributed as the report attributes it (SEARCH_KINDS), so a touch after it is its use and
+  // not an earlier search's; its request is no search the replay can run, so it labels no query here (SMD-2684 PR 2).
+  if (toolOf.get(searchId) === "plan_context") continue;
   for (const target_id of uses.used) links.push({ query, target_id });
 }
 
