@@ -472,8 +472,9 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   1 and the last 1/n. So the search's own order, ties and all, is what weighs,
   and a text match or a literal-only query's similarity order is kept too. Their
   fusion scores are 0, and a score over the top's would have left those rows to
-  priority alone. Priority is the effective priority over 5.8, the default
-  weights' largest. That is a level (unknown counted as 2), plus up to 0.8 from
+  priority alone. Priority is the effective priority over the brain's
+  `ob1_priority_span()` (migration 128, SMD-4194), the largest the default
+  weights allow, 5.8 under them; a ranked search reads it with its window. That is a level (unknown counted as 2), plus up to 0.8 from
   urgency and what it unblocks, which order items of one level and never lift
   one past the next (migration 127, SMD-4177; 9 under 122's weights). Ties keep
   the window's order.
