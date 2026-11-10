@@ -2439,7 +2439,7 @@ one queued this long goes first at the next turn — as the call ahead of it
 takes its slot — after older ones that go first; not a timeout. It orders, and
 the share is the same; the order matters once the scheduler's calls queue —
 consolidation's workers two or more past the share hold the other passes to
-about a call a worker a max-wait — and a lower value gives them more turns —
+about a call a worker a max-wait — and a lower value gives them more turns;
 SMD-3379 PR 2c-2),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and

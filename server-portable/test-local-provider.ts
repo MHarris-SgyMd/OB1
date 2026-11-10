@@ -3225,7 +3225,7 @@ console.log("\n[15] The background slots on by default (SMD-3379 PR 2b-2b): a lo
     `a live genre call at a one-at-a-time tier waits at most the background call in hand, the second background call held for its slot behind it: the live call waited ${Math.round(waited)} ms for a ${PER_MS} ms call (first ${Math.round(first)}, live ${Math.round(live)}, second ${Math.round(second)} ms)`);
 }
 
-console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): consolidation's before the other passes', the rest in the order they asked, and a call that has waited --max-wait first whatever its pass; never more than the share");
+console.log("\n[16] A share's calls in a process ordered (SMD-3379 PR 2c-2): consolidation's before the other passes', the rest in the order they asked, and a call that has waited --max-wait first whatever its pass; never more than the share; a call passed over a second or more told it waits");
 {
   const { installBackgroundSlots, shareOf, backgroundSlotsFrom, SLOTS_CHANNEL } = await import("./slots.ts");
   const { modelCall, asPass, withCallWaits } = await import("./model-call.ts");

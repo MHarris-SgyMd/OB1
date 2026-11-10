@@ -66,7 +66,7 @@
  * In a process a share's calls are ordered (PR 2c-2): consolidation's go
  * first, then the rest in the order they asked, and a call that has waited
  * --max-wait (OB1_SLEEP_MAX_WAIT, 60 s) goes first whatever its pass, at the
- * next turn — the waiter takes a slot — after older consolidation calls; across
+ * next turn — the waiter takes a slot — after older ones that go first; across
  * processes the queue is in the order each process's next call asked. Which
  * model the server has loaded is not read: one brain's order cannot see the
  * other brains' or clients' loads on a server they share, so it is PR 3's
@@ -112,7 +112,8 @@ export const MAX_SLOTS = 16;
 const POLL_MS = 250;
 /**
  * How often the share's head tries its slots again untold, in ms, jittered to twice it: a slot let go by a process that
- * died, or by one from before PR 2c-1, is told to no one.
+ * died, or by one from before PR 2c-1, is told to no one. Also how long a call passed over has queued before it is
+ * told it waits (passTurn, PR 2c-2).
  */
 const RECHECK_MS = 1000;
 /** The application_name of the semaphore's connections. */
@@ -280,14 +281,18 @@ function sessionEnded(e: unknown): boolean {
 }
 
 /**
+ * A call queued behind a share's waiter in this process: how to hand it the turn (`go`) and to tell it it waits
+ * (`waiting`), whether its pass goes first (`first`), and when it queued (`at`, performance.now()), so the turn is
+ * passed in order (PR 2c-2).
+ */
+type Turn = { go: () => void; waiting: () => void; first: boolean; at: number };
+/**
  * A share's calls in this process: whether one of them waits for a slot, those queued behind it, in order, the waiter's
  * backend (`pid`), the slots told let go to it (`freed`, this process's and, through the channel, another's), whether
  * it waits (`busy`: in the share's queue, or at its head with no slot free, its queue told), and how to wake it from
  * its nap — a slot let go goes to the head at once, not at its next try (review pass 6: 424 embeddings at embed=1, two
- * workers, took 36 s against 0.6 with a poll a handoff). Each call queued says whether its pass goes first (`first`)
- * and when it queued (`at`, performance.now()), so the turn is passed in order (PR 2c-2).
+ * workers, took 36 s against 0.6 with a poll a handoff).
  */
-type Turn = { go: () => void; waiting: () => void; first: boolean; at: number };
 type Local = { key: string; limit: number; waiter: boolean; queue: Turn[]; pid: number; freed: number; busy: boolean; wake?: () => void };
 
 /**
@@ -298,8 +303,9 @@ type Local = { key: string; limit: number; waiter: boolean; queue: Turn[]; pid: 
  */
 const FIRST_PASSES: ReadonlySet<string> = new Set(["consolidate"]);
 /**
- * How long a call waits before it goes first whatever its pass, in s (`--max-wait`, OB1_SLEEP_MAX_WAIT): the order
- * reorders a share's calls and never more — the share is the same — and no pass's calls wait behind another's for good.
+ * --max-wait's default, in s (OB1_SLEEP_MAX_WAIT unset): how long a call queues before it goes first at the next turn
+ * whatever its pass, after older ones that go first. It reorders a share's calls and never more — the share is the
+ * same — and no pass's calls wait behind another's for good.
  */
 export const DEFAULT_MAX_WAIT_S = 60;
 /** Most seconds --max-wait takes: a day, as the sleep scheduler's other bounds. */
@@ -324,8 +330,8 @@ const LISTEN_RETRY_MS = 2000;
  * every wait, a call already running keeping its slot until it ends; and the
  * settings' problems, said through `log`, the defaults then standing in.
  * Under `off` no hook is set. `maxWaitS` is --max-wait's, DEFAULT_MAX_WAIT_S
- * unless given. `connectS` bounds a connection's opening and
- * each statement, CONNECT_S unless a test asks for less.
+ * unless given, or not a finite number. `connectS` bounds a connection's
+ * opening and each statement, CONNECT_S unless a test asks for less.
  */
 export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));

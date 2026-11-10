@@ -3423,7 +3423,7 @@ if (import.meta.main) {
   const maintenanceWorkMem = cli.int("maintenance-work-mem", { absent: DEFAULT_MAINTENANCE_WORK_MEM_MB, min: 1, max: MAX_MEM_MB });
   const dumpDir = cli.value("dump-dir");
   // Background calls held to their share, once for the process (SMD-3379 PR 2b-1): a local model server's by default (PR 2b-2b), OB1_BACKGROUND_SLOTS' own, or none under `off`;
-  // consolidation's first in a share, and a call that has waited --max-wait first whatever its pass (PR 2c-2).
+  // consolidation's first in a share, and a call queued --max-wait first at the next turn whatever its pass, after older ones that go first (PR 2c-2).
   const slots = installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS, maxWaitS: maxWait });
   const sql = openSql(url, { max: 2, session: schedulerSession({ workMem, maintenanceWorkMem }) });
   let uninstall = () => {};
