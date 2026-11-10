@@ -246,7 +246,7 @@ export type Env = {
    * but what an OB1_EGRESS_DENY term names) or off. See egress.ts.
    */
   OB1_EGRESS_POLICY?: string;
-  /** Comma-separated unit:value terms (actor, source, type, topic, marker) read under deny. */
+  /** Comma-separated unit:value terms (actor, source, type, topic, marker, plugin) read under deny. */
   OB1_EGRESS_ALLOW?: string;
   /** The same, read under allow. */
   OB1_EGRESS_DENY?: string;
