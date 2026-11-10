@@ -5434,13 +5434,17 @@ if (want("8")) {
   assert(!/no plugin OB1_PLUGINS enables/.test(caseOnly.out) && !/no plugin OB1_PLUGINS enables/.test(offStray.out),
          "…nor for the name in another case (the gate matches it so), nor under off, where no term is read");
   // Under allow a row's deny term, or a key's, holds no plugin's call carrying such a row (SMD-4195): said while a plugin is enabled.
-  const allowRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice, marker:#phi, plugin:exampel" });
-  const allowRowsNoPlugins = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice" });
-  const allowMarkerOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi" });
+  const HOSTED_CHAT = { OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" };
+  const allowRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice, marker:#phi, plugin:exampel" });
+  const allowRowsNoPlugins = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice" });
+  const allowMarkerOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi" });
+  // A chat endpoint declared local is never judged; under deny OB1_EGRESS_DENY is unread: nothing to say in either.
+  const allowRowsLocalChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi" });
+  const denyRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_DENY: "type:phi" });
   assert(/!\s+egress policy\s+type:phi, actor:alice hold\(s\) no plugin's model call \(ctx\.model\) whose text carries such a row — .*\(SMD-4195\)/.test(allowRows.out)
          && /!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables/.test(allowRows.out)
-         && !/hold\(s\) no plugin's model call/.test(allowRowsNoPlugins.out) && !/hold\(s\) no plugin's model call/.test(allowMarkerOnly.out),
-         "under allow, a row's or a key's deny term is said to hold no plugin's call carrying such a row while a plugin is enabled (a marker does); a stray name in OB1_EGRESS_DENY is warned too");
+         && [allowRowsNoPlugins, allowMarkerOnly, allowRowsLocalChat, denyRows].every((r) => !/hold\(s\) no plugin's model call/.test(r.out)),
+         "under allow, a row's or a key's deny term is said to hold no plugin's call carrying such a row while a plugin is enabled and the chat endpoint is judged (not for a marker, a local chat endpoint, or under deny); a stray name in OB1_EGRESS_DENY is warned too");
   // The chat row's consequence names what a plugin's call needs.
   assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — .* an enabled plugin's model call \(ctx\.model\) is refused unless an OB1_EGRESS_ALLOW plugin: term names it/.test(split.out),
          "…and the chat row says a plugin's call needs a plugin: term");

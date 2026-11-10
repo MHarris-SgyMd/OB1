@@ -199,8 +199,10 @@ SMD-2888, SMD-2889). A refused search says which tool works without a model call
 (the access key's name), `source`, `type`, `topic` (a row's metadata, known to
 the passes and the re-embed, not at a first capture), `marker` (a literal in the
 text), `plugin` (a plugin's model call, `ctx.model`: under `deny` only a
-`plugin:<name>` term lets one out) — and a term that does not parse fails
-preflight and closes the gate.
+`plugin:<name>` term lets one out; under `allow` a row's `source:`, `type:` or
+`topic:` deny term, or another key's `actor:`, never holds one, so hold it with
+`plugin:`, `actor:` or a marker, SMD-4195) — and a term that does not parse
+fails preflight and closes the gate.
 Preflight prints the mode and, per endpoint, what leaves; `deploy/.env.example`
 has the block.
 
