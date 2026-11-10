@@ -18695,6 +18695,76 @@ console.log("\n[114] Migration 127: level first — the default weights after th
     "a re-apply is a no-op: the same reads");
 }
 
+console.log("\n[115] Migration 128: the default weights in one function — ob1_priority_defaults() holds 127's, effective_priority reads them from it and holds no literal, ob1_priority_span() is their largest sum (5.8); every effective number as 127's; a replaced defaults function moves both the read and the span with no other change; the shape; a re-apply a no-op (SMD-4194)");
+{
+  const file = files.find((f) => /^\d{3}_priority_defaults\.sql$/.test(f)) ?? "no NNN_priority_defaults.sql";
+  // [114] re-applies 127's effective_priority, which 128 replaces: this section holds 128's, over [114]'s tickets.
+  const ladderKeys: [string, string][] = ["SMD-9963", "SMD-9964", "SMD-9965", "SMD-9967", "SMD-9966", "SMD-9968", "SMD-9969", "SMD-9970"].map((k) => ["ticket", k]);
+  const NOW = "2027-03-10T15:00:00Z";
+  const eff = async (items: [string, string][]) =>
+    (await db.query<{ item_key: string; effective: string }>(`SELECT item_key, effective::text AS effective FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key }))), NOW])).rows.map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
+  const under127 = await eff(ladderKeys);
+  await reapply(file.slice(0, 4));
+
+  // The shape: two new functions, STABLE (an IMMUTABLE value is folded into prepared plans and outlives a retune) and
+  // commented; effective_priority reads the defaults and holds no literal.
+  const fns = (await db.query<{ n: string; v: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') ORDER BY 1`)).rows;
+  const def = (await db.query<{ d: string }>(`SELECT pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0].d;
+  assert(fns.length === 2 && fns.every((f) => f.v === "s" && /Migration 128 \/ SMD-4194/.test(f.c ?? "")) && /c_defaults CONSTANT jsonb := ob1_priority_defaults\(\);/.test(def) && !/"overdue":/.test(def),
+    `ob1_priority_defaults and ob1_priority_span are STABLE and commented; effective_priority reads its defaults from the function and holds no literal (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
+
+  // The values: 127's, and the span their largest sum.
+  const vals = (await db.query<{ d: Record<string, unknown>; s: string }>(`SELECT ob1_priority_defaults() AS d, ob1_priority_span()::text AS s`)).rows[0];
+  assert(JSON.stringify(vals.d) === JSON.stringify({ cap: 50, hop: 1, hops: 2, soon: 0.4, week: 0.2, depth: 3, overdue: 0.6, unknown: 2, soon_days: 1, week_days: 7, unblocks_one: 0.1, unblocks_many: 0.2, count_inferred: false, unblocks_many_at: 3 })
+         && Number(vals.s) === 5.8,
+    `the defaults are 127's, and the span 5 + overdue 0.6 + unblocks_many 0.2 = 5.8 (${vals.s})`);
+
+  // Every effective number as 127's.
+  const under128 = await eff(ladderKeys);
+  assert(under128 === under127 && under128.includes("SMD-9964 3.4") && under128.includes("SMD-9967 2.6"),
+    `every effective number of [114]'s ladder reads as under 127 (${under128})`);
+
+  // The Verify: a migration replacing only the defaults moves the read and the span, nothing else edited. Rolled back.
+  let moved = "", spanMoved = "", spanUnknown = "", spanLost = "", lostRead = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql STABLE AS $f$
+        SELECT '{"unknown": 2, "hop": 1, "hops": 2, "soon": 2, "soon_days": 1, "week": 1, "week_days": 7, "overdue": 3,
+                 "unblocks_one": 0.5, "unblocks_many": 1, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
+      moved = (await tx.query<{ item_key: string; effective: string }>(`SELECT item_key, effective::text AS effective FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`,
+        [JSON.stringify([{ kind: "ticket", key: "SMD-9964" }, { kind: "ticket", key: "SMD-9967" }]), NOW])).rows.map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
+      spanMoved = (await tx.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s;
+      // Unknown past a critical level (review pass 1): the span takes the larger of 5 and unknown's value.
+      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql STABLE AS $f$
+        SELECT '{"unknown": 6, "hop": 1, "hops": 2, "soon": 0.4, "soon_days": 1, "week": 0.2, "week_days": 7, "overdue": 0.6,
+                 "unblocks_one": 0.1, "unblocks_many": 0.2, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
+      spanUnknown = (await tx.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s;
+      // A weight lost (review pass 4): the read refuses, naming it, and the span is NULL, never a plausible number.
+      await tx.exec(`CREATE OR REPLACE FUNCTION ob1_priority_defaults() RETURNS jsonb LANGUAGE sql STABLE AS $f$
+        SELECT '{"unknown": 2, "hop": 1, "hops": 2, "soon": 0.4, "soon_days": 1, "week": 0.2, "week_days": 7, "overdu": 0.6,
+                 "unblocks_one": 0.1, "unblocks_many": 0.2, "unblocks_many_at": 3, "depth": 3, "cap": 50, "count_inferred": false}'::jsonb $f$`);
+      spanLost = String((await tx.query<{ s: string | null }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s);
+      await tx.exec(`SAVEPOINT lost`);
+      try { await tx.query(`SELECT * FROM effective_priority('[{"kind":"ticket","key":"SMD-9964"}]'::jsonb, NULL, $1::timestamptz)`, [NOW]); lostRead = "read"; }
+      catch (e) { lostRead = String((e as Error).message); }
+      await tx.exec(`ROLLBACK TO SAVEPOINT lost`);
+      throw new Error("[115] roll back");
+    });
+  } catch (e) { if (!/\[115\] roll back/.test(String((e as Error).message))) throw e; }
+  const after = await eff(ladderKeys);
+  assert(moved === "SMD-9964 5, SMD-9967 5" && Number(spanMoved) === 9 && Number(spanUnknown) === 6.8 && after === under127,
+    `a defaults function with 122's weights reads the High due tomorrow and the overdue Medium at 5 and the span at 9, no other function edited; with unknown at 6 the span is 6.8; rolled back, 127's numbers again (${moved}; ${spanMoved}; ${spanUnknown})`);
+  assert(spanLost === "null" && /ob1_priority_defaults\(\) lacks weight\(s\): overdue\b/.test(lostRead),
+    `a defaults function that lost a weight ("overdu") gets no span, and the read refuses naming the weight, never NULL numbers (${spanLost}; ${lostRead.slice(0, 90)})`);
+
+  // A re-apply is a no-op.
+  await reapply(file.slice(0, 4));
+  assert(await eff(ladderKeys) === under127 && Number((await db.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s) === 5.8, "a re-apply is a no-op: the same reads, the same span");
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).

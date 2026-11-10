@@ -1455,7 +1455,8 @@ export type PriorityRecord = { item: PriorityItem; exists: boolean; level: numbe
 
 /**
  * docs/priority.md's weights, as migration 122's effective_priority names them (SMD-3667). A read passes the ones it
- * overrides; the read's defaults stand for the rest, level first since migration 127 (SMD-4177): unknown 2, hop 1,
+ * overrides; the read's defaults stand for the rest, read from ob1_priority_defaults() since migration 128
+ * (SMD-4194), level first since migration 127 (SMD-4177): unknown 2, hop 1,
  * hops 2, soon 0.4 by the end of soon_days 1, week 0.2 by the end of week_days 7, overdue 0.6, unblocks_one 0.1,
  * unblocks_many 0.2 from unblocks_many_at 3, depth 3, cap 50, count_inferred false. The terms after the level add at
  * most 0.8 under the defaults; a caller's own weights may make them cross a level (122's were soon 2, week 1,
@@ -2483,6 +2484,12 @@ export interface ThoughtStore {
    */
   effectivePriority(items: { kind: string; key: string }[], opts?: { weights?: Partial<PriorityWeights>; now?: string }): Promise<EffectivePriority[]>;
   /**
+   * The largest effective priority the brain's default weights allow (migration 128's ob1_priority_span, SMD-4194):
+   * a critical level plus the largest urgency and unblocks terms. Search's priority_weight divides by it. A database
+   * before 128 throws.
+   */
+  prioritySpan(): Promise<number>;
+  /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
    * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
@@ -2828,7 +2835,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 
