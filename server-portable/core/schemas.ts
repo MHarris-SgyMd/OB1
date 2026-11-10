@@ -92,6 +92,12 @@ const minTrustInput = z.enum(TRUST).optional()
 /** No lone UTF-16 surrogate: JSON.stringify writes one as an escape jsonb refuses (SMD-3669 review pass 6). */
 const WELL_FORMED = (v: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v);
 /** An agenda scope (SMD-3669): a non-blank string with no NUL and no lone surrogate, each refused here, before 123's jsonb. */
+/**
+ * An evidence entry's text (SMD-2690 PR 3b, review pass 1): bounded, no NUL
+ * and no lone surrogate — jsonb refuses both, and the write would fail as a
+ * fault rather than a refusal — and not blank, which says nothing.
+ */
+const EVIDENCE_TEXT = (max: number) => z.string().min(1).max(max).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
 const AGENDA_SCOPE = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
 
 export const SPECS = {
@@ -543,11 +549,11 @@ export const SPECS = {
     },
     inputSchema: {
       id: z.string().describe("UUID of the thought the source supports — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved; or the `client_key` a thought was captured with, when no thought has it as its id"),
-      source_label: z.string().min(1).max(EVIDENCE_LIMITS.label)
+      source_label: EVIDENCE_TEXT(EVIDENCE_LIMITS.label)
         .describe(`What the evidence came from, as a reader should see it: a document's title or file name, a URL, a meeting. At most ${EVIDENCE_LIMITS.label} characters`),
-      excerpt: z.string().min(1).max(EVIDENCE_LIMITS.excerpt)
+      excerpt: EVIDENCE_TEXT(EVIDENCE_LIMITS.excerpt)
         .describe(`The passage of the source that says what the thought says. At most ${EVIDENCE_LIMITS.excerpt} characters`),
-      source: z.string().min(1).max(EVIDENCE_LIMITS.source).optional()
+      source: EVIDENCE_TEXT(EVIDENCE_LIMITS.source).optional()
         .describe("The kind of source, or the tool that read it (e.g. `smart_ingest`). Omit for none"),
       extracted_at: z.iso.datetime({ offset: true }).optional()
         .describe("When the source was read, ISO 8601 with a zone. Omit for now"),

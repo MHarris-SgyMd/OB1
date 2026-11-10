@@ -1101,8 +1101,8 @@ source, and when it was read (now, unless given). smart-ingest's port calls it, 
 The append is an edit through `update_thought`: it reads the list, adds the entry, and
 writes the list back with the row's stamp as `if_unchanged_since`, so the event log
 records it as any metadata edit, under the caller's key. A write between the read and
-the edit is a stale read, and it reads again (three times at most, then
-`REFUSED_STALE_READ`), so appends at once each keep the others' entries. An entry's
+the edit is a stale read, and it reads again after a short random wait (ten reads at
+most, then `REFUSED_STALE_READ`), so appends at once each keep the others' entries. An entry's
 identity is the sha256 of its label, its excerpt and the thought's id, kept as
 `_identity` — the vendored `schemas/smart-ingest` append's rule and shape — so the same
 entry is never added twice, and the reply says it already was. A label and a source

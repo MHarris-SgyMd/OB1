@@ -505,6 +505,40 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     assert(both.every((b) => b.status === 200 && b.body.action === "appended") && afterRace.length === 4
         && bare.every((e) => "source" in e && e.source === null && typeof e.extracted_at === "string" && Math.abs(Date.parse(e.extracted_at) - Date.now()) < 60_000),
       `…three appends at once each land, none lost to another's write; one sent with no source or time is stored with source null and the server's time (${both.map((b) => `${b.status}:${b.body.action ?? b.body.code}`).join(",")}; ${afterRace.length} held; ${JSON.stringify(bare[0])})`);
+    // Review pass 1. The id as Postgres writes it: named in upper case, the entry is the one the lower-case name finds.
+    const upper = await rest("POST", `/v1/thoughts/${evRest.toUpperCase()}/evidence`, entry);
+    // Eight at once all land: the append waits, at random, before each new read.
+    const evMany = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought eight sources support at once" })).body.id);
+    const eight = await Promise.all(Array.from({ length: 8 }, (_, n) => rest("POST", `/v1/thoughts/${evMany}/evidence`, { source_label: `batch ${n}`, excerpt: `passage ${n}` })));
+    const manyHeld = ((await rest("GET", `/v1/thoughts/${evMany}`)).body as { metadata?: { evidence?: unknown[] } }).metadata?.evidence ?? [];
+    assert(upper.status === 200 && upper.body.action === "already_exists" && upper.body.id === evRest && upper.body.evidenceCount === 4
+        && eight.every((b) => b.status === 200 && b.body.action === "appended") && manyHeld.length === 8,
+      `…an upper-case id finds the entry the lower-case one added; eight appends at once all land (${upper.body.action}/${upper.body.id === evRest}; ${eight.map((b) => b.body.action ?? b.body.code).join(",")}; ${manyHeld.length} held)`);
+    // A NUL, a lone surrogate or a blank is refused before the write (jsonb refuses the first two as a fault).
+    const badText = await Promise.all([
+      { source_label: "a\u0000b", excerpt: "x" }, { source_label: "L", excerpt: "a\ud800b" }, { source_label: "L", excerpt: "x", source: "s\u0000" }, { source_label: "   ", excerpt: "x" },
+    ].map((b) => rest("POST", `/v1/thoughts/${evMany}/evidence`, b)));
+    assert(badText.every((b) => b.status === 400 && b.body.code === "REFUSED_INPUT"),
+      `…a NUL, a lone surrogate or a blank label is REFUSED_INPUT, not a fault (${badText.map((b) => `${b.status}:${b.body.code}`).join(" ")})`);
+    // Metadata a raw writer left as a JSON null or a SQL NULL is no object: refused, and nothing written. A row whose
+    // updated_at a raw writer cleared is checked by its created_at, so appends at once keep each entry.
+    const rawRow = async (text: string, set: string) => {
+      const id = String((await rest("POST", "/v1/thoughts", { content: text })).body.id);
+      await sql.begin(async (tx) => { await tx.unsafe("SET LOCAL session_replication_role = replica"); await tx.unsafe(`UPDATE thoughts SET ${set} WHERE id = '${id}'`); });
+      return id;
+    };
+    const jsonNull = await rawRow("psi: a raw writer's JSON null metadata", "metadata = 'null'::jsonb");
+    const sqlNull = await rawRow("psi: a raw writer's SQL NULL metadata", "metadata = NULL");
+    const unstamped = await rawRow("psi: a raw writer's row with no updated_at", "updated_at = NULL");
+    const onJsonNull = await rest("POST", `/v1/thoughts/${jsonNull}/evidence`, entry);
+    const onSqlNull = await rest("POST", `/v1/thoughts/${sqlNull}/evidence`, entry);
+    const [kept] = await sql`SELECT jsonb_typeof((SELECT metadata FROM thoughts WHERE id = ${jsonNull}::uuid)) AS j, (SELECT metadata IS NULL FROM thoughts WHERE id = ${sqlNull}::uuid) AS s`;
+    const unstampedRace = await Promise.all(["a", "b", "c", "d"].map((n) => rest("POST", `/v1/thoughts/${unstamped}/evidence`, { source_label: `raw ${n}`, excerpt: `passage ${n}` })));
+    const unstampedHeld = ((await rest("GET", `/v1/thoughts/${unstamped}`)).body as { metadata?: { evidence?: unknown[] } }).metadata?.evidence ?? [];
+    assert([onJsonNull, onSqlNull].every((b) => b.status === 409 && b.body.code === "REFUSED_THOUGHT_EVIDENCE" && b.body.problem === "metadata_not_object") && kept?.j === "null" && kept?.s === true
+        && unstampedRace.every((b) => b.status === 200 && b.body.action === "appended") && unstampedHeld.length === 4,
+      `…metadata a raw writer left a JSON null or a SQL NULL refused and left as it was; a row with no updated_at keeps all of four appends at once (${onJsonNull.status}:${onJsonNull.body.problem} ${onSqlNull.status}:${onSqlNull.body.problem} ${JSON.stringify(kept)}; ${unstampedHeld.length} held)`);
+
     // Its refusals: no thought 404, a read key 403, a list that is not one 409, a full list 409, an input past its bound 400.
     const noThought = await rest("POST", "/v1/thoughts/00000000-0000-4000-8000-0000000027a5/evidence", entry);
     const asReader = await rest("POST", `/v1/thoughts/${evRest}/evidence`, entry, KEYS.reader);

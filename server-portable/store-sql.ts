@@ -426,7 +426,7 @@ export class SqlStore implements ThoughtStore {
     if (!UUID_RE.test(id)) return null;
 
     const rows = await this.sql`
-      SELECT id, content, metadata, created_at, updated_at
+      SELECT id, content, metadata, created_at, updated_at, jsonb_typeof(metadata) AS metadata_type
       FROM thoughts WHERE id = ${id}::uuid LIMIT 1`;
     if (rows.length === 0) return null;
     return normaliseThoughtRecord(rows[0]);

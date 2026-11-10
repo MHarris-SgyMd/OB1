@@ -116,9 +116,10 @@ export type EvidenceProblem = "full" | "not_list" | "metadata_not_object";
 /**
  * append_thought_evidence's bounds (SMD-2690 PR 3b), beside the refusal that
  * names the list's: a label and an excerpt as smart-ingest's vendored append
- * took them, held, and a list a thought's metadata carries in every read.
+ * took them, held, and a list a thought's metadata carries in every read;
+ * `tries`, how often an append reads the thought before a stale read refuses it.
  */
-export const EVIDENCE_LIMITS = { label: 200, excerpt: 2_000, source: 200, entries: 100 } as const;
+export const EVIDENCE_LIMITS = { label: 200, excerpt: 2_000, source: 200, entries: 100, tries: 10 } as const;
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";

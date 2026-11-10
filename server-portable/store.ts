@@ -289,6 +289,13 @@ export type ThoughtRecord = {
   metadata: Record<string, unknown>;
   created_at: string | null;
   updated_at?: string | null;
+  /**
+   * The stored metadata's JSON type (jsonb_typeof; null for SQL NULL), where
+   * the store read it: `metadata` above is `{}` for a SQL NULL and a JSON null
+   * alike, so a writer that must not merge into either reads this
+   * (append_thought_evidence, SMD-2690 PR 3b review pass 1).
+   */
+  metadataType?: string | null;
 };
 
 export type ThoughtListItem = {
@@ -378,6 +385,7 @@ export function normaliseThoughtRecord(r: Record<string, unknown>): ThoughtRecor
   return {
     ...normaliseListItem(r),
     updated_at: isoTimestampOrNull(r.updated_at),
+    ...(Object.hasOwn(r, "metadata_type") ? { metadataType: r.metadata_type === null ? null : String(r.metadata_type) } : {}),
   };
 }
 

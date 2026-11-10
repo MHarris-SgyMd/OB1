@@ -5137,9 +5137,35 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
   const stale = refusal({ code: "REFUSED_STALE_READ", id: ID, currentUpdatedAt: "2026-11-10T09:00:00.000Z" });
   const gone = refusal({ code: "NOT_FOUND", id: ID });
   assert(/already holds 100 evidence entries, the most a thought keeps \(100\)/.test(full) && /metadata\.evidence is not a list/.test(notList) && /metadata is not an object/.test(notObject)
-      && /edited by another write each time the append read it \(it is now 2026-11-10T09:00:00\.000Z\)\. Retry: an entry already added is not added twice\./.test(stale) && !/if_unchanged_since/.test(stale)
+      && /edited by another write each of the 10 times the append read it \(it is now 2026-11-10T09:00:00\.000Z\)\. Retry: an entry already added is not added twice\./.test(stale) && !/if_unchanged_since/.test(stale)
       && /^No thought with id /.test(gone),
     `each refusal said by what holds the list; a stale read as another writer's, never the caller's if_unchanged_since (${stale})`);
+
+  // The retry (review pass 1), against a store that answers STALE_READ a set number of times: an append
+  // lands on its tenth read and no later, and waits, at random but longer each time, between reads.
+  const { createCore } = await import("./core/index.ts");
+  const { EVIDENCE_LIMITS } = await import("./core/refusal.ts");
+  const staleFor = (n: number) => {
+    let reads = 0, writes = 0;
+    const store = {
+      thoughtsNamed: async () => new Map(),
+      getThought: async () => { reads++; return { id: ID, content: "c", metadata: {}, metadataType: "object", created_at: "2026-11-10T09:00:00.000Z", updated_at: "2026-11-10T09:00:00.000Z" }; },
+      updateThought: async () => (++writes <= n ? { ok: false, error: "STALE_READ", currentUpdatedAt: "2026-11-10T09:00:01.000Z" } : { ok: true, id: ID, updatedAt: "2026-11-10T09:00:02.000Z" }),
+    };
+    const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+    return { core, reads: () => reads };
+  };
+  const writer = { name: "writer", scope: "write" } as never;
+  const input = { id: ID, source_label: "L", excerpt: "E" };
+  const lands = staleFor(EVIDENCE_LIMITS.tries - 1);
+  const landed = await lands.core.appendThoughtEvidence(writer, input);
+  const never = staleFor(Infinity);
+  const started = performance.now();
+  const refusedAt = await never.core.appendThoughtEvidence(writer, input);
+  const waited = performance.now() - started;
+  assert(EVIDENCE_LIMITS.tries === 10 && landed.ok && landed.value.action === "appended" && lands.reads() === 10
+      && !refusedAt.ok && refusedAt.refusal.code === "REFUSED_STALE_READ" && never.reads() === 10 && waited > 20,
+    `an append stale nine times lands on its tenth read; stale every time, it is refused after ten, having waited between reads (${lands.reads()} reads, ${never.reads()} reads, ${Math.round(waited)} ms)`);
 }
 
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");

@@ -899,8 +899,13 @@ export function evidenceIdentity(sourceLabel: string, excerpt: string, id: strin
   return createHash("sha256").update(sourceLabel + excerpt + id, "utf8").digest("hex");
 }
 
-/** How often an append reads the thought again after another write moved it under its read. */
-const EVIDENCE_TRIES = 3;
+/**
+ * How long, at most, an append waits before reading the thought again after
+ * another write moved it under its read, longer each time, at random: a batch of
+ * appends to one thought (smart-ingest's) all land (review pass 1: three tries
+ * with no wait refused four of eight at once).
+ */
+const EVIDENCE_BACKOFF_MS = 15;
 
 /**
  * Append an evidence entry to a thought's metadata.evidence (SMD-2690 PR 3b):
@@ -908,12 +913,17 @@ const EVIDENCE_TRIES = 3;
  * write the list back through update_thought with the row's stamp as
  * if_unchanged_since — an edit the event log records as any metadata edit is.
  * A write between the read and the edit is a STALE_READ, and the append reads
- * again, so two appends at once each keep the other's entry.
+ * again, so appends at once each keep the others' entries.
  */
 export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id: name, source_label, excerpt, source, extracted_at }: Input<"append_thought_evidence">): Promise<Outcome<EvidenceAppended, EvidenceCode>> {
   // A name that is no uuid names no thought, by id or by key; else the thought by id, else by client_key (SMD-3314).
   if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
-  const { id, byClientKey } = await targetNamed(ctx, principal, name);
+  const target = await targetNamed(ctx, principal, name);
+  // The id as Postgres writes it, lower-case: the identity hashes it, as the
+  // vendored append hashes p_thought_id::text (review pass 1: an upper-case id
+  // added the same entry twice).
+  const id = target.id.toLowerCase();
+  const byClientKey = target.byClientKey;
   const store = await ctx.store();
   const identity = evidenceIdentity(source_label, excerpt, id);
   const named = byClientKey ? { byClientKey } : {};
@@ -921,7 +931,10 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
     const row = await store.getThought(id);
     if (!row) return refuse({ code: "NOT_FOUND", retryable: false, id });
     const meta: unknown = row.metadata;
-    if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "metadata_not_object" });
+    // The stored type where the store read it: a SQL NULL or a JSON null reads as {} above, and a patch merged into a
+    // JSON null makes an array of the row's metadata (review pass 1).
+    const notObject = row.metadataType !== undefined ? row.metadataType !== "object" : meta === null || typeof meta !== "object" || Array.isArray(meta);
+    if (notObject) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "metadata_not_object" });
     const held: unknown = (meta as Record<string, unknown>).evidence ?? [];
     if (!Array.isArray(held)) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "not_list" });
     const stamp = row.updated_at ? { updatedAt: row.updated_at } : {};
@@ -934,12 +947,18 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
     const result = await store.updateThought({
       id,
       metadataPatch: { evidence: [...held, entry] },
-      // A row with no stamp (a raw writer's) has nothing to compare: the edit then has no check, as update_thought's caller without one has none.
-      ...(row.updated_at ? { ifUnchangedSince: row.updated_at } : {}),
+      // A row with no stamp (a raw writer's) is compared by its created_at, as update_thought compares
+      // COALESCE(updated_at, created_at) (review pass 1: with neither checked, appends at once lost entries).
+      ...((row.updated_at ?? row.created_at) ? { ifUnchangedSince: (row.updated_at ?? row.created_at)! } : {}),
       actor: actorOf(ctx, principal),
     });
+    // update_thought merges no patch into a SQL NULL: nothing was written (a store that reads no type reaches here).
+    if (result.ok && result.patchDropped) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "metadata_not_object" });
     if (result.ok) return ok({ id, ...named, action: "appended", evidenceCount: held.length + 1, ...(result.updatedAt !== undefined ? { updatedAt: result.updatedAt } : {}) });
-    if (result.error === "STALE_READ" && tries < EVIDENCE_TRIES) continue;
+    if (result.error === "STALE_READ" && tries < EVIDENCE_LIMITS.tries) {
+      await Bun.sleep(Math.random() * EVIDENCE_BACKOFF_MS * tries);
+      continue;
+    }
     if (result.error === "STALE_READ") return refuse({ code: "REFUSED_STALE_READ", retryable: false, id, ...(result.currentUpdatedAt ? { currentUpdatedAt: result.currentUpdatedAt } : {}) });
     if (result.error === "NOT_FOUND") return refuse({ code: "NOT_FOUND", retryable: false, id });
     // An edit with no content and no pointer refuses nothing else: anything more is a fault, not a refusal of the caller's.

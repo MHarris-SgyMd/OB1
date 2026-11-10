@@ -1963,13 +1963,13 @@ export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, Evidenc
     switch (r.code) {
       case "REFUSED_THOUGHT_EVIDENCE":
         switch (r.problem) {
-          case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; an operator may prune metadata.evidence with update_thought.`;
+          case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; a write key may prune metadata.evidence with update_thought.`;
           case "not_list": return `Refused: ${r.id}'s metadata.evidence is not a list, so no entry can join it. Another writer set it; update_thought's metadata_patch can set it to a list (or null) first.`;
           case "metadata_not_object": return `Refused: ${r.id}'s metadata is not an object (a raw writer's), so it holds no evidence list.`;
         }
         break;
       case "REFUSED_STALE_READ":
-        return `Refused: ${r.id} was edited by another write each time the append read it${r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""}. Retry: an entry already added is not added twice.`;
+        return `Refused: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it${r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""}. Retry: an entry already added is not added twice.`;
       default: return mutationRefusalText(r);
     }
     return mutationRefusalText(r);
