@@ -801,7 +801,7 @@ export const SPECS = {
       include_claimed: z.boolean().optional().default(false).describe("Also list items under a live claim, with their holder, started or not"),
       include_proposed: z.boolean().optional().default(false).describe("Also list open items still proposed (an extraction nobody confirmed)"),
       include_started: z.boolean().optional().default(false).describe("Also list started tickets (In Progress, In Review: Linear's started type) that no live claim covers; a claimed one is include_claimed's (when claims can be read), and holder mine shows the key's own"),
-      order: z.enum(AGENDA_ORDERS).optional().default("priority").describe("priority (the default): by effective priority, for \"what next\". due: the items with a due time first, soonest first, so the longest overdue leads, then the undated by priority, for \"what's due\" or \"this week\". Applied before limit. Default priority"),
+      order: z.enum(AGENDA_ORDERS).optional().default("priority").describe("priority (the default): by effective priority, for \"what next\". due: the items with a due time first, soonest first, so the longest overdue leads, then the undated by priority (a stated None counts as undated), for \"what's due\" or \"this week\". Applied before limit. Default priority"),
     },
   },
   plan_context: {

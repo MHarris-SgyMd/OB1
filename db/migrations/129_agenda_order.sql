@@ -20,7 +20,8 @@
 --     - due: the items with a due time first, soonest first, so the longest
 --       overdue leads; then the items with none, by effective priority. A tie
 --       on the due time goes to the higher effective priority, then kind and
---       key.
+--       key. A stated None (level 0) counts as undated, as 122 gives it no
+--       urgency (review pass 3).
 --     The order is applied before p_limit, so due lists the soonest items,
 --     not the top items re-sorted. Anything else, NULL included, is refused
 --     22023.
@@ -28,7 +29,8 @@
 --     wrapper calling the ten-argument one with priority. So a nine-argument
 --     call names one function whatever runs after: 124 or 126 re-applied
 --     alone replaces the wrapper with its own body, which answers in the
---     priority order as before, and leaves the ten-argument one standing
+--     priority order as before, and leaves the ten-argument one standing (it
+--     also puts back its own comments, query_log.filter's among them)
 --     (review pass 2: a defaulted tenth argument made a nine-argument call
 --     name two functions once either was re-applied).
 --   * The answer gains `order`, the one applied.
@@ -292,10 +294,12 @@ BEGIN
          AND (p_include_claimed OR v_mine OR j.live IS NULL)
          AND (p_include_started OR j.live IS NOT NULL OR (j.c->>'status_type') IS DISTINCT FROM 'started')
     ), ranked AS (
-      -- due (129): the dated items first, soonest due first, so the longest overdue leads; then the undated. Under
-      -- priority both leading keys are NULL alike, and the order is 126's: effective, the sooner due time, kind, key.
-      SELECT k.*, row_number() OVER (ORDER BY CASE WHEN p_order = 'due' THEN (k.s->>'due_at') IS NULL END,
-                                              CASE WHEN p_order = 'due' THEN (k.s->>'due_at')::timestamptz END,
+      -- due (129): the dated items first, soonest due first, so the longest overdue leads; then the undated. A stated
+      -- None (level 0) counts as undated: 122 gives it no urgency and never calls it overdue, so its date leads
+      -- nothing (review pass 3, the maintainer's amendment of 2026-11-10). Under priority both leading keys are NULL
+      -- alike, and the order is 126's: effective, the sooner due time, kind, key.
+      SELECT k.*, row_number() OVER (ORDER BY CASE WHEN p_order = 'due' THEN (k.s->>'due_at') IS NULL OR COALESCE((k.s->>'level')::numeric = 0, false) END,
+                                              CASE WHEN p_order = 'due' AND NOT COALESCE((k.s->>'level')::numeric = 0, false) THEN (k.s->>'due_at')::timestamptz END,
                                               (k.s->>'effective')::numeric DESC, (k.s->>'due_at')::timestamptz ASC NULLS LAST,
                                               k.c->>'kind', k.c->>'key') AS rank
         FROM kept k
@@ -346,7 +350,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text) IS
-  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket; keys, 1 to 500 ticket keys: those tickets alone, no open item, refused beside any other scope or a holder), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by p_order: priority by effective, then the sooner due time, then kind and key; due by the due time, the dated items first, soonest first (so the longest overdue leads), the undated after, each tie by effective, then kind and key. The order is applied before p_limit. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing, and a listed row names it. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), keyed (null without keys; else {others: each named ticket that is no candidate, its head settled or its status type unknown, with key, title, status, status_type and settled; waiting: each named ticket a not_before ahead keeps out, with key, title, status, status_type and not_before; missing: each named key no thought records whose prefix some ticket carries}), order, now}. Raises 22023 on a bad limit, scope, holder, clock, weight or order, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. The nine-argument agenda calls this with priority; this one takes no defaults. Migrations 123 (SMD-3669), 124 (SMD-4162), 126 (SMD-2684) and 129 (SMD-4192).';
+  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket; keys, 1 to 500 ticket keys: those tickets alone, no open item, refused beside any other scope or a holder), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by p_order: priority by effective, then the sooner due time, then kind and key; due by the due time, the dated items first, soonest first (so the longest overdue leads), the undated after (a stated None, level 0, counted undated), each tie by effective, then kind and key. The order is applied before p_limit. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing, and a listed row names it. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), keyed (null without keys; else {others: each named ticket that is no candidate, its head settled or its status type unknown, with key, title, status, status_type and settled; waiting: each named ticket a not_before ahead keeps out, with key, title, status, status_type and not_before; missing: each named key no thought records whose prefix some ticket carries}), order, now}. Raises 22023 on a bad limit, scope, holder, clock, weight or order, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. The nine-argument agenda calls this with priority; this one takes no defaults. Migrations 123 (SMD-3669), 124 (SMD-4162), 126 (SMD-2684) and 129 (SMD-4192).';
 
 -- The nine-argument agenda: 126's signature and defaults, the priority order.
 CREATE OR REPLACE FUNCTION agenda(

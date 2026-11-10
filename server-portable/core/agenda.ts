@@ -38,8 +38,9 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
       return refuse({ code: "CLAIMS_UNREADABLE", retryable: false });
     }
     // order due on a brain before 129, whose agendas take no tenth argument (42883): its schema's gap, refused alike
-    // over both doors, not a fault (review pass 2). Only the agenda's own: another missing function stays a fault.
-    if (input.order === "due" && String((e as { errno?: unknown }).errno ?? "") === "42883" && /function agenda\(/.test(String((e as Error).message ?? ""))) {
+    // over both doors, not a fault (review pass 2). Only the agenda's own: another missing function stays a fault. By
+    // the name alone, which lc_messages never translates, not the words around it (review pass 3).
+    if (input.order === "due" && String((e as { errno?: unknown }).errno ?? "") === "42883" && /\bagenda\(/.test(String((e as Error).message ?? ""))) {
       return refuse({ code: "ORDER_UNAVAILABLE", retryable: false });
     }
     throw e;

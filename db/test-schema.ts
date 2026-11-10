@@ -18800,6 +18800,8 @@ console.log("\n[116] Migration 129: the agenda takes an order — priority, the 
   await ticket("SMD-9951", 4, null); await ticket("SMD-9952", 3, "2027-03-11T00:00:00Z");
   await ticket("SMD-9953", 2, "2027-03-01T00:00:00Z"); await ticket("SMD-9954", 1, "2027-03-01T00:00:00Z");
   await ticket("SMD-9955", 2, "2027-03-15T00:00:00Z"); await ticket("SMD-9956", 3, null);
+  // A stated None due long ago (review pass 3): undated under due, as 122 gives it no urgency; last under both orders.
+  await ticket("SMD-9957", 0, "2027-02-01T00:00:00Z");
   const scope = JSON.stringify({ project: P });
   const nine = async (limit = 100) => (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false) AS a`, [scope, limit, NOW])).rows[0].a;
   const ten = async (order: string | null, limit = 100) =>
@@ -18822,18 +18824,18 @@ console.log("\n[116] Migration 129: the agenda takes an order — priority, the 
   // overdue Medium (2.6), the Medium due within the week (2.2), the overdue Low.
   const byNine = await nine(), byPriority = await ten("priority");
   const strip = (a: Ag) => JSON.stringify({ ...a, order: undefined, now: undefined });
-  assert(keys(byNine) === "9951 9952 9956 9953 9955 9954" && strip(byPriority) === strip(byNine) && byNine.order === "priority" && byPriority.order === "priority",
+  assert(keys(byNine) === "9951 9952 9956 9953 9955 9954 9957" && strip(byPriority) === strip(byNine) && byNine.order === "priority" && byPriority.order === "priority",
     `the priority order is 126's, and a nine-argument call gets it, the answer saying priority (${keys(byNine)} | ${keys(byPriority)} | ${byNine.order})`);
 
   // due: the overdue two first, the Medium before the Low (one moment, the higher priority first), then tomorrow's,
   // then the week's; the undated after, the Urgent before the High.
   const byDue = await ten("due");
-  assert(keys(byDue) === "9953 9954 9952 9955 9951 9956" && byDue.order === "due" && byDue.total === 6,
-    `the due order: the dated first, soonest first, a tie on the moment to the higher priority, then the undated by priority; the answer says due (${keys(byDue)} | ${byDue.order})`);
+  assert(keys(byDue) === "9953 9954 9952 9955 9951 9956 9957" && byDue.order === "due" && byDue.total === 7,
+    `the due order: the dated first, soonest first, a tie on the moment to the higher priority, then the undated by priority, the stated None among them; the answer says due (${keys(byDue)} | ${byDue.order})`);
 
   // The order is applied before the limit: due's first two are the overdue ones, not priority's first two re-sorted.
   const dueTwo = await ten("due", 2), priorityTwo = await ten("priority", 2);
-  assert(keys(dueTwo) === "9953 9954" && keys(priorityTwo) === "9951 9952" && dueTwo.total === 6,
+  assert(keys(dueTwo) === "9953 9954" && keys(priorityTwo) === "9951 9952" && dueTwo.total === 7,
     `the order is applied before the limit (${keys(dueTwo)} | ${keys(priorityTwo)})`);
 
   // Refused 22023: any other order, NULL, a different case, padding, an empty string.

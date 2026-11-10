@@ -2430,15 +2430,16 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   return title ? words : `${words}.`;
 }
 /** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
-function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }): string {
+function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }, now = new Date().toISOString()): string {
   // `more`: what plan_context's budget left out of this line (SMD-4191), said as "and N more"; the agenda's own lines pass none.
   const and = (n: number) => (n > 0 ? ` and ${n} more` : "");
   // A ticket's status is its board's word (124): quoted and cut, as a title is.
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
-    // A due time no urgency term states (past the week, or a level 0): said, so the due order's lead is seen (SMD-4192 review pass 1).
-    i.dueAt && !i.overdue && i.urgency === 0 ? `due ${dueText(i.dueAt)}` : null,
+    // A due time no urgency term states (past the week, or a level 0): said, so the due order's lead is seen (SMD-4192 review pass 1);
+    // a level 0's past date said past, as 122 never calls it overdue (review pass 3).
+    i.dueAt && !i.overdue && i.urgency === 0 ? `${Date.parse(i.dueAt) <= Date.parse(now) ? "was due" : "due"} ${dueText(i.dueAt)}` : null,
     i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.claimed)}` : null,
     i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
@@ -2460,7 +2461,7 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
           // The undated named only when the list holds both kinds (review pass 2).
           : v.items.every((i) => i.dueAt === null) ? "none due, most pressing first" : v.items.some((i) => i.dueAt === null) ? "soonest due first, the undated after" : "soonest due first"}:`,
         // Wrapped: map's index must never reach agendaLine's `more`.
-        ...v.items.map((i) => agendaLine(i)),
+        ...v.items.map((i) => agendaLine(i, undefined, v.now)),
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);

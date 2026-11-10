@@ -6227,7 +6227,7 @@
             "required": false,
             "schema": {
               "default": "priority",
-              "description": "priority (the default): by effective priority, for \"what next\". due: the items with a due time first, soonest first, so the longest overdue leads, then the undated by priority, for \"what's due\" or \"this week\". Applied before limit. Default priority",
+              "description": "priority (the default): by effective priority, for \"what next\". due: the items with a due time first, soonest first, so the longest overdue leads, then the undated by priority (a stated None counts as undated), for \"what's due\" or \"this week\". Applied before limit. Default priority",
               "type": "string",
               "enum": [
                 "priority",

@@ -4805,7 +4805,9 @@ that the agenda takes the question, from the ticket's four options: the bar stay
 chooses the order. The rule was pre-registered on the ticket before any build or run.
 * **The agenda's order.** Migration 129 adds `order`, either `priority` (the default, unchanged) or `due`. `due` lists
   the items with a due time first, soonest first, so the longest overdue leads. The undated follow by priority, and a
-  tie on the due time goes to the higher priority. The order is applied before the limit.
+  tie on the due time goes to the higher priority. The order is applied before the limit. After the run, review pass 3
+  amended it, the maintainer's choice: a stated None (level 0) counts as undated, as it takes no urgency. No seeded
+  item is level 0 with a due date, so the measurement below holds under the amended rule.
 * **The read**, `agenda_question` (`priority.ts`'s `AGENDA_QUESTION_READ`), lists the agenda's own items, not
   search's ten hits reordered. Each ticket becomes its head thought (068's `ob1_ticket_head`), and each open item the
   thought it was read from. It uses the agenda read's flags at the cap of 100.
