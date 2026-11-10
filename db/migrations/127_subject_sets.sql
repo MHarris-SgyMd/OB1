@@ -70,12 +70,12 @@
 --     deadlocked with the second's waiting on it to write the edge again
 --     (review pass 1); locked first, the delete waits for the commit, 120's
 --     write-before-close carried across the keys. All this once a
---     transaction and thought (a local setting, ob1.thread_mark, marks it),
---     the rest finding the locks held, so a door's set, written or closed in
---     any order, a raw writer's included, queues behind another on the same
---     keys. Its timing is 120's: from the commit's first re-link to the
---     commit. Above READ COMMITTED the re-link's refusal comes first, before
---     any lock.
+--     transaction, thought and set of keys moved (one local setting,
+--     ob1.thread_mark, marks them), the rest finding the locks held, so a
+--     door's set, written or closed in any order, a raw writer's included,
+--     queues behind another on the same keys. Its timing is 120's: from the
+--     commit's first re-link to the commit. Above READ COMMITTED the
+--     re-link's refusal comes first, before any lock.
 --   * Comments restated: thought_facets' (one standing per key; a set of at
 --     most three, one rule's, through record_thought_subjects), the trigger
 --     function's and the two doors'.
@@ -91,9 +91,9 @@
 --   thread_relink, db/threads.ts, the census of brain_info and preflight) is
 --   one key's thoughts, and the thread read and fetch's continues read each
 --   standing key of a thought (PR 7a-2a). Two readers of a thought's own
---   subject read one row, below (NOT HERE). brain_info's
---   and --status's thought count is a count of thread places: a thought in
---   two threads counts in each, as each thread wants an edge to it.
+--   subject read one row, below (NOT HERE). brain_info's and --status's
+--   thought count is a count of thread places: a thought in two threads
+--   counts in each, as each thread wants an edge to it.
 --
 -- NOT HERE
 --   * What finds a set (PR 7a-3b): the session-header rule keying each ticket
@@ -122,11 +122,10 @@
 --     120's set instead, the thought's standing keys and the one re-linked,
 --     at each re-link: a replace of one key queues as under 120, but a set's
 --     keys closed in a savepoint, each locked as its re-link comes, can
---     deadlock the same way. No
---     writer of the stack does either: each writes one thought's subjects a
---     transaction, outside any savepoint. The first of several thoughts
---     locks its own neighbours alone, so a delete of a later thought's
---     neighbour can deadlock with the commit too.
+--     deadlock the same way. No writer of the stack does either: each writes
+--     one thought's subjects a transaction, outside any savepoint. The first
+--     of several thoughts locks its own neighbours alone, so a delete of a
+--     later thought's neighbour can deadlock with the commit too.
 --   * An edge a moved key's thread lacks away from the moved thought (a
 --     thread the upgrade to 120 left unlinked, or a gap a delete left) joins
 --     thoughts the neighbour locks do not cover: a delete of one of them,
@@ -139,8 +138,8 @@
 -- SAFETY
 --   One index made and 111's dropped (by name: the new one stands first, so
 --   at no point does the table hold no rule); a statistics object made and
---   thought_facets analysed (a sample of its rows); three functions added, three
---   redefined (113's two doors, now wrappers keeping their signatures,
+--   thought_facets analysed (a sample of its rows); three functions added,
+--   three redefined (113's two doors, now wrappers keeping their signatures,
 --   refusals and answers' shape; 120's trigger function, its locks taken for
 --   a set); four comments restated. No row changes: a brain holds at most
 --   one standing subject per thought, which the new index admits. Making the

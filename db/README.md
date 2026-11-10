@@ -2142,10 +2142,9 @@ way did not meet their bars (SMD-3299); SMD-3116 defines evolves as a later
 segment of the same work, which is a property of each thought's own subject, and
 asked of one thought alone the judge model names the ticket blind raters agree
 on for 241 to 242 of the 245 thoughts whose subject is a ticket (versions 2 and
-3 of the test's step 1). A `subject` facet holds
-it, one standing per thought (a partial unique index; per thought and key since
-127, a set), with a probe on its key
-for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
+3 of the test's step 1). A `subject` facet holds it, one standing per thought (a
+partial unique index; per thought and key since 127, a set), with a probe on its
+key for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
 `pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>`, one shape
 for the validator and the writer (`subject_key_valid`) — how it was found
 (`metadata`, `first_line` or `model`), the pass's key and `origin: derived`.
