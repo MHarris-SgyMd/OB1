@@ -6,7 +6,8 @@
  * (arXiv 2609.05441) measured the next layer — whether a retrieved fact changed
  * what the agent did — and found agents ignore 45–53% of correctly retrieved
  * facts. This module computes that layer from the opt-in query log (migration
- * 034): a search row per call with the ids it returned, and an action row per
+ * 034): a search row per call with the ids it returned (SEARCH_KINDS: a
+ * plan_context call's knowledge hits too, SMD-2684), and an action row per
  * follow-up touch of an id by the same agent. Two kinds of touch are told apart
  * by the `tool` that wrote the action row:
  *
@@ -47,6 +48,19 @@
  */
 
 import { parsePgUuidArray } from "./query-log.ts";
+
+/**
+ * The query_log kinds read as searches: rows that returned thoughts a caller could go on to use, their ids in
+ * result_ids. `search` (034) and `plan_context` (126, SMD-2684: its knowledge hits; the board's tickets are in
+ * result_items). A plan_context row's arm is its own (armOf names the tool), so it is never pooled with a search's.
+ */
+export const SEARCH_KINDS = ["search", "plan_context"] as const;
+/**
+ * The kinds that are not: `action` rows are the touches themselves, and `agenda` rows (123) list tickets and items in
+ * result_items, never thoughts in result_ids. test-schema [39] holds every kind query_log's CHECK allows to one list
+ * or the other, so a new kind can't go unread without a decision.
+ */
+export const NOT_SEARCH_KINDS = ["action", "agenda"] as const;
 
 export type SearchRow = {
   id: string;

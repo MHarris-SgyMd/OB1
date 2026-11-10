@@ -93,7 +93,7 @@ import {
   BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, LIFECYCLE_FILTERS, LIFECYCLE_TYPES, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
-import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, NOT_SEARCH_KINDS, renderReport, SEARCH_KINDS, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
@@ -4738,6 +4738,16 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
   const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
+
+  // SMD-2684 PR 2: a plan_context row is a search to this report (its knowledge hits in result_ids), with an arm of
+  // its own, and every kind query_log allows is read as a search or named as not one — a new kind needs a decision.
+  const planned = summarise([search("pc1", AG, 0, "go ahead with SMD-1", [A, B], null, "plan_context")], [act(AG, 1, "fetch", B)], 30);
+  assert(planned.overall.used === 1 && [...planned.arms.keys()].some((k) => k.startsWith("plan_context ")), `a plan_context row's hit, fetched, is used, under an arm of its own (${[...planned.arms.keys()].join(" | ")})`);
+  const [{ def }] = (await db.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'query_log_kind_check' AND conrelid = 'query_log'::regclass`)).rows;
+  const allowed = [...def.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]).sort();
+  const decided = [...SEARCH_KINDS, ...NOT_SEARCH_KINDS].sort();
+  assert(allowed.length > 0 && JSON.stringify(allowed) === JSON.stringify(decided), `every query_log kind is read as a search or named as not one (allowed ${allowed.join(",")}; decided ${decided.join(",")})`);
+  assert((SEARCH_KINDS as readonly string[]).includes("plan_context"), "plan_context is among the search kinds");
 }
 
 // ── 40. The community schemas on a plain-Postgres brain ──────────────────────

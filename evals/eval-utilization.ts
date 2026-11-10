@@ -2,7 +2,8 @@
 /**
  * eval-utilization.ts — did the caller use what the search returned? (SMD-1719)
  *
- * Reads the opt-in query log (migration 034) from DATABASE_URL and prints, per
+ * Reads the opt-in query log (migration 034) from DATABASE_URL — its search rows, a
+ * plan_context call's row among them (SEARCH_KINDS, SMD-2684) — and prints, per
  * arm, per agent when the log holds more than one (named from ob1_agents when
  * migration 010 is present), and overall: distinct ids returned, ids used
  * (cited by a later capture's or edit's derived_from/supersedes, or opened by
@@ -29,7 +30,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { posInt, requireQueryLog } from "./query-log.ts";
-import { goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
+import { goldFromFixture, renderReport, SEARCH_KINDS, summarise, toActionRow, toSearchRow, type ActionDbRow, type SearchDbRow } from "./utilization.ts";
 
 loadEnv();
 
@@ -97,7 +98,7 @@ const searchRows = await sql<SearchDbRow[]>`
       SELECT sum(length(t.content))::bigint AS chars, count(*)::int AS surviving
         FROM thoughts t WHERE t.id = ANY(s.result_ids)
     ) c
-   WHERE s.kind = 'search'`;
+   WHERE s.kind = ANY(${`{${SEARCH_KINDS.join(",")}}`}::text[])`;
 const actionRows = await sql<ActionDbRow[]>`
   SELECT agent_id, logged_at, (extract(epoch FROM logged_at)::numeric * 1000000)::bigint AS at_us, tool, target_id
     FROM query_log WHERE kind = 'action'`;

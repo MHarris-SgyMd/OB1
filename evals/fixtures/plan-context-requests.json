@@ -1,0 +1,133 @@
+{
+  "seed": "SMD-2684 PR 2",
+  "window": {
+    "from": "2026-09-01T00:00:00.000Z",
+    "to": "2026-11-10T00:00:00.000Z"
+  },
+  "preregistration": "7815fb2226cf8f11534e9ca3ebfcb133564f097664ac358b1c9f59f8d4bbd7e6",
+  "listed": 1750,
+  "eligible": 638,
+  "notHeld": [],
+  "requests": [
+    {
+      "n": 1,
+      "key": "SMD-3991",
+      "title": "Conditional on a solver pilot nobody has chosen — a replaceable solver interface, a pinned Timefold adapter and simpler comparators, with every candidate plan passing the independent checker",
+      "text": "Go ahead with SMD-3991: Conditional on a solver pilot nobody has chosen — a replaceable solver interface, a pinned Timefold adapter and simpler comparators, with every candidate plan passing the independent checker"
+    },
+    {
+      "n": 2,
+      "key": "SMD-3657",
+      "title": "22 pipes into `head`, `sed …q` or `grep -m` under pipefail can SIGPIPE their writer as `grep -q` did — check 46 holds grep -q alone; convert the ones whose status counts, or widen the check",
+      "text": "Go ahead with SMD-3657: 22 pipes into `head`, `sed …q` or `grep -m` under pipefail can SIGPIPE their writer as `grep -q` did — check 46 holds grep -q alone; convert the ones whose status counts, or widen the check"
+    },
+    {
+      "n": 3,
+      "key": "SMD-2312",
+      "title": "OB1_ALLOW_REMOTE_DB can come from a .env file on a host run — the one per-command safety answer that lets tier.ts --refresh and the suites drop a remote schema is read like any other setting",
+      "text": "Go ahead with SMD-2312: OB1_ALLOW_REMOTE_DB can come from a .env file on a host run — the one per-command safety answer that lets tier.ts --refresh and the suites drop a remote schema is read like any other setting"
+    },
+    {
+      "n": 4,
+      "key": "SMD-4005",
+      "title": "Spike: durable environment improvement over repeated cycles — nothing measures whether a tool the brain proposed helps later work more than an existing tool, a procedure or a hand-built one",
+      "text": "Go ahead with SMD-4005: Spike: durable environment improvement over repeated cycles — nothing measures whether a tool the brain proposed helps later work more than an existing tool, a procedure or a hand-built one"
+    },
+    {
+      "n": 5,
+      "key": "SMD-4008",
+      "title": "Spike: propose bounded improvements a test could prove wrong — nothing turns a diagnosed obstacle into a candidate weighed first against no change, a procedure and an existing tool",
+      "text": "Go ahead with SMD-4008: Spike: propose bounded improvements a test could prove wrong — nothing turns a diagnosed obstacle into a candidate weighed first against no change, a procedure and an existing tool"
+    },
+    {
+      "n": 6,
+      "key": "SMD-2835",
+      "title": "CI prints the per-run smoke keys in every later step's env header — .github/ci/full-stack-up.sh writes four raw keys to `$GITHUB_ENV` (release.yml one) unmasked, and the repo's run logs are public",
+      "text": "Go ahead with SMD-2835: CI prints the per-run smoke keys in every later step's env header — .github/ci/full-stack-up.sh writes four raw keys to `$GITHUB_ENV` (release.yml one) unmasked, and the repo's run logs are public"
+    },
+    {
+      "n": 7,
+      "key": "SMD-3910",
+      "title": "The brain's race and transformation tests are hand-picked — generate bounded interleavings at declared pause points on CI's real Postgres, and metamorphic cases over lineage and support",
+      "text": "Go ahead with SMD-3910: The brain's race and transformation tests are hand-picked — generate bounded interleavings at declared pause points on CI's real Postgres, and metamorphic cases over lineage and support"
+    },
+    {
+      "n": 8,
+      "key": "SMD-2246",
+      "title": "test-live [5e]'s JIT timing bound rests on one EXPLAIN sample since 041 pinned two of its three paths — a 482 ms compile spike under load put the bound above the mutant's real 124 ms and failed the suite",
+      "text": "Go ahead with SMD-2246: test-live [5e]'s JIT timing bound rests on one EXPLAIN sample since 041 pinned two of its three paths — a 482 ms compile spike under load put the bound above the mutant's real 124 ms and failed the suite"
+    },
+    {
+      "n": 9,
+      "key": "SMD-3293",
+      "title": "The import runner holds an emitter's whole output about nine times over — past ~100 MiB of items the 2 GB container runs out before the 256 MiB cap, and a runner killed for memory drops n8n's request",
+      "text": "Go ahead with SMD-3293: The import runner holds an emitter's whole output about nine times over — past ~100 MiB of items the 2 GB container runs out before the 256 MiB cap, and a runner killed for memory drops n8n's request"
+    },
+    {
+      "n": 10,
+      "key": "SMD-4069",
+      "title": "Spike: a planner chooses the evidence it later learns from — record the alternatives, the policy and the missing outcomes, and budget exploration without loosening what consequential work requires",
+      "text": "Go ahead with SMD-4069: Spike: a planner chooses the evidence it later learns from — record the alternatives, the policy and the missing outcomes, and budget exploration without loosening what consequential work requires"
+    },
+    {
+      "n": 11,
+      "key": "SMD-3177",
+      "title": "commitlint runs as `bunx @commitlint/cli@19.6.1` with no lockfile — its dependency tree is resolved from npm on every run — and actionlint's pinned 1.7.7 is outside Dependabot",
+      "text": "Go ahead with SMD-3177: commitlint runs as `bunx @commitlint/cli@19.6.1` with no lockfile — its dependency tree is resolved from npm on every run — and actionlint's pinned 1.7.7 is outside Dependabot"
+    },
+    {
+      "n": 12,
+      "key": "SMD-3996",
+      "title": "Spike: three end-to-end capstones — each scripted run on main tests one mechanism, and none runs a multi-session task through the real interfaces with its effects recorded apart from the agent",
+      "text": "Go ahead with SMD-3996: Spike: three end-to-end capstones — each scripted run on main tests one mechanism, and none runs a multi-session task through the real interfaces with its effects recorded apart from the agent"
+    },
+    {
+      "n": 13,
+      "key": "SMD-3875",
+      "title": "The editorial-policy auditor sends the Postgres connection string, password included, to OpenRouter as its HTTP-Referer — on this stack SUPABASE_URL is a postgres:// URL",
+      "text": "Go ahead with SMD-3875: The editorial-policy auditor sends the Postgres connection string, password included, to OpenRouter as its HTTP-Referer — on this stack SUPABASE_URL is a postgres:// URL"
+    },
+    {
+      "n": 14,
+      "key": "SMD-3408",
+      "title": "test-rest [12]'s pushedBack and perSignal rows each failed once under heavy load — pushedBack's span export never reached its collector, and perSignal ended `timed out`",
+      "text": "Go ahead with SMD-3408: test-rest [12]'s pushedBack and perSignal rows each failed once under heavy load — pushedBack's span export never reached its collector, and perSignal ended `timed out`"
+    },
+    {
+      "n": 15,
+      "key": "SMD-4195",
+      "title": "A plugin's model call is judged without the rows it carries — under allow, a source:/type:/topic: deny term or another key's actor: never holds it; name the thoughts its text holds so the gate checks each",
+      "text": "Go ahead with SMD-4195: A plugin's model call is judged without the rows it carries — under allow, a source:/type:/topic: deny term or another key's actor: never holds it; name the thoughts its text holds so the gate checks each"
+    },
+    {
+      "n": 16,
+      "key": "SMD-4056",
+      "title": "Spike: generated representation candidates against a hand-written one — nothing proposes a change from observed failures, with a hypothesis and witnesses, to set against the operator's own",
+      "text": "Go ahead with SMD-4056: Spike: generated representation candidates against a hand-written one — nothing proposes a change from observed failures, with a hypothesis and witnesses, to set against the operator's own"
+    },
+    {
+      "n": 17,
+      "key": "SMD-3480",
+      "title": "Webhooks open runs — a plugin hook can only run its handler in the REST core; let the hook handler open a run as `hook:<plugin>`, with onceById giving a failed run's claim back and keeping an unknown outcome's claim to lapse (SMD-3215 step 5)",
+      "text": "Go ahead with SMD-3480: Webhooks open runs — a plugin hook can only run its handler in the REST core; let the hook handler open a run as `hook:<plugin>`, with onceById giving a failed run's claim back and keeping an unknown outcome's claim to lapse (SMD-3215 step 5)"
+    },
+    {
+      "n": 18,
+      "key": "SMD-3594",
+      "title": "test-live [9]'s hard stop during a stale-read re-read assumes update_thought is waiting after a fixed 400 ms sleep — a slow worker reaches the stop first, and the case it names goes untested while it passes",
+      "text": "Go ahead with SMD-3594: test-live [9]'s hard stop during a stale-read re-read assumes update_thought is waiting after a fixed 400 ms sleep — a slow worker reaches the stop first, and the case it names goes untested while it passes"
+    },
+    {
+      "n": 19,
+      "key": "SMD-3343",
+      "title": "test-live [33]'s write-cost assertion misses two regressions of migration 068's write path — a plain join to ob1_superseded_by and a head lookup without the md5 key both read under its 100-row limits at the section's shape",
+      "text": "Go ahead with SMD-3343: test-live [33]'s write-cost assertion misses two regressions of migration 068's write path — a plain join to ob1_superseded_by and a head lookup without the md5 key both read under its 100-row limits at the section's shape"
+    },
+    {
+      "n": 20,
+      "key": "SMD-3943",
+      "title": "No exercise checks how revisit conditions cope with limited time, coverage and attention — late and missing observations, spikes, DST deadlines and low-value bursts, scored against simple baselines",
+      "text": "Go ahead with SMD-3943: No exercise checks how revisit conditions cope with limited time, coverage and attention — late and missing observations, spikes, DST deadlines and low-value bursts, scored against simple baselines"
+    }
+  ]
+}
