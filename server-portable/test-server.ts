@@ -7147,7 +7147,7 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   assert(/migration 128/.test(hintW?.("function ob1_priority_span() does not exist") ?? "")
       && /EXECUTE is PUBLIC's/.test(hintW?.("permission denied for function ob1_priority_span") ?? "")
       && /min_priority/.test(hintM?.("permission denied for function ob1_priority_defaults") ?? "")
-      && /re-apply migration 128/.test(hintW?.("ob1_priority_span answered no span this server reads") ?? "")
+      && /re-apply every migration/.test(hintW?.("ob1_priority_span answered no span this server reads") ?? "")
       && /migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
       && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
       && hintNone === undefined && priorityHint("some other fault") === "",

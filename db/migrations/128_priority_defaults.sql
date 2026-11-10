@@ -95,7 +95,10 @@ COMMENT ON FUNCTION ob1_priority_defaults() IS
 -- ---------------------------------------------------------------------------
 -- The larger of a critical level (5) and unknown's value (a retune may set it
 -- past 5; an inherited level is at most 5 less a hop) plus the largest urgency
--- term and the largest unblocks term (review pass 1). Search's priority_weight divides an effective priority by this, capped
+-- term and the largest unblocks term (review pass 1). It mirrors
+-- effective_priority's composition, not only its values: a migration that
+-- changes how the terms combine (a term stacking with overdue, a level past 5,
+-- unblocks terms that add) replaces this function too (review pass 3). Search's priority_weight divides an effective priority by this, capped
 -- at 1, so the blend's two halves share a 0-1 scale (SMD-3668).
 CREATE OR REPLACE FUNCTION ob1_priority_span()
 RETURNS numeric

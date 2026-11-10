@@ -591,7 +591,7 @@ export function priorityHint(msg: string): string {
     : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
     ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), whose EXECUTE is PUBLIC's as 128 made it; a hand-made REVOKE took it from the server's role, so grant it back; search without them meanwhile"
     : /ob1_priority_span answered no span/.test(msg)
-    ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply migration 128 (db/migrations/128_priority_defaults.sql); search without priority_weight meanwhile"
+    ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without priority_weight meanwhile"
     : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight and min_priority read effective_priority, migration 122 (db/migrations/122_effective_priority.sql), which is not applied; search without them meanwhile"
     : /permission denied for (table|function|relation) (priority_|open_item|ob1_|thought_facets|thought_sources|node_)/i.test(msg)
