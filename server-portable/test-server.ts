@@ -7498,7 +7498,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   // counted in one trimmed gap, a cut hit saying how to read the whole, settled tickets past the first 5 by key alone,
   // and no label object in the value.
   {
-    const { budgetPlan, HIT_TEXT_BUDGET, HIT_LABELS, BOARD_SHOWN, BOARD_TITLE, OTHERS_TITLED } = await import("./core/plan.ts");
+    const { budgetPlan, headOf, HIT_TEXT_BUDGET, HIT_LABELS, BOARD_SHOWN, BOARD_TITLE, OTHERS_TITLED } = await import("./core/plan.ts");
     const long = (n: number, tag: string) => `${tag} ` + "word ".repeat(Math.ceil(n / 5)).slice(0, n - tag.length - 1);
     const id = (n: number) => `${String(n % 10).repeat(8)}-${String(1000 + n).slice(-4)}-4111-8111-111111111111`;
     const rel = (n: number) => ({ id: id(900 + n), relation: "related", otherIs: "older", other: { id: id(800 + n), trust: "agent", created_at: "2026-11-01T00:00:00.000Z", supersededBy: null }, confidence: 0.5, judgedAt: "2026-11-02T00:00:00.000Z", stale: false });
@@ -7536,15 +7536,40 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && h0.content.length === share && h0.contentChars === 3000 && h0.relations?.length === HIT_LABELS.relations && h0.relationsMore === 4 && c0.claimed?.length === HIT_LABELS.claimed && c0.claimedMore === 2
         && h0.priority?.length === HIT_LABELS.priority && h0.priorityMore === 2
         && v.board.available && v.board.tickets.length === BOARD_SHOWN && v.board.tickets[0].title.length === BOARD_TITLE && v.board.others.filter((o) => o.title !== "").length === OTHERS_TITLED
-        && JSON.stringify(g) === JSON.stringify({ gap: "trimmed", hitText: 8, labels: 8 * (3 + 2), tickets: 3, titles: BOARD_SHOWN + 33 })
+        && JSON.stringify(g) === JSON.stringify({ gap: "trimmed", hitText: 8, labels: 8 * (3 + 2), tickets: 3, titles: BOARD_SHOWN + 33, unlisted: 0 })
         && t.includes(`… cut at ${share} of 3000 characters: fetch ${id(0)} for the whole text.`) && /\n- and 28 more: SMD-4005 \("Done"\), SMD-4006/.test(t)
-        && /- Cut to keep this reply readable: 8 hits' text to its head/.test(t) && !/"relation":"related"/.test(sc) && !/"holder"/.test(sc) && /"contentChars":3000,"moved":0,"claimed":0,"relations":6,"priority":5/.test(sc)
+        && /- Cut to keep this reply readable: 8 hits' text to its head .*3 open tickets past the board's first 15, listed by key alone/.test(t) && /- and 3 more open, in agenda order: SMD-3015, SMD-3016, SMD-3017\./.test(t) && !/"relation":"related"/.test(sc) && !/"holder"/.test(sc) && /"contentChars":3000,"moved":0,"claimed":0,"relations":6,"priority":5/.test(sc)
         && /"settled":\["SMD-4000","SMD-4001"/.test(sc),
       `a canary-sized answer held to its budget: ${size(before)} → ${size(r)} characters; each cut counted (${JSON.stringify(g)})`);
     // Under the caps nothing is cut and no trimmed gap is said.
     const small = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: [{ ...hits[0], content: "short", claimed: [], relations: [], priority: [] }] }, board: { ...raw.board, tickets: [{ ...ticket(0), title: "SMD-3000 — short" }], others: [] } } as never);
     assert(!small.gaps.some((x) => x.gap === "trimmed") && small.knowledge.hits[0].content === "short" && small.knowledge.hits[0].contentChars === 5,
       "an answer under every cap is unchanged, and says nothing was cut");
+    // Review pass 1. The worst the reach allows stays bounded: 20 hits of 60,000 characters with every label, 100 open,
+    // 400 settled, 100 waiting and 300 missing tickets. The open tickets past 15 by key; the rest counted.
+    const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
+    const huge = budgetPlan({ ...raw,
+      knowledge: { ...raw.knowledge, hits: many(20, (i) => ({ ...hits[i % 8], id: id(i), content: long(60_000, `huge-${i}`), claimed: many(12, claim), claimedMore: 0 })) },
+      board: { ...raw.board, tickets: many(100, ticket), others: many(400, settled), waiting: many(100, (i) => ({ key: `SMD-${5000 + i}`, title: long(200, "w"), status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" })) },
+      gaps: [{ gap: "tickets_missing", keys: many(300, (i) => `SMD-${6000 + i}`) }] } as never);
+    const hr = say.renderPlanContext({ ok: true, value: huge } as never);
+    const hg = huge.gaps.find((x) => x.gap === "trimmed") as { tickets: number; unlisted: number } | undefined;
+    const hm = huge.gaps.find((x) => x.gap === "tickets_missing") as { keys: string[]; more?: number } | undefined;
+    assert(size(hr) < 40_000 && hg?.tickets === 85 && hg?.unlisted === 360 + 90 + 280 && hm?.keys.length === 20 && hm?.more === 280
+        && /- and 85 more open, in agenda order: SMD-3015, SMD-3016/.test(text(hr)) && /Not ranked \(400\):/.test(text(hr)) && /- and 360 more, not listed\./.test(text(hr))
+        && /Named but not in the brain: SMD-6000, .* and 280 more\./.test(text(hr)),
+      `the worst the reach allows is bounded (${size(hr)} characters): open tickets past 15 by key, the other lists past their first few counted (${JSON.stringify(hg)})`);
+    // A cut never leaves half of a surrogate pair, in a hit's text or a title; an exact match past the head is said so.
+    const emoji = "a".repeat(199) + "😀" + "b".repeat(2000);
+    const cutEmoji = budgetPlan({ ...raw, knowledge: { ...raw.knowledge, hits: hits.map((h) => ({ ...h, content: emoji, matchedNeedles: ["SMD-77"] })).map((h, i) => i === 0 ? { ...h, content: emoji + " SMD-77" } : h) },
+      board: { ...raw.board, tickets: [{ ...ticket(0), title: "t".repeat(78) + "😀" + "x".repeat(50) }] } } as never);
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const ce = say.renderPlanContext({ ok: true, value: cutEmoji } as never);
+    assert(headOf("ab😀", 3) === "ab" && headOf("ab😀", 4) === "ab😀" && !cutEmoji.knowledge.hits.some((h) => lone.test(h.content)) && cutEmoji.board.available && !lone.test(cutEmoji.board.tickets[0].title)
+        && !lone.test(text(ce)) && /Contains \(in the whole text, past what is shown\): SMD-77/.test(text(ce)),
+      "a cut through an emoji drops the whole character, in a hit's text and in a title; an exact match past the head is said to be in the whole text");
+    // A budget cut is no coverage gap: with nothing else found, the weighing line still stands.
+    assert(/- Nothing else found\. How close the hits are to the request is each hit's match/.test(t), "with only a cut among the gaps, the reply still says nothing else was found and to weigh the hits");
   }
   // 126's keyed, read strictly (review pass 1): a malformed others, waiting or missing is refused in the store's words.
   {

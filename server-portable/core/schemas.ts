@@ -812,7 +812,7 @@ export const SPECS = {
       "`specs` and `procedures`, not available here yet, each saying the ticket it waits on; `tools`, the tools this key's scope may call (core and enabled plugins; another server's are unknown here); " +
       "and `gaps`, what it could not find, as values: no hit at all, every hit superseded or outside text, a named ticket the brain does not hold, tickets past the board's reach (500 named, 100 listed), semantic search unavailable, or a board that ran out of time or failed. No gap is no verdict on coverage: the search keeps its nearest matches, each with its similarity. " +
       "One deadline bounds the two waits: an embedding past it is answered by exact matches alone, and a board past it is a gap, not a failure. " +
-      "The reply is held to a budget: each hit's text cut to its head (`fetch` reads the whole), a hit's labels to its first few, the board to its first 15 open tickets with short titles, and the `trimmed` gap counts every cut. Logged as one query_log row when the log is on.",
+      "The reply is held to a budget: each hit's text cut to its head (`fetch` reads the whole), a hit's labels to its first few, the board to its first 15 open tickets with short titles (the rest by key) and its other lists to their first few, and a `trimmed` entry among the gaps counts every cut — a cut, not a coverage gap. Logged as one query_log row when the log is on.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       request: z.string().min(1).max(2000).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate")
