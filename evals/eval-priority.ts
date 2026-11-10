@@ -61,7 +61,7 @@ import { hashKey } from "../server-portable/auth.ts";
 import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, DOGFOOD_READS, MEASURED, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, priorityWeightRead, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, plannedNoteReads, readNoteReads, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  AGENDA_QUESTION_READ, BASELINE, DOGFOOD_READS, MEASURED, orderFor, PRIORITY_WEIGHT, PRIORITY_WEIGHT_READ, priorityWeightRead, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, plantFacts, plannedFacts, plannedNoteReads, readNoteReads, factPlan, dayFrom, dueInstant, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type PlantedFacts, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -266,13 +266,20 @@ async function selfCheck(): Promise<void> {
   assert(JSON.stringify(idsOfAnswer("search", { results: [{ id: "a" }, { id: "b" }] })) === '["a","b"]' && JSON.stringify(idsOfAnswer("search_thoughts", { hits: [{ id: "c" }] })) === '["c"]', "a tool's answer is read for its ids: search's results, search_thoughts' hits");
   assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
   const sent: { tool: SearchTool; args: Record<string, unknown> }[] = [];
-  const pwIds = await PRIORITY_WEIGHT_READ.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (tool, args) => { sent.push({ tool, args }); return ["a", "b"]; } });
+  const pwIds = await PRIORITY_WEIGHT_READ.run({ query: "q", embedding: [], store: null as unknown as SqlStore, sql: null as unknown as SQL, callTool: async (tool, args) => { sent.push({ tool, args }); return ["a", "b"]; } });
   assert(PRIORITY_WEIGHT === 0.5 && sent.length === 1 && sent[0].tool === "search_thoughts" && JSON.stringify(sent[0].args) === JSON.stringify({ query: "q", priority_weight: 0.5 }) && JSON.stringify(pwIds) === '["a","b"]',
     "priority_weight is search_thoughts at the weight pre-registered on SMD-3668 (0.5), its other arguments the tool's defaults, its hits as the tool returns them: a changed weight is a new pre-registration, never a re-run");
   const sentAt: Record<string, unknown>[] = [];
   const at7 = priorityWeightRead(0.7, "priority_weight@0.7");
-  await at7.run({ query: "q", embedding: [], store: null as unknown as SqlStore, callTool: async (_tool, args) => { sentAt.push(args); return []; } });
+  await at7.run({ query: "q", embedding: [], store: null as unknown as SqlStore, sql: null as unknown as SQL, callTool: async (_tool, args) => { sentAt.push(args); return []; } });
   assert(at7.name === "priority_weight@0.7" && at7.ticket === "SMD-3668" && JSON.stringify(sentAt) === JSON.stringify([{ query: "q", priority_weight: 0.7 }]), "an exploratory read sends its own weight under its own name; the pre-registered read keeps 0.5 (above)");
+  // SMD-4192's chooser, as pre-registered: a question naming a time gets the due order, any other the priority order.
+  const orders = PROMPTS.map((p) => `${p.key}:${orderFor(p.query)}`).join(" ");
+  assert(orders === "next-ticket:priority highest-value:priority this-week:due due-soon:due matters-most:priority promised:priority blocking:priority"
+      && ["Any deadlines?", "What is overdue?", "What can I do today?", "Anything for tomorrow?"].every((q) => orderFor(q) === "due")
+      && ["What should I do next?", "Is this soonest-first?", "What's in the weekly notes?"].every((q) => orderFor(q) === "priority")
+      && AGENDA_QUESTION_READ.name === "agenda_question" && AGENDA_QUESTION_READ.ticket === "SMD-4192",
+    `agenda_question's chooser picks due for a question naming a time, by whole words, and priority otherwise, as pre-registered on SMD-4192 (${orders})`);
   const ew = (raw: string | undefined) => exploratoryWeights(raw);
   const weightsOf = (raw: string) => { const r = ew(raw); return "weights" in r ? JSON.stringify(r.weights) : `error: ${r.error}`; };
   assert(weightsOf("0.7,0.9") === "[0.7,0.9]" && weightsOf(" 0 , 1 ") === "[0,1]", "--priority-weight reads weights from 0 to 1, comma-separated, in the order given");
@@ -410,6 +417,9 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
   const client = mcpClient(`http://127.0.0.1:${server.port}`, KEY_RAW);
   const store = new SqlStore(url, { max: 1 });
+  // The measured reads' own client (SMD-4192): the seeding's closed above, and a read handed it errored "Connection
+  // closed" on every prompt, measuring nothing.
+  const readSql = new SQL({ url, max: 1 });
   /** A search tool over MCP, as a client calls it; its ids from the structured answer, best first. A refusal throws. */
   const callTool = async (tool: SearchTool, args: Record<string, unknown>): Promise<string[]> => {
     const body = (await client.rpc("tools/call", { name: tool, arguments: args })) as { error?: unknown; result?: { isError?: boolean; structuredContent?: unknown; content?: { text?: string }[] } };
@@ -425,7 +435,7 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   const runMeasured = async (r: MeasuredRead, pass: string): Promise<{ hits: string[][]; errors: string[] }> => {
     const out = { hits: [] as string[][], errors: [] as string[] };
     for (const p of PROMPTS) {
-      const input: MeasureInput = { query: p.query, embedding: vectorOf.get(p.query)!, store, callTool };
+      const input: MeasureInput = { query: p.query, embedding: vectorOf.get(p.query)!, store, callTool, sql: readSql };
       try {
         // Each id once, the top READ_K: what the score reads, and all the table shows.
         out.hits.push(toKeys(measuredIds(await r.run(input))));
@@ -472,6 +482,7 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
     }
   } finally {
     await store.close();
+    await readSql.close();
     server.stop(true);
     provider.stop(true);
   }
@@ -524,6 +535,10 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   if (deeper.length) failures.push(`a baseline read returned more than the ${READ_K} hits the score reads (${deeper.join("; ")}): READ_K no longer matches the tool`);
   if (!ceiling.helped) failures.push("the gold ceiling cannot clear the bar, so no read can: the registration needs fixing");
   if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} `))) failures.push("the gold ceiling errored, so the measured reads' path is broken");
+  // A measured read that errored on every prompt was never measured (SMD-4192's first run: a closed client): its
+  // verdict is the harness's fault, not the read's, so the run fails rather than record it.
+  const unmeasured = measured.filter((r) => PROMPTS.every((p) => errors.some((e) => e.startsWith(`measured read ${r.name} on ${p.key}: `))));
+  if (unmeasured.length) failures.push(`measured read(s) ${unmeasured.map((r) => r.name).join(", ")} errored on every prompt, so nothing was measured: mend the harness, and say so beside the verdict`);
   const cheats = answerReaders.filter((n) => n !== CEILING.name);
   if (cheats.length) failures.push(`measured read(s) ${cheats.join(", ")} answer differently when the gold and facts move: a read must read the database, not the answer`);
   if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} (answer moved)`))) failures.push("the gold ceiling errored with the answer moved, so the answer-moved check is broken");

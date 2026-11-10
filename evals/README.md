@@ -4800,6 +4800,64 @@ The program's output, verbatim:
 * So the defaults stay 0 for search, and the agenda's order is level first. Level first moves which prompts each read
   wins rather than how many: no single order of the items reaches 5 of 7, as SMD-4177 set out.
 
+**The agenda takes the question, 2026-11-10** (SMD-4192). No single order reaches 5 of 7, so the maintainer chose
+that the agenda takes the question, from the ticket's four options: the bar stays as registered, and the client
+chooses the order. The rule was pre-registered on the ticket before any build or run.
+* **The agenda's order.** Migration 129 adds `order`, either `priority` (the default, unchanged) or `due`. `due` lists
+  the items with a due time first, soonest first, so the longest overdue leads. The undated follow by priority, and a
+  tie on the due time goes to the higher priority. The order is applied before the limit.
+* **The read**, `agenda_question` (`priority.ts`'s `AGENDA_QUESTION_READ`), lists the agenda's own items, not
+  search's ten hits reordered. Each ticket becomes its head thought (068's `ob1_ticket_head`), and each open item the
+  thought it was read from. It uses the agenda read's flags at the cap of 100.
+* **The chooser.** The eval has no client model to choose the order, so a keyword rule stands in (`DUE_WORDS`): a
+  query naming due, a deadline, overdue, soon, today, tomorrow or this week gets `due`; any other gets `priority`.
+  It reads the query's words alone.
+* **Disclosed before the run.** The read was designed with every read's per-prompt results in view, and the rule was
+  written with the seven queries in front of it. The ticket predicted top-1 on `next-ticket`, `highest-value`,
+  `matters-most`, `blocking` and `due-soon`, and losses on `this-week` (the gutters before the bill) and `promised`.
+
+Registration `acb196be7ec50868`, unchanged; main f684a696 with the branch's migration 129. The program's output,
+verbatim (the new read's rows; the other reads' rows are as recorded above):
+
+```
+next-ticket     agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 0.949]
+highest-value   agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 0.949]
+this-week       agenda_question gutters, bill, commitment, renewal, zq-urgent, passport, zq-high, documentary, cat, zq-medium  [top-1 no, top-3 yes, tau 0.600]
+due-soon        agenda_question gutters, bill, commitment, renewal, zq-urgent, passport, zq-high, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 1.000]
+matters-most    agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 0.333]
+promised        agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 no, top-3 no, tau –]
+blocking        agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau –]
+```
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.429 | 0.429 | 0.525 | 0.222 / 0.345 / -0.001 | 0.220 / 0.347 / 0.000 |
+| priority_weight | 0.143 | 0.571 | 0.414 | 0.085 / 0.310 / -0.002 | 0.085 / 0.312 / 0.000 |
+| agenda_question | 0.714 | 0.857 | 0.766 | 0.285 / 0.509 / -0.001 | 0.285 / 0.511 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: `agenda_question` clears the bar,** the first read to. Top-1 on 5 of 7 (at least 5 needed), mean tau
+0.766 (0.502 needed), and `highest-value` and `due-soon` kept in the top 3. The answer-moved check passed: with the
+gold and the facts moved, its hits stayed the same.
+* **What a pass shows.** The due order and the agenda's own list fit these seven prompts, as the ticket predicted
+  before the run. It doesn't show that a keyword rule chooses well for other questions: it was written with these
+  queries in view. In use the calling model chooses the order, and nothing here measures that choice.
+* **What it still misses.** `this-week` leads with the overdue gutters where the gold has the bill due tomorrow;
+  `promised` leads with the Urgent ticket where the gold has the commitment, which no order of priority or due time
+  puts first.
+* **The agenda read** (search's hits reordered) and `priority_weight` are unchanged, and their verdicts stand.
+* **Two runs before this one measured nothing,** each from a defect in the eval's plumbing, not the read's rule:
+  * the first handed the read the seeding's SQL client, already closed: "Connection closed" on every prompt;
+  * the second bound its keys as a JS array, which Bun sends to `::text[]` as one comma-joined string: "malformed
+    array literal" on every prompt.
+
+  Each scored the read 0 of 7 with every prompt an error. The run now fails when a measured read errors on every
+  prompt, as the second did. The plumbing was mended and checked on its own against a scratch database, with no
+  eval, before this run. The rule and the read's procedure did not change between the three runs.
+
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
 A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's

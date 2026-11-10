@@ -578,7 +578,7 @@ export interface paths {
         };
         /**
          * Agenda
-         * @description What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), then, within a level, urgency from the due time (+0.4 by the end of tomorrow, +0.2 within the week, +0.6 overdue) and what it unblocks (+0.1, or +0.2 for three or more), which never lift an item past the next level — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: "mine"` (work this key holds a live claim on). `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so nothing was left out for a claim and claimed started work counts as started, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.
+         * @description What matters now: open tickets and open items, ranked by effective priority — the stated level (or one inherited from a parent ticket or the ticket a thought is about, or unknown, read as medium), then, within a level, urgency from the due time (+0.4 by the end of tomorrow, +0.2 within the week, +0.6 overdue) and what it unblocks (+0.1, or +0.2 for three or more), which never lift an item past the next level — each with the terms behind its place. By default only startable, unclaimed, unstarted work: blocked items, items under a live claim (this brain's own claims), started tickets and items not yet startable are left out and counted; each ticket carries its Linear `status` and `statusType`. Scope by `source` (linear, items, or a plugin's name), Linear `project` or `label`, or `holder: "mine"` (work this key holds a live claim on). `order: "due"` lists the dated items first, soonest first, for a question about deadlines; the answer's `order` says which was applied. `unknown` counts the items in `total` with no priority, stated or inherited; `boardSync` is board-sync's last heartbeat (its time and its last pass's outcome), `claimsRead` false means claims could not be read, so nothing was left out for a claim and claimed started work counts as started, and `claimsLive` is how many live claims this brain records: 0 means no claim could leave anything out, as on a brain whose work is claimed through another brain. It orders and explains; the caller decides.
          */
         get: operations["agenda"];
         put?: never;
@@ -4655,6 +4655,7 @@ export interface operations {
                 include_claimed?: boolean;
                 include_proposed?: boolean;
                 include_started?: boolean;
+                order?: "priority" | "due";
             };
             header?: never;
             path?: never;

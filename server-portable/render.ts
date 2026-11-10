@@ -2452,7 +2452,7 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   const lines = v.items.length === 0
     ? ["Nothing on the agenda in this scope."]
     : [
-        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, ${v.order === "due" ? "soonest due first, the undated after" : "most pressing first"}:`,
         ...v.items.map(agendaLine),
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
@@ -2464,6 +2464,12 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
 }, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
+
+/** The hint an agenda fault carries when it asked for the due order (SMD-4192): only migration 129's agenda takes it. */
+export const agendaHint = (msg: string): string =>
+  /function agenda\(/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — order due needs migration 129 (db/migrations/129_agenda_order.sql), which is not applied; ask with the priority order meanwhile"
+    : "";
 
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {

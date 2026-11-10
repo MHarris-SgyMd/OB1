@@ -1593,6 +1593,9 @@ export function normaliseEffectivePriority(r: unknown, what: string): EffectiveP
 
 /** A live or lapsed claim an agenda item names (115): the holder's key name, the piece, and when its lease ends or ended. */
 export type AgendaClaim = { holder: string; piece: string | null; label: string | null; at: string };
+/** The agenda's orders (migration 129, SMD-4192). */
+export const AGENDA_ORDERS = ["priority", "due"] as const;
+export type AgendaOrder = (typeof AGENDA_ORDERS)[number];
 /**
  * One agenda item (migrations 123 and 124, SMD-3669, SMD-4162): a ticket or an open item, its place, what it is, and
  * 122's terms behind its place. `status` is a ticket's Linear status (`statusType` its type: triage, backlog,
@@ -1645,6 +1648,8 @@ export type AgendaResult = {
    * Null without keys, and from a brain before 126.
    */
   keyed: { others: AgendaOther[]; waiting: AgendaWaiting[]; missing: string[] } | null;
+  /** The order applied (129): `priority` from a brain before 129, which has no other. */
+  order: AgendaOrder;
   now: string;
 };
 /** A named ticket the agenda does not rank (126): settled, or a status type the brain does not know. */
@@ -1670,7 +1675,8 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
   const num = (v: unknown): number => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
   if (!o || !Array.isArray(o.items) || !Number.isInteger(num(o.total)) || !Number.isInteger(num(o.unknown)) || !lo
       || ![lo.blocked, lo.claimed, lo.started, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date)) || typeof o.claims_read !== "boolean"
-      || (o.claims_live !== null && !Number.isInteger(num(o.claims_live)))) {
+      || (o.claims_live !== null && !Number.isInteger(num(o.claims_live)))
+      || (o.order !== undefined && !(AGENDA_ORDERS as readonly unknown[]).includes(o.order))) {
     throw new Error(`${what} answered no agenda this server reads`);
   }
   const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
@@ -1703,6 +1709,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     claimsRead: o.claims_read as boolean,
     claimsLive: o.claims_live === null ? null : num(o.claims_live),
     keyed,
+    order: (o.order as AgendaOrder | undefined) ?? "priority",
     now: isoTimestamp(o.now as string | Date),
   };
 }
@@ -2501,6 +2508,12 @@ export interface ThoughtStore {
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean;
     /** Also list started tickets (124); absent is false: started work is left out, and counted. */
     includeStarted?: boolean; now?: string;
+    /**
+     * The order (129, SMD-4192): `priority`, the default, by effective priority; `due`, the dated items first, soonest
+     * first (the longest overdue leads), then the undated by effective priority. Applied before `limit`. `due` needs
+     * migration 129; `priority` reads any brain from 123.
+     */
+    order?: AgendaOrder;
     /** A ceiling on the call's statement, in ms (plan_context's deadline, SMD-2684); a stricter role or database setting is kept. Past it the call throws 57014. */
     timeoutMs?: number;
   }): Promise<AgendaResult>;

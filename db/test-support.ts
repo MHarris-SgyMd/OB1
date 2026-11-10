@@ -486,6 +486,9 @@ const FUNCTIONS = [
   // 124 (SMD-4162): the agenda again, under a ninth argument (123's eight-argument one above, dropped by 124, kept for a
   // schema reset at 123).
   "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean)",
+  // 129 (SMD-4192): the agenda under a tenth argument, its order (124's nine-argument one above, dropped by 129, kept
+  // for a schema reset before 129).
+  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text)",
 ];
 
 /**

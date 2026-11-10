@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1199,13 +1199,21 @@ export class SqlStore implements ThoughtStore {
   async agenda(opts: {
     scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string; timeoutMs?: number;
+    order?: AgendaOrder;
   }): Promise<AgendaResult> {
     const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
     const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
-    const call = (q: typeof this.sql) => q`
+    // The priority order is the nine-argument call, so it reads a brain before 129 as before (SMD-4192); due names
+    // the tenth argument, which only 129's agenda takes.
+    const call = (q: typeof this.sql) => (opts.order === "due"
+      ? q`
       SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
                     ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
-                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a` as Promise<{ a: unknown }[]>;
+                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean, 'due'::text) AS a`
+      : q`
+      SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
+                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
+                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a`) as Promise<{ a: unknown }[]>;
     if (opts.timeoutMs === undefined) return normaliseAgenda((await call(this.sql))[0]?.a, "agenda");
     // A deadline (plan_context, SMD-2684): a ceiling, as readDatabaseFacts sets one — 0 (none) or a looser setting is
     // lowered to it, a stricter one kept — local to the call's own transaction.

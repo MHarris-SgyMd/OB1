@@ -27,7 +27,7 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     r = await (await ctx.store()).agenda({
       scope, holder, limit: input.limit,
       includeBlocked: input.include_blocked, includeClaimed: input.include_claimed, includeProposed: input.include_proposed,
-      includeStarted: input.include_started,
+      includeStarted: input.include_started, order: input.order,
     });
   } catch (e) {
     // mine on a role without the claims group (123 raises 42501): designed, so a refusal, not a fault (review pass 2).
@@ -37,7 +37,7 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     }
     throw e;
   }
-  await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed, include_started: input.include_started },
+  await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed, include_started: input.include_started, order: input.order },
     input.limit, r.items.map((i) => ({ kind: i.kind, key: i.key, effective: i.effective })));
   return ok(r);
 }

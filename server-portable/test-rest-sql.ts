@@ -2336,6 +2336,13 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
       && !withStartedMcp.isError && /ticket SMD-9915 \("started"\)/.test(withStartedMcp.text)
       && /\nLeft out: 1 started \(include_started lists them\)\./.test(noStartedMcp.text),
     `a started ticket is left out and counted, said in the text; include_started lists it with its status over REST and MCP; claimsLive a count (${noStarted.status} ${JSON.stringify(noStarted.body.leftOut)} ${noStarted.body.claimsLive} | ${startedRow?.status}/${startedRow?.statusType})`);
+  // 129 (SMD-4192): order due through both doors — the Medium due tomorrow first, then the undated by priority; the
+  // answer and the text say the order; any other order refused 400 by the schema.
+  const [dueRest, dueMcp, badOrder] = [await rest("GET", `${q}&order=due`), await mcp("agenda", { project: P, order: "due" }), await rest("GET", `${q}&order=soonest`)];
+  assert(dueRest.status === 200 && ((dueRest.body.items ?? []) as It[]).map((i) => i.key).join(" ") === "SMD-9912 SMD-9911 SMD-9914" && dueRest.body.order === "due"
+      && r.body.order === "priority" && !dueMcp.isError && same({ ...dueMcp.sc, now: null }, { ...dueRest.body, now: null })
+      && /^3 of 3 items, soonest due first, the undated after:\n1\. ticket SMD-9912 /.test(dueMcp.text) && badOrder.status === 400,
+    `order due lists the dated ticket first over REST and MCP, each saying the order; another order is refused 400 (${((dueRest.body.items ?? []) as It[]).map((i) => i.key)} | ${dueRest.body.order} | ${dueMcp.text.split("\n")[0]} | ${badOrder.status})`);
   // holder mine: the tickets this key holds a live claim on, claimed as they are.
   const claim = await rest("POST", "/v1/claims", { ticket: "SMD-9914", label: "test-rest-sql [17]", lease_seconds: 3600 });
   const mine = await rest("GET", "/v1/agenda?holder=mine");
