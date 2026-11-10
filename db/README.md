@@ -2518,18 +2518,20 @@ it lacks is written with its lineage; an empty set closes them all. It refuses
 as 113's door refuses (a text that moved, a filed ticket that disagrees), and
 `metadata` names one key. `record_thought_subject` is it with one key, and
 `close_thought_subjects` closes only the set the caller read
-(`close_thought_subject` one facet of it). At a writer's commit the first
-re-link locks every key the transaction moved on the thought, in key order
-(`ob1_thread_lock_keys`), so writers moving thoughts across the same keys
-queue; a subject kept beside a replace is not locked. A thought in several
-threads counts in each of `threads.ts --status`'s and `brain_info`'s thought
-counts, a place in each thread. Nothing finds a set yet: the rules and the
-judge's question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is
-a no-op. A re-apply of 111 makes its index again until 127 runs, and fails once
-a thought holds a set (so does `--reapply`, which already fails at 064 on any
-brain holding a subject, SMD-3149).
-test-schema [112], test-upgrade [20bp], test-live [47] and [48], test-rest-sql
-[16].
+(`close_thought_subject` a set of one). At a writer's commit the first re-link
+locks every key the transaction moved on the thought, in key order
+(`ob1_thread_lock_keys`), and the thought and its neighbours in those keys'
+threads, so writers moving thoughts across the same keys queue and a delete of a
+neighbour waits for the commit; a subject kept beside a replace is not locked.
+Statistics on a facet's key (`thought_facets_key_stats`) let the planner read a
+thread by its rows, not as 0.5% of the table. A thought in several threads
+counts in each of `threads.ts --status`'s and `brain_info`'s thought counts, a
+place in each thread. Nothing finds a set yet: the rules and the judge's
+question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is a no-op. A
+re-apply of 111 makes its index again until 127 runs, and fails once a thought
+holds a set (so does `--reapply`, which already fails at 064 on any brain
+holding a subject, SMD-3149). test-schema [112], test-upgrade [20bp], test-live
+[47] and [48], test-rest-sql [16].
 
 Migration 124 replaces the agenda under a ninth argument, `include_started`
 (SMD-4162). A ticket's row carries its head's `status` and `status_type`. A

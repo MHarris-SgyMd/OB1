@@ -7,8 +7,8 @@
 --
 -- WHY
 --   111 kept one standing subject per thought, so a thought stood in one work
---   thread (120). Blind raters split on the 2.5% of canary thoughts that are
---   multi-ticket sessions (SMD-3306's measure, 2026-10-24): such a session is
+--   thread (120). Blind raters split on the multi-ticket sessions, 7 of 275
+--   canary thoughts drawn (SMD-3306's measure, 2026-10-24): such a session is
 --   a segment of each ticket's work. The maintainer chose (2026-11-05) that a
 --   thought's own subject can be a set, so such a session stands in each of
 --   its tickets' threads; and (2026-11-09) that a set is one rule's — the
@@ -20,6 +20,10 @@
 --   * One standing subject per thought AND KEY: 111's partial unique index on
 --     the thought alone is replaced by one on the thought and its key. Closed
 --     rows are history, as before.
+--   * Statistics on a facet's key (thought_facets_key_stats), gathered at
+--     once: the planner read a thread's rows as 0.5% of the table, and so
+--     scanned every thought to read a thread (120's re-link and the lock
+--     below alike).
 --   * ob1_thread_lock_keys(keys) — each key's thread lock (120's
 --     ob1:thread:<key>), taken in key order, so writers that move thoughts
 --     across the same keys queue rather than deadlock, as db/threads.ts's
@@ -103,16 +107,22 @@
 --     counting the thought once for each), its rules write one key, and a
 --     non-current set the model names nothing for is never closed:
 --     close_thought_subject, given one facet of it, answers moved and closes
---     none, the claim goes back to pending, and the thought is asked again
---     every round.
+--     none, the claim goes back to pending, and the same run claims and asks
+--     it again at once — without end under --judge-checked, else until the
+--     garbage-judge alarm trips on the run of answers naming nothing, blaming
+--     the model and holding the pool (review pass 3).
 --   * ob1_item_serves (122) reads one ticket subject of a thought (LIMIT 1);
 --     with a set it serves one of them. SMD-4149's 125 redefines it: the set
 --     reading follows that.
 --   * A transaction that writes the subjects of several thoughts locks each
---     thought's keys as its first re-link comes, and one that writes inside a
---     savepoint (its rows' xmin a subtransaction's, which the trigger does not
---     read as its own) each key as its re-link comes, so two such can
---     deadlock, Postgres ending one (120's NOT HERE). No
+--     thought's keys as its first re-link comes, so it can deadlock beside a
+--     writer taking the same keys in order, Postgres ending one (120's NOT
+--     HERE). One that writes inside a savepoint (its rows' xmin a
+--     subtransaction's, which the trigger does not read as its own) locks
+--     120's set instead, the thought's standing keys and the one re-linked,
+--     at each re-link: a replace of one key queues as under 120, but a set's
+--     keys closed in a savepoint, each locked as its re-link comes, can
+--     deadlock the same way. No
 --     writer of the stack does either: each writes one thought's subjects a
 --     transaction, outside any savepoint. The first of several thoughts
 --     locks its own neighbours alone, so a delete of a later thought's
@@ -128,7 +138,8 @@
 --
 -- SAFETY
 --   One index made and 111's dropped (by name: the new one stands first, so
---   at no point does the table hold no rule); three functions added, three
+--   at no point does the table hold no rule); a statistics object made and
+--   thought_facets analysed (a sample of its rows); three functions added, three
 --   redefined (113's two doors, now wrappers keeping their signatures,
 --   refusals and answers' shape; 120's trigger function, its locks taken for
 --   a set); four comments restated. No row changes: a brain holds at most
@@ -180,6 +191,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS thought_facets_subject_key_uniq
   ON thought_facets (thought_id, (payload->>'key'))
   WHERE kind = 'subject' AND valid_until IS NULL;
 DROP INDEX IF EXISTS thought_facets_subject_active_uniq;
+
+-- How many rows a key holds, which no partial index's expression tells the
+-- planner: guessing 0.5% of thought_facets a key, it scanned every thought to
+-- read a thread of four (review pass 3: some 350 ms a subject's commit at a
+-- million thoughts, in 120's thread reads and this file's lock alike; 3 ms with
+-- these). Gathered now, then by autovacuum's analyze as facets change.
+CREATE STATISTICS IF NOT EXISTS thought_facets_key_stats ON ((payload->>'key')) FROM thought_facets;
+ANALYZE thought_facets;
 
 -- ---------------------------------------------------------------------------
 -- 2. ob1_thread_lock_keys — the threads' locks, in key order
@@ -319,8 +338,8 @@ BEGIN
     RETURN jsonb_build_object('ok', true, 'action', 'none', 'ids', '[]'::jsonb, 'kept', 0, 'added', 0, 'closed', 0);
   END IF;
 
-  -- The closes, then the writes, each in key order; the threads re-link at
-  -- the commit, the first re-link locking every key moved (120's triggers).
+  -- The closes, then the writes in key order; the threads re-link at the
+  -- commit, the first re-link locking every key moved (120's triggers).
   IF cardinality(v_close) > 0 THEN
     UPDATE thought_facets SET valid_until = now() WHERE id = ANY (v_close);
   END IF;
@@ -563,29 +582,43 @@ BEGIN
     -- name a thought left a placeholder for the session's life (review pass 2:
     -- 9 MB after 20,000 thoughts). A transaction writing several thoughts'
     -- subjects locks again at each change of thought, the locks held already.
-    SELECT array_agg(DISTINCT k ORDER BY k) INTO v_moved
-      FROM (SELECT s.payload->>'key' AS k
-              FROM thought_facets s
-             WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.xmin = pg_current_xact_id()::xid
-            UNION
-            SELECT v_key) m;
+    SELECT array_agg(s.payload->>'key') INTO v_moved
+      FROM thought_facets s
+     WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.xmin = pg_current_xact_id()::xid;
+    -- None of the transaction's own: its subjects were written inside a
+    -- savepoint, their xmin a subtransaction's. 120's set then, the thought's
+    -- standing keys with this one, all taken at once in key order (review
+    -- pass 3: locking each key as its re-link came, a replace in a savepoint
+    -- deadlocked beside a writer moving a thought the other way, where 120's
+    -- replace queued).
+    IF v_moved IS NULL THEN
+      SELECT array_agg(s.payload->>'key') INTO v_moved
+        FROM thought_facets s
+       WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.valid_until IS NULL;
+    END IF;
+    SELECT array_agg(DISTINCT k ORDER BY k) INTO v_moved FROM unnest(v_moved || v_key) AS k;
     v_mark := v_thought::text || ':' || v_moved::text;
     IF current_setting('ob1.thread_mark', true) IS DISTINCT FROM v_mark THEN
       PERFORM ob1_thread_lock_keys(v_moved);
       -- The thought itself in the IN list, not an OR beside it: an OR planned a
       -- scan of every thought on every commit (review pass 2: 85 ms at a
-      -- million thoughts, 2 ms as one list probed by the key).
+      -- million thoughts, 2 ms as one list probed by the key). Each member's
+      -- created_at read by its key, not joined: misjudging a key's rows, the
+      -- planner hash-joined a scan of every thought (review pass 3: 197 to
+      -- 241 ms a set at a million thoughts).
       PERFORM 1 FROM thoughts t
        WHERE t.id IN (SELECT v_thought
                       UNION ALL
                       SELECT x
                         FROM (SELECT o.id, lag(o.id) OVER w AS prev, lead(o.id) OVER w AS next
-                                FROM (SELECT s.payload->>'key' AS k, h.id, h.created_at
-                                        FROM thought_facets s JOIN thoughts h ON h.id = s.thought_id
+                                FROM (SELECT s.payload->>'key' AS k, s.thought_id AS id,
+                                             (SELECT h.created_at FROM thoughts h WHERE h.id = s.thought_id) AS created_at
+                                        FROM thought_facets s
                                        WHERE s.kind = 'subject' AND s.valid_until IS NULL AND s.payload->>'key' = ANY (v_moved)
                                          AND s.thought_id <> v_thought
                                       UNION ALL
-                                      SELECT k, h.id, h.created_at FROM unnest(v_moved) AS k, thoughts h WHERE h.id = v_thought) o
+                                      SELECT k, v_thought, (SELECT h.created_at FROM thoughts h WHERE h.id = v_thought)
+                                        FROM unnest(v_moved) AS k) o
                               WINDOW w AS (PARTITION BY o.k ORDER BY o.created_at, o.id)) around,
                              LATERAL (VALUES (around.prev), (around.next)) AS v(x)
                        WHERE around.id = v_thought AND x IS NOT NULL)

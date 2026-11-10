@@ -30065,7 +30065,7 @@ if (want("47b")) {
 }
 
 if (want("48")) {
-  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (127) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken, a raw writer's inserts in any order too; a delete of a neighbour standing in two of those keys waiting on the commit, not deadlocking with it — the thought's previous, its next, one in the later two of three keys, one beside it only in keys it left; a third key moved first, the window's partition, order and standing filter held, a neighbour's row left editable; the lock taken again in a later transaction, for a second thought and for a key moved after the triggers fired; a writer under REPEATABLE READ or SERIALIZABLE refused at its commit without waiting on a held key; a close a delete's own close reached first counted as none (SMD-3306)");
+  console.log("\n[48] Migration 120 on a real Postgres, beside other transactions: a subject written next to a thought the server is deleting waits the delete out and links past it; db/threads.ts the same on an unlinked thread; a re-link waits on another transaction holding its key's lock; a delete's own re-link never waits on that lock — the owner's commits at once and leaves its neighbours to the next re-link; a threads.ts batch a deadlock ends is said and runs again, one an operator cancels ends the run; capture-time ties broken by id, the greater id written first; the re-link writing before it closes, so a subject written beside a delete stalled in its cascade links past it; two writers re-keying across one pair of keys queueing on the lesser, not deadlocking; a thought's set replaced (127) locking every key it moves at its commit's first re-link, in key order, waiting on a held key with none after it taken, a raw writer's inserts in any order too, and a replace in a savepoint beside a writer moving the other way; a delete of a neighbour standing in two of those keys waiting on the commit, not deadlocking with it — the thought's previous, its next, one in the later two of three keys, one beside it only in keys it left; a third key moved first, the window's partition, order and standing filter held, a neighbour's row left editable; the lock taken again in a later transaction, for a second thought and for a key moved after the triggers fired; a writer under REPEATABLE READ or SERIALIZABLE refused at its commit without waiting on a held key; a close a delete's own close reached first counted as none (SMD-3306)");
   // Its own clients: [24] closed the suite's.
   const owner = new SQL({ url: URL_!, max: 1 });
   const SERVER = "ob1_live_threads_server";
@@ -30381,6 +30381,38 @@ if (want("48")) {
       } finally {
         await rawMover.close();
         await rawProber.close();
+      }
+
+      // A replace written inside a savepoint (review pass 3): its rows' xmin is the subtransaction's, so the trigger locks
+      // 120's set, the thought's standing keys and the one re-linked, at once in key order. Beside a writer moving another
+      // thought the other way, both queue on the lesser key, held elsewhere, and both commit; locking each key as its
+      // re-link came, the savepoint's would hold the greater while it waited on the lesser, and one would be ended.
+      const VA = "ticket:SMD-94931", VB = "ticket:SMD-94932";
+      const vt = await thought("vt", 6), vu = await thought("vu", 7);
+      await setOn(owner, vt, [VB]);
+      await setOn(owner, vu, [VA]);
+      const spWriter = new SQL({ url: URL_!, max: 1 }), plainWriter = new SQL({ url: URL_!, max: 1 });
+      try {
+        const spPid = await pidOf(spWriter), plainPid = await pidOf(plainWriter);
+        await holder`BEGIN`;
+        await holder`SELECT pg_advisory_xact_lock(hashtextextended('ob1:thread:' || ${VA}::text, 0))`;
+        await plainWriter`BEGIN`;
+        await setOn(plainWriter, vu, [VB]);
+        const plainCommit = settled(async () => { await plainWriter`COMMIT`; });
+        const plainWaits = await pollUntil(() => waitsOn(plainPid), 5000);
+        await spWriter`BEGIN`;
+        await spWriter`SAVEPOINT s`;
+        await setOn(spWriter, vt, [VA]);
+        await spWriter`RELEASE SAVEPOINT s`;
+        const spCommit = settled(async () => { await spWriter`COMMIT`; });
+        const spWaits = await pollUntil(() => waitsOn(spPid), 5000);
+        await holder`COMMIT`;
+        const [spEnd, plainEnd] = await Promise.all([spCommit, plainCommit]);
+        assert(plainWaits && spWaits && spEnd === "ok" && plainEnd === "ok" && (await pairs(VA)) === "" && (await pairs(VB)) === "",
+          `a replace written in a savepoint queues beside a writer moving another thought the other way, as 120's did, both committing (waited ${plainWaits}/${spWaits}; ${spEnd} / ${plainEnd})`);
+      } finally {
+        await spWriter.close();
+        await plainWriter.close();
       }
 
       // A thought one of whose neighbours stands in two of the keys it moves across (review pass 1's deadlock): x holds

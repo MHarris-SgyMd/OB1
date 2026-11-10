@@ -18405,6 +18405,10 @@ console.log("\n[112] Migration 127: a thought's own subjects are a set — one s
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_active_uniq') AS old`);
   assert(/UNIQUE INDEX/.test(idx.uniq ?? "") && /\(thought_id, \(\(payload ->> 'key'::text\)\)\)/.test(idx.uniq ?? "") && /WHERE \(\(kind = 'subject'::text\) AND \(valid_until IS NULL\)\)$/.test(idx.uniq ?? "") && idx.old === null,
     `one standing subject per thought and key, 111's index on the thought alone dropped (${idx.uniq}; ${idx.old ?? "no 111 index"})`);
+  // Statistics on a facet's key, so a thread's read is planned by its rows, not 0.5% of the table (review pass 3).
+  const stats = await q<{ d: string }>(`SELECT pg_get_statisticsobjdef(oid) AS d FROM pg_statistic_ext WHERE stxname = 'thought_facets_key_stats'`);
+  assert(stats.length === 1 && /ON \(payload ->> 'key'::text\) FROM (public\.)?thought_facets/.test(stats[0].d),
+    `statistics on a facet's key stand (${stats.map((r) => r.d).join() || "none"})`);
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   assert(/ob1:subject-set/.test(await src(SETS)) && /c_max\s+constant integer := 3/.test(await src(SETS)) && /ob1:subject-lineage-with-its-artifact/.test(await src(SETS)),
     "the sentinels: a set of at most three, and 111's lineage with its artifact, in the set door");

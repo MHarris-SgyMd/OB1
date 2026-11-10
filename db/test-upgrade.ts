@@ -5686,9 +5686,10 @@ console.log("\n[20bp] Migration 127: refused by name without 111, 113 or 120; on
   const JUDGE = "subject:qwen3.8:27b@p2r";
   const subject = async (id: string, key: string | null) =>
     (await sql`SELECT record_thought_subject(${id}::uuid, ${key}::text, 'model', ${JUDGE}, NULL::uuid, ${await fpOf(id)}::text, NULL::jsonb) AS r`)[0].r as { action: string; id?: string };
-  // A brain at the file before: two threads, their edges written by 120's triggers as the subjects landed.
+  // A brain at the file before: two threads, their edges written by 120's triggers as the subjects landed, and history
+  // beside them — t[1] keyed K1 first, then K2, leaving a closed subject, its lineage and a closed edge (review pass 3).
   const K1 = "ticket:SMD-3410", K2 = "ticket:SMD-3411", K3 = "pr:3412";
-  for (const [i, key] of [[0, K1], [1, K2], [2, K1], [3, K2]] as const) await subject(t[i], key);
+  for (const [i, key] of [[0, K1], [1, K1], [1, K2], [2, K1], [3, K2]] as const) await subject(t[i], key);
   const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
   const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe FROM derivations ORDER BY id`);
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
@@ -5701,7 +5702,7 @@ console.log("\n[20bp] Migration 127: refused by name without 111, 113 or 120; on
   const [idx] = (await sql`SELECT pg_get_indexdef(to_regclass('thought_facets_subject_key_uniq')) AS uniq, to_regclass('thought_facets_subject_active_uniq')::text AS old`) as { uniq: string | null; old: string | null }[];
   assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before && (await audits()) === auditBefore
          && /\(thought_id\)/.test(oldIndex) && /\(thought_id, \(\(payload ->> 'key'::text\)\)\)/.test(idx.uniq ?? "") && idx.old === null,
-    `the file moves nothing it finds: the subjects, the threads' edges, their lineage, every thought and audit row as they were; 111's index on the thought (${oldIndex.slice(0, 60)}…) replaced by one on the thought and key (${idx.uniq})`);
+    `the file moves nothing it finds: the subjects and the threads' edges, standing and closed, their lineage, every thought and audit row as they were; 111's index on the thought (${oldIndex.slice(0, 60)}…) replaced by one on the thought and key (${idx.uniq})`);
   // Each thread in capture order, as the database orders it.
   const order = async (ids: string[]) => ((await sql`SELECT id::text FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[]) ORDER BY created_at, id`) as { id: string }[]).map((r) => r.id);
   const edges = async (key: string) =>
