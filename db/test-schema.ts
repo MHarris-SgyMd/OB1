@@ -15795,24 +15795,25 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const KEY = "subject:qwen3.8:27b@p1";
 
   // The shape: 111 the last definer of its four functions and of the two it carries, but the door, which 113 carries
-  // with a check of the ticket a thought is filed under ([101]), and the validator, which 120 carries with a thread's
-  // edge ([108]); the sentinels; the trigger; the indexes; the CHECK; the comments.
+  // with a check of the ticket a thought is filed under ([101]) and 130 makes a set of one ([116]), and the validator,
+  // which 120 carries with a thread's edge ([108]); the sentinels; the trigger; the indexes (one standing per thought,
+  // since 130 per thought and key); the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "113" : fn === "thought_facets_validate" ? "120" : "111";
+    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "120" : "111";
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src(RTS)),
-    "the sentinels: the subject branch beside the relation's and the link's in the validator, the lineage with its artifact in the write");
+  assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src("record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)")),
+    "the sentinels: the subject branch beside the relation's and the link's in the validator, the lineage with its artifact in the write (130's set door, which 111's now calls)");
   const [shape] = await q<{ drop: string | null; uniq: string | null; key: string | null; chk: string }>(`SELECT
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_drop_subject_derivation' AND tgrelid = 'thought_facets'::regclass) AS drop,
-      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_active_uniq') AS uniq,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_key_uniq') AS uniq,
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_key_idx') AS key,
       (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS chk`);
   assert(/AFTER DELETE ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(old\.kind = 'subject'::text\)\) EXECUTE FUNCTION ob1_drop_subject_derivation\(\)/.test(shape.drop ?? "")
-         && /UNIQUE INDEX/.test(shape.uniq ?? "") && /\(thought_id\)/.test(shape.uniq ?? "") && /WHERE \(\(kind = 'subject'::text\) AND \(valid_until IS NULL\)\)/.test(shape.uniq ?? "")
+         && /UNIQUE INDEX/.test(shape.uniq ?? "") && /\(thought_id, \(\(payload ->> 'key'::text\)\)\)/.test(shape.uniq ?? "") && /WHERE \(\(kind = 'subject'::text\) AND \(valid_until IS NULL\)\)/.test(shape.uniq ?? "")
          && /payload ->> 'key'/.test(shape.key ?? "") && /'subject'/.test(shape.chk) && /'relation'/.test(shape.chk),
-    `the lineage drop after a subject's delete, one standing per thought, the key probe, the CHECK admitting subject beside relation (${shape.drop}; ${shape.uniq}; ${shape.chk})`);
+    `the lineage drop after a subject's delete, one standing per thought and key (130's index, 111's on the thought alone dropped), the key probe, the CHECK admitting subject beside relation (${shape.drop}; ${shape.uniq}; ${shape.chk})`);
   for (const sig of [RTS, "subject_key_valid(text)", "ob1_drop_subject_derivation()"]) {
     const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
     assert(/111/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 111 and the ticket`);
@@ -15842,8 +15843,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   assert((await insert(okPayload)).code === null, "…and takes a well-formed one written around the door");
   const raw = await one<{ id: string; p: Record<string, unknown> }>(`SELECT id::text, payload AS p FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL`, [a]);
   assert(raw.p.origin === "derived" && raw.p.key === okPayload.key, `origin is the validator's word, derived (${JSON.stringify(raw.p)})`);
-  const second = await insert({ ...okPayload, key: "pr:727" });
-  assert(second.code === "23505" && /thought_facets_subject_active_uniq/.test(second.message), `a second standing subject on the thought breaks the index (${second.code}: ${second.message.slice(0, 80)})`);
+  const second = await insert(okPayload);
+  assert(second.code === "23505" && /thought_facets_subject_key_uniq/.test(second.message), `a second standing subject on the thought under its key breaks the index (130's; ${second.code}: ${second.message.slice(0, 80)})`);
   const rewrite = await failure(`UPDATE thought_facets SET payload = payload || '{"key": "pr:727"}'::jsonb WHERE id = $1::uuid`, [raw.id]);
   const future = await failure(`UPDATE thought_facets SET valid_until = now() + interval '1 day' WHERE id = $1::uuid`, [raw.id]);
   assert(rewrite.code === "23514" && /written once and only closed/.test(rewrite.message) && future.code === "23514",
@@ -15900,7 +15901,9 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
     await door([null, "ticket:SMD-1", "metadata", KEY, "f"]), await door([b, "ticket:SMD-1", "metadata", "", "f"]), await door([b, "ticket:SMD-1", "metadata", "k".repeat(201), "f"]),
     await door([b, "SMD-1", "metadata", KEY, "f"]), await door([b, "ticket:SMD-1", "guess", KEY, "f"]), await door([b, "ticket:SMD-1", null, KEY, "f"]), await door([b, "ticket:SMD-1", "metadata", KEY, null]),
   ];
-  assert(refusals.every((r) => r.code === "22023") && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
+  // 113's refusals word for word, the wrapper's own before the set door's (review pass 1: unanchored, the set door's
+  // passed in their place).
+  assert(refusals.every((r) => r.code === "22023" && r.message.startsWith("record_thought_subject: ")) && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
          && /the key is ticket:<ID>/.test(refusals[3].message) && /by is metadata, first_line or model, got 'guess'/.test(refusals[4].message) && /fingerprint of the text/.test(refusals[6].message),
     `the door refuses a missing thought, an empty or overlong judge key, a malformed key, a way outside the three or none, a missing fingerprint — each invalid_parameter_value (${refusals.map((r) => r.code).join()})`);
 
@@ -15919,7 +15922,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
   assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
-  // 111 re-applied alone put its door and its validator back: the shipped ones are 113's and 120's, which the sections
+  // 111 re-applied alone put its door and its validator back: the shipped ones are 130's and 120's, which the sections
   // after read.
   await restoreShipped("record_thought_subject", "thought_facets_validate");
 
@@ -16054,9 +16057,10 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   // run-it: a sweep's answer, or the pass's rule, read before the ticket moved, replaced the subject another pass had
   // recorded since, and no run took the thought again).
   const fp = async (id: string) => (await db.query<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1`, [id])).rows[0].f;
-  const doorSrc = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_thought_subject(uuid, text, text, text, uuid, text, jsonb)'::regprocedure`)).rows[0].s;
-  assert(lastDefinerOf("record_thought_subject").startsWith("113") && lastDefinerOf("ob1_filed_ticket").startsWith("113") && /ob1_filed_ticket\(t\.metadata\)/.test(doorSrc) && /ob1:subject-lineage-with-its-artifact/.test(doorSrc),
-    "113 the door's last definer, its body reading ob1_filed_ticket and keeping 111's sentinel, and ob1_filed_ticket's");
+  // Since 130 the door is a set of one, the set door's body reading the filed ticket ([116]).
+  const doorSrc = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)'::regprocedure`)).rows[0].s;
+  assert(lastDefinerOf("record_thought_subject").startsWith("130") && lastDefinerOf("ob1_filed_ticket").startsWith("113") && /ob1_filed_ticket\(t\.metadata\)/.test(doorSrc) && /ob1:subject-lineage-with-its-artifact/.test(doorSrc),
+    "130 the door's last definer, the set door it calls reading ob1_filed_ticket and keeping 111's sentinel, and 113 ob1_filed_ticket's");
   const doorAt = async (id: string, key: string, by: string) =>
     (await db.query<{ r: Record<string, unknown> }>(`SELECT record_thought_subject($1, $2, $3, $4, NULL, $5, NULL) AS r`, [id, key, by, `subject:${by}@r1`, await fp(id)])).rows[0].r;
   const filedT = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[101] filed under its ticket', $1) RETURNING id`, [JSON.stringify({ ticket: " SMD-103 " })])).rows[0].id;
@@ -16098,16 +16102,21 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   assert(gone.action === "none" && gone.gone === true, `a thought gone: none (${JSON.stringify(gone)})`);
   const refused: string[] = [];
   for (const args of [[null, since, "x"], [after, null, "x"], [after, since, " "]]) {
-    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) { refused.push((e as { code?: string }).code ?? (e as Error).message); }
+    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) {
+      // 113's words, the wrapper's own: the set close's would name close_thought_subjects (review pass 1).
+      refused.push(`${(e as { code?: string }).code}${(e as Error).message.startsWith("close_thought_subject: ") ? "" : ` (${(e as Error).message.split("\n")[0]})`}`);
+    }
   }
   assert(refused.every((c) => c === "22023"), `a missing thought, facet or fingerprint is refused as a parameter error (${refused.join(", ")})`);
   const comment = (await db.query<{ c: string | null }>(`SELECT obj_description('close_thought_subject(uuid, uuid, text)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
-  assert(/Migrations 113, 120 \/ SMD-3306/.test(comment), `close_thought_subject's comment names its migrations, 113 and 120, which restates it as a close re-links its thread ([108]) (${comment.slice(-60)})`);
+  assert(/Migrations 113, 120, 130 \/ SMD-3306/.test(comment), `close_thought_subject's comment names its migrations, 113, 120, which restates it as a close re-links its thread ([108]), and 130, which makes it a set of one ([116]) (${comment.slice(-60)})`);
 
   // Re-applied, nothing moves.
   let again: string;
   try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
   assert(again.endsWith("_subject_pool.sql") && (await trigger()).n === 1 && (await status(after)) === "pending", `113 applied again changes nothing: one trigger, the pool as it was (${again.slice(0, 80)})`);
+  // 113 re-applied alone put its door and its close back: the shipped ones are 130's, which the sections after read.
+  await restoreShipped("record_thought_subject", "close_thought_subject");
   await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[101]%'`);
 }
@@ -17450,9 +17459,11 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   // The shape: 120 the last definer of its four functions, two of them 102's door and 111's validator carried; the
   // constraint triggers, deferred to the writer's commit, the indexes, the sentinels, SECURITY INVOKER throughout, the
   // comments.
-  for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink", "ob1_thread_relink_subject"]) {
+  // (The trigger function's last definer is 130, which takes its locks for a set: [116].)
+  for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink"]) {
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
   }
+  assert((await functionsNamed("ob1_thread_relink_subject")) === 1 && lastDefinerOf("ob1_thread_relink_subject").startsWith("130"), `one ob1_thread_relink_subject, 130 its last definer (${lastDefinerOf("ob1_thread_relink_subject")})`);
   const [shape] = await q<{ written: string | null; closed: string | null; deleted: string | null; judged: string | null; thread: string | null; bykey: string | null }>(`SELECT
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_written' AND tgrelid = 'thought_facets'::regclass) AS written,
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_closed' AND tgrelid = 'thought_facets'::regclass) AS closed,
@@ -17489,8 +17500,8 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   const payloadComment = (await one<{ c: string | null }>(`SELECT col_description('thought_facets'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_facets'::regclass AND attname = 'payload'`)).c ?? "";
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   assert(/113/.test(closeComment) && /since 120 a close re-links the subject''?s thread/.test(closeComment) && indexComments.every((r) => /120/.test(r.c ?? ""))
-         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120 /.test(tableComment),
-    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (${closeComment.slice(-200)})`);
+         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130 /.test(tableComment),
+    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130: [116]) (${closeComment.slice(-200)})`);
 
   // A thread kept by the triggers, through the door: written, a thought come between, one re-keyed away, one closed.
   const a = await thought("a", "2026-11-01T00:00:00Z"), b = await thought("b", "2026-11-02T00:00:00Z"), c = await thought("c", "2026-11-03T00:00:00Z"), d = await thought("d", "2026-11-04T00:00:00Z");
@@ -17703,6 +17714,8 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   const remade = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'thought_facets_relation_active_uniq'`)).d;
   assert(/NOT \(payload \? 'key'::text\)/.test(remade) && JSON.stringify(await census()) === JSON.stringify(before),
     `an index of 084's shape is made again with the judge's clause, the edges standing (${remade})`);
+  // 120 re-applied put its trigger function back: the shipped one is 130's, which the sections after read.
+  await restoreShipped("ob1_thread_relink_subject");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[108]%'`);
 }
@@ -18787,6 +18800,281 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
   // A re-apply is a no-op.
   await reapply(file.slice(0, 4));
   assert(await eff(ladderKeys) === under127 && Number((await db.query<{ s: string }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s) === 5.8, "a re-apply is a no-op: the same reads, the same span");
+}
+
+console.log("\n[116] Migration 130: a thought's own subjects are a set — one standing per thought and key (111's index on the thought alone dropped), at most three, one way and one pass; record_thought_subjects keeps a subject the set names found the same way by the same pass, closes the rest, writes each key it lacks with its lineage, closes all on an empty set, refuses as 113's door refuses (a text moved, a filed ticket disagreeing) and refuses a malformed set as a parameter error; no thread lock at the write, and at the commit the locks of every key it moved, a kept key's not, a raw replace's too; record_thought_subject and close_thought_subject sets of one, their answers 113's; close_thought_subjects closing only the set read; a thought standing in each key's thread; a re-apply a no-op (SMD-3306)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const file = files.find((f) => /^\d{3}_subject_sets\.sql$/.test(f)) ?? "no NNN_subject_sets.sql";  // by name: renumbered when main takes its number
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return { code: null as string | null, message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const SETS = "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)";
+  const CLOSES = "close_thought_subjects(uuid, uuid[], text)";
+  const LOCKS = "ob1_thread_lock_keys(text[])";
+  await restoreShipped("record_thought_subject", "close_thought_subject", "ob1_thread_relink_subject");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
+
+  // The shape: 130 the last definer of its six functions; one index per thought and key, 111's gone; statistics on a
+  // facet's key; the sentinels; SECURITY INVOKER throughout; the comments.
+  for (const fn of ["ob1_thread_lock_keys", "record_thought_subjects", "record_thought_subject", "close_thought_subjects", "close_thought_subject", "ob1_thread_relink_subject"]) {
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
+  }
+  const [idx] = await q<{ uniq: string | null; old: string | null }>(`SELECT
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_key_uniq') AS uniq,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_active_uniq') AS old`);
+  assert(/UNIQUE INDEX/.test(idx.uniq ?? "") && /\(thought_id, \(\(payload ->> 'key'::text\)\)\)/.test(idx.uniq ?? "") && /WHERE \(\(kind = 'subject'::text\) AND \(valid_until IS NULL\)\)$/.test(idx.uniq ?? "") && idx.old === null,
+    `one standing subject per thought and key, 111's index on the thought alone dropped (${idx.uniq}; ${idx.old ?? "no 111 index"})`);
+  // Statistics on a facet's key, so a thread's read is planned by its rows, not 0.5% of the table (review pass 3).
+  const stats = await q<{ d: string }>(`SELECT pg_get_statisticsobjdef(oid) AS d FROM pg_statistic_ext WHERE stxname = 'thought_facets_key_stats'`);
+  assert(stats.length === 1 && /ON \(payload ->> 'key'::text\) FROM (public\.)?thought_facets/.test(stats[0].d),
+    `statistics on a facet's key stand (${stats.map((r) => r.d).join() || "none"})`);
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  assert(/ob1:subject-set/.test(await src(SETS)) && /c_max\s+constant integer := 3/.test(await src(SETS)) && /ob1:subject-lineage-with-its-artifact/.test(await src(SETS)),
+    "the sentinels: a set of at most three, and 111's lineage with its artifact, in the set door");
+  const definers = await q<{ fn: string }>(`SELECT p.oid::regprocedure::text AS fn FROM pg_proc p WHERE p.prosecdef AND p.oid = ANY (ARRAY[$1::regprocedure, $2::regprocedure, $3::regprocedure, 'record_thought_subject(uuid, text, text, text, uuid, text, jsonb)'::regprocedure, 'close_thought_subject(uuid, uuid, text)'::regprocedure, 'ob1_thread_relink_subject()'::regprocedure])`, [SETS, CLOSES, LOCKS]);
+  assert(definers.length === 0, `SECURITY INVOKER throughout (${definers.map((d) => d.fn).join() || "none a definer"})`);
+  for (const sig of [SETS, CLOSES, LOCKS, "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)", "close_thought_subject(uuid, uuid, text)", "ob1_thread_relink_subject()"]) {
+    const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+    assert(/130/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 130 and the ticket`);
+  }
+  const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
+  assert(/since 130 a set: one standing per thought and key \(the index's rule\), at most three and one rule's \(record_thought_subjects's\)/.test(tableComment) && /four kinds registered/.test(tableComment),
+    "thought_facets' comment says a thought's subjects are a set since 130");
+
+  // Thoughts at known times, so each thread's order is the test's.
+  let n = 0;
+  const thought = async (text: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, created_at) VALUES ($1, '{}', '2027-05-01T00:00:00Z'::timestamptz + make_interval(mins => $2::int)) RETURNING id::text`, [`[116] ${text}`, ++n])).id;
+  const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
+  type SetAnswer = { ok: boolean; action: string; ids?: string[]; kept?: number; added?: number; closed?: number; closedIds?: string[]; stale?: boolean; gone?: boolean };
+  const MODEL = "subject:qwen3.8:27b@p3r";
+  const sets = async (id: string, keys: string[] | null, by: string | null = "model", judge = MODEL, f?: string | null, recipe: unknown = null) =>
+    (await one<{ r: SetAnswer }>(`SELECT record_thought_subjects($1::uuid, $2::text[], $3::text, $4::text, NULL::uuid, $5::text, $6::jsonb) AS r`,
+      [id, keys, by, judge, f === undefined ? await fp(id) : f, recipe === null ? null : JSON.stringify(recipe)])).r;
+  const standing = async (id: string) => q<{ id: string; key: string; by: string; judge: string }>(
+    `SELECT id::text, payload->>'key' AS key, payload->>'by' AS by, payload->>'judge_key' AS judge FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL ORDER BY payload->>'key'`, [id]);
+  const keysOf = async (id: string) => (await standing(id)).map((s) => s.key).join(",");
+  const lineage = async (facet: string) => q<{ inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown> }>(
+    `SELECT input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = $1::uuid`, [facet]);
+  // A thread's edges, as newer→older by the test's names.
+  const names = new Map<string, string>();
+  const edges = async (key: string) => (await q<{ newer: string; older: string }>(
+    `SELECT thought_id::text AS newer, payload->>'target' AS older FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = $1 ORDER BY 1, 2`, [key]))
+    .map((e) => `${names.get(e.newer) ?? "?"}→${names.get(e.older) ?? "?"}`).sort().join(" ");
+  // Keys as the reads order them (key order: each test key starts with a letter that sorts it the same in any collation).
+  const ks = (...keys: string[]) => [...keys].sort().join(",");
+  const A = "ticket:SMD-91201", B = "ticket:SMD-91202", C = "pr:91203", D = "phrase:a release cut";
+
+  // Added: a set of two, each with its lineage; the thought stands in both threads.
+  const t1 = await thought("a session on two tickets"); names.set(t1, "t1");
+  const t2 = await thought("the first ticket again"); names.set(t2, "t2");
+  const t3 = await thought("the second ticket again"); names.set(t3, "t3");
+  const added = await sets(t1, [B, A, B], "model", MODEL, undefined, { deterministic: false, model: "qwen3.8:27b", prompt_hash: "sha256:x" });
+  const s1 = await standing(t1);
+  const l1 = await Promise.all(s1.map((s) => lineage(s.id)));
+  assert(added.ok && added.action === "added" && added.added === 2 && added.kept === 0 && added.closed === 0 && JSON.stringify(added.ids) === JSON.stringify(s1.map((s) => s.id))
+         && (await keysOf(t1)) === ks(A, B) && s1.every((s) => s.by === "model" && s.judge === MODEL)
+         && l1.every((l) => l.length === 1 && l[0].inputs.join() === t1 && l[0].by === MODEL && l[0].recipe.prompt_hash === "sha256:x"),
+    `added: a key repeated counts once, each key a standing subject with its lineage row, ids by key (${JSON.stringify(added)})`);
+  await sets(t2, [A]); await sets(t3, [B]);
+  assert((await edges(A)) === "t2→t1" && (await edges(B)) === "t3→t1", `a thought with a set stands in each key's thread (${await edges(A)} | ${await edges(B)})`);
+
+  // Kept: the same set in another order, the lineage moved to the recipe sent now; nothing closes, no edge moves.
+  const edgesBefore = `${await edges(A)}|${await edges(B)}`;
+  const kept = await sets(t1, [A, B], "model", MODEL, undefined, { deterministic: false, model: "qwen3.8:27b", prompt_hash: "sha256:y" });
+  assert(kept.action === "kept" && kept.kept === 2 && kept.added === 0 && kept.closed === 0 && JSON.stringify(kept.ids) === JSON.stringify(s1.map((s) => s.id))
+         && (await Promise.all(s1.map((s) => lineage(s.id)))).every((l) => l[0]?.recipe.prompt_hash === "sha256:y") && `${await edges(A)}|${await edges(B)}` === edgesBefore,
+    `kept: the same keys, way and pass leave both facets standing, each lineage row moved (${JSON.stringify(kept)})`);
+  const keptBare = await sets(t1, [A, B]);
+  const bareLineage = await Promise.all(s1.map((s) => lineage(s.id)));
+  assert(keptBare.action === "kept" && bareLineage.every((l) => l.length === 1 && l[0].recipe.deterministic === false && l[0].recipe.declared === false && l[0].recipe.prompt_hash === undefined),
+    `kept without a recipe: each lineage row moved to the default's, the model's not deterministic (${JSON.stringify(bareLineage.map((l) => l[0]?.recipe))})`);
+
+  // Replaced: one key kept, one closed, one written; the closed key's thread loses the thought, the new one gains it.
+  const t4 = await thought("a later pr"); names.set(t4, "t4");
+  await sets(t4, [C]);
+  const replaced = await sets(t1, [C, B]);
+  const s1b = await standing(t1);
+  const keptB = s1.find((s) => s.key === B)!.id, closedA = s1.find((s) => s.key === A)!.id;
+  const aClosed = await one<{ v: string | null }>(`SELECT valid_until::text AS v FROM thought_facets WHERE id = $1::uuid`, [closedA]);
+  assert(replaced.action === "replaced" && replaced.kept === 1 && replaced.added === 1 && replaced.closed === 1 && JSON.stringify(replaced.closedIds) === JSON.stringify([closedA])
+         && (await keysOf(t1)) === ks(B, C) && s1b.find((s) => s.key === B)?.id === keptB && aClosed.v !== null && (await lineage(closedA)).length === 1,
+    `replaced: the key the set keeps stands as it was, the one it drops closed (history, its lineage with it), the one it adds written (${JSON.stringify(replaced)})`);
+  assert((await edges(A)) === "" && (await edges(B)) === "t3→t1" && (await edges(C)) === "t4→t1",
+    `the thread of the key dropped loses the thought, the new key's gains it, the kept key's stands (${await edges(A)} | ${await edges(B)} | ${await edges(C)})`);
+
+  // Another way or another pass is another subject: every facet closed and written again.
+  const otherWay = await sets(t1, [B, C], "first_line", "subject:first_line@r3");
+  assert(otherWay.action === "replaced" && otherWay.kept === 0 && otherWay.added === 2 && otherWay.closed === 2 && (await standing(t1)).every((s) => s.by === "first_line"),
+    `the same keys found another way, by another pass: both closed and written again (${JSON.stringify(otherWay)})`);
+  // Grown and narrowed: a key added beside the standing ones is added alone; one dropped, closed alone.
+  const grown = await sets(t1, [B, C, D], "first_line", "subject:first_line@r3");
+  const narrowedSet = await sets(t1, [C, B], "first_line", "subject:first_line@r3");
+  assert(grown.action === "added" && grown.kept === 2 && grown.added === 1 && grown.closed === 0
+         && narrowedSet.action === "closed" && narrowedSet.kept === 2 && narrowedSet.added === 0 && narrowedSet.closed === 1 && (await keysOf(t1)) === ks(B, C),
+    `a key added beside the standing set: added, the rest kept; one dropped: closed, the rest kept (${grown.action}, ${narrowedSet.action})`);
+
+  // An empty set, or NULL, closes every standing subject; again, none.
+  const t5 = await thought("three subjects"); names.set(t5, "t5");
+  const three = await sets(t5, [A, B, D]);
+  const emptied = await sets(t5, [], null, MODEL, null);
+  const again = await sets(t5, null, null, MODEL, null);
+  assert(three.added === 3 && emptied.action === "closed" && emptied.closed === 3 && (await standing(t5)).length === 0 && again.action === "none" && again.closed === 0,
+    `three keys stand; an empty set closes them all, NULL again answers none (${emptied.action}/${emptied.closed}; ${again.action})`);
+
+  // The refusals: parameter errors, before any lock or write.
+  const door = (args: unknown[]) => failure(`SELECT record_thought_subjects($1::uuid, $2::text[], $3::text, $4::text, NULL::uuid, $5::text, NULL::jsonb)`, args);
+  const f5 = await fp(t5);
+  const refusals = [
+    await door([null, [A], "model", MODEL, f5]), await door([t5, [A], "model", "", f5]), await door([t5, [A, null], "model", MODEL, f5]),
+    await door([t5, [A, "SMD-1"], "model", MODEL, f5]), await door([t5, [A, B, C, D], "model", MODEL, f5]), await door([t5, [A], "guess", MODEL, f5]),
+    await door([t5, [A], null, MODEL, f5]), await door([t5, [A, B], "metadata", MODEL, f5]), await door([t5, [A], "model", MODEL, " "]),
+    await door([t5, [A], "model", "k".repeat(201), f5]),
+  ];
+  assert(refusals.every((r) => r.code === "22023") && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
+         && /a key in the set is NULL/.test(refusals[2].message) && /each key is ticket:<ID>.*got 'SMD-1'/.test(refusals[3].message)
+         && /at most 3 subjects, got 4 keys/.test(refusals[4].message) && /by is metadata, first_line or model, got 'guess'/.test(refusals[5].message)
+         && /by metadata is one key/.test(refusals[7].message) && /fingerprint of the text/.test(refusals[8].message) && /judge_key must name the pass/.test(refusals[9].message)
+         && (await standing(t5)).length === 0,
+    `the set door refuses a missing thought, an empty or overlong judge key, a NULL or malformed key, four keys, a way outside the three or none, metadata with two keys, a missing fingerprint — each invalid_parameter_value, nothing written (${refusals.map((r) => r.code).join()})`);
+  const twoDims = [await failure(`SELECT record_thought_subjects($1::uuid, '{{ticket:SMD-1},{ticket:SMD-2}}'::text[], 'model', $2, NULL, $3, NULL)`, [t5, MODEL, f5]),
+    await failure(`SELECT close_thought_subjects($1::uuid, ARRAY[ARRAY[$2::uuid], ARRAY[$2::uuid]], $3)`, [t5, t5, f5])];
+  assert(twoDims.every((r) => r.code === "22023") && /one-dimensional array of keys/.test(twoDims[0].message),
+    `a two-dimensional set is refused as a parameter error, by either door (${twoDims.map((r) => `${r.code}: ${r.message.slice(0, 50)}`).join(" | ")})`);
+  const threeTwice = await sets(t5, [A, A, B, B, C, C]).catch((e: Error) => ({ refused: e.message.split("\n")[0] }));
+  assert("added" in threeTwice && threeTwice.added === 3, `a set of three keys each named twice is three keys, not six (${JSON.stringify(threeTwice)})`);
+
+  // Stale, as 113's door: a text moved since the read; a filed ticket disagreeing.
+  const staleText = await sets(t5, [D], "model", MODEL, "0".repeat(64));
+  const filed = (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[116] filed', $1::jsonb) RETURNING id::text`, [JSON.stringify({ ticket: "SMD-91209" })])).id;
+  const onFiled = [await sets(filed, [A, B]), await sets(filed, [A], "first_line", "subject:first_line@r3"), await sets(filed, ["ticket:SMD-91208"], "metadata", "subject:metadata@r1"), await sets(filed, ["ticket:SMD-91209"], "metadata", "subject:metadata@r1")];
+  assert(staleText.action === "none" && staleText.stale === true && (await keysOf(t5)) === ks(A, B, C)
+         && onFiled.slice(0, 3).every((r) => r.action === "none" && r.stale === true) && onFiled[3].action === "added" && (await keysOf(filed)) === "ticket:SMD-91209",
+    `stale, nothing written: a text that moved; on a thought filed under SMD-91209, a model's set, a session header's, a rule's under another ticket — the rule's at its ticket added (${[staleText, ...onFiled].map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  const gone = await sets("00000000-0000-4000-8000-000000000112", [A], "model", MODEL, "f");
+  assert(gone.ok && gone.action === "none" && gone.gone === true, "a thought that does not exist answers none, gone");
+
+  // 113's door is a set of one, its answer 113's: on a thought standing in two subjects, the one key keeps its facet and
+  // the other closes (replaced, the id the one kept); NULL closes both, the id the first closed by key.
+  const t6 = await thought("the wrapper's"); names.set(t6, "t6");
+  await sets(t6, [A, B]);
+  const s6 = await standing(t6);
+  type OneAnswer = { ok: boolean; action: string; id?: string; stale?: boolean; gone?: boolean; ids?: unknown };
+  const single = async (id: string, key: string | null, f?: string | null) =>
+    (await one<{ r: OneAnswer }>(`SELECT record_thought_subject($1::uuid, $2::text, $3::text, $4::text, NULL::uuid, $5::text, NULL::jsonb) AS r`, [id, key, key === null ? null : "model", MODEL, f === undefined ? await fp(id) : f])).r;
+  const narrowed = await single(t6, A);
+  assert(narrowed.action === "replaced" && narrowed.id === s6[0].id && narrowed.ids === undefined && (await keysOf(t6)) === A && Object.keys(narrowed).sort().join() === "action,id,ok",
+    `record_thought_subject on a set: the key named kept, the other closed, 113's answer shape (${JSON.stringify(narrowed)})`);
+  await sets(t6, [A, B]);
+  const s6b = await standing(t6);
+  const nulled = await single(t6, null, null);
+  const staleOne = await single(t6, A, "0".repeat(64));
+  assert(nulled.action === "closed" && nulled.id === s6b[0].id && (await standing(t6)).length === 0 && staleOne.action === "none" && staleOne.stale === true && staleOne.id === undefined,
+    `a NULL key closes every standing subject, the id the first by key; a stale one answers none, stale, no id (${JSON.stringify(nulled)}; ${JSON.stringify(staleOne)})`);
+
+  // close_thought_subjects: the set read, and no other.
+  const t7 = await thought("the close's"); names.set(t7, "t7");
+  await sets(t7, [A, B]);
+  const s7 = (await standing(t7)).map((s) => s.id);
+  type CloseAnswer = { ok: boolean; action: string; ids?: string[]; id?: string; moved?: boolean; stale?: boolean; gone?: boolean };
+  const closes = async (id: string, facets: string[], f?: string) => (await one<{ c: CloseAnswer }>(`SELECT close_thought_subjects($1::uuid, $2::uuid[], $3) AS c`, [id, facets, f ?? await fp(id)])).c;
+  const closeOne = async (id: string, facet: string, f?: string) => (await one<{ c: CloseAnswer }>(`SELECT close_thought_subject($1::uuid, $2::uuid, $3) AS c`, [id, facet, f ?? await fp(id)])).c;
+  const part = await closes(t7, [s7[0]]), wider = await closes(t7, [...s7, closedA]), wrapPart = await closeOne(t7, s7[1]), staleClose = await closes(t7, s7, "0".repeat(64));
+  const wrapFirst = await closeOne(t7, s7[0]);
+  assert(part.action === "none" && part.moved === true && JSON.stringify(part.ids) === JSON.stringify(s7) && wider.action === "none" && wider.moved === true
+         && wrapPart.action === "none" && wrapPart.moved === true && wrapPart.id === s7[0] && wrapFirst.moved === true && wrapFirst.id === s7[1] && staleClose.stale === true && (await standing(t7)).length === 2,
+    `not closed: one facet of the two read, a facet beside them that no longer stands, close_thought_subject's one facet (moved, naming a facet standing beside it, never the one passed), a text moved (${[part, wider, wrapPart, staleClose].map((c) => c.action + (c.moved ? "/moved" : c.stale ? "/stale" : "")).join(", ")})`);
+  // Of three standing, the one named is the first by key other than the facet passed, not the last (review pass 2).
+  const t11 = await thought("three standing, one closed"); names.set(t11, "t11");
+  await sets(t11, [A, B, C]);
+  const s11 = (await standing(t11)).map((s) => s.id);
+  const midOne = await closeOne(t11, s11[1]);
+  assert(s11.length === 3 && midOne.moved === true && midOne.id === s11[0] && (await standing(t11)).length === 3,
+    `close_thought_subject's moved id on a set of three is the first by key other than the facet passed (${JSON.stringify(midOne)})`);
+  const closedSet = await closes(t7, [s7[1], s7[0], s7[1]]);
+  const noneLeft = await closes(t7, s7);
+  assert(closedSet.action === "closed" && JSON.stringify(closedSet.ids) === JSON.stringify(s7) && (await standing(t7)).length === 0 && noneLeft.action === "none" && noneLeft.moved === undefined,
+    `the set read, in any order, a facet repeated: closed; none standing: none (${JSON.stringify(closedSet)})`);
+  const closeRefusals: string[] = [];
+  for (const args of [[null, s7, "x"], [t7, null, "x"], [t7, [], "x"], [t7, [s7[0], null], "x"], [t7, s7, " "]]) {
+    const r = await failure(`SELECT close_thought_subjects($1::uuid, $2::uuid[], $3)`, args);
+    closeRefusals.push(r.code ?? "accepted");
+  }
+  assert(closeRefusals.every((c) => c === "22023"), `a missing thought, an empty or NULL-holding set, a missing fingerprint: parameter errors (${closeRefusals.join()})`);
+  // A set whose facet ids sort against its keys is still the set read (review pass 1: random ids held it half the time).
+  const t10 = await thought("ids against key order"); names.set(t10, "t10");
+  const hiA = "ffffffff-ffff-4fff-bfff-ffffffff1120", loB = "00000000-0000-4000-8000-000000001120";
+  for (const [fid, key] of [[hiA, A], [loB, B]]) {
+    await db.query(`INSERT INTO thought_facets (id, thought_id, kind, payload) VALUES ($1::uuid, $2::uuid, 'subject', $3::jsonb)`, [fid, t10, JSON.stringify({ key, by: "model", judge_key: MODEL })]);
+  }
+  const reversed = await closes(t10, [hiA, loB]);
+  assert(reversed.action === "closed" && JSON.stringify(reversed.ids) === JSON.stringify([hiA, loB]) && (await standing(t10)).length === 0,
+    `a set whose ids sort against its keys is still the set read: closed, its ids by key (${JSON.stringify(reversed)})`);
+  // Answers by key whatever the plan: the index on (thought, key) returns rows in key order, so a sequential scan is
+  // forced here, the order the ORDER BYs keep (review pass 1).
+  const t9 = await thought("written out of key order"); names.set(t9, "t9");
+  await sets(t9, [B]);
+  await db.exec(`SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off; DISCARD PLANS`);
+  let grownOut: SetAnswer, movedOut: CloseAnswer, nulledOut: OneAnswer, s9: string[];
+  try {
+    grownOut = await sets(t9, [A, B]);
+    s9 = (await standing(t9)).map((s) => s.id);
+    movedOut = await closes(t9, [s9[1]]);
+    nulledOut = await single(t9, null, null);
+  } finally {
+    await db.exec(`RESET enable_indexscan; RESET enable_bitmapscan; RESET enable_indexonlyscan; DISCARD PLANS`);
+  }
+  assert(JSON.stringify(grownOut.ids) === JSON.stringify(s9) && JSON.stringify(movedOut.ids) === JSON.stringify(s9) && nulledOut.id === s9[0],
+    `by key whatever the write order and the plan: the set door's ids, the close's, the wrapper's closed id (${JSON.stringify([grownOut.ids, movedOut.ids, nulledOut.id, s9])})`);
+
+  // The locks. A door takes no thread lock as it writes; at its commit the first re-link takes the lock of every key the
+  // transaction moved on the thought, closed or written, a kept key's not — a raw replace's too. Fired early (SET
+  // CONSTRAINTS ALL IMMEDIATE) and read from pg_locks in the writer's own transaction (PGlite names no pid: its one
+  // session holds every lock). Each re-link takes its own key's lock too, so this read tells which keys were re-linked,
+  // not what the trigger's helper took or in what order: test-live [48] holds those.
+  type Tx = { query: <T>(s: string, p?: unknown[]) => Promise<{ rows: T[] }> };
+  const held = async (tx: Tx, keys: string[]) => (await tx.query<{ k: string }>(
+    `SELECT k FROM unnest($1::text[]) AS k WHERE EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND COALESCE(l.pid, pg_backend_pid()) = pg_backend_pid() AND l.objsubid = 1
+       AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('ob1:thread:' || k, 0)) ORDER BY k`, [keys])).rows.map((r) => r.k).join(",");
+  const t8 = await thought("the locks'"); names.set(t8, "t8");
+  await sets(t8, [A, B]);
+  const f8 = await fp(t8);
+  const fired = async (write: (tx: Tx) => Promise<unknown>) => {
+    let atWrite = "", atCommit = "";
+    await db.transaction(async (tx) => {
+      await write(tx);
+      atWrite = await held(tx, [A, B, C, D]);
+      await tx.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      atCommit = await held(tx, [A, B, C, D]);
+    });
+    return `${atWrite || "none"} / ${atCommit || "none"}`;
+  };
+  const doorTx = (keys: string[]) => (tx: Tx) =>
+    tx.query(`SELECT record_thought_subjects($1::uuid, $2::text[], 'model', $3, NULL, $4, NULL)`, [t8, keys, MODEL, f8]);
+  const doorLocks = await fired(doorTx([B, C]));
+  const keptLocks = await fired(doorTx([C, B]));
+  const twoLocks = await fired(doorTx([A, D]));
+  const rawLocks = await fired(async (tx) => {
+    const a8 = (await tx.query<{ id: string }>(`SELECT id::text FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL AND payload->>'key' = $2`, [t8, A])).rows[0].id;
+    await tx.query(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [a8]);
+    await tx.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'subject', $2::jsonb)`, [t8, JSON.stringify({ key: B, by: "model", judge_key: MODEL })]);
+  });
+  assert(doorLocks === `none / ${ks(A, C)}` && keptLocks === "none / none" && twoLocks === `none / ${ks(A, B, C, D)}` && rawLocks === `none / ${ks(A, B)}` && (await keysOf(t8)) === ks(B, D),
+    `no thread lock at the write; at the commit every key moved, a kept one not: the door's {A,B}→{B,C} (${doorLocks}), the set kept whole (${keptLocks}), two closed and two written (${twoLocks}), a raw replace of A by B beside a kept D (${rawLocks})`);
+
+  // Re-applied, 130 changes nothing: the subjects and edges stand, one of each function, 111's index still gone.
+  const census = async () => one<{ subjects: number; edges: number; fns: number; old: number }>(`SELECT
+      (SELECT count(*)::int FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL) AS subjects,
+      (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload ? 'key') AS edges,
+      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('record_thought_subjects', 'close_thought_subjects', 'ob1_thread_lock_keys', 'record_thought_subject', 'close_thought_subject', 'ob1_thread_relink_subject')) AS fns,
+      (SELECT count(*)::int FROM pg_indexes WHERE indexname = 'thought_facets_subject_active_uniq') AS old`);
+  const before = await census();
+  await reapply(file.slice(0, 4));
+  const after = await census();
+  assert(JSON.stringify(after) === JSON.stringify(before) && after.fns === 6 && after.old === 0, `130 applied again moves nothing: ${JSON.stringify(after)}`);
+
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
