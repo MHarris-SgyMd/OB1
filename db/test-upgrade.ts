@@ -5830,7 +5830,7 @@ console.log("\n[20bs] Migration 128: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20bt] Migration 129: onto a populated brain at the file before it — refused by name without 123's ob1_item_blockers, nothing replaced; then applied: one agenda, of ten arguments; a nine-argument call, as a server before 129 makes, reads as before, in the priority order; the due order lists the overdue ticket first; a re-apply a no-op (SMD-4192)");
+console.log("\n[20bt] Migration 129: onto a populated brain at the file before it — refused by name without 123's ob1_item_blockers, nothing replaced; then applied: the ten-argument agenda and the nine-argument wrapper; a nine-argument call, as a server before 129 makes, reads as before, in the priority order; the due order lists the overdue ticket first; a re-apply a no-op (SMD-4192)");
 {
   const the129 = MIGRATIONS.find((f) => /^\d{3}_agenda_order\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -5863,11 +5863,11 @@ console.log("\n[20bt] Migration 129: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the129 });
   const after = await nine();
   const due = ((await sql`SELECT agenda('{"project": "Upgrade 129"}'::jsonb, NULL, 100, false, false, false, NULL, '2027-03-10T15:00:00Z', false, 'due') AS a`)[0] as { a: A }).a;
-  assert(await agendas() === "10" && keys(before) === "SMD-9731 SMD-9732" && keys(after) === keys(before) && after.order === "priority" && before.order === undefined
+  assert(await agendas() === "9,10" && keys(before) === "SMD-9731 SMD-9732" && keys(after) === keys(before) && after.order === "priority" && before.order === undefined
       && keys(due) === "SMD-9732 SMD-9731" && due.order === "due",
-    `applied: one agenda, of ten arguments; a nine-argument call reads as before, in the priority order; due lists the overdue Low first (${await agendas()} | ${keys(before)} → ${keys(after)} | ${keys(due)})`);
+    `applied: two agendas, the nine-argument wrapper and the ten-argument one; a nine-argument call reads as before, in the priority order; due lists the overdue Low first (${await agendas()} | ${keys(before)} → ${keys(after)} | ${keys(due)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the129 });
-  assert(JSON.stringify(await nine()) === JSON.stringify(after) && await agendas() === "10", "a re-apply is a no-op: the same read, the one function");
+  assert(JSON.stringify(await nine()) === JSON.stringify(after) && await agendas() === "9,10", "a re-apply is a no-op: the same read, the same two functions");
   await sql.close();
 }
 

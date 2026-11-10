@@ -449,6 +449,7 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   const results = new Map<string, { hits: string[][]; scores: PromptScore[] }>();
   const errors: string[] = [];
   const answerReaders: string[] = [];
+  const unchecked: string[] = [];
   const deeper: string[] = [];
   try {
     for (const r of READS) {
@@ -477,7 +478,8 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
     // A pass that errors is reported as an error, not compared: an error is not a sign of reading the answer.
     for (const r of [...measured, CEILING]) {
       const again = await withAnswerMoved(() => runMeasured(r, " (answer moved)"));
-      if (again.errors.length) { errors.push(...again.errors); continue; }
+      // An error skips the read's comparison, so the check never ran for it: named, and failed below (review pass 2).
+      if (again.errors.length) { errors.push(...again.errors); unchecked.push(r.name); continue; }
       if (JSON.stringify(again.hits) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
     }
   } finally {
@@ -538,6 +540,8 @@ async function seeded(explore: readonly number[] = []): Promise<void> {
   // A measured read that errored on every prompt was never measured (SMD-4192's first run: a closed client): its
   // verdict is the harness's fault, not the read's, so the run fails rather than record it.
   const unmeasured = measured.filter((r) => PROMPTS.every((p) => errors.some((e) => e.startsWith(`measured read ${r.name} on ${p.key}: `))));
+  const uncheckedReads = unchecked.filter((n) => n !== CEILING.name);
+  if (uncheckedReads.length) failures.push(`measured read(s) ${uncheckedReads.join(", ")} errored with the answer moved, so the answer-moved check never ran for them`);
   if (unmeasured.length) failures.push(`measured read(s) ${unmeasured.map((r) => r.name).join(", ")} errored on every prompt, so nothing was measured: mend the harness, and say so beside the verdict`);
   const cheats = answerReaders.filter((n) => n !== CEILING.name);
   if (cheats.length) failures.push(`measured read(s) ${cheats.join(", ")} answer differently when the gold and facts move: a read must read the database, not the answer`);

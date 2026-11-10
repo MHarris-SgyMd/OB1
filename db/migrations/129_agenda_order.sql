@@ -13,9 +13,10 @@
 --   question: the client chooses the order.
 --
 -- WHAT
---   * agenda gains a tenth argument, p_order text DEFAULT 'priority':
---     - priority, the default: 126's order, unchanged — effective priority,
---       then the sooner due time, then kind and key;
+--   * agenda gains a ten-argument form, its tenth p_order (no argument of
+--     it has a default):
+--     - priority: 126's order, unchanged — effective priority, then the
+--       sooner due time, then kind and key;
 --     - due: the items with a due time first, soonest first, so the longest
 --       overdue leads; then the items with none, by effective priority. A tie
 --       on the due time goes to the higher effective priority, then kind and
@@ -23,6 +24,13 @@
 --     The order is applied before p_limit, so due lists the soonest items,
 --     not the top items re-sorted. Anything else, NULL included, is refused
 --     22023.
+--   * The nine-argument agenda, 126's signature and defaults, becomes a
+--     wrapper calling the ten-argument one with priority. So a nine-argument
+--     call names one function whatever runs after: 124 or 126 re-applied
+--     alone replaces the wrapper with its own body, which answers in the
+--     priority order as before, and leaves the ten-argument one standing
+--     (review pass 2: a defaulted tenth argument made a nine-argument call
+--     name two functions once either was re-applied).
 --   * The answer gains `order`, the one applied.
 --   * query_log.filter's comment names the agenda row's order.
 --   Every filter, term and number is 126's: the candidates, the include
@@ -33,12 +41,11 @@
 --   plan_context's board section, which keeps the priority order.
 --
 -- SAFETY
---   One function replaced, STABLE. 126's nine-argument agenda is dropped
---   first, and 123's eight-argument one, as 124 and 126 drop it, so a call of
---   up to ten arguments names one function (124 or 126 re-applied alone after
---   this file puts a second back: re-apply every migration). A server before this one calls
---   with nine and gets the priority order, the default. No ACL is carried, as
---   124 and 126 carried none. The comment is re-issued only when it differs,
+--   Two functions, both STABLE. 126's nine-argument agenda is dropped first
+--   and made again as the wrapper, and 123's eight-argument one dropped, as
+--   124 and 126 drop it, so every call names one function. A server before
+--   this one calls with nine and gets the priority order. No ACL is carried,
+--   as 124 and 126 carried none. The comment is re-issued only when it differs,
 --   so a re-apply writes nothing. No row is touched. MINOR under the version
 --   rules. test-schema [116], test-upgrade [20bt].
 --
@@ -65,11 +72,8 @@ BEGIN
 END
 $qc$;
 
--- 126's nine-argument agenda and 123's eight-argument one, dropped, so a call
--- of up to ten arguments names one function. Only while this file ran last of
--- the agenda's: 124 or 126 re-applied alone after it puts a nine-argument one
--- back beside it, and a nine-argument call then names two (42725); the server
--- says to re-apply every migration (review pass 1).
+-- 126's nine-argument agenda, made again below as the wrapper (its body and
+-- language change), and 123's eight-argument one, dropped.
 DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean);
 DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz);
 
@@ -77,16 +81,16 @@ DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jso
 -- agenda — 126's, with p_order
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION agenda(
-  p_scope            jsonb       DEFAULT NULL,
-  p_holder           jsonb       DEFAULT NULL,
-  p_limit            int         DEFAULT 20,
-  p_include_blocked  boolean     DEFAULT false,
-  p_include_claimed  boolean     DEFAULT false,
-  p_include_proposed boolean     DEFAULT false,
-  p_weights          jsonb       DEFAULT NULL,
-  p_now              timestamptz DEFAULT now(),
-  p_include_started  boolean     DEFAULT false,
-  p_order            text        DEFAULT 'priority'
+  p_scope            jsonb,
+  p_holder           jsonb,
+  p_limit            int,
+  p_include_blocked  boolean,
+  p_include_claimed  boolean,
+  p_include_proposed boolean,
+  p_weights          jsonb,
+  p_now              timestamptz,
+  p_include_started  boolean,
+  p_order            text
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -342,7 +346,28 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text) IS
-  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket; keys, 1 to 500 ticket keys: those tickets alone, no open item, refused beside any other scope or a holder), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by p_order: priority (the default) by effective, then the sooner due time, then kind and key; due by the due time, the dated items first, soonest first (so the longest overdue leads), the undated after, each tie by effective, then kind and key. The order is applied before p_limit. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing, and a listed row names it. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), keyed (null without keys; else {others: each named ticket that is no candidate, its head settled or its status type unknown, with key, title, status, status_type and settled; waiting: each named ticket a not_before ahead keeps out, with key, title, status, status_type and not_before; missing: each named key no thought records whose prefix some ticket carries}), order, now}. Raises 22023 on a bad limit, scope, holder, clock, weight or order, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. Migrations 123 (SMD-3669), 124 (SMD-4162), 126 (SMD-2684) and 129 (SMD-4192).';
+  'What matters now: every ticket whose head has a known, unsettled status type (its status and status_type on its row) and every open item with status open (proposed too with p_include_proposed), in p_scope (source: linear, items or a plugin''s name; project and label, Linear''s on a ticket; keys, 1 to 500 ticket keys: those tickets alone, no open item, refused beside any other scope or a holder), and with p_holder (a key''s {name, agent_id}) only the tickets it holds a live claim on; scored by effective_priority (122) and sorted by p_order: priority by effective, then the sooner due time, then kind and key; due by the due time, the dated items first, soonest first (so the longest overdue leads), the undated after, each tie by effective, then kind and key. The order is applied before p_limit. Left out unless asked, and counted: a ticket blocked by an open item (p_include_blocked lists its blockers), a ticket under a live claim (p_include_claimed names the holder), a started ticket no live claim covers (p_include_started lists it; a started ticket under a live claim is a claimed one, listed by p_include_claimed or p_holder), and always an item whose not_before is ahead. A lapsed claim hides nothing, and a listed row names it. Returns {items (the first p_limit, 1 to 100), total, unknown (of total, no counted or inherited level), left_out {blocked, claimed, started, waiting}, board_sync {at, outcome} or null, claims_read (false when this role may not read work_claims: no claim filtered or named, and holder mine refused), claims_live (the live claims this brain records on any ticket, null when claims_read is false: 0 means nothing could be left out for a claim, as on a brain whose board is claimed through another), keyed (null without keys; else {others: each named ticket that is no candidate, its head settled or its status type unknown, with key, title, status, status_type and settled; waiting: each named ticket a not_before ahead keeps out, with key, title, status, status_type and not_before; missing: each named key no thought records whose prefix some ticket carries}), order, now}. Raises 22023 on a bad limit, scope, holder, clock, weight or order, or a NULL include flag; 42501 for holder mine on a role that may not read work_claims. The nine-argument agenda calls this with priority; this one takes no defaults. Migrations 123 (SMD-3669), 124 (SMD-4162), 126 (SMD-2684) and 129 (SMD-4192).';
+
+-- The nine-argument agenda: 126's signature and defaults, the priority order.
+CREATE OR REPLACE FUNCTION agenda(
+  p_scope            jsonb       DEFAULT NULL,
+  p_holder           jsonb       DEFAULT NULL,
+  p_limit            int         DEFAULT 20,
+  p_include_blocked  boolean     DEFAULT false,
+  p_include_claimed  boolean     DEFAULT false,
+  p_include_proposed boolean     DEFAULT false,
+  p_weights          jsonb       DEFAULT NULL,
+  p_now              timestamptz DEFAULT now(),
+  p_include_started  boolean     DEFAULT false
+)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT agenda(p_scope, p_holder, p_limit, p_include_blocked, p_include_claimed, p_include_proposed, p_weights, p_now, p_include_started, 'priority')
+$$;
+COMMENT ON FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean) IS
+  'The agenda in the priority order: the ten-argument agenda with p_order priority, under 126''s nine arguments and their defaults, so a call of up to nine arguments names this function alone. A re-apply of 124 or 126 replaces it with that file''s own body, which answers in the same order. Migration 129 (SMD-4192).';
 
 -- ---------------------------------------------------------------------------
 -- query_log.filter: the agenda row's order

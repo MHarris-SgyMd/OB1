@@ -1203,18 +1203,19 @@ export class SqlStore implements ThoughtStore {
   }): Promise<AgendaResult> {
     const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
     const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
-    // The priority order is the nine-argument call, so it reads a brain before 129 as before (SMD-4192); due names
-    // the tenth argument, which only 129's agenda takes.
-    const call = (q: typeof this.sql) => (opts.order === "due"
-      ? q`
+    // The priority order is the nine-argument call, so it reads a brain before 129 as before (SMD-4192); due adds
+    // the tenth argument, which only 129's agenda takes. One template, the tail a fragment (review pass 2).
+    const call = (q: typeof this.sql) => q`
       SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
                     ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
-                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean, 'due'::text) AS a`
-      : q`
-      SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
-                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
-                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a`) as Promise<{ a: unknown }[]>;
-    if (opts.timeoutMs === undefined) return normaliseAgenda((await call(this.sql))[0]?.a, "agenda");
+                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean${opts.order === "due" ? q`, 'due'::text` : q``}) AS a` as Promise<{ a: unknown }[]>;
+    // The order answered is the one asked (review pass 2): a brain answering another would be labelled with it unseen.
+    const asked = opts.order ?? "priority";
+    const checked = (r: AgendaResult): AgendaResult => {
+      if (r.order !== asked) throw new Error(`agenda answered the ${r.order} order where ${asked} was asked`);
+      return r;
+    };
+    if (opts.timeoutMs === undefined) return checked(normaliseAgenda((await call(this.sql))[0]?.a, "agenda"));
     // A deadline (plan_context, SMD-2684): a ceiling, as readDatabaseFacts sets one — 0 (none) or a looser setting is
     // lowered to it, a stricter one kept — local to the call's own transaction.
     const ms = Math.max(1, Math.floor(opts.timeoutMs));
@@ -1223,7 +1224,7 @@ export class SqlStore implements ThoughtStore {
                  FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
       return call(tx as unknown as typeof this.sql);
     });
-    return normaliseAgenda(rows[0]?.a, "agenda");
+    return checked(normaliseAgenda(rows[0]?.a, "agenda"));
   }
 
   async logPlanContext(row: QueryPlanContextLog): Promise<void> {

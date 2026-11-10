@@ -1,10 +1,12 @@
-// The agenda (SMD-3669, SMD-4162): what matters now, as one read of migration
-// 124's agenda — open, startable, unclaimed, unstarted tickets and open items
-// in a scope, ranked by 122's effective priority, each with the terms behind
-// its place, and what was left out and why. A read: the database decides the
-// candidates, the filters and the order; this file turns the caller's
-// arguments into the call, passes the calling key for `mine`, answers the
-// agenda's refusal of `mine` (123's words, kept by 124) as CLAIMS_UNREADABLE, and writes the call's query_log row.
+// The agenda (SMD-3669, SMD-4162, SMD-4192): what matters now, as one read of
+// migration 129's agenda — open, startable, unclaimed, unstarted tickets and
+// open items in a scope, ranked by 122's effective priority or, with order
+// due, by due time, each with the terms behind its place, and what was left
+// out and why. A read: the database decides the candidates, the filters and
+// the order; this file turns the caller's arguments into the call, passes the
+// calling key for `mine`, answers the agenda's refusal of `mine` (123's words,
+// kept by 124) as CLAIMS_UNREADABLE and a due order on a brain before 129 as
+// ORDER_UNAVAILABLE, and writes the call's query_log row.
 
 import type { Principal } from "../auth.ts";
 import type { AgendaResult } from "../store.ts";
@@ -13,7 +15,7 @@ import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 
 export type { AgendaResult };
-export type AgendaCode = "CLAIMS_UNREADABLE";
+export type AgendaCode = "CLAIMS_UNREADABLE" | "ORDER_UNAVAILABLE";
 
 export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agenda">): Promise<Outcome<AgendaResult, AgendaCode>> {
   const scope: { source?: string; project?: string; label?: string } = {};
@@ -34,6 +36,11 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     // Only 123's own refusal, by its words: another table's 42501 is a fault naming that table (review pass 3).
     if (holder && String((e as { errno?: unknown }).errno ?? "") === "42501" && /holder mine reads work_claims/.test(String((e as Error).message ?? ""))) {
       return refuse({ code: "CLAIMS_UNREADABLE", retryable: false });
+    }
+    // order due on a brain before 129, whose agendas take no tenth argument (42883): its schema's gap, refused alike
+    // over both doors, not a fault (review pass 2). Only the agenda's own: another missing function stays a fault.
+    if (input.order === "due" && String((e as { errno?: unknown }).errno ?? "") === "42883" && /function agenda\(/.test(String((e as Error).message ?? ""))) {
+      return refuse({ code: "ORDER_UNAVAILABLE", retryable: false });
     }
     throw e;
   }

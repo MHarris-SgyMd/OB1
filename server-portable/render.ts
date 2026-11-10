@@ -2454,7 +2454,9 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   const lines = v.items.length === 0
     ? ["Nothing on the agenda in this scope."]
     : [
-        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, ${v.order === "due" ? "soonest due first, the undated after" : "most pressing first"}:`,
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, ${v.order !== "due" ? "most pressing first"
+          // The undated named only when the list holds both kinds (review pass 2).
+          : v.items.every((i) => i.dueAt === null) ? "none due, most pressing first" : v.items.some((i) => i.dueAt === null) ? "soonest due first, the undated after" : "soonest due first"}:`,
         ...v.items.map(agendaLine),
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
@@ -2465,19 +2467,9 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
-}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
-
-/**
- * The hint an agenda fault carries (SMD-4192): the due order on a brain before 129, whose agenda takes no tenth
- * argument; or two agendas, left by 124 or 126 re-applied alone after 129, so a nine-argument call names both (review
- * pass 1).
- */
-export const agendaHint = (msg: string): string =>
-  /function agenda\(.*\btext\)/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — order due needs migration 129 (db/migrations/129_agenda_order.sql), which is not applied; ask with the priority order meanwhile"
-    : /function agenda\(/.test(msg) && /is not unique/i.test(msg)
-    ? " — the database holds two agenda functions: a migration before 129 (124 or 126) was re-applied alone after it; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply)"
-    : "";
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder"
+  : r.code === "ORDER_UNAVAILABLE" ? "Refused: order due needs migration 129 (db/migrations/129_agenda_order.sql), which this brain lacks; ask with the priority order meanwhile"
+  : unknownRefusal(r), AS_JSON);
 
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {

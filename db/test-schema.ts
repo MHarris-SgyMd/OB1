@@ -17997,7 +17997,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   await reapply(file.slice(0, 4));
   // 124 (SMD-4162) replaced 123's agenda under a ninth argument; 123's re-apply puts its eight-argument one back beside
   // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's), and so
-  // does 129's ten-argument one (SMD-4192), which the restore makes again.
+  // does 129's ten-argument one (SMD-4192), so its shape row counts 123's alone; the restore makes both again.
   await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean)`);
   await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
@@ -18261,7 +18261,7 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
   const file = files.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f)) ?? "no NNN_agenda_unstarted.sql";
   await reapply(file.slice(0, 4));
   // 129's ten-argument agenda (SMD-4192), which [110]'s restore made, goes while this section and [113] hold the
-  // nine-argument one: beside it a nine-argument call would name two. [116] puts it back.
+  // nine-argument one, so their shape rows count one agenda. [116] puts it back.
   await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [111]";
   const NOW = "2027-03-10T15:00:00Z";
@@ -18806,13 +18806,17 @@ console.log("\n[116] Migration 129: the agenda takes an order — priority, the 
     (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false, $4) AS a`, [scope, limit, NOW, order])).rows[0].a;
   const keys = (a: Ag) => a.items.map((i) => i.key.slice(4)).join(" ");
 
-  // The shape: one agenda, of ten arguments, the tenth defaulting to priority, STABLE, its comment naming 129.
-  const fns = (await db.query<{ n: number; v: string; d: string | null; c: string | null }>(
-    `SELECT p.pronargs::int AS n, p.provolatile::text AS v, pg_get_function_arguments(p.oid) AS d, obj_description(p.oid, 'pg_proc') AS c
-       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname = 'public' AND p.proname = 'agenda'`)).rows;
-  assert(fns.length === 1 && fns[0].n === 10 && fns[0].v === "s" && /p_order text DEFAULT 'priority'::text$/.test(fns[0].d ?? "")
-      && /126 \(SMD-2684\) and 129 \(SMD-4192\)/.test(fns[0].c ?? "") && /sorted by p_order: priority \(the default\)/.test(fns[0].c ?? ""),
-    `one agenda, of ten arguments, p_order defaulting to priority, STABLE, its comment naming 129 and the orders (${fns.map((f) => `${f.n}:${f.v}:${(f.d ?? "").slice(-40)}`).join(", ")})`);
+  // The shape (review pass 2): the ten-argument agenda, plpgsql, no argument defaulted; and the nine-argument one, a
+  // SQL wrapper with 126's defaults calling it with priority. Both STABLE, each commented for 129.
+  const fns = (await db.query<{ n: number; v: string; l: string; d: string | null; c: string | null }>(
+    `SELECT p.pronargs::int AS n, p.provolatile::text AS v, l.lanname AS l, pg_get_function_arguments(p.oid) AS d, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname = 'agenda' ORDER BY p.pronargs`)).rows;
+  assert(fns.map((f) => `${f.n}:${f.l}:${f.v}`).join(" ") === "9:sql:s 10:plpgsql:s"
+      && /p_include_started boolean DEFAULT false$/.test(fns[0].d ?? "") && !/DEFAULT/.test(fns[1].d ?? "") && /p_order text$/.test(fns[1].d ?? "")
+      && /The agenda in the priority order: the ten-argument agenda with p_order priority/.test(fns[0].c ?? "") && /Migration 129 \(SMD-4192\)/.test(fns[0].c ?? "")
+      && /126 \(SMD-2684\) and 129 \(SMD-4192\)/.test(fns[1].c ?? "") && /sorted by p_order: priority by effective/.test(fns[1].c ?? ""),
+    `two agendas: nine arguments, a SQL wrapper with 126's defaults; ten, plpgsql, none defaulted; both STABLE and commented for 129 (${fns.map((f) => `${f.n}:${f.l}:${f.v}:${(f.d ?? "").slice(-36)}`).join(", ")})`);
 
   // priority: 126's order, as a nine-argument call gets it — the Urgent, the High due tomorrow, the High, the
   // overdue Medium (2.6), the Medium due within the week (2.2), the overdue Low.
@@ -18842,6 +18846,16 @@ console.log("\n[116] Migration 129: the agenda takes an order — priority, the 
     `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
   assert(/its order \(priority or due; migration 129\)/.test(filterComment) && /On a plan_context row/.test(filterComment),
     `query_log.filter's comment names the agenda row's order, and keeps plan_context's row (${filterComment.slice(-160)})`);
+
+  // 126 re-applied alone after 129 (review pass 2): it replaces the wrapper with its own body, so a nine-argument
+  // call still names one function and reads in the priority order, and the ten-argument one still answers.
+  const the126 = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
+  await reapply(the126.slice(0, 4));
+  let after126 = "";
+  try { after126 = `${keys(await nine())} | ${keys(await ten("due"))}`; } catch (e) { after126 = `threw: ${(e as Error).message}`; }
+  const count126 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'agenda'`)).rows[0].n;
+  assert(after126 === `${keys(byNine)} | ${keys(byDue)}` && count126 === 2,
+    `126 re-applied after 129: a nine-argument call names one function, in the priority order, and due still answers (${after126}; ${count126} agendas)`);
 
   // A re-apply is a no-op: the same reads.
   await reapply(file.slice(0, 4));
