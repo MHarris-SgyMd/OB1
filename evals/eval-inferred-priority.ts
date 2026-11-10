@@ -20,6 +20,7 @@
  *       metadata model the environment names (OB1_LLM_BASE_URL, OB1_METADATA_MODEL, OB1_LLM_LOCAL). One line per
  *       id, appended, so a stopped run resumes; a call the provider failed is left out, to be retried by the next
  *       run, never recorded as reading nothing. The file holds the model's phrases, so it must sit outside the repo.
+ *       --shard k/n takes every n-th text from the k-th, so n runs started together share the file.
  *
  *   bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> (--texts <texts.jsonl> | with DATABASE_URL)
  *       The sample (DRAW: 60 calls and 60 others), shuffled, as a labelling sheet: each text and its capture day,
@@ -94,14 +95,26 @@ async function texts(): Promise<Text[]> {
 
 // ── --run ─────────────────────────────────────────────────────────────────────
 
+/**
+ * A run's shard, `k/n` (k from 0): every n-th text still to run, from the k-th, so n runs started together over one
+ * file take disjoint texts and the provider answers n at a time. No flag is the whole run, 0/1.
+ */
+export function shardOf(raw: string | undefined): [number, number] {
+  if (raw === undefined) return [0, 1];
+  const m = /^(\d+)\/(\d+)$/.exec(raw);
+  if (!m || Number(m[2]) < 1 || Number(m[1]) >= Number(m[2])) throw new Error(`--shard ${raw}: write k/n, 0 <= k < n`);
+  return [Number(m[1]), Number(m[2])];
+}
+
 async function run(out: string): Promise<void> {
   const path = outsideRepo(out, "the run file");
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
   const done = new Set(existsSync(path) ? readJsonl<RunLine>(path).map((l) => l.id) : []);
-  const todo = (await texts()).filter((t) => !done.has(t.id));
+  const [k, n] = shardOf(flag("shard"));
+  const todo = (await texts()).filter((t) => !done.has(t.id)).filter((_, i) => i % n === k);
   console.log(`model ${cfg.metadataModel} at ${cfg.chat.base}; ${done.size} done, ${todo.length} to run`);
   let failed = 0;
-  for (const [k, t] of todo.entries()) {
+  for (const [j, t] of todo.entries()) {
     const at = new Date(t.at), t0 = performance.now();
     // inferPriority answers null both for a text that states nothing and for a provider that failed (it logs the
     // latter): the log is caught here so a failure is left out of the file, to be retried, not counted as nothing.
@@ -128,7 +141,7 @@ async function run(out: string): Promise<void> {
       ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION,
     };
     appendFileSync(path, JSON.stringify(line) + "\n", { mode: 0o600 });
-    if ((k + 1) % 50 === 0) console.log(`${k + 1} of ${todo.length}`);
+    if ((j + 1) % 50 === 0) console.log(`${j + 1} of ${todo.length}`);
   }
   console.log(`ran ${todo.length - failed}; ${failed} left out for a re-run`);
   if (failed) process.exitCode = 1;
@@ -139,6 +152,8 @@ async function run(out: string): Promise<void> {
 /** The run's lines, refusing a run that is not one prompt version or that covers less than the population. */
 function runLines(path: string, population: readonly Text[] | null): RunLine[] {
   const lines = readJsonl<RunLine>(path);
+  const seen = new Set<string>(), twice = lines.filter((l) => seen.size === seen.add(l.id).size);
+  if (twice.length) throw new Error(`the run holds ${twice.length} ids twice (${twice[0].id.slice(0, 8)} first): shards started apart from each other overlap`);
   const versions = new Set(lines.map((l) => l.prompt_version));
   if (versions.size !== 1 || !versions.has(INFER_PROMPT_VERSION)) throw new Error(`the run holds prompt versions ${[...versions].join(", ")}, not ${INFER_PROMPT_VERSION} alone`);
   if (population) {
@@ -359,6 +374,12 @@ function selfCheck(): void {
   assert(lines.some((l) => /^level precision  0\.800 \(16 of 20\)/.test(l)) && lines.at(-1)!.startsWith("verdict: PASSES"), "the report prints each half and the verdict");
   assert(lines.some((l) => /κ between the raters: level 1\.000, due 1\.000 \(60 items\)/.test(l)), "the report prints the raters' κ");
   assert(reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("no verdict"), "a fixture from another registration gets no verdict");
+  assert(JSON.stringify(shardOf(undefined)) === "[0,1]" && JSON.stringify(shardOf("2/3")) === "[2,3]", "no shard is the whole run; k/n is read");
+  for (const bad of ["3/3", "1/0", "a/b", "1"]) {
+    threw = false;
+    try { shardOf(bad); } catch { threw = true; }
+    assert(threw, `--shard ${bad} is refused`);
+  }
   threw = false;
   try { outsideRepo(join(REPO, "evals", "run.jsonl"), "the run file"); } catch { threw = true; }
   assert(threw, "a private file inside the repo is refused");
