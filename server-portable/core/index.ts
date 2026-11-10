@@ -15,6 +15,7 @@ import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
 import * as agendaRead from "./agenda.ts";
+import * as planRead from "./plan.ts";
 import { pluginChat, type ModelAnswer, type ModelCaller, type ModelRequest } from "./model.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { mayLeaveBox } from "../egress.ts";
@@ -80,6 +81,7 @@ export function createCore(deps: CoreDeps) {
     itemHistory: bind(ctx, items.itemHistory),
     listItems: bind(ctx, items.listItems),
     agenda: bind(ctx, agendaRead.agenda),
+    planContext: bind(ctx, planRead.planContext),
     /**
      * A plugin's own tables (SMD-2310): a transaction as its role, in its
      * schema (store-sql.ts's pluginTx). A store without one (a suite's fake)

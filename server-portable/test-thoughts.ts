@@ -36,6 +36,7 @@ import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, norma
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
 import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
+import { DUE_ONLY_LEVEL, INFER_PROMPT, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
 
 const { assert, report } = createAssert();
 
@@ -2897,6 +2898,196 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 9, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
   } finally {
     stub.stop(true);
+  }
+}
+
+console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved from the capture day by the rules when it names its day one way, the most specific reading first, the model's date only where they can't read it and only a real day within the year ahead on the weekday named; each half kept only on a phrase the text holds as whole words, a negated level word, a self-negating High and the deadline quoted as the level dropped; a level at most High; the statement's level, due time and quoting reason; the call through the gate, a failure stating nothing");
+{
+  // Captured on Tuesday 2026-11-03, the ticket's own example.
+  const TUE = "2026-11-03";
+  const rows: [string, string | null][] = [
+    ["by Friday", "2026-11-06"], ["Friday", "2026-11-06"], ["this friday", "2026-11-06"], ["by Tuesday", "2026-11-10"], ["on Monday", "2026-11-09"],
+    ["next Friday", null], ["today", TUE], ["tonight", TUE], ["by end of day", TUE], ["tomorrow", "2026-11-04"], ["the day after tomorrow", "2026-11-05"],
+    ["in 3 days", "2026-11-06"], ["within two weeks", "2026-11-17"], ["in a week", "2026-11-10"], ["in 400 days", null], ["in 0 days", null],
+    ["by the end of the month", "2026-11-30"], ["by November 6th", "2026-11-06"], ["Nov. 6", "2026-11-06"], ["6 Nov", "2026-11-06"], ["the 20th of december", "2026-12-20"],
+    ["by November 2", "2027-11-02"], ["by 2026-11-20", "2026-11-20"], ["by 2026-02-30", null], ["Feb 30", null], ["before Friday", "2026-11-05"],
+    ["before the trip", null], ["next week", null], ["", null],
+    // Review pass 1: the more specific reading first ("EOD Friday" was the capture day), a weekday moved on left to the
+    // model, "before" only with no time of day, a start no due time, a stated year kept, a
+    // past day none, the 12th, and a month name only as a whole word.
+    ["by end of day Friday", "2026-11-06"], ["EOD Friday", "2026-11-06"], ["end of day tomorrow", "2026-11-04"], ["EOD", TUE], ["by close of business", TUE],
+    ["a week from today", "2026-11-10"], ["two weeks from today", "2026-11-17"], ["3 days from now", "2026-11-06"],
+    ["by Friday next week", null], ["next week Friday", null], ["the Friday after next", null], ["a week from Friday", null],
+    ["before 5pm Friday", "2026-11-06"], ["before the trip on Friday", "2026-11-05"], ["before noon tomorrow", "2026-11-04"], ["not before Friday", null], ["not until the 20th", null], ["after the trip", null],
+    ["by March 15, 2028", "2028-03-15"], ["by 15 March 2028", "2028-03-15"], ["by December 1, 2025", null], ["by 2025-01-01", null], ["by 2030-01-01", "2030-01-01"],
+    ["before the 12th", "2026-11-11"], ["by the 2nd", "2026-12-02"], ["by the 3rd", TUE], ["in 2 decades", null], ["by 3 maybe", null],
+    // Review pass 2: "the Nth" only with nothing after it but punctuation, "March the 5th" a date, "before" an end
+    // named or a count before it, and the weekdays' abbreviations.
+    ["by March the 5th", "2027-03-05"], ["before March the 5th", "2027-03-04"], ["by the 12th.", "2026-11-12"], ["by the 3rd week of November", null],
+    ["before the 2nd meeting", null], ["by the 1st round", null], ["before the end of the month", "2026-11-30"], ["before end of month", "2026-11-30"],
+    ["2 days before the 20th", null], ["by Fri", "2026-11-06"], ["by Thurs", "2026-11-05"], ["this tues", "2026-11-10"],
+    // Review pass 3: one anchor only, else the model's; "sat", "sun", "wed" and "mon" are words, not days.
+    ["a month from today", null], ["a fortnight from today", null], ["a year from today", null], ["a week from tomorrow", null], ["a week from the 12th", null],
+    ["a week from November 6", null], ["by Friday in two weeks", null], ["due by Fri 20th", null], ["by Monday 30th", null], ["the Friday before the 20th", null],
+    ["by the second Friday of the month", null], ["by the 2nd Friday", null], ["the slides for Monday's meeting by Friday", null],
+    ["before the sun goes down", null], ["due Sat.", null], ["by wed", null],
+  ];
+  const wrong = rows.filter(([p, want]) => resolveDue(p, TUE) !== want).map(([p, want]) => `${p}: ${resolveDue(p, TUE)} not ${want}`);
+  assert(wrong.length === 0, `the rules read a due phrase from the capture day, leaving "next Friday" and a phrase naming no day to the model (${wrong.join("; ") || `${rows.length} rows`})`);
+  assert(resolveDue("by the end of the month", "2026-12-15") === "2026-12-31" && resolveDue("end of month", "2028-02-10") === "2028-02-29" && resolveDue("by Friday", "2026-11-06") === "2026-11-13",
+    "the month's end in December and in a leap February; a weekday on its own day is a week on");
+  const P = "by the 6th or so";
+  assert(modelDay("2026-11-06", TUE, P) === "2026-11-06" && modelDay(" 2026-11-03 ", TUE, P) === TUE && modelDay("2026-11-02", TUE, P) === null && modelDay("2027-11-04", TUE, P) === "2027-11-04"
+      && modelDay("2027-11-05", TUE, P) === null && modelDay("2026-02-30", TUE, P) === null && modelDay("2026-11-6", TUE, P) === null && modelDay(7, TUE, P) === null,
+    "the model's date is taken only as a real YYYY-MM-DD from the capture day to 366 days after it");
+  assert(modelDay("2026-11-06", TUE, "by") === null && modelDay("2026-11-06", TUE, "soon-ish") === null && modelDay("2026-11-06", TUE, "not until Friday") === null && modelDay("2026-11-20", TUE, "the Friday after next") === "2026-11-20",
+    "…on a phrase that names a time (\"by\" alone names none) and isn't a start; \"after next\" is a deadline");
+  assert(modelDay("2026-11-06", TUE, "next Fri") === "2026-11-06" && modelDay("2026-11-07", TUE, "next Fri") === null,
+    "…and an abbreviated weekday holds the model's date to that weekday too");
+  assert(modelDay("2026-11-13", TUE, "next Friday") === "2026-11-13" && modelDay("2026-11-10", TUE, "next Friday") === null && modelDay("2026-11-10", TUE, "in a fortnight or so") === "2026-11-10",
+    "…and on the weekday the phrase names, when it names one (the local 7B gave \"next Friday\" as a Tuesday)");
+  const text = "Urgent:  the landlord wants an answer by\nFriday";
+  assert(quotedIn("urgent", text) === "urgent" && quotedIn("answer  by Friday", text) === "answer by Friday" && quotedIn("ASAP", text) === null && quotedIn(" ", text) === null
+      && quotedIn("x".repeat(201), "x".repeat(300)) === null && quotedIn(3, text) === null && quotedIn("landlord’s", "the landlord's answer") === "landlord’s"
+      && quotedIn("rush", "brush your teeth") === null && quotedIn("by", "on standby") === null && quotedIn(":", text) === null && quotedIn("rush", "no rush, brush later") === "rush",
+    "a phrase is the text's when the text holds it as whole words, case and white space aside, curly quotes as straight ones; blank, punctuation alone, over 200 characters or not a string, none");
+  const notUrgent = "This is not urgent at all";
+  assert(negatedIn("urgent", notUrgent) && !negatedIn("not urgent", notUrgent) && !negatedIn("urgent", "Urgent, and not urgent later") && !negatedIn("absent", notUrgent)
+      && readAnswer({ level: "urgent", level_phrase: "urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "low", level_phrase: "not urgent" }, notUrgent, TUE).level?.value === 1,
+    "a level word the text negates everywhere drops the level; a phrase carrying its own negation is read as written");
+  // Review pass 2: two words between, "non-", and a High off a phrase that negates its own cue.
+  assert(["this is not very urgent", "not that urgent", "not all that urgent really", "a non-urgent task", "nothing's urgent here"].every((t) => negatedIn("urgent", t))
+      && !negatedIn("urgent", "no matter what, urgent")
+      // Review pass 3: emphasis is no negation.
+      && !negatedIn("urgent", "This has never been more urgent") && !negatedIn("important", "Nothing is more important than this") && !negatedIn("urgent", "This is not only urgent but critical")
+      && readAnswer({ level: "urgent", level_phrase: "This has never been more urgent" }, "This has never been more urgent: answer the bank by Friday", TUE).level?.value === 3
+      && readAnswer({ level: "urgent", level_phrase: "not urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "high", level_phrase: "no rush" }, "no rush on this", TUE).level === null
+      && readAnswer({ level: "low", level_phrase: "no rush" }, "no rush on this", TUE).level?.value === 1 && readAnswer({ level: "high", level_phrase: "no time to lose" }, "no time to lose here", TUE).level?.value === 3,
+    "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands, and emphasis (\"never been more urgent\") is no negation");
+  // Review pass 2: the deadline quoted as the level (the local 7B read "I need the slides by Friday" as High).
+  const slides = "Before the meeting, I need the slides by Friday.";
+  const asLevel = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday" }, slides, TUE);
+  const whole = readAnswer({ level: "urgent", level_phrase: "Urgent: landlord wants an answer by Friday", due_phrase: "by Friday" }, "Urgent: landlord wants an answer by Friday", TUE);
+  // Review pass 3: with no due phrase quoted, or one the text doesn't hold, a level phrase naming a time is a deadline's all the same.
+  const noDue = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: null }, slides, TUE);
+  const badDue = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday!" }, slides, TUE);
+  const plain = readAnswer({ level: "medium", level_phrase: "need to get the passport renewed" }, "need to get the passport renewed before the trip", TUE);
+  assert(asLevel.level === null && asLevel.due?.day === "2026-11-06" && inferredStatement(asLevel)?.level === DUE_ONLY_LEVEL && whole.level?.value === 3
+      && noDue.level === null && badDue.level === null && plain.level?.value === 2,
+    `a level phrase with no word about how much it matters that holds the deadline or names a time drops the level (the due phrase alone: Medium), a due phrase quoted or not; one with such a word stands, and one naming no time (${JSON.stringify(asLevel)} | ${JSON.stringify(whole.level)} | ${JSON.stringify(noDue.level)} | ${JSON.stringify(plain.level)})`);
+
+  // The ticket's Verify: "Urgent: landlord wants an answer by Friday", captured on Tuesday, proposes High, due 2026-11-06, quoting the phrase.
+  const verify = "Urgent: landlord wants an answer by Friday";
+  const read = readAnswer({ level: "urgent", level_phrase: "Urgent", due_phrase: "by Friday", due_date: "2026-11-13" }, verify, TUE);
+  assert(read.level?.value === 3 && read.level.word === "urgent" && read.level.phrase === "Urgent" && read.due?.day === "2026-11-06" && read.due.by === "rule" && read.due.phrase === "by Friday",
+    `"Urgent: … by Friday" captured on Tuesday reads High (urgent, capped) on "Urgent", due 2026-11-06 by the rules, the model's 2026-11-13 (a Friday too) passed over (${JSON.stringify(read)})`);
+  const made = readAnswer({ level: "high", level_phrase: "ASAP", due_phrase: "by Monday", due_date: "2026-11-09" }, verify, TUE);
+  assert(made.level === null && made.due === null, `a phrase the text doesn't hold drops its half, the model's date with it (${JSON.stringify(made)})`);
+  const modelled = readAnswer({ level: null, due_phrase: "next Friday", due_date: "2026-11-13" }, "Send it next Friday", TUE);
+  const modelBad = readAnswer({ level: null, due_phrase: "next Friday", due_date: "2026-10-30" }, "Send it next Friday", TUE);
+  assert(modelled.level === null && modelled.due?.day === "2026-11-13" && modelled.due.by === "model" && modelBad.due === null,
+    `a phrase the rules can't read takes the model's date, and only a day the model may give (${JSON.stringify(modelled)} | ${JSON.stringify(modelBad)})`);
+  const levels = ["critical", "urgent", "high", "medium", "low", "none", "meh", "High "].map((w) => readAnswer({ level: w, level_phrase: "it" }, "it matters", TUE).level?.value ?? null);
+  assert(JSON.stringify(levels) === JSON.stringify([INFERRED_CEILING, INFERRED_CEILING, 3, 2, 1, 0, null, 3]) && INFERRED_CEILING === 3,
+    `the model's level words on the scale, critical and urgent at most High, a word not on it none (${JSON.stringify(levels)})`);
+  assert([null, "x", [1], 3].every((a) => { const r = readAnswer(a, verify, TUE); return r.level === null && r.due === null; }), "an answer that is not an object reads as nothing");
+
+  const st = inferredStatement(read);
+  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === 'inferred from the text (v1): urgent from "Urgent"; due 2026-11-06 from "by Friday"',
+    `the statement: High, due by the end of 2026-11-06 (UTC), its reason quoting both phrases (${JSON.stringify(st)})`);
+  const dueOnly = inferredStatement({ level: null, due: { day: "2026-11-13", phrase: "next Friday", by: "model" } });
+  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v1): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
+      && inferredStatement({ level: { value: 1, word: "low", phrase: "no rush" }, due: null })?.dueAt === undefined
+      && inferredStatement({ level: null, due: null }) === null && inferredStatement(null) === null,
+    `a due phrase alone states Medium, saying so and whose date it is; a level alone no due time; nothing read, nothing stated (${JSON.stringify(dueOnly)})`);
+
+  // The call: the metadata model, the prompt, the capture day and weekday on the first line; a failure is null.
+  const bodies: { messages: { role: string; content: string }[]; model: string; temperature: number }[] = [];
+  const replies: (() => Response)[] = [
+    () => Response.json({ choices: [{ message: { content: JSON.stringify({ level: "urgent", level_phrase: "Urgent", due_phrase: "by Friday", due_date: null }) } }] }),
+    () => new Response("busy", { status: 500 }),
+    () => Response.json({ choices: [{ message: { content: "not json" } }] }),
+    () => Response.json({ choices: [{ message: {} }] }),
+  ];
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { bodies.push(await req.json()); return replies.shift()!(); } });
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_LLM_TIMEOUT: "5" });
+    const at = new Date("2026-11-03T22:30:00Z");
+    const got = await inferPriority(verify, at, { kind: "capture", actor: "t", content: verify }, cfg);
+    assert(got?.level?.value === 3 && got.due?.day === "2026-11-06" && bodies[0]?.messages[0].content === INFER_PROMPT && bodies[0].messages[1].content === `Captured: 2026-11-03 (Tuesday)\n\n${verify}`
+        && bodies[0].model === cfg.metadataModel && bodies[0].temperature === 0,
+      `the call asks the metadata model at its temperature, the prompt and the capture's UTC day and weekday before the text, and reads the answer (${JSON.stringify(got)} | ${JSON.stringify(bodies[0]?.messages[1])})`);
+    const failed = [await inferPriority(verify, at, { kind: "capture" }, cfg), await inferPriority(verify, at, { kind: "capture" }, cfg), await inferPriority(verify, at, { kind: "capture" }, cfg)];
+    assert(failed.every((f) => f === null) && bodies.length === 4, `a status, content that is not JSON and an answer with no content each infer nothing (${JSON.stringify(failed)})`);
+    const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
+    assert((await inferPriority(verify, at, { kind: "capture" }, gated)) === null && bodies.length === 4, "an endpoint the gate refuses: nothing inferred, and no request");
+    assert(resolveEmbedConfig({}).inferPriority === false && resolveEmbedConfig({ OB1_INFER_PRIORITY: " on " }).inferPriority === true && resolveEmbedConfig({ OB1_INFER_PRIORITY: "no" }).inferPriority === false,
+      "OB1_INFER_PRIORITY is off unless set on");
+  } finally {
+    stub.stop(true);
+  }
+
+  // The capture path (core/writes.ts) over a stub store: the knob off asks nothing; on, the statement goes on the
+  // thought, inferred, under the key's scope; a text a thought holds already is not asked of a key that can read
+  // (review pass 1), and is of one that cannot (review pass 2); a fault
+  // stating it, or a chat endpoint that refuses the connection, never fails the capture.
+  const calls = { infer: 0, tags: 0 };
+  const closedPort = (() => { const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; })();
+  const chat = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
+    const b = await req.json() as { messages: { content: string }[] };
+    const isInfer = b.messages[0].content === INFER_PROMPT;
+    calls[isInfer ? "infer" : "tags"]++;
+    const answer = isInfer ? { level: "high", level_phrase: "matters", due_phrase: "tomorrow" } : { topics: ["t"], type: "idea" };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
+  } });
+  try {
+    const stated: Record<string, unknown>[] = [];
+    let existed = false, assertFails = false;
+    const stubStore = {
+      captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000c1", existed }),
+      keyAtText: async () => (existed ? { id: "00000000-0000-4000-8000-0000000000c1", clientKey: null } : null),
+      assertPriority: async (o: Record<string, unknown>) => { if (assertFails) throw new Error("the store is away"); stated.push(o); return { outcome: "asserted" }; },
+    };
+    const ctxWith = (on: boolean, chatPort: number = chat.port ?? 0) => createContext({
+      env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${closedPort}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${chatPort}/v1`, OB1_CHAT_LOCAL: "1", ...(on ? { OB1_INFER_PRIORITY: "on" } : {}) }),
+      store: async () => stubStore as never, door: "test",
+    });
+    const writer = { name: "writer", scope: "write", keyHash: "h" } as never;
+    const offOut = await capture(ctxWith(false), writer, { content: "this matters, due tomorrow" } as never);
+    assert(offOut.ok && calls.infer === 0 && calls.tags === 1 && stated.length === 0, `the knob off: the tags' call alone, nothing stated (${JSON.stringify(calls)} ${stated.length})`);
+    // Its due time read on either side of the call: a run across UTC midnight takes either day's tomorrow.
+    const dayBefore = new Date().toISOString().slice(0, 10);
+    const onOut = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never);
+    const dayAfter = new Date().toISOString().slice(0, 10);
+    const endOfTomorrow = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) + 2 * 86_400_000).toISOString();
+    assert(onOut.ok && calls.infer === 1 && stated.length === 1 && stated[0].kind === "thought" && stated[0].key === "00000000-0000-4000-8000-0000000000c1" && stated[0].level === 3
+        && stated[0].inferred === true && stated[0].scope === "write" && [endOfTomorrow(dayBefore), endOfTomorrow(dayAfter)].includes(String(stated[0].dueAt)),
+      `the knob on: one more call, and the thought stated High, inferred, due by the end of tomorrow, at the key's scope (${JSON.stringify(stated[0])})`);
+    existed = true;
+    const re = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never);
+    assert(re.ok && stated.length === 1 && calls.infer === 1 && calls.tags === 3, `a re-capture of a text a thought holds asks nothing and states nothing (${JSON.stringify(calls)})`);
+    // A key that cannot read is asked either way: the call's time would tell it whether the text exists (review pass 2).
+    const hookRe = await capture(ctxWith(true), { name: "hook", scope: "capture", keyHash: "k" } as never, { content: "this matters, due tomorrow" } as never);
+    assert(hookRe.ok && stated.length === 1 && calls.infer === 2, `a capture-only key's re-capture is asked all the same, and states nothing (${JSON.stringify(calls)})`);
+    existed = false; assertFails = true;
+    const errs: string[] = [];
+    const realErr = console.error;
+    console.error = (...a: unknown[]) => { errs.push(a.join(" ")); };
+    let faulted;
+    try { faulted = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
+    assert(faulted.ok && stated.length === 1 && errs.some((e) => /the inferred priority of thought \S+ was not stated: the store is away/.test(e)),
+      `a store fault stating it is logged, and the capture stands (${errs.filter((e) => /inferred/.test(e)).join(" | ")})`);
+    // The chat endpoint refusing the connection: the runtime's error the inference throws is caught by the capture,
+    // which lands with the tags' outage marker and states nothing (review pass 1: no test held that catch).
+    assertFails = false;
+    const refusedErrs: string[] = [];
+    console.error = (...a: unknown[]) => { refusedErrs.push(a.join(" ")); };
+    let refused;
+    try { refused = await capture(ctxWith(true, closedPort), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
+    assert(refused.ok && stated.length === 1 && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
+      `a chat endpoint that refuses the connection: the capture lands, nothing stated (${refusedErrs.filter((e) => /inferred/.test(e)).join(" | ")})`);
+  } finally {
+    chat.stop(true);
   }
 }
 

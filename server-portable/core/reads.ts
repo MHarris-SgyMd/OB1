@@ -65,14 +65,14 @@ interface RunSearch {
   // provider call.
   // An embedding of null is a query the provider did not answer for, and
   // vectorFailed says why (SMD-2891).
-  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean }):
+  (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean; signal?: AbortSignal }):
     Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }>;
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
-const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
+export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
-  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean;
+  threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust; unlogged?: boolean; signal?: AbortSignal;
 }): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] | null; vectorFailed?: QueryVectorFailed; facts?: QueryFacts }> => {
   // min_trust (SMD-1724) is no column of query_log, so a search with it is not
   // logged: a replay (db/tier.ts) would run it without the floor and report
@@ -98,15 +98,19 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   let embedding: number[];
   const embedStarted = performance.now();
   try {
-    embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query");
+    embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query", opts.signal);
   } catch (e) {
-    const down = providerDown(e);
+    // The caller's own stop (plan_context's deadline, SMD-2684): answered as a provider that did not answer in time,
+    // by exact matches alone, and not said of the provider's health — the provider was not what stopped.
+    const stopped = opts.signal?.aborted === true;
+    const down = stopped ? { reason: "deadline", detail: "the read's deadline came before the provider answered" } : providerDown(e);
     if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
     // As a row prints an endpoint: userinfo masked (SMD-2885).
     const base = shownBase(ctx.embedConfig().embeddings);
-    console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
-    // The provider's state, as every embedding call tells it (SMD-2890).
-    heardFrom(ctx.providerHealth, embedStarted, e);
+    console.error(stopped ? `${opts.tool}: the embedding provider at ${base} did not answer before the caller's deadline; answered by exact matches alone`
+      : `${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
+    // The provider's state, as every embedding call tells it (SMD-2890) — not when the caller stopped the call.
+    if (!stopped) heardFrom(ctx.providerHealth, embedStarted, e);
     const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });
     // Logged as arm `literal` (106): no arm a replay could take, since a
     // replay's provider answers; db/brain-compare.ts leaves it out of a plan.
@@ -417,11 +421,16 @@ const TICKET_KEY = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 /** A key a row's metadata files it under (a ticket row's `issue`, a note's `ticket`), as 115 keys it, when it is one. */
 const filedUnder = (v: unknown) => (typeof v === "string" && TICKET_KEY.test(v.trim().toUpperCase()) ? v.trim().toUpperCase() : null);
 /** The tickets a result names: those its metadata files it under, then the first MOVED_READ others its text mentions; the rest counted. */
-function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; notRead: number } {
+export function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; notRead: number } {
+  const { filed, named } = ticketsNamedBy(h);
+  return { keys: [...filed, ...named.slice(0, MOVED_READ)], notRead: Math.max(0, named.length - MOVED_READ) };
+}
+
+/** Every ticket a result names: those its metadata files it under, then the others its text mentions, in order, once each. */
+export function ticketsNamedBy(h: { content: string; metadata?: Record<string, unknown> | null }): { filed: string[]; named: string[] } {
   const filed = [...new Set([filedUnder(h.metadata?.issue), filedUnder(h.metadata?.ticket)].filter((k): k is string => k !== null))];
   // A filed key the text also names is read as filed: not one of the text's 50, nor counted past them (review pass 1).
-  const named = keysInOrder(h.content).filter((k) => !filed.includes(k));
-  return { keys: [...filed, ...named.slice(0, MOVED_READ)], notRead: Math.max(0, named.length - MOVED_READ) };
+  return { filed, named: keysInOrder(h.content).filter((k) => !filed.includes(k)) };
 }
 
 /**
@@ -488,17 +497,17 @@ export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string
 // ── priority_weight and min_priority (SMD-3668) ─────────────────────────────
 
 /**
- * The largest effective priority under the default weights (docs/priority.md, migration 122): a critical level (5),
- * overdue (3) and unblocking many (1). A priority-ranked search reads a match's priority as its effective over this,
- * capped at 1, so the blend's two halves share a 0–1 scale.
+ * The largest effective priority under the default weights (docs/priority.md, migration 127, SMD-4177): a critical
+ * level (5), overdue (0.6) and unblocking many (0.2). A priority-ranked search reads a match's priority as its
+ * effective over this, capped at 1, so the blend's two halves share a 0–1 scale. 9 under 122's weights.
  */
-export const PRIORITY_SPAN = 9;
+export const PRIORITY_SPAN = 5.8;
 /** The matches a priority-ranked search reads: prefer_current's window, min(100, 4 × limit) (077). */
 export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
 
 /** What a priority-ranked search did (SMD-3668): its weight and floor, how many matches it read, kept, and found a known priority on. */
 export type PriorityRanking = { weight: number; min: number | null; window: number; read: number; kept: number; known: number };
-/** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a stated or inherited level). */
+/** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a level stated, read from its open items, or inherited). */
 export type MatchPriority = { effective: number; known: boolean };
 
 /**
@@ -507,12 +516,14 @@ export type MatchPriority = { effective: number; known: boolean };
  * docs/priority.md decision 5 says (review pass 1: an earlier reading took the highest of a thought's and its filed
  * tickets', against three of the ADR's rules):
  * - a ticket's own row reads as its ticket;
- * - any other thought takes its own stated level, else one inherited from the ticket it is about (metadata ticket or
- *   issue, else its standing subject) at one level less a hop, counted only above unknown's 2, and nothing from a
- *   settled ticket;
+ * - any other thought takes its own stated level, else the highest counted on its open items (125, SMD-4149), else one
+ *   inherited from the ticket it is about (metadata ticket or issue, else its standing subject) at one level less a
+ *   hop, counted only above unknown's 2, and nothing from a settled ticket; its due time its own, else its open items'
+ *   soonest;
  * - a ticket its text only mentions does not rank it: inheritance through mentions waits for SMD-3662's numbers ("Not
  *   decided here"); the label shows that ticket's priority beside the row's own.
- * Known is a stated or a counted inherited level; otherwise the row's unknown, ordered as 122's `unknown` weight.
+ * Known is a stated level, one read from its open items, or a counted inherited one; otherwise the row's unknown,
+ * ordered as 122's `unknown` weight (plus any urgency its due time adds).
  */
 export function prioritiesOf(read: PriorityRead, rows: readonly { id: string }[]): Record<string, MatchPriority> {
   const out: Record<string, MatchPriority> = {};
@@ -523,19 +534,25 @@ export function prioritiesOf(read: PriorityRead, rows: readonly { id: string }[]
   return out;
 }
 
-/** A priority is known when a counted statement states its level or it inherits a counted one (decision 5): unknown's 2 is no label. */
-const knownPriority = (p: Pick<EffectivePriority, "level" | "inheritedFrom">) => p.level !== null || p.inheritedFrom !== null;
+/**
+ * A priority is known when a counted statement states its level, a thought reads one from its open items (`from_items`,
+ * migration 125, SMD-4149), or it inherits a counted one (decision 5): unknown's 2 is no label, nor is a due time alone.
+ */
+const knownPriority = (p: Pick<EffectivePriority, "level" | "inheritedFrom" | "terms">) =>
+  p.level !== null || p.inheritedFrom !== null || p.terms.some((t) => t.term === "from_items");
 
 /**
  * A prioritised item a result names (SMD-3668 PR 2), as 122 read it: the result itself (`self`) — a ticket's own row
  * as its ticket, kind `ticket` — or a ticket it is filed under or names. Its effective priority and the level behind
- * it, stated (`level`) or inherited (`inheritedFrom`); its due time, the urgency or overdue term it adds, the open
+ * it, stated (`level`), read from an open item opened from it (`fromItem`, migration 125) or inherited
+ * (`inheritedFrom`); its due time, the urgency or overdue term it adds, the open
  * items it unblocks; whether it is settled (a finished ticket's own level stands, its urgency and unblocks dropped)
  * or waiting on a not_before; and every term, named, as the agenda shows them.
  */
 export type PriorityOn = {
   kind: "thought" | "ticket"; key: string; self: boolean; effective: number; level: number | null;
   inheritedFrom: { kind: string; key: string; level: number; hops: number } | null;
+  fromItem: { key: string; level: number } | null;
   dueAt: string | null; urgency: number; overdue: boolean; unblocks: number; settled: boolean; notBefore: string | null; waiting: boolean;
   terms: PriorityTerm[];
 };
@@ -600,11 +617,16 @@ const readAs = (p: EffectivePriority): string | null => {
   const as = p.terms[0]?.detail.as as { kind?: unknown; key?: unknown } | undefined;
   return as?.kind === "ticket" && typeof as.key === "string" ? as.key : null;
 };
+/** The open item a thought read its level from (125's `from_items` term): its id and the level counted on it, else null. */
+const fromItemOf = (p: EffectivePriority): PriorityOn["fromItem"] => {
+  const t = p.terms.find((x) => x.term === "from_items");
+  return t && typeof t.detail.item === "string" ? { key: t.detail.item, level: t.value } : null;
+};
 const priorityOn = (p: EffectivePriority, self: boolean): PriorityOn => {
   const as = self ? readAs(p) : null;
   return {
     kind: as !== null || p.item.kind === "ticket" ? "ticket" : "thought", key: as ?? p.item.key, self, effective: p.effective, level: p.level,
-    inheritedFrom: p.inheritedFrom, dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
+    inheritedFrom: p.inheritedFrom, fromItem: fromItemOf(p), dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
     notBefore: p.notBefore, waiting: p.waiting, terms: p.terms,
   };
 };
@@ -681,6 +703,24 @@ export function rankByPriority<T extends { id: string }>(rows: readonly T[], pri
   return kept.slice(0, limit).map(({ r }) => r);
 }
 
+/**
+ * A page of hybrid rows as search_thoughts' hits: which a newer thought superseded, the tickets they name that moved,
+ * their claims, judged relations and priorities, each read once for the page. `labels` is a priority read already
+ * made (a ranked search's). Shared with plan_context's knowledge section (SMD-2684), so its hits read as these do.
+ */
+export async function labelHits(ctx: Ctx, principal: Principal, data: readonly ThoughtHybridMatch[], labels?: Promise<Record<string, PriorityHit> | null> | null): Promise<SearchHit[]> {
+  const store = await ctx.store();
+  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
+  const prios = labels ?? priorityOf(store, data);
+  const superseded = await store.supersededAmong(data.map((t) => t.id));
+  const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
+  return data.map((t) => ({
+    id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
+    matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
+    supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id),
+  }));
+}
+
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
   const { query, limit, threshold, recency_weight, prefer_current, min_trust, priority_weight, min_priority } = input;
   // SMD-3668: a weight above 0 or a floor reads a window and its priorities; neither is today's search, untouched.
@@ -734,19 +774,10 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // SMD-2255), priced by eval-supersession.ts. A hit ranked beside the
   // version that replaced it is the failure this ticket is about — say so
   // on the row rather than let it pass as current.
-  const store = await ctx.store();
-  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
-  const prios = labels ?? priorityOf(store, data);
-  const superseded = await store.supersededAmong(data.map((t) => t.id));
-  const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
   return ok({
     query,
     preferCurrent: prefer_current,
-    hits: data.map((t) => ({
-      id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
-      matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id),
-    })),
+    hits: await labelHits(ctx, principal, data, labels),
     // A text match has no literal-only reading: unknown, not false (review pass 6).
     facts: r.vectorFailed?.matched === "text" ? { ...factsOf(data[0])!, literalOnly: null } : factsOf(data[0]),
     window: data[0].window ?? null,

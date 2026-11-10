@@ -4414,9 +4414,11 @@ writers that keep them there:
   day (calendar days in UTC from the run's day), done when its facts say so. Its stated level is the operator's
   statement on the item, the operator's key classified as `SETUP.md` classifies a brain's own.
 
-A personal note's facts sit on its open item, not on the note. So a read that scores thoughts, as SMD-3668's
-`priority_weight` does, sees the tickets' levels and none of the notes'. The maintainer decided (2026-11-08) that it
-should see them: SMD-4149 has `effective_priority` read a thought's open items, and re-measures both reads.
+A personal note's facts sit on its open item, not on the note. Until migration 125, a read that scores thoughts, as
+SMD-3668's `priority_weight` does, saw the tickets' levels and none of the notes'. The maintainer decided
+(2026-11-08) that it should see them, and SMD-4149 has `effective_priority` read a thought's open items: a note with
+no level of its own takes its open items' highest, and with no due time of its own their soonest. The run prints what
+each note reads as a thought, and fails unless it is `plannedNoteReads`' answer.
 
 The run reads the facts back and fails unless the database holds exactly the plan's, line for line, duplicates
 counted: every source and the row it sits on, every link but a text reference, every live claim, every open item by
@@ -4478,8 +4480,8 @@ relevant; it adds nothing search didn't find.
 are. 0.5 was pre-registered on SMD-3668 on 2026-11-08, before any run, as the value it would ship with (the bar's rule
 for a read with a weight), and the self-check pins the call. The tool re-ranks its top min(100, 4 × limit) matches
 by their place and 122's effective priority, each read as a thought. A ticket's row
-reads its ticket's level. A note reads unknown 2, since its facts sit on its open item, which `effective_priority`
-doesn't read (SMD-4149).
+reads its ticket's level. A note reads its open item's level and due time (migration 125, SMD-4149); before 125 it
+read unknown 2.
 
 **`--priority-weight w,...`** measures the same read at other weights, beside the pre-registered one, each as an
 exploratory read named `priority_weight@<w>`. Each weight is from 0 to 1; a weight listed twice, the pre-registered
@@ -4692,6 +4694,112 @@ since it resets the database it is given.
 * **Latency** was 200 to 1,200 ms a search at every weight, 0 included, while the canary's sleep worker ran. These
   numbers don't separate the weight's cost.
 
+**`priority_weight` again, with a note reading its open items, 2026-11-09** (SMD-4149: main 410e28a0 with migration
+125, and the same on main 7c47111f with SMD-4162's 124; registration `acb196be7ec50868`, unchanged since the planting
+is; the same pre-registered 0.5, measured once; two runs give the same hits). The rule, which the maintainer decided before the run, is that a thought that is no
+ticket's row and states no level takes the highest level counted on its open items, before what it inherits. With no
+due time of its own, it takes the soonest of theirs. The run now prints what each note reads as a thought, and fails
+unless that is `plannedNoteReads`' answer:
+
+```
+  bill 4: unknown 2; urgency soon 2 item:bill
+  bookshelf 0: from_items 0 item:bookshelf
+  cat 2: unknown 2
+  claim-done 2: unknown 2
+  coffee 0: from_items 0 item:coffee
+  commitment 3: unknown 2; urgency week 1 item:commitment
+  documentary 2: unknown 2
+  gutters 5: unknown 2; overdue 3 item:gutters
+  passport 4: from_items 4 item:passport
+  renewal 2: unknown 2
+```
+
+The program's output, verbatim:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.143 | 0.571 | 0.607 | 0.083 / 0.390 / 0.001 | 0.085 / 0.390 / 0.000 |
+| priority_weight | 0.286 | 0.286 | 0.327 | 0.084 / 0.168 / -0.003 | 0.085 / 0.169 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: `priority_weight` at 0.5 still doesn't clear the bar,** though it now beats plain search on top-1 and
+mean tau. It passes (d). It fails (a) and (b), with top-1 on 2 of 7 (`highest-value`, as plain search, and
+`due-soon`), where (a) needs 5 and (b) needs 3; and (c), with mean tau 0.327 against the 0.502 needed.
+* **What the notes' items bring.** On `due-soon` the gutters (5) now come before the bill (4), the gold's order, so
+  the read gains that prompt's top-1 (tau 0.548 to 0.913). The two notes at a stated 0, the coffee and the bookshelf,
+  fall: the coffee leaves first place on `blocking` for seventh.
+* **What still caps it is relevance, not sight.** The structural cap of 4 of 7 is gone, since equal priorities no
+  longer tie every note. But at 0.5 a row's place in the window weighs as much as its priority, and on the five
+  prompts it misses, the gold's first item sits far down the window. The Urgent ticket (4.5) rises to sixth on
+  `next-ticket` and fifth on `blocking`, behind rows that lead it by meaning, and stays out of the top ten on
+  `matters-most`. The bill on `this-week` and the commitment on `promised` stay out of the top ten.
+* **The agenda is unchanged,** as the rule says it must be: it scores tickets and open items, never thoughts, and an
+  open item still inherits only the level stated on its note. Its scores are the 2026-11-08 record's.
+
+**Exploratory: 0.7 and 0.9 again, with a note reading its open items, 2026-11-09** (the maintainer asked for them
+after the verdict; the same tree and registration, `--priority-weight 0.7,0.9`; the 0.5 row is the verdict's, hit for
+hit). Not a verdict: a weight chosen from these rows would be fitted to the prompts that judge it. The program's
+output, verbatim, its other rows as above:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| priority_weight | 0.286 | 0.286 | 0.327 | 0.084 / 0.168 / -0.003 | 0.085 / 0.169 / 0.000 |
+| priority_weight@0.7 | 0.286 | 0.571 | 0.603 | 0.111 / 0.340 / -0.002 | 0.113 / 0.341 / 0.000 |
+| priority_weight@0.9 | 0.286 | 0.714 | 0.723 | 0.113 / 0.390 / -0.001 | 0.113 / 0.390 / 0.000 |
+
+Neither would clear the bar. Each would pass (c) and (d), and fail (a) and (b), with top-1 on 2 of 7.
+* **The order improves; the first place doesn't.** At 0.9 mean tau is 0.723 and top-3 holds on 5 of 7, both above the
+  agenda's (0.607, 4 of 7). Before migration 125 the same weights failed (d), since the gutters left `due-soon`'s top
+  3 (0.7: 0.429 / 0.429 / 0.520; 0.9: 0.571 / 0.571 / 0.559, above).
+* **The gutters lead now, as on the agenda.** Two weeks overdue with no stated level, the note reads unknown 2 plus
+  overdue 3, which is 5. The Urgent ticket that blocks another reads 4 plus 0.5. At 0.9 the gutters come first on six
+  of seven prompts, and the Urgent ticket keeps first place on `highest-value` alone: top-1 on 2, `highest-value` and
+  `due-soon`. Before 125 the gutters read 2, so at 0.9 the Urgent ticket led every prompt and reached 4 of 7.
+* **So what caps first place at a high weight is docs/priority.md's weights, not what the read sees.** The agenda's
+  verdict (2026-11-08, above) found the same: overdue +3 on an unknown 2 outranks an Urgent ticket that unblocks
+  another, against the gold. Retuning the weights is a decision of its own, outside SMD-4149.
+
+**Level first, 2026-11-09** (SMD-4177: the maintainer chose option C, posted on the ticket before the build. Migration
+127 scales the terms after the level by 0.2, so they order items of one level and never lift one past the next, and
+search's blend divides by 5.8, the new largest. Registration `acb196be7ec50868`, unchanged; measured once, at the
+pre-registered 0.5). Each note asked as a thought now reads its level plus tenths:
+
+```
+  bill 2.4: unknown 2; urgency soon 0.4 item:bill
+  commitment 2.2: unknown 2; urgency week 0.2 item:commitment
+  gutters 2.6: unknown 2; overdue 0.6 item:gutters
+  passport 4: from_items 4 item:passport
+```
+
+The program's output, verbatim:
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.429 | 0.429 | 0.525 | 0.222 / 0.345 / -0.001 | 0.220 / 0.347 / 0.000 |
+| priority_weight | 0.143 | 0.571 | 0.414 | 0.085 / 0.310 / -0.002 | 0.085 / 0.312 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: neither read clears the bar.**
+* **The agenda** passes (b) and (c) and fails (a) and (d). The Urgent ticket now leads `next-ticket`,
+  `highest-value` and `blocking`, so top-1 goes from 1 of 7 to 3 (from 0.143 to 0.429). The cost is `due-soon`: the
+  Urgent ticket and the passport (4) now come before the overdue gutters (2.6), which leave the top 3 that a baseline
+  kept, so (d) fails. Mean tau falls from 0.607 to 0.525, still above the 0.502 needed. On `matters-most` the Urgent
+  ticket is outside search's ten hits, so the passport leads.
+* **`priority_weight`** fails (a), (b) and (c). Top-3 goes from 2 prompts to 4 and mean tau from 0.327 to 0.414, but
+  top-1 falls from 2 to 1. Within a level the notes now differ by tenths (2.6, 2.4, 2.2) where they differed by
+  whole levels, so at 0.5 their order is search's: the bill comes before the gutters on `due-soon`, and that prompt's
+  top-1 is lost. The Urgent ticket rises to third on `next-ticket` and second on `blocking`, still behind rows that
+  lead it by meaning.
+* **The 11-02 board replay** (below) puts SMD-2908 3rd of 314, from 6th.
+* So the defaults stay 0 for search, and the agenda's order is level first. Level first moves which prompts each read
+  wins rather than how many: no single order of the items reaches 5 of 7, as SMD-4177 set out.
+
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
 A row names its reads from `DOGFOOD_READS`, written out so a row stays sound if a read is retired: the seeded set's
@@ -4778,6 +4886,16 @@ with no declared work of its own. The replay found:
 So the Verify holds on SMD-3602 and SMD-1853, and fails on SMD-2908: the deadline that made it the pick was never
 stated where the agenda reads. With a due date of 11-03 on Linear, SMD-2908 would have taken urgency +2 and ranked
 first at 5.
+
+**Level first, 2026-11-09** (SMD-4177, migration 127; the same moment, on a board of 1,294 issues now; measured once,
+as pre-registered). A level now decides the place, and urgency and unblocks order items of one level:
+* **SMD-2908 ranks 3rd.** It still scores its High alone (3). The three Mediums that tied it through unblocking open
+  work now read 2.2 and fall below every High, so only SMD-2607 (High, 3) is beside it, ahead by key. First is still
+  SMD-2301, High and unblocking open work (3.2).
+* **SMD-3602 is left out as claimed,** as before; **SMD-1853 ranks 37th** on its own Medium (2), as before.
+
+So the Verify still fails on SMD-2908, for the same reason: its deadline was never stated where the agenda reads.
+Level first narrows the gap from five tickets ahead of it to two.
 
 ## The query-log replay loop — measuring against real use (SMD-1295)
 

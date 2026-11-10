@@ -216,6 +216,13 @@ export type Env = {
    * it on asks again about every subject a model found with it off.
    */
   OB1_SUBJECT_REASONING?: string;
+  /**
+   * 1/on/true/yes: a capture asks the metadata model for the priority and due
+   * time its text states, in one more call beside the tags', and states them
+   * inferred (tier 4) on the thought or the items it proposed (SMD-3670). Off
+   * when unset; no ranking counts an inferred statement until its bar clears.
+   */
+  OB1_INFER_PRIORITY?: string;
   /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. Embeddings, and chat unless OB1_CHAT_BASE_URL says otherwise. */
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */

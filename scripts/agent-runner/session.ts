@@ -13,8 +13,8 @@
  *   - at its time limit the session is ended: its process group and every process it started, the sandboxed ones
  *     included.
  *
- * It returns what the stream said, for the run's record: the init and the result (cost, turns, denials), each tool
- * call and result, and why the session ended.
+ * It returns what the stream said, for the run's record: the init and the result (cost, turns, denials), the session's
+ * final message as its report, each tool call and result, and why the session ended.
  */
 
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
@@ -55,6 +55,8 @@ export type SessionOutcome = {
   why: string;
   init: InitSummary | null;
   result: ResultSummary | null;
+  /** The session's final message (Claude Code's result event `result`): the worker's or the review's report, as the gate and the orchestrator read it. Empty if the session ended without one. */
+  report: string;
   exitCode: number | null;
   signal: string | null;
   calls: ToolCall[];
@@ -218,7 +220,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 
 /** Starts the session, watches its stream, and returns how it went. It never throws for the session's sake: a refusal or failure is an outcome. */
 export async function runSession(spec: SessionSpec, deps: SessionDeps = REAL_DEPS): Promise<SessionOutcome> {
-  const outcome: SessionOutcome = { ended: "refused", why: "", init: null, result: null, exitCode: null, signal: null, calls: [], results: [], stderr: "" };
+  const outcome: SessionOutcome = { ended: "refused", why: "", init: null, result: null, report: "", exitCode: null, signal: null, calls: [], results: [], stderr: "" };
   const refuse = (why: string): SessionOutcome => ({ ...outcome, ended: "refused", why });
   const problem = pathsProblem(spec.paths, spec.uid);
   if (problem) return refuse(problem);
@@ -325,6 +327,8 @@ export async function runSession(spec: SessionSpec, deps: SessionDeps = REAL_DEP
       }
     } else if (ev.type === "result") {
       outcome.result = { subtype: ev.subtype, isError: ev.is_error, numTurns: ev.num_turns, totalCostUsd: ev.total_cost_usd, permissionDenials: ev.permission_denials, terminalReason: ev.terminal_reason };
+      // The result event's `result` is the session's final message text (its report). Kept for the gate and the PR body; other subtypes (a budget or turn error) carry none.
+      if (typeof ev.result === "string") outcome.report = ev.result;
     }
   };
   if (child.stdout) {

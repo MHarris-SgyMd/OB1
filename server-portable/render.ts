@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, PriorityTerm, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AgendaItem, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, PriorityTerm, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -36,7 +36,8 @@ import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type Cla
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
-import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { PlanContextResult, PlanGap } from "./core/plan.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -175,7 +176,7 @@ const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?:
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 /**
  * A result's priorities as a typed field (SMD-3668 PR 2): each item's kind, key, whether it is the result itself, its
- * effective priority, its stated level or the item it inherits from, its due time and the urgency it adds, overdue,
+ * effective priority, its stated level, the open item it read its level from or the item it inherits from, its due time and the urgency it adds, overdue,
  * unblocks, settled and waiting. The terms ride the text, as a term's maker is another key's name. Null when the
  * priorities were not read, and from a REST core older than this MCP server.
  *
@@ -189,6 +190,7 @@ const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
     kind: p.kind, ...(p.self && p.kind === "thought" ? {} : { key: p.key }), ...(p.self ? { self: true } : {}), effective: p.effective,
     ...(p.level !== null ? { level: p.level } : {}),
     ...(p.inheritedFrom ? { inheritedFrom: { kind: p.inheritedFrom.kind, key: p.inheritedFrom.key, level: p.inheritedFrom.level, hops: p.inheritedFrom.hops } } : {}),
+    ...(p.fromItem ? { fromItem: { key: p.fromItem.key, level: p.fromItem.level } } : {}),
     ...(p.dueAt !== null ? { dueAt: p.dueAt } : {}), ...(p.urgency !== 0 ? { urgency: p.urgency } : {}), ...(p.overdue ? { overdue: true } : {}),
     ...(p.unblocks !== 0 ? { unblocks: p.unblocks } : {}), ...(p.settled ? { settled: true } : {}),
     ...(p.waiting ? { waiting: true, ...(p.notBefore !== null ? { notBefore: p.notBefore } : {}) } : {}),
@@ -223,15 +225,19 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   // SMD-3668: the priority ranking's weight, floor and window; null with neither set. (A REST core older than this server
   // refuses the inputs this one always sends, as it does prefer_current's, so it never answers without the field.)
   priority: v.priority ?? null,
-  hits: v.hits.map((h) => ({
+  hits: v.hits.map(safeHit),
+});
+/** A search_thoughts hit's safe fields (and a plan_context knowledge hit's, SMD-2684): ids, times, scores, trust and its labels. */
+function safeHit(h: SearchHit) {
+  return {
     id: h.id, created_at: h.created_at, similarity: h.similarity, score: h.score, fused: h.fused,
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
     // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
     trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
     ...claimedFields(h), ...relationsFields(h),
     ...priorityFields(h),
-  })),
-});
+  };
+}
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
 const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
@@ -653,13 +659,15 @@ const thoughtCount = (n: number) => n > TEXT_PAGE ? `more than ${TEXT_PAGE} thou
  * the tool that matches any word — search_thoughts_keyword, which the compat
  * `search`'s caller may not have, so it is named there as the brain's.
  */
-function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts"): string {
+function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched"> & { reason?: string }, tool: "search" | "search_thoughts" | "plan_context"): string {
   // Its literals; then, those matching nothing, the query as one text; or nothing could be (review passes 4 and 5).
   const how = f.matched === "text"
     ? "the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning"
     : f.matched === "none"
       ? "nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text"
       : "the query was matched only by its identifiers and quoted spans, exactly — not by meaning";
+  // A caller's deadline (plan_context, SMD-2684 review pass 2) is no failure of the provider's: said as the deadline.
+  if (f.reason === "deadline") return `Semantic search was cut short: the embedding provider at ${f.base} did not answer within plan_context's deadline. So ${how}.`;
   return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how}. ` +
     `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
 }
@@ -667,6 +675,75 @@ function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched
 export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
   render(o.ok ? ok(fetchedMarked(o.value)) : o,
     (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), AS_JSON);
+
+/**
+ * search_thoughts' hit blocks, one a hit: its header, labels, who wrote it, its metadata one value a line, and its text
+ * fenced. Shared with plan_context's knowledge section (SMD-2684), so a hit reads the same in both.
+ */
+function hitBlocks(data: readonly SearchHit[], literal: string | null): string[] {
+  const onPage = new Map(data.map((t, i) => [t.id, `Result ${i + 1}`]));
+  return data.map(
+    (t, i) => {
+      const m = t.metadata || {};
+      // A keyword hit with no vector has no similarity to report; it is
+      // here because it contains the literal, and the header says which.
+      // Without a query vector (SMD-2891) every hit is one, whether or not it has a vector of its own.
+      const match = t.similarity == null ? (literal ? "exact match" : "exact match, no vector") : `${(t.similarity * 100).toFixed(1)}% match`;
+      const parts = [
+        `--- Result ${i + 1} (${match}) ---`,
+        // The id, so update_thought and delete_thought can be aimed at a hit
+        // the caller never captured — without it those two tools reach only
+        // what capture_thought just returned. In the header group and cased
+        // `ID:` to match search_thoughts_keyword, which prints the id the
+        // same way for the same block format. SMD-1248.
+        `ID: ${t.id}`,
+      ];
+      // 025: mark a hit a newer thought replaces, and name the replacement,
+      // so the reader is not left ranking a superseded version as current.
+      if (t.supersededBy) parts.push(`⚠ Superseded by a newer thought — ID ${t.supersededBy}`);
+      // 059: a row prefer_current demoted says by what and why.
+      const demotion = demotedLine(t);
+      if (demotion) parts.push(demotion);
+      // SMD-2540: the tickets it names that moved since it was written; a
+      // label, so the rank above is unchanged.
+      const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
+      if (moved) parts.push(`⚠ Moved since written: ${moved}`);
+      // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
+      const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+      if (held) parts.push(`⚠ Claimed: ${held}`);
+      // SMD-3668 PR 2: what matters, of itself and the tickets it names: a label; only priority_weight moves the rank.
+      const prio = priorityWords(t.priority, t.priorityMore ?? 0, t.priorityNotRead ?? 0);
+      if (prio) parts.push(`Priority: ${prio}`);
+      // SMD-2726: its judged relations — labels, so the rank above is unchanged; another hit named by its place.
+      const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
+      if (related) parts.push(`↔ Relations: ${related}`);
+      // SMD-1328: an undated row shows no Captured line rather than a
+      // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
+      const captured = displayDate(t.created_at);
+      parts.push(
+        ...(captured ? [`Captured: ${captured}`] : []),
+        `Type: ${metaText(m.type, TYPE_MAX) || "unknown"}`,
+      );
+      // SMD-1726: who wrote the current text, from the key (050); its own
+      // line, as every field of this block is — nothing parses `ID:`
+      // past the id, and nothing should start to.
+      const by = actorLine(m);
+      if (by) parts.push(by);
+      // SMD-1724: outside text says so, in the block, before the text.
+      const notice = ingestedNotice(m);
+      if (notice) parts.push(notice);
+      if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
+      // SMD-2510: each metadata value on its one line, as the text is fenced.
+      const topics = metaList(m.topics, TAG_MAX), people = metaList(m.people, TAG_MAX), actions = metaList(m.action_items, ACTION_MAX);
+      if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
+      if (people.length) parts.push(`People: ${people.join(", ")}`);
+      if (actions.length) parts.push(`Actions: ${actions.join("; ")}`);
+      // SMD-2483: the text fenced, so no line of it reads as this reply's own.
+      parts.push(`\n${fenceText(t.content)}`);
+      return parts.join("\n");
+    }
+  );
+}
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
   return render(o, (v) => {
@@ -697,68 +774,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }
 
-    const onPage = new Map(data.map((t, i) => [t.id, `Result ${i + 1}`]));
-    const results = data.map(
-      (t, i) => {
-        const m = t.metadata || {};
-        // A keyword hit with no vector has no similarity to report; it is
-        // here because it contains the literal, and the header says which.
-        // Without a query vector (SMD-2891) every hit is one, whether or not it has a vector of its own.
-        const match = t.similarity == null ? (literal ? "exact match" : "exact match, no vector") : `${(t.similarity * 100).toFixed(1)}% match`;
-        const parts = [
-          `--- Result ${i + 1} (${match}) ---`,
-          // The id, so update_thought and delete_thought can be aimed at a hit
-          // the caller never captured — without it those two tools reach only
-          // what capture_thought just returned. In the header group and cased
-          // `ID:` to match search_thoughts_keyword, which prints the id the
-          // same way for the same block format. SMD-1248.
-          `ID: ${t.id}`,
-        ];
-        // 025: mark a hit a newer thought replaces, and name the replacement,
-        // so the reader is not left ranking a superseded version as current.
-        if (t.supersededBy) parts.push(`⚠ Superseded by a newer thought — ID ${t.supersededBy}`);
-        // 059: a row prefer_current demoted says by what and why.
-        const demotion = demotedLine(t);
-        if (demotion) parts.push(demotion);
-        // SMD-2540: the tickets it names that moved since it was written; a
-        // label, so the rank above is unchanged.
-        const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
-        if (moved) parts.push(`⚠ Moved since written: ${moved}`);
-        // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
-        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
-        if (held) parts.push(`⚠ Claimed: ${held}`);
-        // SMD-3668 PR 2: what matters, of itself and the tickets it names: a label; only priority_weight moves the rank.
-        const prio = priorityWords(t.priority, t.priorityMore ?? 0, t.priorityNotRead ?? 0);
-        if (prio) parts.push(`Priority: ${prio}`);
-        // SMD-2726: its judged relations — labels, so the rank above is unchanged; another hit named by its place.
-        const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
-        if (related) parts.push(`↔ Relations: ${related}`);
-        // SMD-1328: an undated row shows no Captured line rather than a
-        // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
-        const captured = displayDate(t.created_at);
-        parts.push(
-          ...(captured ? [`Captured: ${captured}`] : []),
-          `Type: ${metaText(m.type, TYPE_MAX) || "unknown"}`,
-        );
-        // SMD-1726: who wrote the current text, from the key (050); its own
-        // line, as every field of this block is — nothing parses `ID:`
-        // past the id, and nothing should start to.
-        const by = actorLine(m);
-        if (by) parts.push(by);
-        // SMD-1724: outside text says so, in the block, before the text.
-        const notice = ingestedNotice(m);
-        if (notice) parts.push(notice);
-        if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
-        // SMD-2510: each metadata value on its one line, as the text is fenced.
-        const topics = metaList(m.topics, TAG_MAX), people = metaList(m.people, TAG_MAX), actions = metaList(m.action_items, ACTION_MAX);
-        if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
-        if (people.length) parts.push(`People: ${people.join(", ")}`);
-        if (actions.length) parts.push(`Actions: ${actions.join("; ")}`);
-        // SMD-2483: the text fenced, so no line of it reads as this reply's own.
-        parts.push(`\n${fenceText(t.content)}`);
-        return parts.join("\n");
-      }
-    );
+    const results = hitBlocks(data, literal);
 
     // What the query was taken to mean, from the first row (every row
     // carries the same three): which literals were searched for exactly —
@@ -2342,17 +2358,22 @@ export const renderItemHistory = (o: Outcome<ItemHistoryResult, ItemHistoryCode>
   ].join("\n"),
   itemRefusal, AS_JSON);
 
+/** The open item a thought's due time came from (migration 125), said after it. */
+const fromItem = (d: Record<string, unknown>) => (d.due_from === "from_items" ? ` (open item ${d.item ?? "?"})` : "");
 /** One of 122's terms behind an agenda item's place, in words. */
 const agendaTerm = (t: PriorityTerm): string => {
   const d = t.detail;
   if (t.term === "level") return levelText(Number(d.level));
+  // A thought's level read from an open item opened from it (migration 125, SMD-4149).
+  // A stated None is a statement, not an unknown (SMD-3668 PR 2's review pass 3).
+  if (t.term === "from_items") return `${Number(d.level) === 0 ? "stated " : ""}${levelText(Number(d.level))} from open item ${d.item ?? "?"}`;
   if (t.term === "inherited") {
     const f = d.from as { kind?: string; key?: string; level?: number; hops?: number } | undefined;
     return `inherited ${t.value} from ${f?.kind === "item" ? "open item" : f?.kind ?? "?"} ${f?.key ?? "?"} (${levelText(Number(f?.level))}, ${f?.hops} hop${f?.hops === 1 ? "" : "s"})`;
   }
   if (t.term === "unknown") return `no priority stated (read as ${t.value})`;
-  if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}`;
-  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}`;
+  if (t.term === "urgency") return `+${t.value} due ${typeof d.due_at === "string" ? dueText(d.due_at) : "soon"}${fromItem(d)}`;
+  if (t.term === "overdue") return `+${t.value} overdue, due ${typeof d.due_at === "string" ? dueText(d.due_at) : "?"}${fromItem(d)}`;
   if (t.term === "unblocks") return `+${t.value} unblocks ${d.count}`;
   return `${t.term} ${t.value}`;
 };
@@ -2368,9 +2389,9 @@ const PRIORITY_IN_TITLE = 2;
 const priorityWho = (p: PriorityOn) => (p.self ? (p.kind === "ticket" ? `this ticket's row (${p.key})` : "this thought") : `ticket ${p.key}`);
 /**
  * A result's prioritised items in words (SMD-3668 PR 2): each one's effective priority and the terms behind it, as the
- * agenda says them (the level stated or inherited, the urgency or overdue its due time adds, what it unblocks), and
- * whether it is settled (a finished ticket keeps its level, its urgency and unblocks dropped) or waiting. A title's say
- * the level and whether it is due or overdue, for the first two. The rest counted, the tickets not read counted. Null
+ * agenda says them (the level stated, read from an open item (SMD-4149) or inherited, the urgency or overdue its due
+ * time adds, what it unblocks), and whether it is settled (a finished ticket keeps its level, its urgency and unblocks
+ * dropped) or waiting. A title's say the level and whether it is due or overdue, for the first two. The rest counted, the tickets not read counted. Null
  * when there is nothing to say.
  */
 function priorityWords(priority: readonly PriorityOn[] | null | undefined, more = 0, notRead = 0, title = false): string | null {
@@ -2388,7 +2409,9 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
       const inherited = p.terms.find((t) => t.term === "inherited");
       // The inherited level after its hops, then the level it came from (review pass 1: "high (3) inherited from ticket SMD-1" read as SMD-1 High).
       const from = p.inheritedFrom;
-      const level = p.level !== null ? stated(p.level) : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
+      const level = p.level !== null ? stated(p.level)
+        : p.fromItem ? `${stated(p.fromItem.level)} from open item ${p.fromItem.key}`
+        : `${levelText(Number(inherited?.value))}, inherited from ${from ? `${levelText(from.level)} ${from.kind === "item" ? "open item" : from.kind} ${from.key}` : "?"}`;
       // What it unblocks, which orders it too (review pass 3: a High before an Urgent, the reason unshown).
       return `${priorityWho(p)} ${level}${p.overdue ? `, overdue${p.dueAt ? ` (due ${dueText(p.dueAt)})` : ""}` : p.urgency > 0 && p.dueAt ? `, due ${dueText(p.dueAt)}` : ""}${p.unblocks > 0 ? `, unblocks ${p.unblocks}` : ""}${state(p)}`;
     }
@@ -2397,6 +2420,20 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more` : ""}${unread ? ` (+${unread})` : ""}`;
   return title ? words : `${words}.`;
 }
+/** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
+function agendaLine(i: AgendaItem): string {
+  // A ticket's status is its board's word (124): quoted and cut, as a title is.
+  const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
+  const notes = [
+    i.overdue ? "OVERDUE" : null,
+    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
+    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
+    // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
+    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+  ].filter(Boolean);
+  return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
+}
+
 /**
  * The agenda (SMD-3669): one line an item — its place, what it is, its score and the terms behind it — then what was
  * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
@@ -2407,18 +2444,7 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
     ? ["Nothing on the agenda in this scope."]
     : [
         `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
-        ...v.items.map((i) => {
-          // A ticket's status is its board's word (124): quoted and cut, as a title is.
-          const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
-          const notes = [
-            i.overdue ? "OVERDUE" : null,
-            i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
-            i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
-            // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
-            i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
-          ].filter(Boolean);
-          return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
-        }),
+        ...v.items.map(agendaLine),
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
@@ -2429,6 +2455,79 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
 }, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
+
+/** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
+const gapWords = (g: PlanGap): string => {
+  switch (g.gap) {
+    case "no_knowledge": return "Nothing in the brain matched the request.";
+    case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
+    case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
+    case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
+    case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}.`;
+    case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
+    case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}; the hits name ${g.named} ticket${g.named === 1 ? "" : "s"}.`;
+  }
+};
+
+/**
+ * plan_context (SMD-2684): the request, then each section under its heading — the knowledge as search_thoughts' hit
+ * blocks (each text fenced), the board as agenda lines, the named tickets it does not rank, the sections not
+ * available here and why, the tools this key may call, and the gaps. Words from thoughts and the board are quoted or
+ * fenced, never a line of their own; the value keeps ids, keys, numbers and codes.
+ */
+export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => render(o, (v) => {
+  const k = v.knowledge;
+  const literal = k.vectorFailed ? literalOnlyNote(k.vectorFailed, "plan_context") : null;
+  const out: string[] = [`Plan context for ${quoted(v.request, 200)}. The brain hands over what it holds; the plan and the judgement are yours.`];
+  // A text match has no ranking for current work (review pass 2): newest first.
+  const order = k.vectorFailed?.matched === "text" ? "newest first, matched as one text" : "current work ranked first";
+  out.push(`\n## Knowledge: ${k.hits.length} hit${k.hits.length === 1 ? "" : "s"}, ${order}${literal ? ` (${literal})` : ""}`);
+  if (k.hits.length) {
+    const notes: string[] = [];
+    if (k.hits.some((t) => (t.claimed?.length ?? 0) > 0)) notes.push(CLAIMED_KEY);
+    if (k.hits.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
+    if (k.hits.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
+    if (k.hits.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
+    if (anyStale(k.hits)) notes.push(STALE_KEY);
+    out.push(...notes, "", hitBlocks(k.hits, literal).join("\n\n"));
+  }
+  const b = v.board;
+  out.push("\n## Board: the tickets the hits name");
+  if (!b.available) out.push(b.reason === "deadline" ? "Not read: it ran out of time." : b.reason === "no_keys_scope" ? "Not available here: this brain's agenda predates migration 126." : "Not read: the agenda's read failed (the server's log says why).");
+  else if (!b.tickets.length && !b.others.length && !b.waiting.length) out.push(b.claimsRead === null ? "The hits name no ticket." : "The hits name no ticket this brain holds.");
+  else {
+    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map(agendaLine));
+    if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`));
+    if (b.others.length) out.push(`Not ranked (${b.others.length}):`, ...b.others.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)}${t.settled ? " — settled: finished, or not to be done" : " — a status type this brain does not know"}`));
+    out.push(b.boardSync ? `Board-sync last stamped ${b.boardSync.at}${typeof b.boardSync.outcome === "string" ? `, its last pass ${quoted(b.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
+    if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
+    else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
+  }
+  out.push(`\n## Specs and deliverables: not available here (${v.specs.reason}; waits on ${v.specs.waitsOn.join(", ")}).`);
+  out.push(`## Procedures: not available here (${v.procedures.reason}; waits on ${v.procedures.waitsOn.join(", ")}).`);
+  const t = v.tools;
+  out.push(`\n## Tools this key may call (scope ${t.scope})`, `Core: ${t.core.join(", ") || "none"}.`,
+    t.plugins === null ? "Plugins: the plugin list could not be read." : `Plugins: ${t.plugins.join(", ") || "none enabled for this scope"}.`,
+    "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
+  // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
+  out.push("\n## Gaps", ...(v.gaps.length ? v.gaps.map((g) => `- ${gapWords(g)}`) : ["- None found. How close the hits are to the request is each hit's match; weigh them before relying on them."]));
+  return out.join("\n");
+}, (r) => searchRefusal(r), (v) => ({
+  knowledge: { preferCurrent: v.knowledge.preferCurrent, ...(v.knowledge.vectorFailed ? { vectorFailed: v.knowledge.vectorFailed.reason } : {}), hits: v.knowledge.hits.map(safeHit) },
+  board: v.board.available
+    ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,
+        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, level: i.level, overdue: i.overdue, unblocks: i.unblocks,
+                                              blockers: i.blockers.filter((x) => TOKEN.test(x)), claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+        // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
+        others: v.board.others.map((x) => ({ key: x.key, statusType: x.statusType, settled: x.settled })),
+        waiting: v.board.waiting.map((x) => ({ key: x.key, notBefore: x.notBefore })) }
+    : { available: false, reason: v.board.reason },
+  specs: { available: false, waitsOn: v.specs.waitsOn },
+  procedures: { available: false, waitsOn: v.procedures.waitsOn },
+  tools: { scope: v.tools.scope, core: v.tools.core, plugins: v.tools.plugins },
+  gaps: v.gaps,
+  deadlineMs: v.deadlineMs,
+}));
 
 export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Reply => render(o, (v) =>
   v.items.length === 0 ? "No items match."
