@@ -7099,13 +7099,14 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   {
     const { readdirSync, readFileSync } = await import("node:fs");
     const migDir = new URL("../db/migrations/", import.meta.url);
-    const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1)!;
-    const body = /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))![1];
-    const d = JSON.parse(body) as Record<string, number>;
-    const span = Math.round((Math.max(5, d.unknown) + Math.max(d.soon, d.week, d.overdue) + Math.max(d.unblocks_one, d.unblocks_many)) * 1000) / 1000;
+    const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1);
+    // A defaults function of another shape fails this row, not the suite (review pass 4).
+    const literal = definer ? /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))?.[1] : undefined;
+    let span = NaN;
+    try { const d = JSON.parse(literal ?? "") as Record<string, number>; span = Math.round((Math.max(5, d.unknown) + Math.max(d.soon, d.week, d.overdue) + Math.max(d.unblocks_one, d.unblocks_many)) * 1000) / 1000; } catch { span = NaN; }
     const described = readFileSync(new URL("./core/schemas.ts", import.meta.url), "utf8");
     assert(span === SPAN && described.includes(`(ob1_priority_span, ${SPAN})`),
-      `the span ${definer}'s defaults allow is this suite's ${SPAN}, and the search description says it (${span})`);
+      `the span ${definer ?? "no migration"}'s defaults allow is this suite's ${SPAN}, and the search description says it (${literal === undefined ? "its defaults read as no jsonb literal: teach this row their shape" : span})`);
   }
   const { priorityNote } = await import("./render.ts");
   const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
@@ -7123,6 +7124,8 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   // would pass only the third at 0.9 (0.365 over 0.350, under b's 0.375).
   const within = { a: { effective: 3, known: true }, b: { effective: 3, known: true }, c: { effective: 3, known: true }, d: { effective: 3.4, known: true } };
   const over9 = rankByPriority(rows, within, 0.9, null, 4, 9).map((r) => r.id).join("");
+  const badSpan = [0, -1, NaN, Infinity].map((s) => { try { rankByPriority(rows, within, 0.5, null, 4, s); return "ranked"; } catch { return "refused"; } });
+  assert(badSpan.every((r) => r === "refused"), `a span that is no positive number is refused, never ranked by (${badSpan.join(", ")})`);
   assert(order(0.9, null, 4, within) === "adbc" && order(0.7, null, 4, within) === "abcd" && over9 === "abdc",
     `a tenth of a level within one level moves a row at a high weight and not at a lower one; the span given is the one divided by (${order(0.9, null, 4, within)}, ${order(0.7, null, 4, within)}; over 9 ${over9})`);
   // Relevance is place, not score (review pass 2): a text match and a literal-only query's rows without the literal all
@@ -7145,9 +7148,11 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const { searchHint, priorityHint } = await import("./render.ts");
   const hintW = searchHint({ priority_weight: 0.5 }), hintM = searchHint({ min_priority: 3 }), hintNone = searchHint({ priority_weight: 0 });
   assert(/migration 128/.test(hintW?.("function ob1_priority_span() does not exist") ?? "")
-      && /EXECUTE is PUBLIC's/.test(hintW?.("permission denied for function ob1_priority_span") ?? "")
       && /min_priority/.test(hintM?.("permission denied for function ob1_priority_defaults") ?? "")
       && /re-apply every migration/.test(hintW?.("ob1_priority_span answered no span this server reads") ?? "")
+      && /re-apply every migration/.test(hintM?.("ob1_priority_defaults() lacks weight(s): overdue; re-apply every migration so the last to define it stands") ?? "")
+      && /missing or lacks a weight/.test(hintW?.("function ob1_priority_defaults() does not exist") ?? "")
+      && /default privileges/.test(hintW?.("permission denied for function ob1_priority_span") ?? "")
       && /migration 122/.test(hintW?.("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") ?? "")
       && /grants migrations 116, 117 and 122 add/.test(hintM?.("permission denied for table priority_assertions") ?? "")
       && hintNone === undefined && priorityHint("some other fault") === "",

@@ -105,8 +105,12 @@ RETURNS numeric
 LANGUAGE sql
 STABLE
 AS $$
-  SELECT greatest(5, (d->>'unknown')::numeric) + greatest((d->>'soon')::numeric, (d->>'week')::numeric, (d->>'overdue')::numeric)
-           + greatest((d->>'unblocks_one')::numeric, (d->>'unblocks_many')::numeric)
+  -- NULL when a weight it reads is missing (greatest() would skip it and
+  -- answer a plausible number): the server refuses a span that is no number.
+  SELECT CASE WHEN (SELECT bool_and(d->k IS NOT NULL AND d->k <> 'null'::jsonb)
+                      FROM unnest(ARRAY['unknown', 'soon', 'week', 'overdue', 'unblocks_one', 'unblocks_many']) k)
+              THEN greatest(5, (d->>'unknown')::numeric) + greatest((d->>'soon')::numeric, (d->>'week')::numeric, (d->>'overdue')::numeric)
+                   + greatest((d->>'unblocks_one')::numeric, (d->>'unblocks_many')::numeric) END
     FROM ob1_priority_defaults() d
 $$;
 COMMENT ON FUNCTION ob1_priority_span() IS
@@ -174,6 +178,17 @@ BEGIN
                           ERRCODE = 'invalid_parameter_value';
   END IF;
   v_w := c_defaults || COALESCE(p_weights, '{}');
+  -- Every weight the read uses, present: ob1_priority_defaults() is replaced
+  -- alone, and a name it lost (a retune writing "overdu") would read NULL
+  -- and every effective number with it, with no error (review pass 4).
+  SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM unnest(ARRAY['unknown', 'hop', 'hops', 'soon', 'soon_days', 'week', 'week_days', 'overdue',
+                      'unblocks_one', 'unblocks_many', 'unblocks_many_at', 'depth', 'cap', 'count_inferred']) k
+   WHERE v_w->k IS NULL OR v_w->k = 'null'::jsonb;
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION USING MESSAGE = format('ob1_priority_defaults() lacks weight(s): %s; re-apply every migration so the last to define it stands', v_bad),
+                          ERRCODE = 'data_exception';
+  END IF;
   SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
     FROM jsonb_each(v_w) e(k, v)
    WHERE CASE

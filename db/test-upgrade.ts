@@ -734,7 +734,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // ([20bq]); 127 replaces effective_priority's default weights, level
   // first, refusing by name without 125 ([20br]); 128 moves its default
   // weights into ob1_priority_defaults and adds ob1_priority_span, refusing by
-  // name without 127 ([20bs]) — all recorded by the
+  // name without effective_priority or 125's helpers ([20bs]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).

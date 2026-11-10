@@ -589,7 +589,9 @@ export function priorityHint(msg: string): string {
   return /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight reads the brain's scale, ob1_priority_span, migration 128 (db/migrations/128_priority_defaults.sql), which is not applied; search without it meanwhile"
     : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
-    ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), whose EXECUTE is PUBLIC's as 128 made it; a hand-made REVOKE took it from the server's role, so grant it back; search without them meanwhile"
+    ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), which 128 leaves to PUBLIC's EXECUTE: the database's default privileges or a REVOKE took it from the server's role, so grant EXECUTE on both to it (migrate.ts --grant does not); search without them meanwhile"
+    : /ob1_priority_defaults/.test(msg) && /does not exist|could not find|lacks weight/i.test(msg)
+    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128), which is missing or lacks a weight; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
     : /ob1_priority_span answered no span/.test(msg)
     ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without priority_weight meanwhile"
     : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)

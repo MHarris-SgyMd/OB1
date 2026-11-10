@@ -688,6 +688,8 @@ export const priorityResult = (all: Record<string, PriorityHit> | null, id: stri
  * search's own, ties and all; and the fusion scores bunch (the 40th about 0.6 of the first), which place does not.
  */
 export function rankByPriority<T extends { id: string }>(rows: readonly T[], prio: Record<string, MatchPriority>, weight: number, min: number | null, limit: number, span: number): T[] {
+  // A span that is no positive number would make every score NaN and the order the engine's (review pass 4).
+  if (!(span > 0) || !Number.isFinite(span)) throw new Error(`rankByPriority needs a positive span; got ${span}`);
   const n = rows.length;
   const priority = (r: T) => Math.min(1, Math.max(0, prio[r.id]?.effective ?? 0) / span);
   const scored = rows.map((r, i) => ({ r, i, s: (1 - weight) * ((n - i) / n) + weight * priority(r) }));
