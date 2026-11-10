@@ -86,7 +86,11 @@
  * when the database is back. Its start waits the same way, every statement
  * up to the first claim but --retry-failed's, the worker key's lookup
  * included (SMD-2752). A run
- * without --follow still exits 1 on it.
+ * without --follow still exits 1 on it. Any other database error at a pair's
+ * write is read as extract-entities.ts's is (SMD-2636 PR 4): the end ends the
+ * follower, its row failed, the error thrown; a moment's sends the thought
+ * back unrecorded, its proposals written so far standing, and stops that
+ * worker; any other is the thought's, recorded failed.
  * It outlasts the provider going away too, by extract-entities.ts's rules.
  * Three things are outages:
  *   - a transient error past the pauses;
@@ -173,7 +177,7 @@ import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probedFault, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probedFault, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -2206,6 +2210,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // for the database before its next pass (SMD-2599).
                 if (FOLLOW && databaseUnavailable(e)) {
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
+                  return;
+                }
+                // Any other database error at a pair's write is read as re-embed's and extract's are (followClassify,
+                // SMD-2636 PR 4): the end ends the follower, its row failed, the error thrown for the sleep scheduler's
+                // budget; a moment's sends the thought back unrecorded, its proposals written so far standing, and
+                // stops this worker; any other is the thought's, recorded failed below. Before, every one was the thought's.
+                const dbVerdict = FOLLOW ? followClassify(e) : null;
+                if (dbVerdict === "db-end") throw e;
+                if (dbVerdict === "db-moment") {
+                  err(`  ${workerId}: the write met the database's moment (${(e as Error).message.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
                   return;
                 }
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);

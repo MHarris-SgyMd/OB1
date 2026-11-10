@@ -444,7 +444,8 @@ export function followClassify(e: unknown): FollowVerdict {
  * - `probe`: a deadline with no answer, or a 4xx or a redirect no rule reads (a 401, 402 or 403, a 404 naming no
  *   model, a 400 neither the thought's length nor the request's shape): the probe's answer decides (`probedFault`);
  * - `thought`: the error names the thought — its length, the egress gate's refusal of it — or is a database error at
- *   write time (the caller reads one not answering first; PR 4 reads the rest), recorded failed;
+ *   write time that followClassify calls the thought's (a function's guard, the thought's data), recorded failed; the
+ *   caller reads a database not answering, its end and its moment first (SMD-2636 PR 4);
  * - `fatal`: the request's shape refused (`requestFault`: a 400 naming a field every call sends whose refusal the
  *   probe's one-token call does not meet — a response_format or a reasoning_effort it does not send, an answer budget
  *   it asks one token of — so the probe would answer and read it the thought's, failing the pool row by row); a 402

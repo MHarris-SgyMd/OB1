@@ -103,7 +103,14 @@
  * first claim but an operator's --retry-* — the worker key's lookup too,
  * which would otherwise go on unattributed — since the sleep scheduler starts
  * a follower at every sleep (SMD-2752). A run without --follow still exits 1
- * on it.
+ * on it. Any other database error at a thought's write is read as re-embed's
+ * is (worker-bootstrap.ts's followClassify, SMD-2636 PR 4): a privilege or a
+ * function gone, or a statement cancelled or past its statement_timeout, ends
+ * the follower, its row failed, the error thrown for the sleep scheduler's
+ * budget; a deadlock, a lock not available, resources or a read-only
+ * transaction sends the thought back unrecorded and stops that worker; any
+ * other — a function's own guard, the thought's data — is the thought's,
+ * recorded failed.
  *
  * It outlasts the provider going away too. Three things are outages:
  *   - a rate limit, a server error, a 408 or a lost connection still failing
@@ -201,7 +208,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -1723,6 +1730,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // for the database before its next pass (SMD-2599).
                 if (FOLLOW && databaseUnavailable(e)) {
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
+                  return;
+                }
+                // Any other database error at the write is read as re-embed's is (followClassify, SMD-2636 PR 4):
+                // the end — a privilege or a function gone, a statement cancelled or past its statement_timeout —
+                // ends the follower, its row failed, the error thrown for the sleep scheduler's budget to read; a
+                // moment's — a deadlock, a lock not available, resources, a read-only transaction — sends the thought
+                // back unrecorded and stops this worker; any other — a function's own guard, the thought's data — is
+                // the thought's, recorded failed below (`fault` reads it so). Before, every one was the thought's.
+                const dbVerdict = FOLLOW ? followClassify(e) : null;
+                if (dbVerdict === "db-end") throw e;
+                if (dbVerdict === "db-moment") {
+                  err(`  ${workerId}: the write met the database's moment (${(e as Error).message.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
                   return;
                 }
                 const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
