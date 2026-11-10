@@ -3978,7 +3978,8 @@ said and a stop cancelling it, the budget set back as it ends, for the mark
 after it and the claims; unwatched (its watching connection refused, as at a
 role's connection limit) it keeps the budget, and a session with no
 statement_timeout leaves a role's or the database's own to bound it. One over a
-thought is the thought's or the poll's, as a claim pass's is (review pass 6):
+thought is the thought's or the poll's, as a claim pass's was until SMD-2636
+PR 4, which holds a claim pass instead (review pass 6):
 its own write past it fails the thought, for `--retry-failed`; its claim, its
 read, a put-back or set-back, its release or its answer's window costs the run
 its poll, counted and said once, naming the statement, what it holds going back,
@@ -5134,10 +5135,11 @@ the row's outcome failed, `holds` naming the pass with why `statement` and no
 time; the other passes go on, and the period ends once they drain. A held
 pass begins no period and starts in none, so the scan that timed out is not
 run again on its own; a one-shot run with one exits 1. A statement past its
-timeout inside a thought's own processing holds the pass the same way, since
-every pass the scheduler runs follows (re-embed's since SMD-2679, extract's and
-consolidate's since SMD-2636 PR 4; a one-shot run records it the thought's
-failure), and so does one on a claim. The cost: a thought whose own write
+timeout in a claim pass's thought — at its claim or in its processing — holds
+that pass the same way, each following under the scheduler (re-embed's since
+SMD-2679, extract's and consolidate's since SMD-2636 PR 4; a one-shot run
+records it the thought's failure); the subject sweep records the thought failed
+instead, and one at its claim costs it the poll. The cost: a thought whose own write
 always runs past the timeout holds its pass at every restart, never recorded,
 so no --retry-failed or acceptance clears it — the hold's remedy names a scan. An operator's
 `pg_cancel_backend` is 57014 too ("user request"): no budget's, it ends the

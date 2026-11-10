@@ -6221,6 +6221,11 @@ if (want("10")) {
       timedCode = await timed;
     } finally {
       clearTimeout(backstop2);
+      if (timedCode === -1) {
+        ac2.abort();
+        // Thrown before the one-shot row: its trigger is dropped here too (review pass 2).
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_extract_write_error ON thought_entities; DROP FUNCTION IF EXISTS zz_extract_write_error()`);
+      }
     }
     const timedBeat = await beatOf();
     const timedRow = await statusOf(timeout);
@@ -11142,7 +11147,7 @@ if (want("10h")) {
          WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}
            AND (${event}::text IS NULL OR wait_event = ${event}::text)`) as { n: number }[])[0].n > 0;
 
-      // A statement past a scheduler's budget over a thought is the thought's or the poll's, as a claim pass's is, not the
+      // A statement past a scheduler's budget over a thought is the thought's or the poll's, as a claim pass's was until SMD-2636 PR 4, not the
       // run's, which sleep read as its budget's (review pass 6, run-it). A thought's own write — the door's write of a
       // key, the finish of one named nothing, each waiting on the door's lock on the thought, which the case holds —
       // fails that thought, said once, and the run goes on, each answer judged as a failed one's is.
@@ -17466,6 +17471,11 @@ if (want("16")) {
       timedCode = await timed;
     } finally {
       clearTimeout(backstop2);
+      if (timedCode === -1) {
+        ac2.abort();
+        // Thrown before the one-shot row: its trigger is dropped here too (review pass 2).
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_consolidate_write_error ON thought_facets; DROP FUNCTION IF EXISTS zz_consolidate_write_error()`);
+      }
     }
     const timedBeat = await beatOf();
     const timedRow = await statusOf(timeout);

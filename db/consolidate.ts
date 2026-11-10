@@ -2223,7 +2223,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // SMD-2636 PR 4): the end ends the follower, its row failed, the error thrown for the sleep scheduler's
                 // budget; a moment's sends the thought back unrecorded, its proposals written so far standing, and
                 // stops this worker; any other is the thought's, recorded failed below. Before, every one was the thought's.
-                // Not past the hard stop, which abandons the thought below: a write it cancelled is no end (review pass 1).
+                // Not past the hard stop, which abandons the thought below: a write cancelled with it — the sleep
+                // scheduler's migration stop hard-stops the passes and cancels their statements waiting on a lock,
+                // 57014 — is no end (review pass 1).
                 const dbVerdict = FOLLOW && !hardStopped ? followClassify(e) : null;
                 if (dbVerdict === "db-end") throw e;
                 if (dbVerdict === "db-moment") {

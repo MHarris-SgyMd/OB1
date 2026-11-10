@@ -329,11 +329,13 @@
  * its pool as it stands, a newer thought's neighbours not all extracted;
  * consolidation held, extraction parked behind it resumes at once and never
  * joins past it. A changed setting needs the coordinator recreated, which is
- * the restart. An operator's pg_cancel_backend is 57014
- * too, "user request": no budget's, it ends the scheduler as a pass that
- * throws does. One in a thought's own processing holds the pass the same
- * way, every pass here following (re-embed's since SMD-2679, extract's and
- * consolidate's since SMD-2636 PR 4), and so does one on a claim.
+ * the restart. A statement timeout in a claim pass's thought — at its
+ * claim or in its processing — holds that pass the same way (re-embed's
+ * since SMD-2679, extract's and consolidate's since SMD-2636 PR 4); the
+ * subject sweep records the thought failed instead, and one at its claim
+ * costs it the poll (subject-sweep.ts's overBudget, lostPoll). An
+ * operator's pg_cancel_backend is 57014 too, "user request": no budget's,
+ * it ends the scheduler as a pass that throws does, wherever it lands.
  * The settings go out as startup parameters, which a transaction pooler —
  * PgBouncer, a managed host's pooled endpoint — refuses: the scheduler
  * connects to Postgres directly, as the compose stack's does. The worker

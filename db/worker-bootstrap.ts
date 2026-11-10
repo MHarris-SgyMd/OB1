@@ -308,10 +308,12 @@ export function lookupOutage(e: unknown): boolean {
  * Whether a database error is one no wait mends (SMD-2599, review pass 4):
  * a statement or object the server refuses — SQLSTATE class 42 (a function
  * or table missing, a privilege revoked) or 28 (authorization) — or a
- * database or schema that does not exist (3D000, 3F000). A follower's worker
- * ends the run on one of these, as the pass's own errors do; anything else
- * not databaseUnavailable's — a statement or lock timeout, out of memory or
- * disk, a serialization failure — costs that worker its poll, as before.
+ * database or schema that does not exist (3D000, 3F000). followClassify's
+ * `db-end` is these and a statement cancelled or past its timeout (57014), a
+ * feature the server lacks (0A000) or the database dropped (57P04): every
+ * follower ends on `db-end` at a claim or a thought's processing (re-embed's
+ * since SMD-2679, extract's and consolidate's since SMD-2636 PR 4, whose
+ * claims read this alone before, a claim's timeout costing the poll).
  */
 export function databasePermanent(e: unknown): boolean {
   const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
