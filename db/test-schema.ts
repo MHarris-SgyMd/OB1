@@ -19053,6 +19053,85 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 }
 
+console.log("\n[117] Migration 131: a thought serves every ticket of its subject set — ob1_item_serves returns each standing ticket subject, distinct, in key order, a filed ticket still serving alone and a subject of another kind none; effective_priority inherits from the best of them; 122's other arms as they were; a re-apply a no-op (SMD-3306)");
+{
+  const file = files.find((f) => /^\d{3}_item_serves_subject_set\.sql$/.test(f)) ?? "no NNN_item_serves_subject_set.sql";  // by name: renumbered when main takes its number
+  // [109] re-applied 122's ob1_item_serves, which 131 replaces: this section holds 131's.
+  await reapply(file.slice(0, 4));
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[117]%'`);
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('serves-op', 'operator') ON CONFLICT DO NOTHING`);
+  const OP = { name: "serves-op", scope: "write" };
+
+  // The shape: 131 the last definer, the sentinel, the comment naming both migrations.
+  const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_item_serves(text, text)'::regprocedure`)).s);
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_item_serves(text, text)"])).c ?? "";
+  assert((await functionsNamed("ob1_item_serves")) === 1 && lastDefinerOf("ob1_item_serves") === file && /ob1:serves-subject-set/.test(src) && !/LIMIT 1/.test(src)
+         && /Migrations 122, 131 \/ SMD-3667, SMD-3306/.test(comment),
+    `one ob1_item_serves, ${file} its last definer, its sentinel and no LIMIT 1, its comment naming 122 and 131 (${comment.slice(-60)})`);
+
+  const thought = async (content: string, metadata: object | null = null) =>
+    (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`, [`[117] ${content}`, metadata === null ? null : JSON.stringify(metadata)])).id;
+  const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
+  const sets = async (id: string, keys: string[]) =>
+    (await one<{ r: { action: string } }>(`SELECT record_thought_subjects($1::uuid, $2::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL, $3, NULL) AS r`, [id, keys, await fp(id)])).r;
+  const serves = async (id: string) => (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('thought', $1)`, [id])).map((r) => `${r.kind}:${r.key}`).join(",");
+
+  // A session on two tickets, and a phrase beside them: both tickets served, in key order, the phrase none. The lesser
+  // key's facet is written first, so a read of one subject in scan order would serve it alone.
+  const session = await thought("a session on two tickets");
+  await sets(session, ["ticket:SMD-91701", "ticket:SMD-91702", "phrase:a release cut"]);
+  const two = await serves(session);
+  // A ticket filed under: it alone, whatever subjects stand (the metadata rule writes it alone; a raw set beside it
+  // here, to show the filed ticket wins).
+  const filed = await thought("filed under its ticket", { ticket: "SMD-91709" });
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'subject', $2::jsonb)`, [filed, JSON.stringify({ key: "ticket:SMD-91708", by: "model", judge_key: "subject:qwen3.8:27b@p3r" })]);
+  const alone = await serves(filed);
+  // No ticket subject: nothing.
+  const phrased = await thought("a phrase alone");
+  await sets(phrased, ["phrase:a phrase alone"]);
+  const none = await serves(phrased);
+  assert(two === "ticket:SMD-91701,ticket:SMD-91702" && alone === "ticket:SMD-91709" && none === "",
+    `a thought serves each ticket of its set, in key order, a phrase none; a filed ticket alone; no ticket subject, nothing (${two} | ${alone} | ${none || "none"})`);
+
+  // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
+  // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
+  const put = async (key: string, level: number) => {
+    const r = (await one<{ r: { outcome: string } }>(`SELECT assert_priority('ticket', $1, $2, NULL, NULL, NULL, NULL, NULL, false, $3::jsonb) AS r`, [key, level, JSON.stringify(OP)])).r;
+    if (r.outcome !== "asserted") throw new Error(`[117] fixture: assert_priority on ${key} answered ${JSON.stringify(r)}`);
+  };
+  // The two tickets as board-sync writes them ([109]'s way): a source row each, open.
+  for (const issue of ["SMD-91701", "SMD-91702"]) {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
+        [`[117] ${issue}`, JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, `[117] ${issue}`]);
+  }
+  await put("SMD-91701", 3);
+  await put("SMD-91702", 4);
+  type Eff = { level: number | null; inherited_from: { kind: string; key: string; level: number; hops: number } | null; effective: string };
+  const effOf = async (id: string) => (await one<Eff>(`SELECT level, inherited_from, effective FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`, [JSON.stringify([{ kind: "thought", key: id }]), NOW]));
+  const inherited = await effOf(session);
+  assert(inherited.inherited_from?.key === "SMD-91702" && inherited.inherited_from.level === 4 && inherited.inherited_from.hops === 1,
+    `effective_priority inherits from the best ticket of the set, the Urgent one a hop away (${JSON.stringify(inherited.inherited_from)}; effective ${inherited.effective})`);
+
+  // 122's other arms: a ticket's parent, an item's origin thought — answered as before.
+  const parentArm = (await q<{ key: string }>(`SELECT key FROM ob1_item_serves('ticket', 'SMD-91799')`)).length;
+  const itemArm = (await q<{ key: string }>(`SELECT key FROM ob1_item_serves('item', '00000000-0000-4000-8000-000000009170')`)).length;
+  assert(parentArm === 0 && itemArm === 0, `a ticket with no parent link and an item that does not exist serve nothing, as under 122 (${parentArm}, ${itemArm})`);
+
+  // Re-applied, 131 changes nothing.
+  await reapply(file.slice(0, 4));
+  assert((await serves(session)) === two && (await functionsNamed("ob1_item_serves")) === 1, "131 applied again changes nothing");
+
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[117]%'`);
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).

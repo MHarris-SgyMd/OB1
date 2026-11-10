@@ -180,8 +180,8 @@
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
  * With its entities, each thought's own subject is recorded when a rule finds
  * it: the ticket it is filed under, else a session summary's header ticket
- * its prompts name (server-portable/subject.ts), through migration 111's
- * record_thought_subject at the text the claim read. No model is asked for
+ * its prompts name (server-portable/subject.ts), through migration 130's
+ * record_thought_subjects at the text the claim read. No model is asked for
  * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts),
  * from migration 113's pool, into which its first run puts every thought with
  * no current subject and the trigger each new or edited one: thoughts
@@ -1340,10 +1340,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * The thought's own subject by the rules (SMD-3306), recorded once its
    * entities are: the ticket it is filed under, else a session summary's
    * header ticket its prompts name (subject.ts's ruleSubject), each under its
-   * rule's key, at the text the claim read; record_thought_subject refuses a
-   * text that moved since, and since 113 a ticket that did. No model is asked
+   * rule's key, at the text the claim read; record_thought_subjects (130)
+   * refuses a text that moved since, and a ticket that did. No model is asked
    * here: a thought no rule keys is --subjects' (db/subject-sweep.ts). A
-   * courtesy, as the kept windows are: a brain before 111, or a role without
+   * courtesy, as the kept windows are: a brain before 130, or a role without
    * its door's grants, records none and says so once; another error is said
    * once, and the thought's entities stand.
    */
@@ -1355,8 +1355,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const found = ruleSubject(row);
     if (!found) return;
     try {
-      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
-      if (w.action === "added" || w.action === "replaced") subjects.recorded++;
+      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, [found.key], found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
+      // `closed`: a set narrowed to the rule's key (130), as recorded as a replacement.
+      if (w.action === "added" || w.action === "replaced" || w.action === "closed") subjects.recorded++;
       else if (w.action === "kept") subjects.kept++;
     } catch (e) {
       const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
@@ -1364,7 +1365,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // Read after the call: every worker in hand may try at once.
         if (!subjecting) return;
         subjecting = false;
-        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own ${DOOR_GRANTS}; a running follower takes it up once restarted`);
+        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 130's record_thought_subjects, and for a role of its own ${DOOR_GRANTS}; a running follower takes it up once restarted`);
         return;
       }
       if (saidSubject.passing) return;

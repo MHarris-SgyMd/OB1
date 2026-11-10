@@ -739,12 +739,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // key, statistics on a facet's key, a set door, a set close and the
   // threads' locks in key order — and redefines 113's two doors as sets of
   // one and 120's trigger function, refusing by name without 111, 113 or 120
-  // ([20bt]) — all recorded by the
+  // ([20bt]); 131 redefines 122's ob1_item_serves, a thought serving every
+  // ticket of its subject set, refusing by name without 122 or 130 ([20bu]) —
+  // all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 100, `030 is among the last one hundred migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 101, `030 is among the last one hundred and one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5908,6 +5910,53 @@ console.log("\n[20bt] Migration 130: refused by name without 111, 113 or 120; on
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the130 });
   assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === rowsAfter,
     "a re-apply is a no-op: every facet, edge, lineage row and thought as it was");
+  await sql.close();
+}
+
+console.log("\n[20bu] Migration 131: refused by name without 122 or 130; onto a populated brain at the file before it — the facets, lineage and thoughts as they were; after it a thought holding a set of two ticket subjects serves both, a filed ticket alone; a re-apply a no-op (SMD-3306)");
+{
+  const the131 = MIGRATIONS.find((f) => f.endsWith("_item_serves_subject_set.sql"))!;  // by name: renumbered when main takes its number
+  const the130 = MIGRATIONS.find((f) => f.endsWith("_subject_sets.sql"))!;
+  // Each prerequisite in turn, the first missing named.
+  for (const [only, needs] of [
+    [(f: string) => f < "122", "migration 131 needs 122 (ob1_item_serves); this schema lacks it"],
+    [(f: string) => f < the130, "migration 131 needs 130 (record_thought_subjects); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `131 on a schema stopped before its prerequisite is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the131 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const capture = async (i: number, metadata: Record<string, unknown> = {}) =>
+    ((await sql`SELECT upsert_thought(${`upgrade 131: a session note, the ${i}th`}::text, ${{ metadata: { source: "mcp", ...metadata }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id;
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const sets = async (id: string, keys: string[]) =>
+    sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL::uuid, ${await fpOf(id)}::text, NULL::jsonb)`;
+  const serves = async (id: string) => ((await sql`SELECT kind, key FROM ob1_item_serves('thought', ${id})`) as { kind: string; key: string }[]).map((r) => `${r.kind}:${r.key}`).join(",");
+  // A brain at the file before: a thought holding a set of two ticket subjects, and one filed under a ticket.
+  const session = await capture(0), filed = await capture(1, { ticket: "SMD-3421" });
+  await sets(session, ["ticket:SMD-3420", "ticket:SMD-3422"]);
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe FROM derivations ORDER BY id`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const facetsBefore = await facets(), lineageBefore = await lineage(), before = await rows();
+  const servedBefore = await serves(session);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 });
+
+  const servedAfter = await serves(session), filedAfter = await serves(filed);
+  assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before
+         && servedBefore.split(",").length === 1 && servedAfter === "ticket:SMD-3420,ticket:SMD-3422" && filedAfter === "ticket:SMD-3421",
+    `the file moves nothing it finds; before it the set's thought served one of its tickets (${servedBefore}), after it both (${servedAfter}), the filed one its ticket alone (${filedAfter})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 });
+  assert((await serves(session)) === servedAfter && (await facets()) === facetsBefore, "a re-apply is a no-op");
   await sql.close();
 }
 

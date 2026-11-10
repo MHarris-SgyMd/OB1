@@ -8330,7 +8330,7 @@ if (want("10h")) {
 
     // Version 1's subjects found again (SMD-3306 PR 3): a version's change is a pool's, so the sweep pools every thought
     // with no current subject again, their finished claims reopened, and the door replaces each under the current key.
-    // An out-of-date one the model now names nothing for is closed through close_thought_subject, being the one read at
+    // An out-of-date one the model now names nothing for is closed through close_thought_subjects, being the set read at
     // the text read (PR 5).
     const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
     const asV1 = async (id: string, key: string, by: string, judge: string) =>
@@ -8585,22 +8585,22 @@ if (want("10h")) {
         && claimedAts.length === 4 && new Set(claimedAts).size === 4 && claimedAts.every((at, i) => i === 0 || at > claimedAts[i - 1]),
       `a server error puts its thought back in the pool, first, its attempt not counted, and is paused for three times, each call on a fresh claim of its own, then ends the sweep, exit 1, the thought it ended at sent to the end of the pool (exit ${down.code}, ${ownCalls - asked} call(s), asked ${downAsked.map(downNamed).join(",")}, ${freshLeases} on a fresh lease, downAttempts ${downAttempts}, last ${last === none ? "none" : last === garbled ? "garbled" : last === utf ? "utf" : "another"})`);
 
-    // A brain without 113's close, or 111's door: the sweep refuses by name; without the door the pass extracts, and
-    // says once that it records no subject.
-    await sql`ALTER FUNCTION close_thought_subject(uuid, uuid, text) RENAME TO close_thought_subject_away`;
+    // A brain without 130's set close, or its set door: the sweep refuses by name; without the door the pass extracts,
+    // and says once that it records no subject (SMD-3306 PR 7a-3b-1: the sweep and the pass write and close sets).
+    await sql`ALTER FUNCTION close_thought_subjects(uuid, uuid[], text) RENAME TO close_thought_subjects_away`;
     try {
       const noCloseHeard: StartResult[] = [];
       const noClose = await sweep({ onStart: (r) => { noCloseHeard.push(r); } });
       // Heard as the tables' (PR 6b-1's review pass 2, mutant: heard as usage, it lived).
-      assert(noClose.code === 2 && /close_thought_subject is missing: the subject pool is migration 113's/.test(noClose.stderr) && JSON.stringify(noCloseHeard) === JSON.stringify([{ ok: false, refused: "tables" }]),
-        `--subjects without 113's close refuses, naming the migration, heard as the tables' (exit ${noClose.code}; heard ${JSON.stringify(noCloseHeard)})`);
+      assert(noClose.code === 2 && /close_thought_subjects is missing: a thought's subjects as a set are migration 130's/.test(noClose.stderr) && JSON.stringify(noCloseHeard) === JSON.stringify([{ ok: false, refused: "tables" }]),
+        `--subjects without 130's set close refuses, naming the migration, heard as the tables' (exit ${noClose.code}; heard ${JSON.stringify(noCloseHeard)})`);
     } finally {
-      await sql`ALTER FUNCTION close_thought_subject_away(uuid, uuid, text) RENAME TO close_thought_subject`;
+      await sql`ALTER FUNCTION close_thought_subjects_away(uuid, uuid[], text) RENAME TO close_thought_subjects`;
     }
-    await sql`ALTER FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject_away`;
+    await sql`ALTER FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) RENAME TO record_thought_subjects_away`;
     try {
       const noDoor = await sweep();
-      assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 111's/.test(noDoor.stderr), `--subjects without 111's door refuses, naming the migration (exit ${noDoor.code})`);
+      assert(noDoor.code === 2 && /record_thought_subjects is missing: a thought's subjects as a set are migration 130's/.test(noDoor.stderr), `--subjects without 130's set door refuses, naming the migration (exit ${noDoor.code})`);
       await sql`SELECT update_thought(${filed}::uuid, ${"The ticket row's own text, edited."})`;
       await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-9", "edited again: start smd-9")})`;
       const noDoorPass = await extractRun();
@@ -8609,10 +8609,10 @@ if (want("10h")) {
       // above. Read off the run's own line: its "before:" line counts the three extracted before it (PR 5: the count
       // matched that line, whatever the run did).
       const extracted = noDoorPass.stdout.split("\n").find((l) => /^ {2}\d+ extracted, \d+ failed, /.test(l));
-      assert(noDoorPass.code === 0 && /^ {2}4 extracted, 0 failed, /.test(extracted ?? "") && said.length === 1 && /needs migration 111/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
+      assert(noDoorPass.code === 0 && /^ {2}4 extracted, 0 failed, /.test(extracted ?? "") && said.length === 1 && /needs migration 130's record_thought_subjects/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
         `the pass without it extracts the four edited, their entities standing, and says once that it records no subject (exit ${noDoorPass.code}, ${said.length} line(s): ${extracted?.trim().slice(0, 60)})`);
     } finally {
-      await sql`ALTER FUNCTION record_thought_subject_away(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject`;
+      await sql`ALTER FUNCTION record_thought_subjects_away(uuid, text[], text, text, uuid, text, jsonb) RENAME TO record_thought_subjects`;
     }
     // A dry run counts as a run would: the two whose text moved under the same ticket, each pooled by its edit, are
     // kept, not recorded (review pass 2). The pool's own pages, each thought once: the limit is over the pool's five,
@@ -8661,7 +8661,7 @@ if (want("10h")) {
         asked = ownCalls;
         const roleHeard: StartResult[] = [];
         const roleSweep = await sweep({ onStart: (r) => roleHeard.push(r) }, sEnv, sUrl);
-        assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subject needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
+        assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subjects needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
           `a role without the structure group: the sweep refused before any question, exit 2 (exit ${roleSweep.code}, ${ownCalls - asked} asked: ${roleSweep.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         assert(JSON.stringify(roleHeard) === JSON.stringify([{ ok: false, refused: "tables" }]), `…heard by its kind, tables (PR 6b-1): ${JSON.stringify(roleHeard)}`);
         const roleDry = await sweep({ dryRun: true }, sEnv, sUrl);
@@ -8706,24 +8706,24 @@ if (want("10h")) {
           `…and one that cannot read ob1_config is refused, naming it, even dry (exit ${noConfigRead.code})`);
         assert(noConfigStatus.code === 0 && noConfigStatus.out.includes("    subjects:r0  →  (--subjects, if ob1_config.subject_pool_key names it: this role cannot read which it names)\n"),
           `…and rebuild.ts --status as it says a subject pool's drainer is unknown to it, exit 0 (exit ${noConfigStatus.code}: ${(noConfigStatus.stdout + noConfigStatus.stderr).split("\n").filter((l) => /subjects:r0|error|denied/i.test(l)).map((l) => l.trim().slice(0, 100)).join(" | ")})`);
-        await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) FROM PUBLIC");
+        await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) FROM PUBLIC");
         try {
           // A rejection read as the run's result, so an error escaping the sweep fails this case rather than the suite.
           const refusedWrite = await sweep({ model: false, switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
-          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subject\)/.test(refusedWrite.stderr),
+          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subjects\)/.test(refusedWrite.stderr),
             `a write the role is refused ends the sweep, exit 2, naming the grants (exit ${refusedWrite.code}: ${refusedWrite.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         } finally {
-          await sql.unsafe("GRANT EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) TO PUBLIC");
+          await sql.unsafe("GRANT EXECUTE ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) TO PUBLIC");
         }
         // A close the role is refused — the session summary's out-of-date subject, the model naming nothing for it —
         // ends the sweep, exit 2, naming what the close needs (review pass 1: no case reached it).
-        await sql.unsafe("REVOKE EXECUTE ON FUNCTION close_thought_subject(uuid, uuid, text) FROM PUBLIC");
+        await sql.unsafe("REVOKE EXECUTE ON FUNCTION close_thought_subjects(uuid, uuid[], text) FROM PUBLIC");
         try {
           const refusedClose = await sweep({ switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
-          assert(refusedClose.code === 2 && /This role cannot close a thought's subject \(permission denied for function close_thought_subject\)/.test(refusedClose.stderr),
+          assert(refusedClose.code === 2 && /This role cannot close a thought's subject \(permission denied for function close_thought_subjects\)/.test(refusedClose.stderr),
             `a close the role is refused ends the sweep, exit 2 (exit ${refusedClose.code}: ${refusedClose.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         } finally {
-          await sql.unsafe("GRANT EXECUTE ON FUNCTION close_thought_subject(uuid, uuid, text) TO PUBLIC");
+          await sql.unsafe("GRANT EXECUTE ON FUNCTION close_thought_subjects(uuid, uuid[], text) TO PUBLIC");
         }
         // A naming's write that fails otherwise — the role's statement_timeout, past which the server cancels it — ends
         // the run in words, exit 1, the pool as it was, not read as a stop (review pass 9: it escaped as a trace; a
@@ -8880,7 +8880,7 @@ if (want("10h")) {
     await sql`SELECT requeue_thought_work(${POOL}, ${pr}::uuid)`;
     asked = ownCalls;
     const refusedKey = await sweep({}, { ...env, OB1_JUDGE_MODEL: `stub-judge-${"l".repeat(200)}` });
-    assert(refusedKey.code === 1 && /record_thought_subject refused the key/.test(refusedKey.stderr)
+    assert(refusedKey.code === 1 && /record_thought_subjects refused the key/.test(refusedKey.stderr)
         && tally(refusedKey) === "0 subject(s) recorded; 1 keys refused — among them, 1 with an out-of-date subject still standing" && ownCalls === asked + 1 && (await claimOf(pr))?.status === "failed",
       `a key the door refuses fails the claim, said, exit 1, the out-of-date subject counted standing (exit ${refusedKey.code}: ${tally(refusedKey)})`);
     // An answer naming nothing about a text that moved while the model answered closes nothing: the close reads the
@@ -8925,6 +8925,19 @@ if (want("10h")) {
     const unfiled = await sweep();
     assert(unfiled.code === 0 && tally(unfiled) === "0 subject(s) recorded; 1 the model named nothing for (1 out-of-date subject(s) closed)" && (await standingOf(fresh)) === undefined && ownCalls === asked + 1,
       `a ticket taken away: the model is asked, and naming nothing, the rule's subject is closed (exit ${unfiled.code}: ${tally(unfiled)})`);
+    // A thought holding a set (130), out of date, the model naming nothing for it: the sweep closes the whole set and
+    // finishes the claim, the thought asked once, and a dry run counts it once (SMD-3306 PR 7a-3b-1: the close of one
+    // facet answered moved, closing none, and the thought went back to the pool to be asked again within the run, until
+    // the garbage-judge alarm tripped; a dry run counted it once a subject).
+    await sql`SELECT record_thought_subjects(${fresh}::uuid, ARRAY['phrase:an old set', 'pr:7310'], 'model', 'subject:stub-judge@p1', NULL, ${await fpOf(fresh)}, NULL)`;
+    await sql`SELECT requeue_thought_work(${POOL}, ${fresh}::uuid)`;
+    const setDry = await sweep({ dryRun: true });
+    asked = ownCalls;
+    const setSwept = await sweep();
+    assert(/would: of 1 thought\(s\), record none by the rules; ask stub-judge about 1 \(1 with an out-of-date subject\)\./.test(setDry.stdout)
+        && setSwept.code === 0 && tally(setSwept) === "0 subject(s) recorded; 1 the model named nothing for (1 out-of-date subject(s) closed)"
+        && (await standingOf(fresh)) === undefined && ownCalls === asked + 1 && (await claimOf(fresh))?.status === "succeeded",
+      `a thought holding an out-of-date set the model names nothing for: counted once by a dry run, asked once, its whole set closed and its claim finished (exit ${setSwept.code}, ${ownCalls - asked} asked: ${tally(setSwept)}; dry: ${setDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 120)})`);
     // An unread answer about a text edited while the model answered: its failed claim is no longer this run's when
     // released — the edit pooled it again — so it is said, and the run, taking it again and finishing it, exits 0
     // (review pass 2: it counted as this run's failure, for --retry-failed).
@@ -9016,7 +9029,7 @@ if (want("10h")) {
     // …and the pass's write of the rule's subject at a ticket it read before a move is refused alike (the pass beside a
     // sweep, review pass 5, run-it).
     const [{ racedFp }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS "racedFp" FROM thoughts WHERE id = ${raced}::uuid`) as { racedFp: string }[];
-    const passWrite = await recordSubject(sql, { id: raced, fingerprint: racedFp }, "ticket:SMD-80", "metadata", subjectRuleKey("metadata"), subjectRecipe({ by: "metadata" }), null);
+    const passWrite = await recordSubject(sql, { id: raced, fingerprint: racedFp }, ["ticket:SMD-80"], "metadata", subjectRuleKey("metadata"), subjectRecipe({ by: "metadata" }), null);
     assert(passWrite.action === "none" && passWrite.stale === true && (await standingOf(raced))?.key === "ticket:SMD-81",
       `a rule's subject at a ticket the thought is no longer filed under is refused at the door (${JSON.stringify(passWrite)})`);
     // A key's switch away and back while a run holds a claim under it: the naming pools the thoughts with no current
@@ -9043,7 +9056,7 @@ if (want("10h")) {
     const meanOld = await seed("Meanwhile, older: a note whose older subject a run under another key replaced while it was asked.");
     const fpNow = async (id: string) => ((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0] as { f: string }).f;
     const asOther = async (id: string, key: string, judge: string) =>
-      recordSubject(sql, { id, fingerprint: await fpNow(id) }, key, "model", judge, subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+      recordSubject(sql, { id, fingerprint: await fpNow(id) }, [key], "model", judge, subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
     await asOther(meanOld, "phrase:the oldest question", "subject:stub-judge@p1");
     const meanAsks = { none: 0, older: 0 };
     onOwn = async (t) => {
@@ -11071,7 +11084,7 @@ if (want("10h")) {
       const [finishT] = await seedAll(["Budget note 9: nothing to name here either, its finish's window held past the budget."]);
       // A model's subject under an older question's key: standing, out of date under this pool's.
       const [{ f: finishF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${finishT}::uuid`) as { f: string }[];
-      await recordSubject(sql, { id: finishT, fingerprint: finishF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+      await recordSubject(sql, { id: finishT, fingerprint: finishF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
       const finishHolder = new SQL({ url: URL_!, max: 1 });
       const fc = await finishHolder.reserve();
       let finishHeld: Promise<void> | null = null;
@@ -11374,7 +11387,7 @@ if (want("10h")) {
         const hardRunning = settled(sweep({ session: WATCHED_SESSION, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
         // Both stops once the door's write is seen waiting on the case's lock (review pass 7, cold read: on a timer, a
         // slow answer let the stops land before the write, which the case then never met).
-        doorWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        doorWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
         (hardStopOf as PassStop | null)?.();
         (hardStopOf as PassStop | null)?.();
         hardRun = await orHung(hardRunning);
@@ -11398,7 +11411,7 @@ if (want("10h")) {
       try {
         await oc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${onceT}::uuid::text, 0))`;
         const onceRunning = settled(sweep({ follow: 1, session: WATCHED_SESSION, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
-        onceWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        onceWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
         onceStop.abort();
         onceRun = await orHung(onceRunning, 20_000);
       } finally {
@@ -11495,8 +11508,8 @@ if (want("10h")) {
       try {
         await cnc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${cancelT}::uuid::text, 0))`;
         const cancelRunning = settled(sweep({ follow: 1, session: { statement_timeout: "30000" }, signal: AbortSignal.any([cancelStop.signal, backstop()]) }));
-        cancelWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
-        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND query LIKE ${"%record_thought_subject(%"}`;
+        cancelWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
+        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND query LIKE ${"%record_thought_subjects(%"}`;
         cancelRun = await orHung(cancelRunning, 20_000);
       } finally {
         cancelStop.abort();
@@ -12646,7 +12659,7 @@ if (want("10h")) {
         // A's own failure counted with an out-of-date subject still standing on it (PR 6b-1's review pass 2, mutant: left out
         // of that count, it lived): a model's under an older question's key.
         const [{ f: tieF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${tied[0]}::uuid`) as { f: string }[];
-        await recordSubject(sql, { id: tied[0], fingerprint: tieF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+        await recordSubject(sql, { id: tied[0], fingerprint: tieF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
         // Queued at one instant, as a pooling queues its claims.
         await sql`SELECT requeue_thought_work(${POOL}, id) FROM unnest(${sql.array(tied, "TEXT")}::uuid[]) AS id`;
         [{ n: tieInstants }] = (await sql`SELECT count(DISTINCT enqueued_at)::int AS n FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id = ANY(${sql.array(tied, "TEXT")}::uuid[])`) as { n: number }[];
@@ -12686,7 +12699,7 @@ if (want("10h")) {
         judgeScript.splice(0, judgeScript.length, "500", "500", "500", "500");
         [closeT] = await seedAll(["Close note: nothing to name here, its out-of-date subject closed after an outage, then edited."]);
         const [{ f: closeF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${closeT}::uuid`) as { f: string }[];
-        await recordSubject(sql, { id: closeT, fingerprint: closeF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+        await recordSubject(sql, { id: closeT, fingerprint: closeF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
         let closeEditedAt = "";
         closeRun = await followUntil({}, async () => {
           const c = (await sql`SELECT status, finished_at::text AS at FROM thought_work_claims WHERE thought_id = ${closeT}::uuid AND work_type = ${POOL}`)[0] as { status: string; at: string | null } | undefined;
@@ -14805,7 +14818,7 @@ if (want("10h")) {
           // (review pass 8, mutant: hangAborted's failure kept the claim's finished_at, and counted none).
           const [abortOldT] = await seedAll(["Abort old subject alone: sweep-pass-good work, an older question's subject standing, its calls aborted in hand."]);
           const [{ f: abortOldF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${abortOldT}::uuid`) as { f: string }[];
-          await recordSubject(sql, { id: abortOldT, fingerprint: abortOldF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+          await recordSubject(sql, { id: abortOldT, fingerprint: abortOldF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
           await sql`SELECT requeue_thought_work(${POOL}, ${abortOldT}::uuid)`;
           let abortOldIn: InHandAbort = () => -1;
           const abortOldAborts: number[] = [];
@@ -14833,7 +14846,7 @@ if (want("10h")) {
           // counted only when the provider erred on it).
           const [hangOldT] = await seedAll(["Hang old subject alone: sweep-pass-good work, an older question's subject standing, hanging the provider each time it is asked."]);
           const [{ f: hangOldF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${hangOldT}::uuid`) as { f: string }[];
-          await recordSubject(sql, { id: hangOldT, fingerprint: hangOldF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+          await recordSubject(sql, { id: hangOldT, fingerprint: hangOldF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
           await sql`SELECT requeue_thought_work(${POOL}, ${hangOldT}::uuid)`;
           judgeScript.splice(0, judgeScript.length, "slow", "slow");
           probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
