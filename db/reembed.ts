@@ -68,11 +68,14 @@
  * is. The provider not answering at the start is waited for after the
  * start's other checks, before the row exists (said on a caller's row; a
  * model not served there is the start's refusal, `model`). Mid-pass, whose
- * each thought's error is, is followClassify's. The thought's — recorded
- * failed — only when it names the thought (its length, the egress gate, its
- * data, or any database error not named below — a guard, an invariant) or
- * the provider answers the probe's constant text right after (a content
- * filter's 400). The database's state: it waits (the database gone:
+ * each thought's error is: a database error's, followClassify's; a provider
+ * error's, worker-bootstrap.ts's `fault`, as extract's and consolidate's are
+ * (SMD-2636 PR 3b). The thought's — recorded failed — only when it names the
+ * thought (its length, the egress gate, its data, or any database error not
+ * named below — a guard, an invariant) or the provider answers the probe's
+ * constant text right after a call that met a deadline with no answer, or a
+ * 4xx or redirect no rule reads (a content filter's 400). The probe out too
+ * is an outage, the thought a suspect. The database's state: it waits (the database gone:
  * the worker stops, recording nothing), a moment's (a deadlock, a lock,
  * resources, a read-only transaction: the thought back unrecorded; at a pool, that pool deferred to
  * the next poll, the first's lines said when it runs), or the end (a
@@ -83,14 +86,16 @@
  * row waiting mid-pass while the follower probes, under the subject of the
  * thought that began it when the egress gate refuses the probe's own.
  * Backpressure (429, 503, the model loading) makes no suspect; any other
- * 5xx, a 408, a timeout or no connection makes the thought in hand one,
- * recorded failed as its own if it fails again right after a probe answered.
+ * 5xx, a 408 or no connection makes the thought in hand one, recorded
+ * failed as its own if it fails again right after a probe answered. Each
+ * says the provider "is not answering".
  * No pauses come first, as extract's do; an outage that begins again within
  * a minute and a poll interval of the probe answering, no thought settled
  * since, carries on the last one's schedule, so a limit the probe passes and
- * no row gets past waits longer each time, up to 5 min. The probe refused too
+ * no row gets past waits longer each time, up to 5 min. The probe refused
  * — or a probe in a wait answered with a refusal, a key revoked meanwhile —
- * is the request's: every worker stops, nothing is marked failed and the
+ * is the request's, and so is a 402 saying the call asks more than the
+ * account affords: every worker stops, nothing is marked failed and the
  * follower ends refused `provider`, exit 2. Any other error at the first pool
  * rejects run() — the CLI exits 1 — as extract-entities.ts's start does. At
  * a claim only the end ends the follower, anything else stopping that worker;
@@ -485,7 +490,7 @@ import {
 import { createEmbedder, isRedirect, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
-import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, waitOutProvider, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, isOut, modelMissing, probedFault, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, waitOutProvider, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
@@ -1801,6 +1806,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     const msg = (e as Error).message ?? "";
     return /Embedding width mismatch|returned no embedding/.test(msg);
   }
+  /** `s` cut to `n` characters, a cut marked "…", so a number cut short does not read whole (SMD-2636 PR 3b, review passes 1, 2 and 4). */
+  const cutMarked = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
   /** One embedding call of the probe's text, as a follower's start and its outage waits ask (worker-bootstrap.ts's Probe): up, out (no answer, a timeout, a 408, a 429 or a 5xx), missing (the model not served), or refused. */
   const embedProbe = async (wake: AbortSignal, subject: EgressSubject = probeSubject): Promise<Probe> => {
     try {
@@ -1808,7 +1815,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       return { state: "up" };
     } catch (e) {
       if (wake.aborted) return { state: "out", why: "the probe was stopped" };
-      const why = (e as Error).message.slice(0, 300);
+      const why = cutMarked((e as Error).message, 300);
       if (providerDown(e)) return { state: "out", why };
       if (modelMissing(e)) return { state: "missing", why };
       return { state: "refused", why };
@@ -2286,19 +2293,28 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           if (!row) {
             outcome = { outcome: "vanished" };
           } else {
-            inCall.begin(workerId);
+            /**
+             * The call's slot waits, one count for its calls and the probe after them, so a window call still waiting
+             * and the probe do not keep two (SMD-2636 PR 3b, review pass 4), on this thought's own entry: looked up
+             * by the worker's id, a window call left waiting when a sibling failed told the next thought's entry it
+             * ran (review pass 5).
+             */
+            const entry = inCall.begin(workerId);
+            const callWaits = callWaitsFor(() => entry);
             try {
               // A wait for a slot on the model-call seam is not the call's time (review pass 3).
-              outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => processRow(row, workerId));
+              outcome = await withCallWaits(callWaits, () => processRow(row, workerId));
               // An aborted call is no answer from the provider (review pass 2).
               if (outcome.outcome !== "setBack") probed = true;
             } catch (e) {
               if (e instanceof WriterThrow) throw e.error;
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
               if (FOLLOW && !hardStopped) {
-                // Under --follow, whose the error is (worker-bootstrap.ts's followClassify, SMD-2679 PR 4a-2b):
-                // the thought's only when it names the thought, or when the provider answers a probe right
-                // after; else the database's state or the provider's, and the thought goes back unrecorded.
+                // Under --follow, a database error is read by followClassify (SMD-2679 PR 4a-2b): the database's
+                // state, or the thought's. A provider error is read by worker-bootstrap.ts's `fault`, as extract's and
+                // consolidate's are (SMD-2636 PR 3b). The thought is the error's only when the error names it, or
+                // when the provider answers a probe right after. Otherwise the error is the provider's state and the
+                // thought goes back unrecorded, or the request's and every worker stops.
                 const verdict = followClassify(e);
                 const rowSubject: EgressSubject = { kind: "re-embed", metadata: row.metadata ?? undefined, content: row.content };
                 /** The thought back to the pool unrecorded, and the follower waits for the provider: an outage begun or joined, the thought a suspect or not. */
@@ -2306,43 +2322,72 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   if (outage.begin(why, suspect ? b.thought_id : undefined) === "thought") return "thought";
                   drainEnds.abort();
                   outageSubject ??= rowSubject;
-                  const state = verdict === "backpressure" ? "is holding calls back" : "is not answering";
-                  err(`  ${workerId}: the embedding provider ${state} (${why.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
+                  err(`  ${workerId}: the embedding provider is not answering (${cutMarked(why, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                   return "outage";
                 };
+                /**
+                 * The request refused itself: every row would fail the same way. Stop every worker, mark nothing, and
+                 * say what to fix (extract-entities.ts's configError). A refusal the probe found says the probe's words
+                 * first, as extract's does (SMD-2636 PR 3a, review pass 2): a deadline's own words name no refusal,
+                 * here or in the closing line (review pass 1). Not named `refuse`: test-engines reads every call of
+                 * that name in this file as one of run()'s refusals, which it returns.
+                 */
+                const stopRefused = (probeWhy?: string): void => {
+                  configError = probeWhy === undefined ? msg : `a probe's embedding call was refused (${cutMarked(probeWhy, 160)}), right after ${msg}`;
+                  drainEnds.abort();
+                  // Cut words marked (review pass 1: a 402's "…up to 81" read as a number).
+                  err(`  ${workerId}: the embedding provider refuses the request itself (${cutMarked(configError, 200)}) — stopping every worker; nothing is marked failed`);
+                };
                 if (verdict === "db-end") throw e;
-                if (verdict === "thought") {
+                // Re-embed has no pauses: a fault to pause for is an outage at once, as before.
+                const read = verdict === "db-wait" || verdict === "db-moment" ? null : fault(e);
+                const again = `provider error again right after the provider answered a probe, so this thought's: ${msg}`;
+                if (read?.act === "thought") {
                   outcome = { outcome: "failed", error: msg };
                 } else if (stopping) {
                   // A stopping pass hands every other thought back to the pool, as a transient's.
                   return;
-                } else if (verdict === "db-wait") {
-                  err(`  ${workerId}: the database is not answering (${msg}) — this worker stops, recording nothing for ${b.thought_id}`);
+                } else if (read === null) {
+                  if (verdict === "db-wait") err(`  ${workerId}: the database is not answering (${msg}) — this worker stops, recording nothing for ${b.thought_id}`);
+                  else err(`  ${workerId}: the write met the database's moment (${msg.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
                   return;
-                } else if (verdict === "db-moment") {
-                  err(`  ${workerId}: the write met the database's moment (${msg.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
+                } else if (read.act === "fatal") {
+                  stopRefused();
                   return;
-                } else if (verdict === "backpressure" || verdict === "maybe-poison") {
-                  // Again, right after the provider answered a probe, a suspect's own: recorded so it does not cycle through the pool for ever.
-                  if (sendBack(msg, verdict === "maybe-poison") === "outage") return;
-                  outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
+                } else if (read.act === "pause" || read.act === "outage" || outage.reason !== null) {
+                  // Another worker's outage is joined unprobed, as extract's is (SMD-2636 PR 3a, review pass 1).
+                  // A suspect that fails again right after the provider answered a probe is recorded failed, so it
+                  // does not cycle through the pool for ever.
+                  if (sendBack(msg, read.suspect) === "outage") return;
+                  outcome = { outcome: "failed", error: again };
                 } else {
-                  // probe-decides: answered, this thought's (a content filter); refused as well, every row would
-                  // fail the same way — stop everyone, mark nothing, say what to fix (extract-entities.ts's
-                  // configError); not answering, the provider went away meanwhile.
-                  const probe = await embedProbe(onStop.signal, probeGate.allowed ? probeSubject : rowSubject);
-                  if (probe.state === "up") {
-                    outcome = { outcome: "failed", error: `${msg} (the provider answered a probe right after, so this thought's)` };
-                  } else if (stopping) {
+                  // `probe`: a deadline with no answer, a 4xx or redirect no rule reads, an error of no known kind.
+                  // The probe's answer decides (probedFault): answered, the thought's (a content filter's); refused,
+                  // the request's; no answer, the provider's outage, the thought a suspect. The probe is part of the
+                  // call in hand: it counts its slot wait in the call's own count, not as the call's time; the pass's
+                  // caller aborting the call (abortInHand) sets the thought back; and the drain's end — another
+                  // worker's outage or refusal, the record moved — cuts it short, the outage joined or the thought
+                  // handed back. After another worker's refusal it is not made at all (review passes 1, 3 and 4: a
+                  // probe deaf to these held the pass, or the exit, up to a call's timeout).
+                  if (configError !== null) return;
+                  const drainEnd = drainEnds.signal;
+                  const probe = await withCallWaits(callWaits, () => embedProbe(AbortSignal.any([onStop.signal, drainEnd, entry.abort.signal]), probeGate.allowed ? probeSubject : rowSubject));
+                  const act = probedFault(probe);
+                  if (entry.aborted) {
+                    outcome = { outcome: "setBack" };
+                  } else if (act === "thought") {
+                    // Said so, and that a retry revisits it, as extract's does (review pass 1).
+                    outcome = { outcome: "failed", error: `${msg} (the provider answered a probe right after, so this thought's; --retry-failed revisits it)` };
+                  } else if (stopping || configError !== null || (drainEnd.aborted && outage.reason === null)) {
+                    // Handed back: a stop, another worker's refusal (its words kept, not this probe's), the record moved.
                     return;
-                  } else if (isOut(probe)) {
-                    // A suspect: an input that brings the provider down, with a code no rule names, is recorded at its next (review pass 5).
-                    if (sendBack(probe.why, true) === "outage") return;
-                    outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
+                  } else if (act === "outage") {
+                    // A suspect: an input that brings the provider down, with a code no rule names, is recorded at its
+                    // next (review pass 5). Another worker's outage cut the probe short: joined, in this call's words.
+                    if (sendBack(isOut(probe) && !drainEnd.aborted ? probe.why : msg, true) === "outage") return;
+                    outcome = { outcome: "failed", error: again };
                   } else {
-                    configError = msg;
-                    drainEnds.abort();
-                    err(`  ${workerId}: the embedding provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
+                    stopRefused(probe.state === "refused" ? probe.why : undefined);
                     return;
                   }
                 }
@@ -2518,10 +2563,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * error once they have stopped, not while they still hold rows and the client.
    */
   const drain = async (): Promise<void> => {
-    if (ADMIT) {
-      drainEnds = new AbortController();
-      gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
-    }
+    // Each drain's own end: a probe reads it too, so one left aborted by the last drain's outage would cut every
+    // later probe short (SMD-2636 PR 3b, review pass 4: renewed under the admit gate alone, it cycled a thought).
+    drainEnds = new AbortController();
+    if (ADMIT) gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
       drainEnds.abort();
@@ -2671,7 +2716,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   if (configError !== null) {
     if (opts.stamper === undefined) stamper?.refused?.("provider");
     await stamper?.end("failed");
-    err(`\n  The embedding provider refused the request itself: ${configError.slice(0, 300)}`);
+    err(`\n  The embedding provider refused the request itself: ${cutMarked(configError, 300)}`);
     return 2;
   }
   await stamper?.end(haltedByProvider ? "failed" : "stopped");

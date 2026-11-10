@@ -1849,7 +1849,7 @@ else {
   await hb("heartbeat:sleep", { running: true, outcome: "failed", aside: { reembed: { kind: "provider" } } });
   const schedDown = await run(SQL_ENV);
   assert(/!\s+re-embed pass\s+.* — the sleep scheduler runs this key, .*; re-embed set down for this period \(provider\); 1 failed row\(s\) it will not retry$/m.test(schedDown.out)
-      && /^\s*→ The provider refused the embedding probe: check the embedding endpoint's key and base URL .*\. The next period with work tries it again, with no second worker\. Once their cause is fixed, the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next period takes; for one the provider refuses permanently, .* --accept-failed <thought-id…>\.$/m.test(fix(schedDown.out, "re-embed pass")),
+      && /^\s*→ The provider refused the embedding request: check the embedding endpoint's key and base URL .*\. The next period with work tries it again, with no second worker\. Once their cause is fixed, the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next period takes; for one the provider refuses permanently, .* --accept-failed <thought-id…>\.$/m.test(fix(schedDown.out, "re-embed pass")),
          `a scheduler whose re-embed was set down for the period warns with the cause's remedy, the embedding endpoint's (${row(schedDown.out, "re-embed pass")} | ${fix(schedDown.out, "re-embed pass")})`);
   // A hand follower on another key beside it: the scheduler refuses at its next poll and ends, so the row warns (review pass 4).
   await hb("heartbeat:sleep", { running: true });
@@ -3363,8 +3363,8 @@ else {
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
-      assert(/, and so does agenda \(SMD-3669\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\)/.test(rowOf(noItems.out, "priority"))
-             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table/.test(rowOf(noItems.out, "open items")),
+      assert(/, and so does agenda \(SMD-3669\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\); plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
+             && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
@@ -4894,7 +4894,7 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "provider" } }, slept: { from: await at(130), to: null } }), 10);
       const setDown = await run(LOG_ON);
       assert(/; re-embed set down for this period \(provider\)$/.test(row(setDown.out, "sleep"))
-          && /Re-embed was set down for this period — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; the other passes run on, and the next period with work tries it again\./.test(fix(setDown.out, "sleep")),
+          && /Re-embed was set down for this period — the provider refused the embedding request: check the embedding endpoint's key and base URL .*; the other passes run on, and the next period with work tries it again\./.test(fix(setDown.out, "sleep")),
         `re-embed set down for the period is said with its cause's remedy (${row(setDown.out, "sleep")} | ${fix(setDown.out, "sleep")})`);
       // A statement holds re-embed until a restart (SMD-3379 PR 1c-4b, review pass 2): said as a hold, not a period's set-down.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "statement" } }, holds: [{ pass: "reembed", why: "statement", until: null }], slept: { from: await at(130), to: null } }), 10);
@@ -4942,7 +4942,7 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "provider" } }, slept: { from: await at(900), to: await at(700) } }), 30);
       const endedDown = await run(LOG_ON);
       assert(/at its last word, re-embed set down for its last period \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))
-          && /Its last period set re-embed down \(provider\) — the provider refused the embedding probe: .*; mend that before it starts again, or its first period sets re-embed down again\..* start it again/.test(fix(endedDown.out, "sleep"))
+          && /Its last period set re-embed down \(provider\) — the provider refused the embedding request: .*; mend that before it starts again, or its first period sets re-embed down again\..* start it again/.test(fix(endedDown.out, "sleep"))
           && !/for the embedding's\): /.test(fix(endedDown.out, "sleep")),
         `an ended row's set-down is its last word, its cause to mend before the restart, in that order (${row(endedDown.out, "sleep")} | ${fix(endedDown.out, "sleep")})`);
       // Not of the shape — a pass it does not run, a name twice — left off: the row reads as it did before.

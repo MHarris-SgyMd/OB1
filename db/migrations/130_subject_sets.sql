@@ -112,8 +112,8 @@
 --     garbage-judge alarm trips on the run of answers naming nothing, blaming
 --     the model and holding the pool (review pass 3).
 --   * ob1_item_serves (122) reads one ticket subject of a thought (LIMIT 1);
---     with a set it serves one of them. SMD-4149's 125 redefines it: the set
---     reading follows that.
+--     with a set it serves one of them. 125 to 128 call it as 122 wrote it;
+--     PR 7a-3b reads the set.
 --   * A transaction that writes the subjects of several thoughts locks each
 --     thought's keys as its first re-link comes, so it can deadlock beside a
 --     writer taking the same keys in order, Postgres ending one (120's NOT

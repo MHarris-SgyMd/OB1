@@ -450,10 +450,13 @@ window's own thoughts' effective priority once (`effective_priority`, migration
 - **A match's priority** is its own effective priority, as `docs/priority.md`
   decision 5 composes it:
   - A ticket's row reads as its ticket.
-  - Any other thought takes its own counted level, else one inherited from the
-    ticket it is about (its metadata `ticket` or `issue`, else its standing
-    subject). An inherited level is one less a hop, two hops at most, and
-    counts only above unknown's 2.
+  - Any other thought takes its own counted level, else the highest counted on
+    the open items opened from it (migration 125, SMD-4149), else one inherited
+    from the ticket it is about (its metadata `ticket` or `issue`, else its
+    standing subject). An inherited level is one less a hop, two hops at most,
+    and counts only above unknown's 2. With no due time of its own, such a
+    thought takes its open items' soonest, so a note whose open item is due
+    tomorrow reads +2.
   - A level counts when a key the operator classified stated it. An
     unclassified or importer's key's statement is inferred, and not counted
     until SMD-3670.
@@ -469,13 +472,17 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   1 and the last 1/n. So the search's own order, ties and all, is what weighs,
   and a text match or a literal-only query's similarity order is kept too. Their
   fusion scores are 0, and a score over the top's would have left those rows to
-  priority alone. Priority is the effective priority (a level, unknown counted as
-  2, plus urgency and what it unblocks) over 9, the default weights' largest.
-  Ties keep the window's order.
-- **`min_priority`** keeps the matches whose priority is known (counted, or
-  inherited from what they serve) and whose effective priority is at least the
-  level. Urgency counts, so a High due tomorrow (3 + 2) passes at critical. An
-  unknown priority never passes.
+  priority alone. Priority is the effective priority over the brain's
+  `ob1_priority_span()` (migration 128, SMD-4194), the largest the default
+  weights allow, 5.8 under them; a ranked search reads it with its window. That is a level (unknown counted as 2), plus up to 0.8 from
+  urgency and what it unblocks, which order items of one level and never lift
+  one past the next (migration 127, SMD-4177; 9 under 122's weights). Ties keep
+  the window's order.
+- **`min_priority`** keeps the matches whose priority is known (counted, read
+  from their open items, or inherited from what they serve) and whose effective
+  priority is at least the level. Since migration 127 the level decides it: a
+  High due tomorrow (3.4) passes at high, not at urgent. An unknown priority
+  never passes.
 
 Like `prefer_current`, it reorders the window and can surface no match past it.
 The header says what it read, how many carry a known priority and, with a
@@ -491,9 +498,10 @@ hint naming the fix.
 The ChatGPT `search` tool takes only its query, so it never ranks by priority.
 `evals/eval-priority.ts` (SMD-3662) measures the weight before any default
 changes. At its pre-registered 0.5 it doesn't clear the bar (2026-11-09,
-`evals/README.md`): a note's due time and level sit on its open item, which
-`effective_priority` doesn't read yet (SMD-4149, which re-measures it). The
-default stays 0.
+`evals/README.md`). Its due time and level then sat on its open item, which
+`effective_priority` didn't read. Measured again once it does (SMD-4149, the
+same day), it still doesn't: top-1 on 2 of 7 and mean tau 0.327, where the bar
+asks 5 and 0.502. The default stays 0.
 
 **Each result's priority, a label (SMD-3668 PR 2).** `search`, `search_thoughts`,
 `search_thoughts_keyword`, `list_thoughts` and `fetch` give each result its
@@ -510,7 +518,7 @@ priority; ten are named and `priorityMore` counts the rest. A settled item is
 ordered by the level it keeps and said settled: whether work is finished is its
 own fact, not a lower priority (`prefer_current` ranks by it), so a Done Critical
 can come before an open High. Over MCP the three text tools print
-`Priority: ticket SMD-2908 at 5 (high (3); +2 due by the end of …)`, each term
+`Priority: ticket SMD-2908 at 3.4 (high (3); +0.4 due by the end of …)`, each term
 as the agenda says it, and their values keep the fields without the terms (a
 term names the stating key). `search` and `fetch` start the title
 `[priority: ticket SMD-2908 high (3), due …]` (two named) after any claimed
@@ -1307,6 +1315,7 @@ it, each over REST and MCP alike:
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
 | `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE` |
+| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values. One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
   `proposed` item for each distinct non-blank action item the extractor reads from it, at

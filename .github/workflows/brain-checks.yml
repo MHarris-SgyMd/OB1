@@ -250,6 +250,27 @@ jobs:
       # orchestration that produces a real bundle is cut 2b-2b-2.
       - name: The agent runner's bundle and review brief
         run: bun scripts/agent-runner/bundle-check.ts --self-check
+      # SMD-4087 cut 2b-2b-2: the run orchestrator on fixtures — a clean run
+      # driven to a passing gate (the clone and review checkout deleted, the
+      # bundle and diff kept), the one resume (with budget, without, and a resume
+      # whose bundle is unusable), and every failure path (no bundle, a session
+      # that ends without a result, a malformed bundle, an import the fsck
+      # refuses, a gate failure, a clone failure, an unbriefable ticket), with the
+      # two Claude Code sessions stubbed. The live whole run is cut 2c's brief probe.
+      - name: The agent runner's run orchestrator
+        run: bun scripts/agent-runner/run-check.ts --self-check
+      # SMD-4087 cut 2c-1: the runner's REST claim client on a stubbed fetch and a
+      # temp directory — the brain/tier check, claim/renew/release and every coded
+      # refusal, and the token files round-tripped owner-only and never through a
+      # link. No network and no key; the live run that calls it is cut 2c-3.
+      - name: The agent runner's claim client
+        run: bun scripts/agent-runner/claims-check.ts --self-check
+      # SMD-4087 cut 2c-2: the runner's Linear moves on a stubbed GraphQL client —
+      # the move to In Progress at the claim, and the hand-back to Backlog
+      # (relabelled for a person on a work failure, the label kept on an
+      # environment failure). No key; the live run that calls it is cut 2c-3.
+      - name: The agent runner's Linear moves
+        run: bun scripts/agent-runner/board-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.

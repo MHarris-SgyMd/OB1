@@ -44,6 +44,7 @@ import type {
   ProvenanceNode,
   QueryActionLog,
   QueryAgendaLog,
+  QueryPlanContextLog,
   QuerySearchLog,
   SupersessionProposal,
   ThoughtHybridMatch,
@@ -1186,18 +1187,43 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
   }
 
+  // SMD-4194: 128's span, the largest effective priority the brain's defaults allow, read as text (numeric).
+  async prioritySpan(): Promise<number> {
+    const [r] = (await this.sql`SELECT ob1_priority_span()::text AS span`) as { span: string }[];
+    const span = Number(r?.span);
+    if (!Number.isFinite(span) || span <= 0) throw new Error("ob1_priority_span answered no span this server reads");
+    return span;
+  }
+
   // SMD-3669, SMD-4162: 124's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
   async agenda(opts: {
-    scope?: { source?: string; project?: string; label?: string }; holder?: { name: string; agentId?: string }; limit: number;
-    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string;
+    scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
+    includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string; timeoutMs?: number;
   }): Promise<AgendaResult> {
     const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
     const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
-    const rows = await this.sql`
+    const call = (q: typeof this.sql) => q`
       SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
                     ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
-                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a` as { a: unknown }[];
+                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a` as Promise<{ a: unknown }[]>;
+    if (opts.timeoutMs === undefined) return normaliseAgenda((await call(this.sql))[0]?.a, "agenda");
+    // A deadline (plan_context, SMD-2684): a ceiling, as readDatabaseFacts sets one — 0 (none) or a looser setting is
+    // lowered to it, a stricter one kept — local to the call's own transaction.
+    const ms = Math.max(1, Math.floor(opts.timeoutMs));
+    const rows = await this.sql.begin(async (tx) => {
+      await tx`SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${ms}::int THEN ${ms}::int ELSE s.st END)::text, true)
+                 FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
+      return call(tx as unknown as typeof this.sql);
+    });
     return normaliseAgenda(rows[0]?.a, "agenda");
+  }
+
+  async logPlanContext(row: QueryPlanContextLog): Promise<void> {
+    await this.sql`
+      INSERT INTO query_log (kind, tool, agent_id, query, match_count, filter, result_ids, result_scores, arm, result_items, tier)
+      VALUES ('plan_context', 'plan_context', ${row.agentId ?? null}::uuid, ${row.query}::text, ${row.matchCount}::int, (${JSON.stringify(row.filter)}::text)::jsonb,
+              ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[], ${row.arm}::text,
+              (${JSON.stringify(row.items)}::text)::jsonb, ${row.tier ?? null}::text)`;
   }
 
   async logAgenda(row: QueryAgendaLog): Promise<void> {

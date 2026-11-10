@@ -30,6 +30,7 @@ import { listCursor, parseRelationsCursor, relationsCursor, threadCursor } from 
 import * as say from "./render.ts";
 import { REFUSAL_STATUS } from "./rest/app.ts";
 import { TOOL_NAMES } from "./tools.ts";
+import { INFER_PROMPT } from "./priority-infer.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { checkerOver, subjectHash, tokenSettings } from "./oauth-token.ts";
 
@@ -52,6 +53,7 @@ const STUB_BASE = "https://stub.invalid/v1";
 const KNOWN: Record<string, number> = { alpha: 0, beta: 1, gamma: 2 };
 const axisFor = (text: string) => KNOWN[Object.keys(KNOWN).find((k) => text.toLowerCase().includes(k)) ?? ""] ?? 3;
 const realFetch = globalThis.fetch;
+let inferCalls = 0;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
@@ -60,6 +62,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const v = new Array(EMBEDDING_DIM).fill(0);
       v[axisFor(String(body.input))] = 1;
       return new Response(JSON.stringify({ data: [{ embedding: v }] }), { headers: { "Content-Type": "application/json" } });
+    }
+    // The priority inference's call (SMD-3670's [20]): a capture marked "[20]" whose text says "Urgent" reads High on it,
+    // due "by Friday"; any other text reads nothing. Counted, so a capture with the knob off is seen to make none.
+    if (body.messages?.[0]?.content === INFER_PROMPT) {
+      inferCalls++;
+      const said = String(body.messages[1]?.content ?? "");
+      const answer = said.includes("[20]") && said.includes("Urgent") ? { level: "urgent", level_phrase: "Urgent", due_phrase: "by Friday", due_date: null } : { level: null };
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(answer) } }] }), { headers: { "Content-Type": "application/json" } });
     }
     // A capture marked "rho: remind me" reads action items (SMD-3665 PR 3a's [15]): a repeat in another case, a blank and a number among them;
     // one marked "rho: a long list" reads 25 texts, each twice in two cases, so the 20 proposed are 20 distinct.
@@ -80,6 +90,7 @@ process.env.MCP_ACCESS_KEY = "legacy-raw"; // the legacy single key: full write,
 delete process.env.OB1_QUERY_LOG; // off: a read through one door must leave nothing the other door's read would see
 process.env.DATABASE_URL = URL_;
 process.env.OB1_AGENT_CACHE_TTL_MS = "0"; // a revocation reaches the next request
+process.env.OB1_INFER_PRIORITY = "on"; // [20]: every capture asks; only a "[20]" text's answer states anything (the env is frozen at the first request)
 const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gone: "gone-raw", forwarder: "forwarder-raw", forwarderGone: "forwarder-gone-raw", fresh: "fresh-raw", rival: "rival-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [
   `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
@@ -2303,11 +2314,11 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
   const m = await mcp("agenda", { project: P });
   type It = { key: string; rank: number; effective: number; terms: { term: string }[] };
   const items = (r.body.items ?? []) as It[];
-  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9912 SMD-9911 SMD-9914"
-      && items[0].effective === 4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
-    `REST and MCP give one agenda, each stamped with its own clock: the Medium due tomorrow (4), the High (3), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
+  assert(high.status === 200 && soon.status === 200 && r.status === 200 && items.map((i) => i.key).join(" ") === "SMD-9911 SMD-9912 SMD-9914"
+      && items[1].effective === 2.4 && r.body.total === 3 && r.body.unknown === 1 && !m.isError && same({ ...m.sc, now: null }, { ...r.body, now: null }),
+    `REST and MCP give one agenda, each stamped with its own clock, level first (127): the High (3), the Medium due tomorrow (2.4), the unknown (2); the completed ticket out; one carries no priority (${items.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(m.sc, r.body)})`);
   const out = rendered((v) => say.renderAgenda(ok(v)), r.body);
-  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9912 \("backlog"\) "SMD-9912 — \[17\] SMD-9912" — 4: medium \(2\); \+2 due by the end of /.test(m.text)
+  assert(out.content[0].text === m.text && /^3 of 3 items, most pressing first:\n1\. ticket SMD-9911 \("backlog"\) "SMD-9911 — \[17\] SMD-9911" — 3: high \(3\)\n2\. ticket SMD-9912 \("backlog"\) "SMD-9912 — \[17\] SMD-9912" — 2\.4: medium \(2\); \+0\.4 due by the end of /.test(m.text)
       && /\n1 of 3 carry no priority, stated or inherited \(read as medium, not low\)\./.test(m.text),
     `the MCP text is the REST answer rendered: each item's place, score and terms, and how many carry no priority (${m.text.split("\n").slice(0, 2).join(" | ")})`);
   const blank = await rest("GET", `/v1/agenda?project=${encodeURIComponent("  ")}`);
@@ -2320,8 +2331,8 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
   const its = await rest("GET", "/v1/agenda?source=items&limit=100");
   const itsMcp = await mcp("agenda", { source: "items", limit: 100 });
   const mine17 = ((its.body.items ?? []) as (It & { kind: string })[]).find((i) => i.key === String((opened.body.item as { id?: string } | undefined)?.id));
-  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 4 && !itsMcp.isError
-      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 4: no priority stated \\(read as 2\\); \\+2 due by the end of `).test(itsMcp.text),
+  assert(opened.status === 200 && its.status === 200 && mine17?.kind === "item" && mine17.effective === 2.4 && !itsMcp.isError
+      && new RegExp(`\\d+\\. open item ${mine17.key} "\\[17\\] water the ferns" — 2\\.4: no priority stated \\(read as 2\\); \\+0\\.4 due by the end of `).test(itsMcp.text),
     `an open item due tomorrow is listed over REST and said over MCP, unknown 2 plus its urgency (${its.status} ${mine17?.effective} | ${itsMcp.text.split("\n").find((l) => l.includes("water the ferns"))})`);
   const reader = await rest("GET", q, undefined, KEYS.reader);
   const hook = await rest("GET", q, undefined, KEYS.hook);
@@ -2350,6 +2361,79 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
       && rivalMine.status === 200 && Array.isArray(rivalMine.body.items) && (rivalMine.body.items as It[]).every((i) => i.key !== "SMD-9914"),
     `holder mine lists the ticket the key claimed, its claim named; another key's mine leaves it out (${mine.status} ${mineItems.map((i) => i.key)} | ${rivalMine.status})`);
   if (claim.status === 200) await rest("POST", `/v1/claims/${String((claim.body as { claim?: { id: string } }).claim?.id)}/release`, { token: (claim.body as { token?: string }).token, reason: "test-rest-sql [17] done" });
+}
+
+console.log("\n[17b] plan_context through both doors (migration 126, SMD-2684): REST's POST /v1/plan-context and MCP's plan_context give one record; the knowledge is the request's search with current work first, a superseded hit labelled with its replacement; the board is the tickets the hits name in agenda order, a started one listed with its status, a Done one beside, a key the brain does not hold a gap; specs and procedures not available, naming what they wait on; the tools a key's scope may call; a read key reads it, a capture-only key and an unknown key do not; a blank request refused by the schema");
+{
+  const P = "Plan rest [17b]";
+  const ticket = async (issue: string, st: string) => {
+    const content = `${issue} — [17b] ${issue}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: st, status_type: st, project: P })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket("SMD-9951", "backlog"); await ticket("SMD-9952", "started"); await ticket("SMD-9953", "completed");
+  await rest("POST", "/v1/priorities/ticket/SMD-9951", { level: 3 });
+  // Three notes holding the request's quoted span (axis beta, so the search's pool is small): a draft and the newer
+  // draft superseding it, and a note naming an open, a started, a Done and an unknown ticket.
+  const draft = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" first draft, about SMD-9952' });
+  const redraft = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" second draft, about SMD-9952', supersedes: String(draft.body.id) });
+  const note = await rest("POST", "/v1/thoughts", { content: '[17b] "zephyr plan beta" needs SMD-9951, follows SMD-9953, and SMD-9959' });
+  const request = 'how do I build "zephyr plan beta"';
+  const r = await rest("POST", "/v1/plan-context", { request, limit: 20 });
+  const m = await mcp("plan_context", { request, limit: 20 });
+  type Hit = { id: string; supersededBy: string | null };
+  type Tk = { key: string; status: string | null; statusType: string | null; effective: number };
+  const k = r.body.knowledge as { hits: Hit[]; preferCurrent: boolean } | undefined;
+  const b = r.body.board as { available: boolean; tickets: Tk[]; others: { key: string; settled: boolean }[] } | undefined;
+  const gaps = (r.body.gaps ?? []) as { gap: string; keys?: string[] }[];
+  const hitIds = (k?.hits ?? []).map((h) => h.id);
+  const oldHit = k?.hits.find((h) => h.id === draft.body.id);
+  const keysShown = (b?.tickets ?? []).map((t) => t.key);
+  assert(draft.status === 201 && redraft.status === 201 && note.status === 201 && r.status === 200 && k?.preferCurrent === true
+      && [draft.body.id, redraft.body.id, note.body.id].every((id) => hitIds.includes(String(id))) && oldHit?.supersededBy === redraft.body.id
+      && hitIds.indexOf(String(redraft.body.id)) < hitIds.indexOf(String(draft.body.id)),
+    `the knowledge: the request's search, current work first, the superseded draft labelled with the draft that replaced it (${r.status} ${hitIds.length} hits; ${oldHit?.supersededBy})`);
+  assert(b?.available === true && keysShown.includes("SMD-9951") && keysShown.includes("SMD-9952") && keysShown.indexOf("SMD-9951") < keysShown.indexOf("SMD-9952")
+      && b.tickets.find((t) => t.key === "SMD-9952")?.statusType === "started" && b.others.some((o) => o.key === "SMD-9953" && o.settled)
+      && gaps.some((g) => g.gap === "tickets_missing" && g.keys?.includes("SMD-9959")),
+    `the board: the named tickets in agenda order, the High before the started one, which is listed with its status; the Done one beside, settled; the unknown key a gap (${keysShown.join(" ")} | ${JSON.stringify(b?.others)} | ${JSON.stringify(gaps)})`);
+  const specs = r.body.specs as { available: boolean; waitsOn: string[] }, procs = r.body.procedures as { available: boolean; waitsOn: string[] };
+  const tools = r.body.tools as { scope: string; core: string[] };
+  assert(specs?.available === false && same(specs.waitsOn, ["SMD-2683", "SMD-1715"]) && procs?.available === false && same(procs.waitsOn, ["SMD-1721"])
+      && tools?.scope === "write" && tools.core.includes("plan_context") && tools.core.includes("capture_thought"),
+    `specs and procedures not available, naming the tickets they wait on; the tools a write key may call (${JSON.stringify(specs)} | ${tools?.core.length})`);
+  // One record through both doors: MCP's reply is the REST answer rendered.
+  const out = rendered((v) => say.renderPlanContext(ok(v)), r.body);
+  assert(!m.isError && out.content[0].text === m.text && same(out.structuredContent, m.sc) && /^Plan context for "how do I build \\"zephyr plan beta\\""/.test(m.text)
+      && /\n## Board: the tickets the hits name\n/.test(m.text) && /ticket SMD-9952 \("started"\)/.test(m.text) && /- ticket SMD-9953 \("completed"\) .* — settled/.test(m.text),
+    `MCP's reply is the REST answer rendered, text and value (${m.text.split("\n")[0]})`);
+  const reader = await rest("POST", "/v1/plan-context", { request, limit: 20 }, KEYS.reader);
+  const hook = await rest("POST", "/v1/plan-context", { request }, KEYS.hook);
+  const gone = await rest("POST", "/v1/plan-context", { request }, "no-such-key-raw");
+  const blank = await rest("POST", "/v1/plan-context", { request: "   " });
+  // The limit (review pass 1): 2 keeps two of the three notes' hits; 21 is past the schema's 20, refused; the log is
+  // off in this suite, so no call here wrote a row.
+  const two = await rest("POST", "/v1/plan-context", { request, limit: 2 });
+  const tooMany = await rest("POST", "/v1/plan-context", { request, limit: 21 });
+  const [{ n: planRows }] = await sql`SELECT count(*)::int AS n FROM query_log WHERE kind = 'plan_context'`;
+  assert(reader.status === 200 && same((reader.body.board as { tickets: Tk[] }).tickets.map((t) => t.key), keysShown) && (reader.body.tools as { scope: string; core: string[] }).scope === "read"
+      && !(reader.body.tools as { core: string[] }).core.includes("capture_thought") && hook.status === 403 && gone.status === 401 && blank.status === 400
+      && two.status === 200 && (two.body.knowledge as { hits: Hit[] }).hits.length === 2 && tooMany.status === 400 && planRows === 0,
+    `a read key reads it, its own tools listed; a capture-only key is refused 403, an unknown key 401, a blank request 400; limit 2 keeps two hits, 21 is refused; with the log off no row is written (${reader.status} ${hook.status} ${gone.status} ${blank.status} ${(two.body.knowledge as { hits?: Hit[] } | undefined)?.hits?.length} ${tooMany.status} ${planRows})`);
+  // The reply's budget (SMD-4191): a long note's text comes back cut to its head over both doors, the trimmed gap counts
+  // it, the MCP text says how to read the whole, and fetch returns every character.
+  const longText = '[17b] "zephyr plan beta" long notes ' + "the plan has many steps and each one is written out at length here. ".repeat(60);
+  const longNote = await rest("POST", "/v1/thoughts", { content: longText });
+  const cutR = await rest("POST", "/v1/plan-context", { request, limit: 20 });
+  const cutM = await mcp("plan_context", { request, limit: 20 });
+  const cutHit = ((cutR.body.knowledge as { hits?: (Hit & { content: string; contentChars: number })[] } | undefined)?.hits ?? []).find((h) => h.id === longNote.body.id);
+  const trimmed = ((cutR.body.gaps ?? []) as { gap: string; hitText?: number }[]).find((g) => g.gap === "trimmed");
+  const whole = await rest("GET", `/v1/thoughts/${String(longNote.body.id)}`);
+  assert(longNote.status === 201 && cutR.status === 200 && cutHit !== undefined && cutHit.contentChars === longText.length && cutHit.content.length < longText.length
+      && longText.startsWith(cutHit.content) && (trimmed?.hitText ?? 0) >= 1
+      && cutM.text.includes(`… cut at ${cutHit.content.length} of ${longText.length} characters: fetch ${String(longNote.body.id)} for the whole text.`)
+      && whole.status === 200 && whole.body.text === longText,
+    `a long note's text is cut to its head (${cutHit?.content.length} of ${longText.length}), the trimmed gap counts it, the MCP text says how to read the whole, and fetch returns it all (${JSON.stringify(trimmed)})`);
 }
 
 console.log("\n[18] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search_thoughts, search_thoughts_keyword, list_thoughts and fetch (none on search), the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");
@@ -2776,11 +2860,11 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   const restRows = [pick(compat.body.results, tid), pick(st.body.hits, tid), pick(kw.body.hits, tid), pick(list.body.thoughts, tid), fetched.body as Row];
   const due = `by the end of ${tomorrow} (UTC)`;
   assert(set.status === 200 && restRows.every((r) => r?.priority?.length === 1 && r.priority[0].kind === "ticket" && r.priority[0].key === "SMD-9921" && r.priority[0].self === false
-        && r.priority[0].effective === 5 && r.priority[0].level === 3 && r.priority[0].urgency === 2 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
+        && r.priority[0].effective === 3.4 && r.priority[0].level === 3 && r.priority[0].urgency === 0.4 && JSON.stringify((r.priority[0].terms as { term: string }[]).map((t) => t.term)) === '["level","urgency"]'),
     `over REST each of the five carries the High due tomorrow, its terms named; the unknown SMD-9922 no label (${JSON.stringify(restRows.map((r) => r?.priority?.map((p) => `${p.key} ${p.effective}`)))})`);
-  const line = `Priority: ticket SMD-9921 at 5 (high (3); +2 due ${due}).`;
+  const line = `Priority: ticket SMD-9921 at 3.4 (high (3); +0.4 due ${due}).`;
   const scs = [pick(stMcp.sc.hits, tid), pick(kwMcp.sc.hits, tid), pick(listMcp.sc.thoughts, tid)];
-  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 5 && !("terms" in h.priority[0])),
+  assert([stMcp.text, kwMcp.text, listMcp.text].every((t) => t.includes(line)) && scs.every((h) => h?.priority?.length === 1 && h.priority[0].effective === 3.4 && !("terms" in h.priority[0])),
     `over MCP the three text tools print the line, and their values carry the item without its terms (${stMcp.text.match(/Priority: .*/)?.[0]})`);
   const title = `[priority: ticket SMD-9921 high (3), due ${due}] `;
   const compatHit = pick(JSON.parse(compatMcp.text).results, tid);
@@ -2797,6 +2881,68 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   await sql`DELETE FROM thoughts WHERE content LIKE '%[19] the priority label%'`;
   // The key's kind as [11] left it, before [17] classified it (review pass 1: left as operator for a section after).
   await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+}
+
+console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_INFER_PRIORITY on, \"Urgent: … by Friday\" is stated High, due Friday, quoting both phrases, at the inferred tier by the capturing key — on the thought, or on each item the capture proposed from it; an operator's Low wins and the inferred statement stays in the history; effective_priority passes it over unless count_inferred; a re-capture makes no call and states nothing again; a capture key's on its own thought (the knob off: test-thoughts [18])");
+{
+  type A = { id: string; item: { kind: string; key: string }; level: number; dueAt: string | null; reason: string | null; inferred: boolean; maker: { name: string; scope: string | null }; tierName: string; closedAt: string | null };
+  const hist = async (kind: string, key: string) => (await rest("GET", `/v1/priorities/${kind}/${key}`)).body as { level: number | null; winner: A | null; history: A[] };
+  // The next Friday after a UTC day (a week on from a Friday), counted here rather than by the rules under test
+  // (review pass 1); either the day the section starts or the day it is checked, so a run across midnight holds.
+  const fridayAfter = (day: string) => { const t = Date.parse(`${day}T00:00:00Z`); const dow = new Date(t).getUTCDay(); return new Date(t + (((5 - dow + 7) % 7) || 7) * 86_400_000).toISOString().slice(0, 10); };
+  const startDay = new Date().toISOString().slice(0, 10);
+  const stated = (a: A | undefined, kind: string, key: string, maker: string, scope: string) => [startDay, new Date().toISOString().slice(0, 10)].map(fridayAfter).some((friday) =>
+    a !== undefined && a.item.kind === kind && a.item.key === key && a.level === 3
+    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v1): urgent from "Urgent"; due ${friday} from "by Friday"`
+    && a.inferred === true && a.tierName === "inferred" && a.maker.name === maker && a.maker.scope === scope && a.closedAt === null);
+  const friday = fridayAfter(startDay);
+  await sql`SELECT set_agent_kind('rival', 'operator')`;
+  try {
+    // The ticket's Verify 1: High, due Friday, quoting the phrase, inferred, by the capturing key, on the thought (it proposed no item).
+    const cap = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: landlord wants an answer by Friday" });
+    const tid = String(cap.body.id);
+    const h1 = await hist("thought", tid);
+    assert(cap.status === 201 && h1.history.length === 1 && stated(h1.history[0], "thought", tid, "writer", "write") && h1.winner?.id === h1.history[0].id,
+      `"Urgent: … by Friday" is stated on the thought: High, due by the end of ${friday}, both phrases quoted, inferred, by the writer (${JSON.stringify(h1.history[0])})`);
+    // Verify 2: an operator's Low on the same item wins; the inferred statement stays in the history, passed over.
+    const low = await rest("POST", `/v1/priorities/thought/${tid}`, { level: 1, reason: "[20] not urgent at all" }, KEYS.rival);
+    const h2 = await hist("thought", tid);
+    assert(low.status === 200 && h2.winner?.maker.name === "rival" && h2.winner.level === 1 && h2.winner.tierName === "operator" && h2.level === 1
+        && h2.history.length === 2 && h2.history.some((a) => a.id === h1.history[0].id && a.closedAt === null && a.tierName === "inferred"),
+      `an operator's Low wins, and the inferred High stays in the history, open (${h2.winner?.maker.name} ${h2.level} | ${h2.history.map((a) => `${a.maker.name}:${a.tierName}:${a.closedAt ? "closed" : "open"}`)})`);
+    // Nothing ranks on it unless count_inferred: the inferred High alone on a second thought reads unknown, passed over.
+    const cap2 = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the plumber needs a date by Friday" });
+    const t2 = String(cap2.body.id);
+    const items = JSON.stringify([{ kind: "thought", key: t2 }]);
+    const [plain] = await sql`SELECT level, jsonb_array_length(passed_over) AS passed FROM effective_priority((${items}::text)::jsonb)`;
+    const [counted] = await sql`SELECT level FROM effective_priority((${items}::text)::jsonb, '{"count_inferred": true}'::jsonb)`;
+    assert(plain?.level === null && plain?.passed === 1 && counted?.level === 3,
+      `effective_priority passes the inferred statement over by default (level unknown, one passed over) and counts it with count_inferred (${JSON.stringify(plain)} | ${JSON.stringify(counted)})`);
+    // A re-capture of the same text asks nothing and states nothing again (review pass 1: it asked, for nothing).
+    const callsBeforeAgain = inferCalls;
+    const again = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the plumber needs a date by Friday" });
+    assert(String(again.body.id) === t2 && inferCalls === callsBeforeAgain && (await hist("thought", t2)).history.length === 1,
+      `a re-capture makes no inference call and states nothing again (${inferCalls - callsBeforeAgain} calls)`);
+    // A capture that proposed items: the statement on each item, none on the thought.
+    const withItems = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: rho: remind me to call the dentist and book the vet by Friday" });
+    const wid = String(withItems.body.id);
+    const proposed = ((await rest("GET", `/v1/items?status=all&origin_thought=${wid}`)).body.items ?? []) as { id: string }[];
+    const onItems = await Promise.all(proposed.map((i) => hist("item", i.id)));
+    const onThought = await hist("thought", wid);
+    assert(proposed.length === 2 && onItems.every((h, i) => h.history.length === 1 && stated(h.history[0], "item", proposed[i].id, "writer", "write")) && onThought.history.length === 0,
+      `a capture that proposed two items states the inferred High on each, not on the thought (${proposed.length} | ${onItems.map((h) => h.history.length)} | ${onThought.history.length})`);
+    // A capture-only key's capture: on its own thought, at capture scope.
+    const hooked = await rest("POST", "/v1/thoughts", { content: "[20] Urgent: the hook says answer by Friday" }, KEYS.hook);
+    const hh = await hist("thought", String(hooked.body.id));
+    assert(hooked.status === 201 && hh.history.length === 1 && stated(hh.history[0], "thought", String(hooked.body.id), "hook", "capture"),
+      `a capture key's capture states it on its own thought, at capture scope (${JSON.stringify(hh.history[0]?.maker)})`);
+    // A text that states nothing: a call, and no statement.
+    const before = inferCalls;
+    const plainCap = await rest("POST", "/v1/thoughts", { content: "[20] a note that says nothing about when" });
+    assert(inferCalls === before + 1 && (await hist("thought", String(plainCap.body.id))).history.length === 0, "a text the model reads nothing in states nothing");
+  } finally {
+    await sql`SELECT set_agent_kind('rival', 'agent')`;
+  }
 }
 
 apiServer.stop();

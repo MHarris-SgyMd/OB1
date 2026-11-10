@@ -7,7 +7,7 @@
 import { createEmbedder, resolveEmbedConfig, shownBase, type EmbedConfig, type EmbedEnv, type Embedder } from "../embed.ts";
 import { createProviderHealth, type ProviderHealth } from "../provider-health.ts";
 import type { JevEnv } from "../jev.ts";
-import type { QueryAgendaLog, StoreEnv, ThoughtStore } from "../store.ts";
+import type { QueryAgendaLog, QueryPlanContextLog, StoreEnv, ThoughtStore } from "../store.ts";
 import { queryLogEnabled } from "../../db/config.mjs";
 import type { Principal } from "../auth.ts";
 
@@ -16,6 +16,8 @@ export type CoreEnv = EmbedEnv & JevEnv & StoreEnv & {
   OB1_TIER?: string;
   OB1_GIT_SHA?: string;
   OB1_QUERY_LOG?: string;
+  /** The plugins enabled (SMD-2310), for plan_context's tools section (SMD-2684): the root reads the same variable to serve them. */
+  OB1_PLUGINS?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
 };
 
@@ -46,6 +48,8 @@ export interface Ctx {
   logActions(principal: Pick<Principal, "agentId">, rows: ActionRow[]): Promise<void>;
   /** An agenda call's query_log row (migration 123): its scope and the items it returned; best-effort, a no-op unless OB1_QUERY_LOG=on. */
   logAgenda(principal: Pick<Principal, "agentId">, filter: Record<string, unknown>, limit: number, items: QueryAgendaLog["items"]): Promise<void>;
+  /** A plan_context call's query_log row (migration 126, SMD-2684): the request, the knowledge hits and the board's tickets; best-effort, a no-op unless OB1_QUERY_LOG=on. */
+  logPlanContext(principal: Pick<Principal, "agentId">, row: Omit<QueryPlanContextLog, "agentId" | "tier">): Promise<void>;
   /** The embedding provider as this server last saw it (SMD-2890): every embedding call says, and the keyed /health and brain_info read it. */
   providerHealth: ProviderHealth;
   /** Seconds between re-probes of a provider that does not answer, once the server started its loop; null for none (a hosted endpoint, or OB1_PROVIDER_REPROBE_INTERVAL=off). */
@@ -146,6 +150,16 @@ export function createContext(deps: CoreDeps): Ctx {
     }
   };
 
+  // plan_context's row (SMD-2684), as best-effort as the agenda's.
+  const logPlanContext: Ctx["logPlanContext"] = async (principal, row) => {
+    if (!queryLogEnabled(deps.env())) return;
+    try {
+      await (await deps.store()).logPlanContext({ ...row, agentId: principal.agentId, tier: tier() });
+    } catch {
+      // best-effort: a log failure must never reach the caller.
+    }
+  };
+
   return {
     env: deps.env,
     store: deps.store,
@@ -160,6 +174,7 @@ export function createContext(deps: CoreDeps): Ctx {
     logSearch,
     logActions,
     logAgenda,
+    logPlanContext,
     providerHealth: createProviderHealth({ base: () => shownBase(embedConfig().embeddings) }),
     reprobeS: null,
     reprobeByCall: false,

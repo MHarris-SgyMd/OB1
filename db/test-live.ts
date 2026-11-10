@@ -4201,7 +4201,8 @@ if (want("9")) {
 // whose every cell test-worker-bootstrap.ts holds; here one case per path it
 // sends a thought down), and what the follower says, stamps and ends with. Its
 // own section, out of [9] so the long shard kept its time (review pass 4);
-// in the rest since SMD-3714, which evened the cells out under sleep.
+// in the rest from SMD-3714, which evened the cells out under sleep, and in
+// long since SMD-3306 PR 6b-1 (the header's shard history).
 
 if (want("9f")) {
   console.log("\n[9f] db/reembed.ts --follow: the provider and the database going away, at the start and mid-pass");
@@ -4212,6 +4213,18 @@ if (want("9f")) {
   let providerDown503 = false;
   let downStatus = 503;
   let keyRefused401 = false;
+  /** The probe's call alone answers 401, the rows' calls passing (SMD-2636 PR 3b). */
+  let probeRefused401 = false;
+  /** While set, a zz-deadline thought's call never answers (SMD-2636 PR 3b); cleared, it answers as any. */
+  let deadlinesHang = true;
+  /**
+   * While set, the first probe after each zz-deadline call answers 503, the wait's probe after it answering: a thought
+   * whose deadline's probe meets an outage twice (SMD-2636 PR 3b, the build's mutants and review pass 1's).
+   */
+  let probeDownAfterDeadline = false;
+  let probeDownNext = false;
+  /** Every row's call answers OpenRouter's 402 "can only afford", the probe's passing (SMD-2636 PR 3b, the build's mutants). */
+  let rowsAfford402 = false;
   let modelGone404 = false;
   /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
   let limitConcurrent = false;
@@ -4246,6 +4259,21 @@ if (want("9f")) {
       }
       if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
       if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
+      // The probe's refusal past the 160 characters its words are cut at in the closing line (review pass 3).
+      if (probe && probeRefused401) return Response.json({ error: { message: `stub: invalid api key — ${"the key was revoked by its owner; ".repeat(5)}` } }, { status: 401 });
+      if (probe && probeDownNext) {
+        probeDownNext = false;
+        // Past the 160 characters the "is not answering" line cuts at, so its mark is read (review pass 5).
+        return Response.json({ error: { message: `stub: overloaded — ${"every replica is busy, retry after the queue drains; ".repeat(3)}` } }, { status: 503 });
+      }
+      // Past the worker line's 200 characters and the closing line's 300, as OpenRouter's is with its advice (review pass 3).
+      if (rowsAfford402 && !probe) return Response.json({ error: { message: `This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12. ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
+      // A zz-deadline thought's call never answers, so its deadline passes; the probe after it answers unless a flag
+      // above says otherwise (SMD-2636 PR 3b).
+      if (input.includes("zz-deadline") && deadlinesHang) {
+        if (probeDownAfterDeadline) probeDownNext = true;
+        return neverAnswers();
+      }
       if (modelGone404) return Response.json({ error: { message: `model "stub-embed" not found, try pulling it first` } }, { status: 404 });
       if (rowsLimited && !probe) return Response.json({ error: { message: "stub: rate limit reached for tokens per minute" } }, { status: rowsStatus });
       if (limitConcurrent && !probe) {
@@ -4256,7 +4284,11 @@ if (want("9f")) {
       }
       if (input.includes("zz-filtered")) return Response.json({ error: { message: "stub: the request was rejected by the content filter" } }, { status: 400 });
       if (input.includes("zz-overlong")) return Response.json({ error: { message: "stub: the input exceeds the model's context length" } }, { status: 400 });
-      if (poison && input.includes("hemlock")) return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
+      // A slow hemlock note answers its 500 after 1 s, so a second worker has claimed its own thought by then, on a slow runner too (review pass 4: 500 ms).
+      if (poison && input.includes("hemlock")) {
+        if (input.includes("slow hemlock")) await Bun.sleep(1000);
+        return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
+      }
       if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
@@ -4411,20 +4443,25 @@ if (want("9f")) {
     keyRefused401 = false;
     const keyRow = await row();
     const keyClaim = await claimOf(keyThought);
-    assert(keyEnd === "exit 2" && keyRow?.ended === true && keyRow.refused === "provider" && keyClaim?.status === "pending" && keyed.lines.some((l) => /The embedding provider refused the request itself: Embeddings request .* 401/.test(l)),
+    // The probe's refusal said first, as extract's is (SMD-2636 PR 3b).
+    assert(keyEnd === "exit 2" && keyRow?.ended === true && keyRow.refused === "provider" && keyClaim?.status === "pending" && keyed.lines.some((l) => /The embedding provider refused the request itself: a probe's embedding call was refused \(Embeddings request .* 401.*\), right after Embeddings request .* 401/.test(l)),
       `a key refused mid-pass ends the follower with 2, its row refused provider, the row in hand left pending (${keyEnd}; row ${JSON.stringify(keyRow)}; claim ${JSON.stringify(keyClaim)})`);
     await sql`DELETE FROM thoughts WHERE id = ${keyThought}::uuid`;
 
     // A 400 about one thought's length is that thought's: recorded failed, the follower goes on (review pass 1: it ended the follower, refused provider, and every restart met the same row first).
     const lengthy = liveFollower();
     await lengthy.idle();
+    const overlongProbes = probeCalls;
     const overlong = await newThought("a zz-overlong thought the provider refuses by its length");
     const overlongFailed = await pollUntil(async () => (await claimOf(overlong))?.status === "failed", 15_000);
+    // Its own words, unprobed: the length names the thought (SMD-2636 PR 3b, review pass 1's mutant: `thought` read as a probe passed).
+    const overlongError = (await claimOf(overlong))?.last_error ?? "";
+    const overlongProbed = probeCalls - overlongProbes;
     const afterOverlong = await newThought("a thought the follower takes after a length refusal");
     const afterEmbedded = await pollUntil(() => atModel(afterOverlong), 15_000);
     const lengthyExit = await lengthy.stop();
-    assert(overlongFailed && afterEmbedded && lengthyExit === "exit 0" && !lengthy.lines.some((l) => /refused the request itself/.test(l)),
-      `a 400 about a thought's length records that thought failed and the follower goes on, a stop 0 (failed ${overlongFailed}, next embedded ${afterEmbedded}; ${lengthyExit})`);
+    assert(overlongFailed && /context length/.test(overlongError) && !/probe/.test(overlongError) && overlongProbed === 0 && afterEmbedded && lengthyExit === "exit 0" && !lengthy.lines.some((l) => /refused the request itself/.test(l)),
+      `a 400 about a thought's length records that thought failed, unprobed, and the follower goes on, a stop 0 (failed ${overlongFailed}: ${overlongError.slice(0, 120)}; ${overlongProbed} probe(s); next embedded ${afterEmbedded}; ${lengthyExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${overlong}::uuid`;
 
     // A 400 not about length that the probe's text then gets answered (a content filter) is the thought's too: recorded failed, the follower goes on (review pass 2: it ended the follower, refused provider).
@@ -4439,6 +4476,121 @@ if (want("9f")) {
     assert(filteredFailed && /content filter.*the provider answered a probe right after, so this thought's/.test(filteredClaim?.last_error ?? "") && afterFilteredEmbedded && filteringExit === "exit 0",
       `a 400 the probe's text then gets answered is the thought's: recorded failed, said so, the follower goes on, a stop 0 (${filteredClaim?.last_error?.slice(0, 160)}; next embedded ${afterFilteredEmbedded}; ${filteringExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${filtered}::uuid`;
+
+    // A call that meets its deadline with no answer is probed first (SMD-2636 PR 3b, the maintainer's rule of
+    // 2026-11-05; it was an outage at once, the thought recorded only when it hung again after a wait): the probe
+    // answered, the thought's — recorded failed at once, said so, no outage — and the follower goes on.
+    const deadlined = liveFollower();
+    await deadlined.idle();
+    const hangs = await newThought("a zz-deadline thought whose call never answers");
+    const hangsFailed = await pollUntil(async () => (await claimOf(hangs))?.status === "failed", 15_000);
+    const hangsClaim = await claimOf(hangs);
+    const afterHangs = await newThought("a thought the follower takes after a deadline the probe answered past");
+    const afterHangsEmbedded = await pollUntil(() => atModel(afterHangs), 15_000);
+    const deadlinedExit = await deadlined.stop();
+    const deadlinedOutage = deadlined.lines.some((l) => /goes back to the pool unrecorded|is not answering/.test(l));
+    assert(hangsFailed && /the provider answered a probe right after, so this thought's; --retry-failed revisits it\)$/.test(hangsClaim?.last_error ?? "") && !deadlinedOutage && afterHangsEmbedded && deadlinedExit === "exit 0",
+      `a deadline with no answer is probed first: the probe answered, the thought recorded failed as its own at once, no outage, the follower going on, a stop 0 (${hangsClaim?.last_error?.slice(0, 160)}; outage said ${deadlinedOutage}; next embedded ${afterHangsEmbedded}; ${deadlinedExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${hangs}::uuid OR id = ${afterHangs}::uuid`;
+
+    // A deadline whose probe is refused is the request's: every worker stops, exit 2, refused provider, the thought
+    // pending, the probe's refusal said first (SMD-2636 PR 3b; it was an outage, the wait's probe then refused).
+    const deadRefused = liveFollower();
+    await deadRefused.idle();
+    probeRefused401 = true;
+    let deadRefusedEnd: string | null = null;
+    let refusedHangs = "";
+    try {
+      refusedHangs = await newThought("a zz-deadline thought whose probe is refused");
+      deadRefusedEnd = await deadRefused.ended();
+    } finally {
+      probeRefused401 = false;
+    }
+    const deadRefusedRow = await row();
+    const deadRefusedClaim = await claimOf(refusedHangs);
+    // The probe's words cut at 160, marked (review pass 3: unmarked, a cut read whole).
+    const deadRefusedSaid = deadRefused.lines.some((l) => /The embedding provider refused the request itself: a probe's embedding call was refused \(Embeddings request .* 401 .*…\), right after /.test(l));
+    const deadRefusedWaited = deadRefused.lines.some((l) => /goes back to the pool unrecorded/.test(l));
+    assert(deadRefusedEnd === "exit 2" && deadRefusedRow?.refused === "provider" && deadRefusedClaim?.status === "pending" && deadRefusedSaid && !deadRefusedWaited,
+      `a deadline whose probe is refused ends the follower with 2, refused provider, the thought pending, the probe's refusal said, no outage waited (${deadRefusedEnd}; row ${JSON.stringify(deadRefusedRow)}; claim ${JSON.stringify(deadRefusedClaim)}; said ${deadRefusedSaid}, waited ${deadRefusedWaited})`);
+    await sql`DELETE FROM thoughts WHERE id = ${refusedHangs}::uuid`;
+
+    // A deadline whose probe gets no answer is the provider's outage, the thought back in the pool unrecorded, not the
+    // thought's (SMD-2636 PR 3b, the build's mutant: probedFault's outage read the thought's passed every row). Once
+    // the wait's probe answers, the same again is the suspect's own, recorded failed (review pass 1's mutants: the
+    // suspect dropped on this path, or the second round handed back, passed every row and cycled for ever).
+    const deadDown = liveFollower();
+    await deadDown.idle();
+    probeDownAfterDeadline = true;
+    let downHangs = "";
+    let downSentBack = false;
+    let downFailed = false;
+    let downClaim: Awaited<ReturnType<typeof claimOf>>;
+    try {
+      downHangs = await newThought("a zz-deadline thought whose probe meets an outage");
+      // In the probe's words, cut at 160 and marked (review pass 5: the mark was held by no row).
+      downSentBack = await deadDown.saw(new RegExp(`the embedding provider is not answering \\(Embeddings request .* 503 .*…\\) — ${downHangs} goes back to the pool unrecorded`));
+      downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 20_000);
+      downClaim = await claimOf(downHangs);
+    } finally {
+      probeDownAfterDeadline = false;
+      probeDownNext = false;
+    }
+    const deadDownExit = await deadDown.stop();
+    assert(downSentBack && deadDownExit === "exit 0",
+      `a deadline whose probe gets no answer is an outage: the thought back in the pool unrecorded, said as the probe's 503 (sent back ${downSentBack}; ${deadDownExit})`);
+    assert(downFailed && /^provider error again right after the provider answered a probe, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? ""),
+      `…and, once the wait's probe answers, the same again is the suspect's own: recorded failed (${JSON.stringify(downClaim)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${downHangs}::uuid`;
+
+    // Another worker's outage is joined unprobed (SMD-2636 PR 3b, as extract's, PR 3a's review pass 1): under two
+    // workers a slow hemlock note's 500 begins an outage while a deadline thought's call is still in hand, which, met
+    // after, goes back to the pool unrecorded, where a probe would answer and record it failed. The 500 comes after
+    // 1 s: at once, it began the outage before the other worker claimed, which then claimed nothing.
+    const joining = liveFollower({ workers: 2 });
+    await joining.idle();
+    poison = true;
+    let joinHangs = "";
+    let joinSick = "";
+    let joinSentBack = false;
+    let joinClaim: Awaited<ReturnType<typeof claimOf>>;
+    try {
+      [{ id: joinHangs }, { id: joinSick }] = (await sql`INSERT INTO thoughts (content) VALUES ('a zz-deadline thought in hand when another begins an outage'), ('the slow hemlock note that begins the outage') RETURNING id::text AS id`) as { id: string }[];
+      joinSentBack = await joining.saw(new RegExp(`${joinHangs} goes back to the pool unrecorded`));
+      joinClaim = await claimOf(joinHangs);
+    } finally {
+      poison = false;
+    }
+    const joiningExit = await joining.stop();
+    const joinProbedFailed = joinClaim?.status === "failed";
+    assert(joinSentBack && !joinProbedFailed && joiningExit === "exit 0",
+      `a deadline met during another worker's outage joins it, unprobed: back in the pool, not recorded failed (sent back ${joinSentBack}; claim ${JSON.stringify(joinClaim)}; ${joiningExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${joinHangs}::uuid OR id = ${joinSick}::uuid`;
+
+    // A 402 saying the call asks more than the account affords is the request's at once, unprobed: exit 2, refused
+    // provider, the thought pending (SMD-2636 PR 3b; the probe's one call is affordable and would read each thought its own).
+    const afford = liveFollower();
+    await afford.idle();
+    rowsAfford402 = true;
+    const affordProbes = probeCalls;
+    let affordEnd: string | null = null;
+    let affordThought = "";
+    try {
+      affordThought = await newThought("a thought the account cannot afford to re-embed");
+      affordEnd = await afford.ended();
+    } finally {
+      rowsAfford402 = false;
+    }
+    const affordRow = await row();
+    const affordClaim = await claimOf(affordThought);
+    // The closing line cut at 300, marked (review pass 3).
+    const affordSaid = afford.lines.some((l) => /The embedding provider refused the request itself: Embeddings request .* 402 .*can only afford 12\..*…$/.test(l));
+    // The worker's own line too, its words whole or marked cut (review pass 1: cut at 160, "…up to 81" read as a number).
+    const affordWorkerLine = afford.lines.find((l) => /: the embedding provider refuses the request itself \(/.test(l)) ?? "";
+    const affordWorkerSaid = /\(Embeddings request .* 402 .*…\) — stopping every worker; nothing is marked failed$/.test(affordWorkerLine);
+    assert(affordEnd === "exit 2" && affordRow?.refused === "provider" && affordClaim?.status === "pending" && affordSaid && affordWorkerSaid && probeCalls === affordProbes,
+      `a 402 "can only afford" ends the follower with 2 unprobed, refused provider, the thought pending, its worker's line saying why (${affordEnd}; row ${JSON.stringify(affordRow)}; claim ${JSON.stringify(affordClaim)}; said ${affordSaid}, worker ${affordWorkerLine.trim().slice(-120)}; ${probeCalls - affordProbes} probe(s))`);
+    await sql`DELETE FROM thoughts WHERE id = ${affordThought}::uuid`;
 
     // The model missing mid-pass (a 404 naming it, as while Ollama pulls it) is waited for, as an outage is — not the request refused.
     const pulled = liveFollower();
@@ -4497,6 +4649,10 @@ if (want("9f")) {
     const throttledExit = await throttledFollower.stop();
     assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
       `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
+    // A 429 says the provider "is not answering", as every follower's outage does (SMD-2636 PR 3b: it said "is holding calls back").
+    const throttledSaid = throttledFollower.lines.filter((l) => l.includes(`${throttledThought} goes back to the pool unrecorded`));
+    assert(throttledSaid.length >= 1 && throttledSaid.every((l) => /: the embedding provider is not answering \(Embeddings request .* 429/.test(l)),
+      `…each 429's line says the provider is not answering (${throttledSaid.length}; ${throttledSaid[0]?.slice(0, 160)})`);
     // Re-embed's carried line in its own words, as on main: no pauses in its window or its note (SMD-2636 PR 2,
     // review pass 3, mutant: re-embed given extract's pausing window and words passed every row).
     const carriedLines = throttledFollower.lines.filter((l) => /the follower calls stub-embed at /.test(l) && / \(back within /.test(l));
@@ -4830,6 +4986,43 @@ if (want("9f")) {
     const setBackLine = aborting.lines.find((l) => /set back in the queue/.test(l)) ?? "";
     assert(embedInHand && embedTooYoung === 0 && embedAborted === 1 && embedded && abortingExit === "exit 0" && /1 set back in the queue, the embedding call in hand aborted by the pass's caller/.test(setBackLine),
       `abortInHand aborts a re-embed follower's call in hand: the thought set back and re-embedded, the follower going on (${embedTooYoung} then ${embedAborted} aborted, re-embedded ${embedded}; ${abortingExit}; ${setBackLine.trim().slice(0, 160)}; ${probeCalls - embedFrom} probe(s))`);
+
+    // The probe after a deadline is part of the call in hand (SMD-2636 PR 3b, review pass 1): abortInHand during it
+    // sets the thought back, where a probe deaf to it held the pass to its own timeout, then began an outage. Timed,
+    // at a 6 s call timeout: re-embedded within 2 s of the abort, so the probe heard it (review pass 3's mutant: the
+    // probe on the stop alone passed, the set-back coming once the deaf probe timed out).
+    let abortProbe: InHandAbort | undefined;
+    const probing = liveFollower({ env: { ...env, OB1_LLM_TIMEOUT: "6" }, onPass: (_st, a) => { abortProbe = a; } });
+    await probing.idle();
+    const probeHungFrom = embedProbesHung;
+    let probeAborted = -1;
+    let probedThought = "";
+    let probeEmbedded = false;
+    let probeAfterMs = -1;
+    let probeClaim: Awaited<ReturnType<typeof claimOf>>;
+    try {
+      embedProbeHangs = true;
+      probedThought = await newThought("a zz-deadline thought whose probe is aborted in hand");
+      await pollUntil(async () => embedProbesHung > probeHungFrom, 15_000);
+      // The thought's next call answers: set back, it is claimed again at once, in the same drain (a second
+      // deadline with the probe still hung was an outage). The "set back" count is the run's closing summary's,
+      // read after the stop (review pass 2: waited for here, it never came before the stop).
+      deadlinesHang = false;
+      embedProbeHangs = false;
+      const abortAt = Date.now();
+      probeAborted = abortProbe?.() ?? -1;
+      probeEmbedded = await pollUntil(() => atModel(probedThought), 15_000);
+      probeAfterMs = Date.now() - abortAt;
+      probeClaim = await claimOutOfHand(probedThought);
+    } finally {
+      deadlinesHang = true;
+      embedProbeHangs = false;
+    }
+    const probingExit = await probing.stop();
+    const probeOutageLine = probing.lines.find((l) => /goes back to the pool unrecorded|is not answering/.test(l));
+    assert(embedProbesHung > probeHungFrom && probeAborted === 1 && probeEmbedded && probeAfterMs >= 0 && probeAfterMs < 2_000 && probeClaim?.status === "succeeded" && probeOutageLine === undefined && probing.lines.some((l) => /set back in the queue/.test(l)) && probingExit === "exit 0",
+      `abortInHand during the probe after a deadline sets the thought back, then re-embedded: no outage, not recorded failed (${probeAborted} aborted; embedded ${probeEmbedded} ${probeAfterMs} ms after it; claim ${JSON.stringify(probeClaim)}; outage said ${probeOutageLine?.trim().slice(0, 200)}; ${probingExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${probedThought}::uuid`;
   } finally {
     restoreOutage();
     providerDown503 = false;
