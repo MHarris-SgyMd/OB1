@@ -2411,6 +2411,20 @@ console.log("\n[17b] plan_context through both doors (migration 126, SMD-2684): 
       && !(reader.body.tools as { core: string[] }).core.includes("capture_thought") && hook.status === 403 && gone.status === 401 && blank.status === 400
       && two.status === 200 && (two.body.knowledge as { hits: Hit[] }).hits.length === 2 && tooMany.status === 400 && planRows === 0,
     `a read key reads it, its own tools listed; a capture-only key is refused 403, an unknown key 401, a blank request 400; limit 2 keeps two hits, 21 is refused; with the log off no row is written (${reader.status} ${hook.status} ${gone.status} ${blank.status} ${(two.body.knowledge as { hits?: Hit[] } | undefined)?.hits?.length} ${tooMany.status} ${planRows})`);
+  // The reply's budget (SMD-4191): a long note's text comes back cut to its head over both doors, the trimmed gap counts
+  // it, the MCP text says how to read the whole, and fetch returns every character.
+  const longText = '[17b] "zephyr plan beta" long notes ' + "the plan has many steps and each one is written out at length here. ".repeat(60);
+  const longNote = await rest("POST", "/v1/thoughts", { content: longText });
+  const cutR = await rest("POST", "/v1/plan-context", { request, limit: 20 });
+  const cutM = await mcp("plan_context", { request, limit: 20 });
+  const cutHit = ((cutR.body.knowledge as { hits?: (Hit & { content: string; contentChars: number })[] } | undefined)?.hits ?? []).find((h) => h.id === longNote.body.id);
+  const trimmed = ((cutR.body.gaps ?? []) as { gap: string; hitText?: number }[]).find((g) => g.gap === "trimmed");
+  const whole = await rest("GET", `/v1/thoughts/${String(longNote.body.id)}`);
+  assert(longNote.status === 201 && cutR.status === 200 && cutHit !== undefined && cutHit.contentChars === longText.length && cutHit.content.length < longText.length
+      && longText.startsWith(cutHit.content) && (trimmed?.hitText ?? 0) >= 1
+      && cutM.text.includes(`… cut at ${cutHit.content.length} of ${longText.length} characters: fetch ${String(longNote.body.id)} for the whole text.`)
+      && whole.status === 200 && whole.body.text === longText,
+    `a long note's text is cut to its head (${cutHit?.content.length} of ${longText.length}), the trimmed gap counts it, the MCP text says how to read the whole, and fetch returns it all (${JSON.stringify(trimmed)})`);
 }
 
 console.log("\n[18] Judged relations through both doors (SMD-2726; SMD-3306 PR 7a-2b): a thought's standing judged relations from both sides, strongest first — related, evolves, duplicate and distinct, each word as it reads from its side, the confidence, a relation edited since judged marked stale, the other thought superseded — paged by its cursor and filtered by word; a work thread's edge and a closed relation never shown; the labels on search_thoughts, search_thoughts_keyword, list_thoughts and fetch (none on search), the first five on a page and the rest counted, twenty on a fetch; no title in MCP's value; null when they cannot be read; each refusal by its rule");

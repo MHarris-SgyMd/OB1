@@ -37,6 +37,129 @@ export const BOARD_RESERVE_MS = 2_000;
 export const BOARD_KEYS = 500;
 /** The board's list: the agenda's ceiling of 100 items. Open named tickets past it are counted, not read. */
 export const BOARD_LIMIT = 100;
+
+/**
+ * The reply's budget (SMD-4191: one canary answer ran to 63,108 characters for 8 hits): about 15,500 characters for that
+ * answer's shape at the default 8 hits, 17,200 with claims and every hit's topics; every list capped by count and every
+ * item by length, so a reply is bounded — the largest shape tested, 20 hits and every list full of items at their
+ * longest, comes to about 55,500. Every cap here is applied in
+ * the core, so REST and MCP still give one record, and each cut is counted in the `trimmed` gap.
+ * - HIT_TEXT_BUDGET: the knowledge's text, shared across the hits, each at least HIT_TEXT_MIN, cut to its head;
+ * - HIT_LABELS: a hit's labels, past which the rest are counted in its `…More`, as search_thoughts counts its own;
+ * - BOARD_SHOWN: the open tickets listed, the rest counted; BOARD_TITLE: a title's characters;
+ * - OTHERS_TITLED: the settled and unknown-type tickets listed with their titles, the rest by key and status.
+ */
+export const HIT_TEXT_BUDGET = 1_200;
+export const HIT_TEXT_MIN = 100;
+export const HIT_LABELS = { claimed: 2, relations: 2, priority: 3 } as const;
+/**
+ * The lists a thought's metadata and a board line carry (review pass 2: an importer's 30 topics on every hit made a
+ * reply of 220,703 characters, and 12 blockers on every open ticket 59,058): a hit's topics, people and action items,
+ * and an open ticket's blockers and its live and lapsed claims' holders, each to its first few, the cut counted.
+ */
+export const HIT_META = { topics: 3, people: 3, action_items: 2 } as const;
+/** A metadata item's characters, past which it is cut (the block's own one-line caps are 80 and 200). */
+export const HIT_META_ITEM = 60;
+/** A board line's blockers and holders. Each is kept whole (review pass 3: a cut identity could not be followed); the text quotes it to 80. */
+export const TICKET_LABELS = { blockers: 3, claimed: 1, lapsedClaim: 1 } as const;
+/** How many of an open ticket's blockers and holders the budget left out, so its line and the value still count them (review pass 3). */
+export type TicketMore = { blockers: number; claimed: number; lapsedClaim: number };
+export const BOARD_SHOWN = 15;
+export const BOARD_TITLE = 72;
+export const OTHERS_TITLED = 5;
+/**
+ * The lists that grew with the board's reach of 500 keys (review pass 1: 400 settled and 100 waiting tickets made a
+ * reply of 68,825 characters): settled and unknown-type tickets listed to OTHERS_LISTED, those not yet startable to
+ * WAITING_LISTED, the keys no thought records to MISSING_LISTED, each past it counted.
+ */
+export const OTHERS_LISTED = 40;
+export const WAITING_LISTED = 10;
+export const MISSING_LISTED = 20;
+
+/** A string's head of at most `n` UTF-16 units, never ending in half of a surrogate pair (review pass 1: a cut through an emoji left a lone surrogate). */
+export function headOf(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const head = s.slice(0, n);
+  const last = head.charCodeAt(head.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head;
+}
+
+const shortTitle = (t: string): { title: string; cut: boolean } =>
+  t.length <= BOARD_TITLE ? { title: t, cut: false } : { title: `${headOf(t, BOARD_TITLE - 1)}…`, cut: true };
+
+/** A list cut to its first `n`, the rest added to its count of more. */
+function capped<T>(list: T[] | null, more: number, n: number): { list: T[] | null; more: number; cut: number } {
+  if (list === null || list.length <= n) return { list, more, cut: 0 };
+  return { list: list.slice(0, n), more: more + list.length - n, cut: list.length - n };
+}
+
+/**
+ * The reply held to its budget (SMD-4191): each hit's text cut to its share of HIT_TEXT_BUDGET, each hit's labels to
+ * HIT_LABELS, the board's open tickets to BOARD_SHOWN and every title to BOARD_TITLE, the settled ones past
+ * OTHERS_TITLED by key and status alone; what was cut said in one `trimmed` gap. Nothing else changes.
+ */
+export function budgetPlan(v: Omit<PlanContextResult, "knowledge"> & { knowledge: Omit<PlanContextResult["knowledge"], "hits"> & { hits: SearchHit[] } }): PlanContextResult {
+  const trimmed: PlanTrimmed = { gap: "trimmed", hitText: 0, labels: 0, boardLabels: 0, tickets: 0, titles: 0, unlisted: 0 };
+  const share = v.knowledge.hits.length ? Math.max(HIT_TEXT_MIN, Math.floor(HIT_TEXT_BUDGET / v.knowledge.hits.length)) : HIT_TEXT_BUDGET;
+  const hits: PlanHit[] = v.knowledge.hits.map((h) => {
+    const contentChars = h.content.length;
+    if (contentChars > share) trimmed.hitText++;
+    const claimed = capped(h.claimed, h.claimedMore ?? 0, HIT_LABELS.claimed);
+    const relations = capped(h.relations, h.relationsMore ?? 0, HIT_LABELS.relations);
+    const priority = capped(h.priority, h.priorityMore ?? 0, HIT_LABELS.priority);
+    trimmed.labels += claimed.cut + relations.cut + priority.cut;
+    // The metadata lists the block prints, each to its first few (a copy: the thought's own metadata is untouched).
+    const metadata: Record<string, unknown> = { ...(h.metadata ?? {}) };
+    for (const [k, n] of Object.entries(HIT_META)) {
+      const list = metadata[k];
+      if (!Array.isArray(list)) continue;
+      // Only what the block would print (review pass 3: empty entries took the slots of real ones).
+      const printable = list.filter((x) => x !== null && x !== undefined && String(x).trim() !== "");
+      if (printable.length > n) trimmed.labels += printable.length - n;
+      metadata[k] = printable.slice(0, n).map((x) => (typeof x === "string" && x.length > HIT_META_ITEM ? `${headOf(x, HIT_META_ITEM - 1)}…` : x));
+    }
+    return {
+      ...h, metadata, content: headOf(h.content, share), contentChars,
+      claimed: claimed.list, claimedMore: claimed.more, relations: relations.list, relationsMore: relations.more, priority: priority.list, priorityMore: priority.more,
+    };
+  });
+  let board = v.board;
+  if (board.available) {
+    const shown = board.tickets.slice(0, BOARD_SHOWN);
+    // Past the list, by key (review pass 1: the agenda tool takes no keys, so a cut ticket was out of reach).
+    const moreOpen = board.tickets.slice(BOARD_SHOWN).map((t) => t.key);
+    trimmed.tickets = moreOpen.length;
+    const ticketMore: Record<string, TicketMore> = {};
+    const tickets = shown.map((t) => {
+      const c = shortTitle(t.title);
+      if (c.cut) trimmed.titles++;
+      // A line's blockers and holders to their first few, kept whole; how many were left out kept per ticket (review
+      // passes 2 and 3), so the line says "and N more" and the value counts them all.
+      const more: TicketMore = { blockers: Math.max(0, t.blockers.length - TICKET_LABELS.blockers), claimed: Math.max(0, t.claimed.length - TICKET_LABELS.claimed),
+                                 lapsedClaim: Math.max(0, t.lapsedClaim.length - TICKET_LABELS.lapsedClaim) };
+      const n = more.blockers + more.claimed + more.lapsedClaim;
+      if (n) { ticketMore[t.key] = more; trimmed.boardLabels += n; }
+      return { ...t, blockers: t.blockers.slice(0, TICKET_LABELS.blockers), claimed: t.claimed.slice(0, TICKET_LABELS.claimed),
+               lapsedClaim: t.lapsedClaim.slice(0, TICKET_LABELS.lapsedClaim), title: c.title };
+    });
+    const waitingMore = Math.max(0, board.waiting.length - WAITING_LISTED);
+    const waiting = board.waiting.slice(0, WAITING_LISTED).map((t) => { const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title }; });
+    const othersMore = Math.max(0, board.others.length - OTHERS_LISTED);
+    const others = board.others.slice(0, OTHERS_LISTED).map((t, i) => {
+      if (i >= OTHERS_TITLED) { if (t.title) trimmed.titles++; return { ...t, title: "" }; }
+      const c = shortTitle(t.title); if (c.cut) trimmed.titles++; return { ...t, title: c.title };
+    });
+    trimmed.unlisted = waitingMore + othersMore;
+    board = { ...board, tickets, waiting, others, ...(Object.keys(ticketMore).length ? { ticketMore } : {}), ...(moreOpen.length ? { moreOpen } : {}), ...(othersMore ? { othersMore } : {}), ...(waitingMore ? { waitingMore } : {}) };
+  }
+  const gaps: PlanGap[] = v.gaps.map((g) => {
+    if (g.gap !== "tickets_missing" || g.keys.length <= MISSING_LISTED) return g;
+    trimmed.unlisted += g.keys.length - MISSING_LISTED;
+    return { gap: "tickets_missing", keys: g.keys.slice(0, MISSING_LISTED), more: (g.more ?? 0) + g.keys.length - MISSING_LISTED };
+  });
+  const cut = trimmed.hitText + trimmed.labels + trimmed.boardLabels + trimmed.tickets + trimmed.titles + trimmed.unlisted > 0;
+  return { ...v, knowledge: { ...v.knowledge, hits }, board, gaps: cut ? [...gaps, trimmed] : gaps };
+}
 /** A ticket key as the agenda takes one (126's `c_key`, 068's form). Kept in step with the SQL: one key it refuses fails the whole call. */
 export const AGENDA_KEY = /^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$/;
 
@@ -53,6 +176,12 @@ export type PlanBoard =
       others: AgendaOther[];
       /** The named tickets a not_before ahead keeps out: not yet startable, and when they will be. */
       waiting: AgendaWaiting[];
+      /** Per open ticket listed, keyed by its key, how many blockers and holders the budget left out (SMD-4191 review pass 3). */
+      ticketMore?: Record<string, TicketMore>;
+      /** Held to the reply's budget (SMD-4191): the keys of open tickets past the list's first BOARD_SHOWN, and how many settled or waiting tickets went unlisted. */
+      moreOpen?: string[];
+      othersMore?: number;
+      waitingMore?: number;
       /** False when this role may not read work_claims: no claim is named on a ticket. Null when no ticket was named, so nothing was read. */
       claimsRead: boolean | null;
       /** The live claims this brain records on any ticket; 0 means work claimed through another brain is not seen here. Null when not read. */
@@ -67,9 +196,17 @@ export type PlanGap =
   | { gap: "all_superseded"; hits: number }
   | { gap: "ingested_only"; hits: number }
   | { gap: "semantic_unavailable"; reason: string }
-  | { gap: "tickets_missing"; keys: string[] }
+  | { gap: "tickets_missing"; keys: string[]; more?: number }
   | { gap: "tickets_not_read"; count: number }
-  | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number };
+  | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number }
+  | PlanTrimmed;
+
+/**
+ * What the reply's budget cut (SMD-4191), so nothing is dropped without a word: hits whose text was cut to its head
+ * (`fetch` reads the whole), labels past a hit's caps (`fetch`, `relations` and `list_claims` read them), open tickets
+ * past the board's first BOARD_SHOWN (the agenda lists them), and titles shortened or left off.
+ */
+export type PlanTrimmed = { gap: "trimmed"; hitText: number; labels: number; boardLabels: number; tickets: number; titles: number; unlisted: number };
 
 export type PlanTools = {
   scope: Principal["scope"];
@@ -81,9 +218,12 @@ export type PlanTools = {
   elsewhere: "unknown";
 };
 
+/** A knowledge hit as plan_context hands it over: its text perhaps cut to its head, `contentChars` the whole text's length. */
+export type PlanHit = SearchHit & { contentChars: number };
+
 export type PlanContextResult = {
   request: string;
-  knowledge: { hits: SearchHit[]; preferCurrent: true; vectorFailed?: QueryVectorFailed };
+  knowledge: { hits: PlanHit[]; preferCurrent: true; vectorFailed?: QueryVectorFailed };
   board: PlanBoard;
   specs: NotAvailable;
   procedures: NotAvailable;
@@ -216,11 +356,12 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
   const { board, gaps: boardGaps } = await boardOf(ctx, named, deadlineMs - (clock() - started));
   gaps.push(...boardGaps);
 
-  const value: PlanContextResult = {
+  // Held to the reply's budget (SMD-4191); the log below names every hit and ticket read, cut or not.
+  const value = budgetPlan({
     request,
     knowledge: { hits, preferCurrent: true, ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}) },
     board, specs: SPECS, procedures: PROCEDURES, tools: toolsFor(ctx, principal), gaps, deadlineMs,
-  };
+  });
   // A board not read says why in the row's filter, so its empty items are not read as a board that named nothing.
   await ctx.logPlanContext(principal, {
     query: request, matchCount: input.limit, arm: r.vectorFailed ? "literal" : "current",
