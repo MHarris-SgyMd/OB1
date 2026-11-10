@@ -2430,15 +2430,17 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   return title ? words : `${words}.`;
 }
 /** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
-function agendaLine(i: AgendaItem): string {
+function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }): string {
+  // `more`: what plan_context's budget left out of this line (SMD-4191), said as "and N more"; the agenda's own lines pass none.
+  const and = (n: number) => (n > 0 ? ` and ${n} more` : "");
   // A ticket's status is its board's word (124): quoted and cut, as a title is.
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
-    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
-    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
+    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.claimed)}` : null,
+    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
-    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${and(Math.max(0, i.blockers.length - 10) + more.blockers)}` : null,
   ].filter(Boolean);
   return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
 }
@@ -2453,7 +2455,8 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
     ? ["Nothing on the agenda in this scope."]
     : [
         `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
-        ...v.items.map(agendaLine),
+        // Wrapped: map's index must never reach agendaLine's `more`.
+        ...v.items.map((i) => agendaLine(i)),
       ];
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
@@ -2472,8 +2475,16 @@ const gapWords = (g: PlanGap): string => {
     case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
     case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
-    case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}.`;
+    case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}${g.more ? ` and ${g.more} more` : ""}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
+    case "trimmed": return `Cut to keep this reply readable: ${[
+      g.hitText ? `${g.hitText} hit${g.hitText === 1 ? "'s" : "s'"} text to its head (fetch the id for the whole)` : null,
+      g.labels ? `${g.labels} label${g.labels === 1 ? "" : "s"} or metadata item${g.labels === 1 ? "" : "s"} past a hit's first few (list_claims, relations and fetch read them)` : null,
+      g.boardLabels ? `${g.boardLabels} blocker${g.boardLabels === 1 ? "" : "s"} or holder${g.boardLabels === 1 ? "" : "s"} past a board line's first few, each line saying how many (list_claims and the ticket read them)` : null,
+      g.tickets ? `${g.tickets} open ticket${g.tickets === 1 ? "" : "s"} past the board's first 15, listed by key alone` : null,
+      g.titles ? `${g.titles} title${g.titles === 1 ? "" : "s"} shortened or left off` : null,
+      g.unlisted ? `${g.unlisted} settled, not yet startable or unknown ticket${g.unlisted === 1 ? "" : "s"} past the lists, counted and not named` : null,
+    ].filter(Boolean).join("; ")}.`;
     case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}; the hits name ${g.named} ticket${g.named === 1 ? "" : "s"}.`;
   }
 };
@@ -2498,16 +2509,36 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (k.hits.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     if (k.hits.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(k.hits)) notes.push(STALE_KEY);
-    out.push(...notes, "", hitBlocks(k.hits, literal).join("\n\n"));
+    // A hit cut to its head says so under its text, and how to read the whole (SMD-4191).
+    const blocks = hitBlocks(k.hits, literal).map((b, i) => {
+      const h = k.hits[i];
+      if (h.contentChars <= h.content.length) return b;
+      // An exact match past the head is in the whole text, not in what is shown (review pass 1); a shown one stays said
+      // as shown (review pass 2). Lower-cased as the search's ILIKE folds ASCII, which keys and quoted spans are.
+      const shown = h.content.toLowerCase();
+      const inHead = h.matchedNeedles.filter((n) => shown.includes(n.toLowerCase())), past = h.matchedNeedles.filter((n) => !shown.includes(n.toLowerCase()));
+      const contains = [inHead.length ? `Contains: ${inHead.join(", ")}` : null, past.length ? `Contains (in the whole text, past what is shown): ${past.join(", ")}` : null].filter(Boolean).join("\n");
+      // A function, not a string: a quoted span holding `$'` or `$$` is a needle, never a replacement pattern (review pass 3).
+      return `${past.length ? b.replace(/^Contains: .*$/m, () => contains) : b}\n… cut at ${h.content.length} of ${h.contentChars} characters: fetch ${h.id} for the whole text.`;
+    });
+    out.push(...notes, "", blocks.join("\n\n"));
   }
   const b = v.board;
   out.push("\n## Board: the tickets the hits name");
   if (!b.available) out.push(b.reason === "deadline" ? "Not read: it ran out of time." : b.reason === "no_keys_scope" ? "Not available here: this brain's agenda predates migration 126." : "Not read: the agenda's read failed (the server's log says why).");
   else if (!b.tickets.length && !b.others.length && !b.waiting.length) out.push(b.claimsRead === null ? "The hits name no ticket." : "The hits name no ticket this brain holds.");
   else {
-    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map(agendaLine));
-    if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`));
-    if (b.others.length) out.push(`Not ranked (${b.others.length}):`, ...b.others.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)}${t.settled ? " — settled: finished, or not to be done" : " — a status type this brain does not know"}`));
+    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map((t) => agendaLine(t, b.ticketMore?.[t.key])));
+    if (b.moreOpen?.length) out.push(`- and ${b.moreOpen.length} more open, in agenda order: ${b.moreOpen.join(", ")}.`);
+    if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length + (b.waitingMore ?? 0)}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`),
+      ...(b.waitingMore ? [`- and ${b.waitingMore} more, not listed.`] : []));
+    if (b.others.length) {
+      // Past the first few, by key and status alone (SMD-4191): a title left off is no title said.
+      const titled = b.others.filter((t) => t.title !== ""), bare = b.others.filter((t) => t.title === "");
+      out.push(`Not ranked (${b.others.length + (b.othersMore ?? 0)}):`, ...titled.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)}${t.settled ? " — settled: finished, or not to be done" : " — a status type this brain does not know"}`));
+      if (bare.length) out.push(`- and ${bare.length} more: ${bare.map((t) => `${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""}${t.settled ? "" : " unknown type"}`).join(", ")}.`);
+      if (b.othersMore) out.push(`- and ${b.othersMore} more, not listed.`);
+    }
     out.push(b.boardSync ? `Board-sync last stamped ${b.boardSync.at}${typeof b.boardSync.outcome === "string" ? `, its last pass ${quoted(b.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
     if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
     else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
@@ -2519,16 +2550,30 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     t.plugins === null ? "Plugins: the plugin list could not be read." : `Plugins: ${t.plugins.join(", ") || "none enabled for this scope"}.`,
     "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
   // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
-  out.push("\n## Gaps", ...(v.gaps.length ? v.gaps.map((g) => `- ${gapWords(g)}`) : ["- None found. How close the hits are to the request is each hit's match; weigh them before relying on them."]));
+  // A budget cut is no coverage gap (review pass 1): the weighing line stands whenever nothing else is found.
+  const found = v.gaps.filter((g) => g.gap !== "trimmed");
+  out.push("\n## Gaps", ...v.gaps.map((g) => `- ${gapWords(g)}`),
+    ...(found.length ? [] : [`- ${v.gaps.length ? "Nothing else found" : "None found"}. How close the hits are to the request is each hit's match; weigh them before relying on them.`]));
   return out.join("\n");
 }, (r) => searchRefusal(r), (v) => ({
-  knowledge: { preferCurrent: v.knowledge.preferCurrent, ...(v.knowledge.vectorFailed ? { vectorFailed: v.knowledge.vectorFailed.reason } : {}), hits: v.knowledge.hits.map(safeHit) },
+  // Lean (SMD-4191: the labels as objects were most of a 63,000-character reply): per hit its id, time, scores, trust and
+  // how much each label holds; the text says each label, and fetch, relations and list_claims read them whole.
+  knowledge: { preferCurrent: v.knowledge.preferCurrent, ...(v.knowledge.vectorFailed ? { vectorFailed: v.knowledge.vectorFailed.reason } : {}),
+               hits: v.knowledge.hits.map((h) => ({
+                 id: h.id, created_at: h.created_at, similarity: h.similarity, supersededBy: h.supersededBy, trust: trustOf(h.metadata), contentChars: h.contentChars,
+                 moved: Array.isArray(h.moved) ? h.moved.length : null, claimed: h.claimed === null ? null : h.claimed.length + (h.claimedMore ?? 0),
+                 relations: h.relations === null ? null : h.relations.length + (h.relationsMore ?? 0), priority: h.priority === null ? null : h.priority.length + (h.priorityMore ?? 0),
+               })) },
   board: v.board.available
     ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,
-        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, level: i.level, overdue: i.overdue, unblocks: i.unblocks,
-                                              blockers: i.blockers.filter((x) => TOKEN.test(x)), claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+        // Counts as the ticket has them, not as the budget listed them (review pass 3).
+        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, blockers: i.blockers.length + ((v.board.available && v.board.ticketMore?.[i.key]?.blockers) || 0),
+                                              claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+        moreOpen: v.board.moreOpen ?? [], othersMore: v.board.othersMore ?? 0, waitingMore: v.board.waitingMore ?? 0,
         // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
-        others: v.board.others.map((x) => ({ key: x.key, statusType: x.statusType, settled: x.settled })),
+        // Compact (SMD-4191): the settled by key; an unknown status type with its word, which guard() holds to a token.
+        settled: v.board.others.filter((x) => x.settled).map((x) => x.key),
+        unknownType: v.board.others.filter((x) => !x.settled).map((x) => ({ key: x.key, statusType: x.statusType })),
         waiting: v.board.waiting.map((x) => ({ key: x.key, notBefore: x.notBefore })) }
     : { available: false, reason: v.board.reason },
   specs: { available: false, waitsOn: v.specs.waitsOn },
