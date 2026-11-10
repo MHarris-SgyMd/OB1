@@ -86,11 +86,13 @@
  * when the database is back. Its start waits the same way, every statement
  * up to the first claim but --retry-failed's, the worker key's lookup
  * included (SMD-2752). A run
- * without --follow still exits 1 on it. Any other database error at a pair's
- * write is read as extract-entities.ts's is (SMD-2636 PR 4): the end ends the
+ * without --follow still exits 1 on it. Any other database error in a
+ * thought's processing — its reads and its pairs' writes — is read as
+ * extract-entities.ts's is (SMD-2636 PR 4): the end ends the
  * follower, its row failed, the error thrown; a moment's sends the thought
  * back unrecorded, its proposals written so far standing, and stops that
- * worker; any other is the thought's, recorded failed.
+ * worker; any other is the thought's, recorded failed. At a claim the end
+ * ends the follower too, as re-embed's claim does.
  * It outlasts the provider going away too, by extract-entities.ts's rules.
  * Three things are outages:
  *   - a transient error past the pauses;
@@ -177,7 +179,7 @@ import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probedFault, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probedFault, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
   actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
@@ -1995,7 +1997,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // A grant revoked while the pass runs: relations stop here, as
             // the next poll would say, rather than every later thought
             // failing on the write (review pass 4). A refusal relationsOff
-            // does not explain is still the thought's.
+            // does not explain is the worker catch's: the end of a follower
+            // (SMD-2636 PR 4), the thought's in a one-shot run.
             const off = await relationsOff().catch(() => null);
             if (off === null) throw e;
             storesNow(off, HAS_102, "from this pair on");
@@ -2143,11 +2146,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
-          // A follower outlasts the database going away; an error no wait
-          // mends — a function missing, a grant revoked — ends the run, as the
-          // pass's own errors do (review pass 3); a passing one — a timeout, a
-          // serialization failure — costs this worker its poll (review pass 4).
-          if (FOLLOW && databasePermanent(e)) throw e;
+          // A follower outlasts the database going away; the end — a function
+          // missing, a grant revoked, a statement cancelled or past its
+          // statement_timeout — ends the run, as the pass's own errors do
+          // (review pass 3) and as re-embed's claim does (followClassify's
+          // db-end, SMD-2636 PR 4: a timeout here cost the poll, every poll,
+          // the sleep scheduler's budget never told); a passing one — a
+          // serialization failure, a lock — costs this worker its poll (review pass 4).
+          if (FOLLOW && followClassify(e) === "db-end") throw e;
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
           return;
         }
@@ -2212,11 +2218,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
                   return;
                 }
-                // Any other database error at a pair's write is read as re-embed's and extract's are (followClassify,
+                // Any other database error in the thought's processing — its reads (the candidates, the olders, the
+                // linked tickets) and a pair's write — is read as re-embed's and extract's are (followClassify,
                 // SMD-2636 PR 4): the end ends the follower, its row failed, the error thrown for the sleep scheduler's
                 // budget; a moment's sends the thought back unrecorded, its proposals written so far standing, and
                 // stops this worker; any other is the thought's, recorded failed below. Before, every one was the thought's.
-                const dbVerdict = FOLLOW ? followClassify(e) : null;
+                // Not past the hard stop, which abandons the thought below: a write it cancelled is no end (review pass 1).
+                const dbVerdict = FOLLOW && !hardStopped ? followClassify(e) : null;
                 if (dbVerdict === "db-end") throw e;
                 if (dbVerdict === "db-moment") {
                   err(`  ${workerId}: the write met the database's moment (${(e as Error).message.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
@@ -2560,8 +2568,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     lastPassIdle = before.pending + before.claimed === 0;
     if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) printCounts(before, "before");
-    // A worker that throws — a Writer that throws, in practice; each catches
-    // its own database errors — stops the rest after the thought in hand, and
+    // A worker that throws — a Writer that throws, a follower's database error
+    // that ends it (SMD-2636 PR 4) — stops the rest after the thought in hand, and
     // the pass rejects with its error once they have stopped, not while they
     // still hold rows and the client.
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {

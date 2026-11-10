@@ -110,7 +110,8 @@
  * budget; a deadlock, a lock not available, resources or a read-only
  * transaction sends the thought back unrecorded and stops that worker; any
  * other — a function's own guard, the thought's data — is the thought's,
- * recorded failed.
+ * recorded failed. At a claim the end ends the follower too, as re-embed's
+ * claim does.
  *
  * It outlasts the provider going away too. Three things are outages:
  *   - a rate limit, a server error, a 408 or a lost connection still failing
@@ -208,7 +209,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -1627,11 +1628,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
-          // A follower outlasts the database going away; an error no wait
-          // mends — a function missing, a grant revoked — ends the run, as the
-          // pass's own errors do (review pass 3); a passing one — a timeout, a
-          // serialization failure — costs this worker its poll (review pass 4).
-          if (FOLLOW && databasePermanent(e)) throw e;
+          // A follower outlasts the database going away; the end — a function
+          // missing, a grant revoked, a statement cancelled or past its
+          // statement_timeout — ends the run, as the pass's own errors do
+          // (review pass 3) and as re-embed's claim does (followClassify's
+          // db-end, SMD-2636 PR 4: a timeout here cost the poll, every poll,
+          // the sleep scheduler's budget never told); a passing one — a
+          // serialization failure, a lock — costs this worker its poll (review pass 4).
+          if (FOLLOW && followClassify(e) === "db-end") throw e;
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
           return;
         }
@@ -2174,8 +2178,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (!FOLLOW || added > 0 || before.pending > 0) {
       printCounts(before, "before");
     }
-    // A worker that throws — a Writer that throws, in practice; each catches
-    // its own database errors — stops the rest after the thought in hand, and
+    // A worker that throws — a Writer that throws, a follower's database error
+    // that ends it (SMD-2636 PR 4) — stops the rest after the thought in hand, and
     // the pass rejects with its error once they have stopped, not while they
     // still hold rows and the client (review pass 1).
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {

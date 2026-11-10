@@ -331,9 +331,9 @@
  * joins past it. A changed setting needs the coordinator recreated, which is
  * the restart. An operator's pg_cancel_backend is 57014
  * too, "user request": no budget's, it ends the scheduler as a pass that
- * throws does. One in a thought's own write fails that thought, as any
- * database error there does (its --retry-failed); one on a claim costs its
- * worker the poll.
+ * throws does. One in a thought's own processing holds the pass the same
+ * way, every pass here following (re-embed's since SMD-2679, extract's and
+ * consolidate's since SMD-2636 PR 4), and so does one on a claim.
  * The settings go out as startup parameters, which a transaction pooler —
  * PgBouncer, a managed host's pooled endpoint — refuses: the scheduler
  * connects to Postgres directly, as the compose stack's does. The worker
