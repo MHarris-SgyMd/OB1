@@ -39,7 +39,7 @@ The direction joins the two. One runtime runs every task a brain has, whether a 
 | # | Decision | Status | Instead of |
 | --- | --- | --- | --- |
 | 1 | **A coordinator per brain**, a service in that brain's stack, runs every task the brain has. | Direction (2026-10-27) | Each task as its own service with its own rules |
-| 2 | **A federated coordinator** on the host, on no brain's network, reached through the host alias as the model servers are. It holds SMD-3379's slot service. A brain's sleep reaches it through the brain's own coordinator. | Direction (2026-10-27) | A broker per brain; a proxy in front of the model server |
+| 2 | **A federated coordinator** on the host, on no brain's network, reached through the host alias as the model servers are. It holds SMD-3379's slot service. A brain's sleep reaches it through the brain's own coordinator, and so does every model call the brain makes, live ones included: only the coordinator holds the brain's key (decided 2026-11-10, over each process dialling it). | Direction (2026-10-27); the slot broker built alone (SMD-3379 PR 3a, `deploy/federated/`) | A broker per brain; a proxy in front of the model server |
 | 3 | **Every plugin operation, interactive ones included, every plugin webhook and every plugin task is an implementation the coordinator runs.** n8n defines the workflow and is its one integration point with outside services. | Direction (2026-10-27) | Handlers in the REST core's process (SMD-2310 as built) |
 | 4 | **The plugin manifest stays the contract.** Operations (schemas, scopes, REST route, MCP tool), tables, GUI pages and hooks are declared as today. An operation names its implementation: a workflow, or a handler, which a port may ship first and swap for a workflow later. The tool, its schemas and its scope do not change with the implementation. A workflow operation may answer two refusals a handler never does (see "Failure and limits"). | Accepted (2026-10-28); the interim handler decided 2026-10-27 | The workflow as the contract; a second MCP server for extension tools |
 | 5 | **n8n's engine runs the workflow; the coordinator never interprets it.** The coordinator admits a run, gives it a deadline, starts it through the workflow's Webhook trigger, waits for the last node's answer and records the run. | Accepted (2026-10-28): follows from n8n's workflow JSON running only on n8n's engine | An OB1 engine for n8n's format |
@@ -288,7 +288,7 @@ Each step is its own PR. The ports run in parallel with handlers (decided 2026-1
 5. **Webhooks open runs:** `HookContext`'s run; a run's failure mapped to a throw, so `onceById` gives the claim back as it does today; an unknown outcome keeping the claim to lapse; the lease sized past the deadline.
 6. **Ports move from handlers to workflows**, plugin by plugin: SMD-2311 (the six extensions), SMD-2690 (the three integrations), SMD-2101 (Slack and Telegram), SMD-3320 (the three recipes) and SMD-3319 (bio and metadata-norm as plugin tasks).
 
-The federated coordinator comes with SMD-3379's third PR, its slot service, and needs nothing above.
+The federated coordinator comes with SMD-3379's third PR, its slot service, and needs nothing above. Its broker is built alone (PR 3a, `deploy/federated/`: a compose project of its own, as the edge proxy is); PR 3b has each brain's coordinator ask it for the brain's calls, and PR 3c orders background calls by the models a server has loaded.
 
 ## Open questions, answered
 
@@ -303,7 +303,7 @@ The federated coordinator comes with SMD-3379's third PR, its slot service, and 
 
 ## Not decided here
 
-- **The federated coordinator's protocol** beyond slots: what else it holds for a federation (SMD-2877, SMD-3268). How a live call's slot request reaches it is SMD-3379's third PR's.
+- **The federated coordinator's protocol** beyond slots: what else it holds for a federation (SMD-2877, SMD-3268). How a live call's slot request reaches it is decided (2026-11-10): through the brain's coordinator, as every model call's does (row 2).
 - **Workflows a brain writes on request** (SMD-2274). Under this record, only reviewed templates run.
 - **Multiple users per brain** (SMD-1716).
 - **Each port's details:** which of upstream's `user_id` columns survive, and which tables are adopted (SMD-2311's own decisions).

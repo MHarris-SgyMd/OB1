@@ -1,0 +1,40 @@
+# The federated coordinator's registry (SMD-3379 PR 3a): copy to
+# deploy/federated/federation.local.yaml (ignored by git), name the model
+# servers your brains share and the brains, and run
+#   bun --no-env-file deploy/federated/federated.ts up
+#
+# broker        the slot broker's settings, each optional:
+#   port        its port on the host's loopback (default 8095); a brain's
+#               container reaches it at host.containers.internal:<port>;
+#   lease_s     a grant held longer than this is taken back (default 900):
+#               longer than the longest model call a brain makes;
+#   warm_s      after a start, background calls wait this long while the
+#               brains re-register the slots they hold (default 10);
+#   idle_s      a brain's connection silent this long is closed, and its
+#               slots given back (default 30, at least 8).
+# servers       each model server the brains share, by a name of your own:
+#   bases       every base URL a brain reaches it by (its OB1_LLM_BASE_URL,
+#               OB1_CHAT_BASE_URL…), each one server's;
+#   slots       its parallel setting: Ollama's OLLAMA_NUM_PARALLEL, which is
+#               per model, so each model on it has this many;
+#   reserve     the slots per model background never takes, kept for live
+#               calls (default 1; background keeps at least one).
+# brains        each brain by name, with the sha256 of its broker key:
+#               `bun deploy/federated/federated.ts key --brain <name>` prints
+#               a new key once, for that brain's deploy/.env, and this line.
+#               Never the key itself; quoted, so YAML reads it as text.
+#
+# This Mac's Ollama (OLLAMA_NUM_PARALLEL=3), shared by stable and a canary:
+broker:
+  port: 8095
+servers:
+  ollama:
+    bases:
+      - http://host.containers.internal:11434/v1
+    slots: 3
+    reserve: 1
+brains:
+  stable:
+    key: "0000000000000000000000000000000000000000000000000000000000000001"
+  canary:
+    key: "0000000000000000000000000000000000000000000000000000000000000002"

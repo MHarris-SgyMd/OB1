@@ -370,6 +370,57 @@ there.
 - **Changing the registry:** `up` again. The table's digest is a label on
   the edge's container, so a changed table recreates it.
 
+## The slot broker for the brains on one host
+
+Brains that share a model server, such as stable and a canary on this Mac's
+Ollama, each hold their background calls to a share of its slots
+(`OB1_BACKGROUND_SLOTS`, above). Fixed shares split the slots ahead of time:
+a brain alone can't use another's share, and one brain's sleep doesn't yield
+to another brain's live calls. The federated coordinator's slot broker
+(SMD-3379 PR 3a, `docs/brain-coordinator.md` row 2) shares the slots as they
+free:
+- **A live call** is granted at once, always.
+- **A background call** is granted in turn across the brains, within the room
+  the live calls leave. Each server keeps `reserve` slots per model that
+  background never takes.
+- **A brain alone** may use every background slot. Two backlogged brains
+  split them.
+
+**No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
+and fall back to the brain's own share while it is down.
+
+The broker is a compose project of its own, `ob1-federated`
+(`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
+container reaches it at the host alias, as it reaches the host's Ollama, and
+its port is published on the host's loopback alone.
+
+```bash
+cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
+bun deploy/federated/federated.ts key --brain stable    # a key, shown once, and its registry line
+# deploy/federated/federation.local.yaml: the shared servers (their bases, slots, reserve), each brain's key hash
+bun --no-env-file deploy/federated/federated.ts check   # the registry, the runtime, the port; starts nothing
+bun --no-env-file deploy/federated/federated.ts up
+bun --no-env-file deploy/federated/federated.ts down
+```
+
+- **The registry holds each brain's key hash, never the key.** The broker
+  reads the registry as an unprivileged user, so it must be readable by
+  others (`chmod 644`). `federated.ts` refuses it otherwise.
+- **`slots` is the server's parallel setting.** For Ollama this is
+  `OLLAMA_NUM_PARALLEL`, which applies per model, so the broker counts each
+  model on the server apart. `reserve` (1 unless set) is kept for live calls.
+- **`bases` lists every base URL a brain reaches the server by**, such as
+  `http://host.containers.internal:11434/v1`. A call to any other base isn't
+  brokered.
+- **Only podman machine is measured.** There, a container dials
+  `host.containers.internal:<port>` and the loopback port answers. On Docker
+  Engine on Linux a container reaches the host at the bridge's gateway, which
+  a loopback port doesn't answer, so `federated.ts` refuses it until a shape
+  is measured there.
+- **The broker keeps nothing across a restart.** A brain re-registers the
+  slots it holds when it reconnects. For `warm_s` (10 unless set) after a
+  start, background calls wait while that happens.
+
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
