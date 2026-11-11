@@ -83,8 +83,8 @@ const SYNTHESIZE_INPUT_CAP = 80;
 // The most rows read per run. Every one's priority is read before the turns are
 // numbered (SMD-4112), so this is the window the ranking sees: a week is about
 // 550 on the canary and 900 over 14 days (2026-11-11). Past it, readThoughts
-// keeps each group's newest, so a cut drops the latest turns, never a day or a
-// writer.
+// keeps each group's newest, so a cut drops the later turns (each group's oldest
+// rows), never a day or a writer.
 const FETCH_HARD_CAP = 5000;
 // The most effective_priority reads in one call (122's limit): the window is read in chunks of it.
 const PRIORITY_READ_MAX = 1000;
@@ -184,7 +184,8 @@ export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_
   const settled = (t: DigestThought) => (t.priority?.settled ? 1 : 0);
   const mattersMost = (a: DigestThought, b: DigestThought) => settled(a) - settled(b) || effective(b) - effective(a);
   // Each group's rows numbered again, what matters most first, then by readThoughts' own turn: Postgres' order to the
-  // microsecond, then by id, where a JavaScript Date keeps milliseconds (review pass 3). A row without one, newest first.
+  // microsecond, then by id, where a JavaScript Date keeps milliseconds (review pass 3). A row without a turn: newest
+  // first, then by id.
   const turns = new Map<DigestThought, number>();
   const groups = new Map<string, DigestThought[]>();
   for (const t of thoughts) {
@@ -373,6 +374,8 @@ export async function readThoughts(
   return { failClosed: false, rows: more ? rows.slice(0, FETCH_HARD_CAP) : rows, more };
 }
 
+const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 500);
+
 /**
  * The window's effective priorities (SMD-4112): each thought by its id, a ticket's own row read as its ticket, under
  * the brain's weights (the operator's setting over the built-in ones, since 132), in calls of effective_priority's
@@ -410,8 +413,6 @@ export async function readPriorities(
     return { read: null, why: oneLine(String((e as Error)?.message ?? e)), failed: true };
   }
 }
-
-const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 500);
 
 // ── Synthesis (gated) + delivery ────────────────────────────────────────────
 

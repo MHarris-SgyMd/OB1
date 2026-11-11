@@ -23271,7 +23271,8 @@ if (want("36")) {
   for (const r of [prio.low1, prio.low2]) await wsql`SELECT assert_priority('thought', ${r.id}, 1, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'can wait', false, ${op}::jsonb)`;
   // SMD-2653's shape with priority: Urgent stated on every row of the burst. Taken a turn at a time, what matters most
   // first within each day and writer's share (the maintainer, 2026-11-11), it still holds one row per turn, so every
-  // planted row stays in the prompt; ranked over the shares it would take all 80.
+  // planted row stays in the prompt; ranked over the shares (the first build's order) it took 79 of the 80 and left out
+  // all six planted rows.
   const burstIds = (await wsql`SELECT id::text AS id FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' AND content LIKE 'zqflood %— one key''s burst before the run'`).map((r: { id: string }) => r.id);
   for (const id of burstIds) await wsql`SELECT assert_priority('thought', ${id}, 4, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'everything is urgent', false, ${op}::jsonb)`;
   assert(burstIds.length === 100, `Urgent is stated on the burst's 100 rows (${burstIds.length})`);

@@ -3,8 +3,8 @@
  * test-weekly-digest.ts — db/weekly-digest.ts's pure core (SMD-2239), hermetic.
  *
  * No Postgres, no model, no network. Covers the pick (a share of each day and
- * writer a turn at a time, each share taken what matters most first by
- * effective priority, then newest, SMD-4112; no key's `importance` or own
+ * writer a turn at a time, each share taken what matters most first (open work
+ * before closed, then effective priority), then newest, SMD-4112; no key's `importance` or own
  * Urgent captures take more than their share, SMD-2653), the priority read
  * and its fallbacks over a stub, each pick's reason, the prompt,
  * the Telegram chunking, and the digest's egress subject — including the gate
@@ -97,8 +97,9 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
 
 // ---------------------------------------------------------------------------
 // pickForDigest by priority (SMD-4112) — within each (day, writer) share, what
-// matters most first; the shares still taken a turn at a time (the maintainer,
-// 2026-11-11), and the pick listed what matters most first.
+// matters most first (open work before closed, then effective priority); the
+// shares still taken a turn at a time (the maintainer, 2026-11-11), and the pick
+// listed what matters most first.
 // ---------------------------------------------------------------------------
 {
   const ids = (ts: DigestThought[]) => ts.map((t) => t.id).join();
@@ -129,7 +130,7 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
     { id: "low2", group: "other|9", created_at: at(9, 19), priority: stated(1) },
   ]);
   ok(ids(pickForDigest(week)) === "urgent,late,plain,low1,lowTicket,low2", `an Urgent ticket's row and an overdue item come before newer unknown and Low ones (${ids(pickForDigest(week))})`);
-  // Past the cap: each share's first turn is what matters most in it, not its newest (the drop-the-priority-order mutant's row).
+  // Past the cap: each share's first turn is what matters most in it, not its newest (the groups-by-recency mutant's row).
   ok(ids(pickForDigest(week, 3)) === "urgent,late,low1", `the first turn of each share is what matters most in it (${ids(pickForDigest(week, 3))})`);
 
   // SMD-2653's shape, with priority: a key states Urgent on its own 100 captures, newer than every other row. It gets
