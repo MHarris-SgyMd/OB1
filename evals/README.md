@@ -8462,6 +8462,54 @@ The consent-page mutants above hold its pages too.
 
 The table's utilization is the rate over the rows `query_log` would hold for the runs: a search row per call of `search`, `search_thoughts`, `search_thoughts_keyword` or `plan_context` that the server logs (not one with `min_trust`, or a priority-ranked `search_thoughts`; no B planner passed either), with the results it returned; a fetch as an opened action; each credited cite as a cite row. Review pass 1 corrected it: the first report fed every ID a reply printed as a result, and every call as a search, and read 29.6% of 439 for A and 13.7% of 365 for B. The verdict, which counts relevant cites, did not change.
 
+## Where does "the brain has little on this" begin? (SMD-4212 PR 1)
+
+`plan_context`'s knowledge section is a search of the request, and a search keeps its nearest matches whatever their similarity. A request the brain knows nothing about still gets its eight hits, and no gap says so. SMD-4212 asks for a `little` gap at a measured bar. It should be a coverage signal, not a verdict, and the client still judges. `eval-little.ts` measures where that bar is. The maintainer chose its shape on 2026-11-10, and SMD-4212's comment aac12cda preregistered it before any measured run (hash `703eb62defe1`).
+
+**How it ran.**
+- **The requests: 80 in all.**
+  - 30 Backlog tickets of the brain's own projects, all held by the brain;
+  - 30 Backlog tickets of SMD's other projects (the client app and the rest), which this brain holds no ticket of;
+  - each kind drawn by a seeded hash from tickets filed 2026-09-01 to 11-09;
+  - 20 of those tickets (10 of each kind) rewritten without their key by a paraphraser who saw only the titles. The harness checked each: no key, at most 25 words, no six words in a row from the title.
+- **The hits: 8 per request,** from `plan_context`'s own search (hybrid, `prefer_current` on, threshold 0, recency 0, no filter). It was called through `search_thoughts` with the same arguments, because the rehearsal found `plan_context`'s 8 s embedding window missed on every call while the canary's sleep held the model server.
+- **The truth:** two blind raters, one on Opus and one on Sonnet, labelled all 640 hits relevant or not, under rules adapted from SMD-2684 PR 2's (`RATER_RULES`): the same categories, worded for any request rather than a ticket's planning, with one added edge case (a request about a product the rows never mention gets 0 on every row). A request has **little** when at most 1 of its hits is relevant by both.
+- **The candidates:**
+  - `top(t)`: the best hit's similarity below t;
+  - `count(f)`: at most 1 hit at similarity f or more;
+  - `literal`: no hit matched an exact literal of the request;
+  - t and f from 0.30 to 0.80 in steps of 0.02: 53 rules.
+- **Choosing and confirming:** half the requests (dev, half of each kind) chose the rule with the highest balanced accuracy. The other half (test) confirmed it against the bar: balanced accuracy ≥ 0.75 and precision of `little` ≥ 0.75, with κ ≥ 0.6.
+
+**Result: the bar is met by `top(0.74)`.** The brain has little on a request when no hit reaches a similarity of 0.74 (qwen3-embedding:4b@1024).
+
+| | Balanced accuracy | Precision of `little` | Little said right / wrong | Not little said right / wrong |
+|---|---|---|---|---|
+| Dev (40 requests) | 0.876 | 0.909 | 20 / 2 | 15 / 3 |
+| **Test (40 requests)** | **0.885** | **0.789** | 15 / 4 | 20 / 1 |
+
+- **Agreement:** κ 0.789 over 640 hits.
+- **Little, by kind of request:** brain tickets 3 of 30; other-project tickets 25 of 30; paraphrases 11 of 20. The brain does hold something on a few of SMD's other projects: SMD-1888 had 5 relevant hits, SMD-2580, 1589, 3390 and 3752 had 2 each.
+- **The four false `little` calls on test** are those last four: other-project tickets where the brain holds exactly 2 relevant rows, one over the line. Each top similarity was below 0.74 (0.58 to 0.72).
+- **The one miss on test** is SMD-2380: a brain ticket whose best hit is 0.93 (its own record), with only 1 hit relevant by both raters. A ticket the brain holds only as its board record reads as covered by similarity alone.
+- **Neighbouring thresholds on test:** `top(0.70)` and `top(0.72)` score 0.906 balanced and 0.833 precision; `top(0.76)` scores 0.844 and 0.714. So the bar sits on a plateau, not on a knife's edge, and dev chose the higher end of it.
+- **`literal` was never in contention.** No paraphrase of a brain ticket matches an identifier, and several other-project requests match one (`bin/dev`-style tokens), so "no literal" calls known paraphrases little and misses unknown tickets.
+
+**What it means for PR 2.** `plan_context` can raise a `little` gap when its best hit's similarity is below 0.74. The gap should give the value it read and the bar, and only on a brain whose embedding is qwen3-embedding:4b@1024. On another model the bar wasn't measured, and the gap should say so rather than guess. A ticket held only as its board record still reads as covered, and that's a limit of similarity: the gap can't see it.
+
+**Caveats.**
+- **The raters** are both Claude models. κ 0.79 says the rules held between them, not that a person would agree.
+- **The definition of little** ("at most 1 relevant hit of 8") decides the gold. A stricter one (no relevant hit) would move the bar.
+- **Similarity is the embedding's own scale.** A different model, or the same model at another dimension, needs its own measurement.
+- **The brain:** the canary, at one moment. The requests are tickets and one paraphraser's rewrites, not real session openers.
+- **Paraphrases and their tickets share a split only by chance.** The split halves each kind of request separately, so 11 of the 20 paraphrases sit in the other half from their source ticket. Test is then not fully independent of the choice made on dev. Without those 11, the test half is 36 requests and the bar is still met: balanced accuracy 0.871, precision 0.778.
+- **The sheets were numbered by kind** (brain tickets 1–30, other projects 31–60, paraphrases 61–80), and the raters weren't told the scheme. The batches mixed the kinds, and the harness now numbers sheets in a hashed order.
+- **The run wrote to the brain.** Each search, the warm-up and any retry are a `query_log` row on the canary, as a `plan_context` call would be.
+
+**Reproduce.**
+- `--draw` rebuilds the request file from the same Linear listings and held keys. It holds board titles, so it stays out of the repo, as do the runs, the rows, the sheets and the labels.
+- `bun eval-little.ts --self-check` holds the rules on hand-known answers, in CI.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
