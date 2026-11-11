@@ -1307,6 +1307,20 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   and its level (null: unknown, not low), and every statement in the order written,
   each with its maker, tier, reason and how its window closed. `exists: false` is an
   item since removed, whose statements are kept.
+- **`set_priority_weights`** (`POST /v1/priority-weights`, write scope; SMD-4193 PR 2,
+  migration 132): the operator's weights, which every read takes as its defaults (the
+  agenda, plan_context's board, search's `priority_weight` and `min_priority`), by
+  name over the built-in ones; `{}` clears them. A call's own `weights` still override
+  them. Past the scope, the database admits a key the operator classified `operator`,
+  by its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR` (403). A name
+  or a value out of range is refused `REFUSED_INPUT` (400), cap below
+  `unblocks_many_at` `REFUSED_WEIGHTS` (400). The answer is `{changed, weights,
+  previous, setAt, setBy, caller}`: `changed` false means the weights given were those
+  standing, and nothing was written; a replaced setting stays as history.
+  `brain_info`'s `database.priorityWeights` shows the one standing. A stored setting
+  the database refuses fails the agenda and a ranked search (500, its message naming
+  the setting and the weight) until an operator sets it again or clears it; a search's
+  priority labels and `plan_context`'s board say only that they were not read.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while

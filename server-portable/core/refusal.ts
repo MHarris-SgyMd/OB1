@@ -52,7 +52,7 @@ export type Refusal =
   | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[] } // statements in other thoughts rest on it (042)
   | { code: "REFUSED"; retryable: false; error: string }              // a refusal the store named that this server does not know
   // reset_capture_stamp (086, SMD-2744).
-  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is), or is capture-only
+  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null; unidentified?: true } // the key is not one the registry classifies operator (kind: what it is), or is capture-only; unidentified: it reached the server with no agent id, so it has no registry kind (set_priority_weights, SMD-4193 PR 2)
   | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
   // append_thought_evidence (SMD-2690 PR 3b): the thought's own evidence list will not take an entry.
   | { code: "REFUSED_THOUGHT_EVIDENCE"; retryable: false; id: string; problem: EvidenceProblem; count?: number } // full: it holds EVIDENCE_LIMITS.entries or more (count); not_list: its metadata.evidence is no list; metadata_not_object: its metadata is no object; unstamped: it has neither updated_at nor created_at, so no edit of it can be checked against another

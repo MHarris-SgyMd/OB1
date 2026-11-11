@@ -72,6 +72,8 @@ export const TOOLS = [
   { name: "delete_thought", scope: "write" },
   { name: "reset_capture_stamp", scope: "write" },
   { name: "append_thought_evidence", scope: "write" },
+  // SMD-4193 PR 2 (migration 132): the operator's weights; past the scope, the database admits an operator key alone.
+  { name: "set_priority_weights", scope: "write" },
   { name: "review_supersession_proposal", scope: "write" },
   { name: "retry_failed", scope: "write" },
   { name: "release_stale_leases", scope: "write" },

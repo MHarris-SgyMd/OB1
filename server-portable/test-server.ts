@@ -123,8 +123,22 @@ const server = Bun.serve({ ...worker, port: 0, hostname: "127.0.0.1" });
 const PORT = server.port ?? 0;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+/**
+ * The last migration defining the brain's built-in priority weights, and the function that holds their literal:
+ * ob1_priority_builtin since 132 (SMD-4193 PR 2), ob1_priority_defaults from 128 until then.
+ */
+function builtinDefiner(files: string[], read: (f: string) => string): { file: string; fn: string } | undefined {
+  const defines = (f: string, fn: string) => new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(`, "m").test(read(f));
+  const fn = files.some((f) => defines(f, "ob1_priority_builtin")) ? "ob1_priority_builtin" : "ob1_priority_defaults";
+  const file = files.filter((f) => defines(f, fn)).at(-1);
+  return file ? { file, fn } : undefined;
+}
+/** That function's jsonb literal, or undefined when it holds none (a function of another shape fails its row, not the suite). */
+const builtinLiteral = (text: string, fn: string): string | undefined =>
+  new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)\\s+RETURNS jsonb\\s+LANGUAGE sql[\\s\\S]*?'(\\{[^']*\\})'::jsonb`, "m").exec(text)?.[1];
+
 /** Every response the server sends, success or refusal, carries the permissive CORS header. */
-const corsOk = (r: Response) => r.headers.get("access-control-allow-origin") === "*";
+const corsOk =(r: Response) => r.headers.get("access-control-allow-origin") === "*";
 
 /** WebStandardStreamableHTTPServerTransport answers with raw JSON or an SSE frame. */
 async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
@@ -7232,19 +7246,19 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const { rankByPriority, prioritiesOf, readPriorities, priorityWindow } = await import("./core/reads.ts");
   // The brain's scale, ob1_priority_span() under 127's defaults (migration 128, SMD-4194; test-schema [115] holds it).
   const SPAN = 5.8;
-  // The copies that remain follow the defaults (review pass 2): the last migration defining ob1_priority_defaults, its
-  // span by ob1_priority_span's rule, against this suite's SPAN and the search tool's description.
+  // The copies that remain follow the defaults (review pass 2): the last migration defining the built-in weights
+  // (builtinDefiner), its span by ob1_priority_span's rule, against this suite's SPAN and the search tool's description.
   {
     const { readdirSync, readFileSync } = await import("node:fs");
     const migDir = new URL("../db/migrations/", import.meta.url);
-    const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1);
+    const definer = builtinDefiner(readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort(), (f) => readFileSync(new URL(f, migDir), "utf8"));
     // A defaults function of another shape fails this row, not the suite (review pass 4).
-    const literal = definer ? /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))?.[1] : undefined;
+    const literal = definer ? builtinLiteral(readFileSync(new URL(definer.file, migDir), "utf8"), definer.fn) : undefined;
     let span = NaN;
     try { const d = JSON.parse(literal ?? "") as Record<string, number>; span = Math.round((Math.max(5, d.unknown) + Math.max(d.soon, d.week, d.overdue) + Math.max(d.unblocks_one, d.unblocks_many)) * 1000) / 1000; } catch { span = NaN; }
     const described = readFileSync(new URL("./core/schemas.ts", import.meta.url), "utf8");
     assert(span === SPAN && described.includes(`(ob1_priority_span, ${SPAN})`),
-      `the span ${definer ?? "no migration"}'s defaults allow is this suite's ${SPAN}, and the search description says it (${literal === undefined ? "its defaults read as no jsonb literal: teach this row their shape" : span})`);
+      `the span ${definer?.file ?? "no migration"}'s built-in weights allow is this suite's ${SPAN}, and the search description says it (${literal === undefined ? "its defaults read as no jsonb literal: teach this row their shape" : span})`);
   }
   const { priorityNote } = await import("./render.ts");
   const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
@@ -7357,14 +7371,14 @@ console.log("\n[36c] A read's own priority weights in the core and the words (SM
   const { openApiDocument } = await import("./rest/openapi.ts");
   const { readFileSync, readdirSync } = await import("node:fs");
   const { z } = await import("zod");
-  // The names: the last migration defining ob1_priority_defaults, its literal's keys, every one and no other.
+  // The names: the last migration defining the built-in weights (builtinDefiner), its literal's keys, every one and no other.
   const migDir = new URL("../db/migrations/", import.meta.url);
-  const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1);
-  const literal = definer ? /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))?.[1] : undefined;
+  const definer = builtinDefiner(readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort(), (f) => readFileSync(new URL(f, migDir), "utf8"));
+  const literal = definer ? builtinLiteral(readFileSync(new URL(definer.file, migDir), "utf8"), definer.fn) : undefined;
   let names: string[] = [];
   try { names = Object.keys(JSON.parse(literal ?? "") as object).sort(); } catch { names = []; }
   assert(names.length === 14 && JSON.stringify([...PRIORITY_WEIGHT_NAMES].sort()) === JSON.stringify(names),
-    `the input's weights are ${definer ?? "no migration"}'s defaults' names, every one and no other (${names.join(", ")} | ${PRIORITY_WEIGHT_NAMES.join(", ")})`);
+    `the input's weights are ${definer?.file ?? "no migration"}'s built-in weights' names, every one and no other (${names.join(", ")} | ${PRIORITY_WEIGHT_NAMES.join(", ")})`);
 
   // The query string: each weight its own parameter, read by its type; the bare field, a repeat, or a value of the wrong
   // type refused, by the reader or by the schema naming the weight.
@@ -7606,6 +7620,105 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
       && noneFromItem.includes(`\nPriority: this thought at 0 (stated none (0) from open item ${ITEM}).\n`)
       && noteTitle[0].title === `[priority: this thought urgent (4) from open item ${ITEM}, due by the end of 2026-11-01 (UTC)] t` && noteTitle[1].title === `[priority: this thought stated none (0) from open item ${ITEM}] t`,
     `a note's level from its open item is known, the item named in the value, the line and the title, a None from it said as stated; a due time alone from an item is no label (${noteHit.content[0].text.match(/Priority: .*/)?.[0]} | ${noteTitle.map((r) => r.title).join(" | ")})`);
+}
+
+console.log("\n[36d] The operator's priority weights in the core and the words (SMD-4193 PR 2, migration 132): set_priority_weights passing the weights and the caller's key to the store, {} as null; its answer and its refusals (not an operator, bad weights) said; the store's reading of 132's envelope; a stored setting the database refuses left a fault, its hint saying how to mend it; brain_info's row for each state of the setting");
+{
+  const { setPriorityWeights, weightsRefused } = await import("./core/weights.ts");
+  const { normaliseSetWeights } = await import("./store.ts");
+  const { weightSettingValue, priorityWeightsLine } = await import("./brain-info.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ setPriorityWeights: async (o: Record<string, unknown>) => { asked.push(o); return normaliseSetWeights(answer); } }) });
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  // 132's envelopes, as the scratch brain answered them.
+  const setA = { ok: true, changed: true, weights: { overdue: 3, unblocks_many: 1 }, previous: null, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key" };
+  const sameA = { ok: true, changed: false, weights: { overdue: 3, unblocks_many: 1 }, previous: { overdue: 3, unblocks_many: 1 }, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key" };
+  const clearA = { ok: true, changed: true, weights: null, previous: { soon: 2 }, set_at: null, set_by: null };
+  const agentA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may set the priority weights; op-key is agent" };
+  const nullA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: null, message: "only an operator key, named by its agent id, may set the priority weights; op-key is named by its name alone" };
+  const badA = { ok: false, error: "BAD_WEIGHTS", message: "a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached" };
+  const set = await setPriorityWeights(core(setA) as never, P, { weights: { overdue: 3, unblocks_many: 1 } } as never);
+  const cleared = await setPriorityWeights(core(clearA) as never, P, { weights: {} } as never);
+  const same = await setPriorityWeights(core(sameA) as never, P, { weights: { overdue: 3, unblocks_many: 1 } } as never);
+  const agent = await setPriorityWeights(core(agentA) as never, P, { weights: { overdue: 3 } } as never);
+  const unclassified = await setPriorityWeights(core(nullA) as never, P, { weights: { overdue: 3 } } as never);
+  const bad = await setPriorityWeights(core(badA) as never, P, { weights: { cap: 2 } } as never);
+  const sent = asked.map((o) => JSON.stringify(o.weights));
+  const actor = asked[0]?.actor as Record<string, unknown> | undefined;
+  assert(sent[0] === '{"overdue":3,"unblocks_many":1}' && sent[1] === "null" && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test",
+    `the weights reach the store as given, {} as null (a clear), with the caller's key, its agent id and the door as the actor (${sent.join(" | ")}; ${JSON.stringify(actor)})`);
+  assert(set.ok && set.value.changed && set.value.setAt === "2026-11-11T03:30:44.937Z" && set.value.setBy === "op-key" && set.value.previous === null && set.value.caller === "op-key"
+      && cleared.ok && cleared.value.weights === null && JSON.stringify(cleared.value.previous) === '{"soon":2}' && same.ok && same.value.changed === false
+      && !agent.ok && agent.refusal.code === "REFUSED_NOT_OPERATOR" && agent.refusal.kind === "agent" && agent.refusal.key === "op-key"
+      && !unclassified.ok && unclassified.refusal.code === "REFUSED_NOT_OPERATOR" && unclassified.refusal.kind === null
+      && !bad.ok && bad.refusal.code === "REFUSED_WEIGHTS" && bad.refusal.problem === "rule" && JSON.stringify(bad.refusal.named) === '["unblocks_many_at","cap"]',
+    `132's answers: set, cleared and unchanged as values; not an operator as REFUSED_NOT_OPERATOR with the key's kind; bad weights as REFUSED_WEIGHTS naming them (${JSON.stringify([set, cleared, same].map((o) => o.ok && o.value.changed))} ${JSON.stringify([agent, unclassified, bad].map((o) => !o.ok && o.refusal.code))})`);
+  // An envelope 132 does not answer is a fault, never a value (an unknown error, no changed flag, a BAD_WEIGHTS without words).
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true }, { ok: false, error: "BAD_WEIGHTS" }, null].map((a) => { try { normaliseSetWeights(a); return "read"; } catch { return "threw"; } });
+  assert(strays.every((s) => s === "threw"), `an envelope set_priority_weights does not answer throws (${strays.join(",")})`);
+  // No agent id (review pass 1): the registry away is said as set_priority says it, retryable; a principal with none
+  // by design is named so. Neither reaches the store, nor is told to classify a key that may be the operator's.
+  const before = asked.length;
+  const away = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { weights: { overdue: 3 } } as never);
+  const stuck = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { weights: { overdue: 3 } } as never);
+  const none = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write" } as never, { weights: { overdue: 3 } } as never);
+  const awayText = text(say.renderSetPriorityWeights(away)), stuckText = text(say.renderSetPriorityWeights(stuck)), noneText = text(say.renderSetPriorityWeights(none));
+  assert(asked.length === before && !away.ok && away.refusal.code === "PRIORITY_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "PRIORITY_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR"
+      && awayText === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && /until an operator acts/.test(stuckText) && /reached the brain with none; call with the operator's own key\.$/.test(noneText) && !/set_agent_kind/.test(awayText + stuckText + noneText),
+    `with no agent id nothing reaches the store: the registry away PRIORITY_UNATTRIBUTED (retryable, or not when an operator must act), a principal with none named so, and no line to classify the key (${awayText} | ${noneText})`);
+
+  const words = [set, cleared, same, agent, unclassified, bad].map((o) => text(say.renderSetPriorityWeights(o)));
+  assert(words[0] === "Set the operator's priority weights: every read now takes overdue 3, unblocks_many 1, the rest built in as its defaults, and a call's own weights still override them by name. Before: the built-in weights. A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it."
+      && words[1] === "Cleared the operator's priority weights: every read now takes the built-in weights as its defaults, and a call's own weights still override them by name. Before: soon 2, the rest built in."
+      && words[2] === "Unchanged: every read already takes overdue 3, unblocks_many 1, the rest built in as its defaults (set 2026-11-11T03:30:44.937Z by op-key). Nothing was written."
+      && words[3] === "Refused: only a key the operator classified `operator` may set the priority weights. This key, op-key, is classified agent: use the operator's own key — classifying this one operator would raise the trust of everything it writes."
+      && words[4].startsWith("Refused: only a key the operator classified `operator` may set the priority weights. This key, op-key, is unclassified. If it is the operator's own, classify it: SELECT set_agent_kind('op-key', 'operator')")
+      && words[5] === "Refused: a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached",
+    `the words: what every read takes now and took before, a clear, nothing written; the refusals naming the key's kind and its fix, and the weights in the database's words (${words.join(" | ")})`);
+  const sv = say.renderSetPriorityWeights(set).structuredContent;
+  assert(sv.changed === true && JSON.stringify(sv.weights) === '{"overdue":3,"unblocks_many":1}' && sv.previous === null && sv.setAt === "2026-11-11T03:30:44.937Z" && sv.setBy === "op-key",
+    `the value carries the weights now and before, when and by which key (${JSON.stringify(sv)})`);
+
+  // A stored setting the database refuses (132's 22000) is the brain's fault, never the caller's REFUSED_WEIGHTS; the
+  // hint says how to mend it, for the agenda and a ranked search alike. A brain before 132 is named for the write.
+  const stored = "the operator's priority weights (set 2026-11-11T03:30:44Z by op-key) are refused, so no effective priority is read: a weight out of range: soon (count_inferred a boolean; hops a whole number 0 to 2, depth 0 to 5, cap 1 to 1000, soon_days, week_days and unblocks_many_at whole numbers to 366; every other a number 0 to 10)";
+  const asFault = weightsRefused(Object.assign(new Error(stored), { errno: "22000" }), { overdue: 3 });
+  const hint = say.weightSettingHint(stored);
+  const failedAgenda = text(say.failed(Object.assign(new Error(stored), { errno: "22000" }), { hint: say.weightSettingHint }));
+  assert(asFault === null && /set_priority_weights \(REST POST \/v1\/priority-weights\); brain_info shows the setting$/.test(hint) && say.priorityHint(stored) === hint
+      && say.weightSettingHint("a weight out of range: soon") === "" && failedAgenda.startsWith("Error: the operator's priority weights (set ") && failedAgenda.endsWith(hint)
+      && /migration 132/.test(say.setWeightsHint("function set_priority_weights(jsonb, jsonb) does not exist")) && say.setWeightsHint("connection refused") === ""
+      && /from priority_weight_settings \(migration 132\), and the server's role needs the priority group's grants/.test(say.priorityHint("permission denied for table priority_weight_settings")),
+    `a refused stored setting stays a fault, its hint naming the write that mends it (the agenda's and a ranked search's); a brain before 132 or a role without the grant is named (${hint} | ${failedAgenda.slice(0, 80)})`);
+
+  // brain_info: the row for each state of the setting, and the reading of 132's jsonb.
+  const standing = weightSettingValue({ weights: { overdue: 3 }, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key", refused: null });
+  const refusedS = weightSettingValue({ weights: { soon: 20 }, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key", refused: "a weight out of range: soon (…)" });
+  const unreadW = { reason: "refused", message: "permission denied for table priority_weight_settings" } as never;
+  const lines = [
+    priorityWeightsLine({ priorityWeights: null, unread: {} }),
+    priorityWeightsLine({ priorityWeights: null, unread: { priorityWeights: unreadW } }),
+    priorityWeightsLine({ priorityWeights: { standing: weightSettingValue(null) }, unread: {} }),
+    priorityWeightsLine({ priorityWeights: { standing }, unread: {} }),
+    priorityWeightsLine({ priorityWeights: { standing: refusedS }, unread: {} }),
+  ];
+  const badRead = [{ weights: "x" }, { weights: [1] }, [], 3].map((r) => { try { weightSettingValue(r); return "read"; } catch { return "threw"; } });
+  // A raw write's values and name are unbounded: the row cuts each, as the set reply cuts the name (review pass 2).
+  const longLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: "y".repeat(500) }, set_at: "2026-11-11T03:30:44Z", set_by: "k".repeat(200), refused: "r".repeat(1000) }) }, unread: {} });
+  assert(longLine.length < 700 && longLine.includes(`soon "${"y".repeat(38)}…`) && longLine.includes(` by ${"k".repeat(79)}…)`) && longLine.includes(`${"r".repeat(299)}…. An operator key`),
+    `brain_info's row cuts a stored value to 40 characters, the setter's name to 80 and the refusal to 300 (${longLine.length} characters)`);
+  // A refused setting holding what no weight may (a null, a string) is read and said, never left unread (review pass 1).
+  const oddLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: null, week: "x" }, set_at: "2026-11-11T03:30:44Z", set_by: "op-key", refused: "a weight out of range: soon, week (…)" }) }, unread: {} });
+  assert(lines[0] === "built in (no operator's setting before migration 132)" && /^\? \(priority_weight_settings /.test(lines[1]) && lines[2] === "built in (no operator's setting)"
+      && lines[3] === "the operator's: overdue 3, the rest built in (set 2026-11-11T03:30:44.937Z by op-key)"
+      && lines[4] === "the operator's, REFUSED, so every ranked priority read fails: soon 20 (set 2026-11-11T03:30:44.937Z by op-key): a weight out of range: soon (…). An operator key sets them again, or clears them with {}, through set_priority_weights"
+      && badRead.every((r) => r === "threw") && oddLine.startsWith(`the operator's, REFUSED, so every ranked priority read fails: soon null, week "x" (set 2026-11-11T03:30:44.000Z by op-key)`),
+    `brain_info's Priority weights row: before 132, unread, built in, the operator's, the operator's refused, a refused one holding a null and a string; a read answering no setting throws (${lines.join(" | ")} | ${oddLine.slice(0, 90)} | ${badRead.join(",")})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
