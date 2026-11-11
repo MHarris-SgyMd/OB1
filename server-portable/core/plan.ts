@@ -195,7 +195,7 @@ export type PlanBoard =
  * Where "the brain has little on this" begins (SMD-4212), measured once in its PR 1 (evals/eval-little.ts; the ticket's
  * comment 7689f339): no knowledge hit with a similarity of LITTLE_BAR or more, on the embedding LITTLE_MEASURED_ON. On
  * 40 held-out requests it scored 0.885 balanced accuracy and 0.789 precision. Similarity is the embedding's own scale,
- * so on any other the bar is not applied and the gap says it was not measured there. A request whose ticket the brain
+ * so on any other the bar is not applied and a note says it was not measured there. A request whose ticket the brain
  * holds only as its board record reads as covered: its own record is a close match.
  */
 export const LITTLE_BAR = 0.74;
@@ -213,7 +213,10 @@ export type PlanGap =
   | { gap: "all_superseded"; hits: number }
   | { gap: "ingested_only"; hits: number }
   | { gap: "semantic_unavailable"; reason: string }
-  /** The best similarity of the first LITTLE_HITS hits under LITTLE_BAR, on the embedding it was measured on: the brain may hold little here. Null: no hit read has a similarity. */
+  /**
+   * The best similarity of the first LITTLE_HITS hits under LITTLE_BAR, on the embedding it was measured on: the brain
+   * may hold little here. Null: no hit read has a similarity.
+   */
   | { gap: "little"; topSimilarity: number | null; bar: number; embeddingId: string }
   /** A note, not a coverage gap: this server's embedding is not the one the bar was measured on, so no bar is applied. */
   | { gap: "little_not_measured"; topSimilarity: number | null; embeddingId: string; measuredOn: string }

@@ -7760,11 +7760,11 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       `the read: the limit to the search, the deadline's remainder (${askedTimeout} ms) to the board; the log's ids and scores in the hits' order, the board's tickets in its order, a board not read logged with no items and its reason; no hit, the no_knowledge gap (${JSON.stringify(goodLog)?.slice(0, 160)} | ${JSON.stringify(badLog?.filter)})`);
 
     // SMD-4212 PR 2: little on this, read from the embedding this server searches with. Under LITTLE_BAR on the embedding
-    // it was measured on, the gap with the best similarity and the bar; at the bar, none; a hit with no similarity reads 0
-    // (as the measurement read it); another embedding, the bar said not measured, nothing found; no vector, none.
-    const runWith = async (embeddingModel: string, sims: (number | null)[], vectorFailed?: object) => {
+    // it was measured on, the gap with the best similarity and the bar; at the bar, none; no similarity at all, said as
+    // none; another embedding, the bar said not measured, nothing found; no vector, none.
+    const runWith = async (embeddingModel: string, sims: (number | null)[], vectorFailed?: object, embeddingDim = 1024) => {
       const found = sims.map((sim, i) => ({ ...hit(i ? B : A, 0.5, "about SMD-21"), similarity: sim }));
-      const ctx = { env: () => ({}), embedConfig: () => ({ embeddingModel, embeddingDim: 1024 }), store: async () => ({ agenda: async () => ({ ...board2, items: [], total: 0 }) }), logPlanContext: async () => {} };
+      const ctx = { env: () => ({}), embedConfig: () => ({ embeddingModel, embeddingDim }), store: async () => ({ agenda: async () => ({ ...board2, items: [], total: 0 }) }), logPlanContext: async () => {} };
       const search = async () => ({ rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })), ...(vectorFailed ? { vectorFailed } : {}) });
       const r = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, search: search as never });
       return r.ok ? r.value : null;
@@ -7780,10 +7780,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     // similarity at all is said as none.
     const bestNotFirst = await runWith("qwen3-embedding:4b", [0.5, 0.8]);
     const pastEight = await runWith("qwen3-embedding:4b", [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.95]);
-    const otherWidth = await (async () => { const ctx = { env: () => ({}), embedConfig: () => ({ embeddingModel: "qwen3-embedding:4b", embeddingDim: 2048 }), store: async () => ({ agenda: async () => ({ ...board2, items: [], total: 0 }) }), logPlanContext: async () => {} };
-      const found = [{ ...hit(A, 0.5, "x"), similarity: 0.9 }];
-      const r = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, search: (async () => ({ rows: found, hits: found.map((x) => ({ ...x, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) })) as never });
-      return r.ok ? r.value : null; })();
+    const otherWidth = await runWith("qwen3-embedding:4b", [0.9], undefined, 2048);
     const noVector = await runWith("qwen3-embedding:4b", [null], { reason: "deadline", matched: "literals" });
     assert(LITTLE_BAR === 0.74 && LITTLE_MEASURED_ON === "qwen3-embedding:4b@1024"
         && littleOf(low) === '[{"gap":"little","topSimilarity":0.61,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
@@ -7793,7 +7790,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && littleOf(otherWidth) === '[{"gap":"little_not_measured","topSimilarity":0.9,"embeddingId":"qwen3-embedding:4b@2048","measuredOn":"qwen3-embedding:4b@1024"}]'
         && littleOf(other) === '[{"gap":"little_not_measured","topSimilarity":0.9,"embeddingId":"nomic-embed-text@1024","measuredOn":"qwen3-embedding:4b@1024"}]'
         && littleOf(noVector) === "[]" && littleOf(v) === "[]",
-      `little on this: under the bar on its embedding a gap with the best similarity, at the bar none, no similarity read as 0, another embedding not measured, no vector or no embedding named none (${littleOf(low)} | ${littleOf(atBar)} | ${littleOf(other)} | ${littleOf(noVector)})`);
+      `little on this: under the bar on its embedding a gap with the best similarity, at the bar none, no similarity said as none, another embedding not measured, no vector or no embedding named none (${littleOf(low)} | ${littleOf(atBar)} | ${littleOf(other)} | ${littleOf(noVector)})`);
     assert(JSON.stringify(knowledgeGaps([], undefined, LITTLE_MEASURED_ON).map((g) => g.gap)) === '["no_knowledge"]'
         && JSON.stringify(knowledgeGaps([{ supersededBy: null, metadata: { trust: "agent" }, similarity: 0.1 }] as never, undefined).map((g) => g.gap)) === "[]",
       "no hit is no_knowledge alone, and no embedding named is no little gap");
