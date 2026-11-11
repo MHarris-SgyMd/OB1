@@ -77,9 +77,9 @@ const stored = (s: string) => {
   }
 };
 const text = (max: number) => z.string().max(max).refine(stored, "a NUL or a lone surrogate");
-/** A model's words made storable: NULs dropped, a lone surrogate (a cut emoji included) read as U+FFFD. */
 /** A lone surrogate: a high one with no low after it, or a low one with no high before it. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/** A model's words made storable: NULs dropped, a lone surrogate (a cut emoji included) read as U+FFFD. */
 const storable = (s: string) => s.replaceAll("\u0000", "").replace(LONE_SURROGATE, "\uFFFD");
 
 // ── The extraction ──────────────────────────────────────────────────────────
@@ -325,7 +325,7 @@ async function jobById(sql: PluginSql, id: string, owner?: string): Promise<Job 
  * one count per item, by what it did (existed, failed) or, executed or still
  * ready, by its action. So the six always sum to extracted_count.
  */
-async function settle(sql: PluginSql, id: string, status: (typeof STATUSES)[number], done: boolean): Promise<Job> {
+async function settle(sql: PluginSql, id: string, status: (typeof STATUSES)[number], done: boolean, from?: (typeof STATUSES)[number]): Promise<Job> {
   const [row] = await sql<JobRow>`
     WITH c AS (
       SELECT count(*)::int AS extracted,
@@ -340,11 +340,12 @@ async function settle(sql: PluginSql, id: string, status: (typeof STATUSES)[numb
        SET status = ${status}, extracted_count = c.extracted, added_count = c.added, skipped_count = c.skipped, appended_count = c.appended,
            revised_count = c.revised, existed_count = c.existed, failed_count = c.failed,
            completed_at = CASE WHEN ${done} THEN now() ELSE j.completed_at END
-      FROM c WHERE j.id = ${id}::bigint
+      FROM c WHERE j.id = ${id}::bigint AND (${from ?? null}::text IS NULL OR j.status = ${from ?? null})
     RETURNING j.id::text AS job_id, j.status, j.dry_run, j.source_label, j.source_type, j.input_length, j.trust, j.created_by, j.extracted_count,
               j.added_count, j.skipped_count, j.appended_count, j.revised_count, j.existed_count, j.failed_count, j.model_calls, j.error_message,
               j.created_at, j.completed_at`;
-  return asJob(row);
+  // No row only when `from` no longer holds: the caller asked for nothing then, so its answer is not read.
+  return row ? asJob(row) : (null as unknown as Job);
 }
 
 /** What a job or an item records for a fault of the core's or the store's: its words go to the REST core's log, not to a read key. */
@@ -364,6 +365,14 @@ export class Unavailable {
   constructor(readonly facts: Record<string, unknown>) {}
 }
 
+/** The trust words, lowest first (migration 073's ladder). */
+const TRUST_RANK: Record<string, number> = { ingested: 0, agent: 1, operator: 2 };
+/** The evidence entry's `source` when a lower-trust job's passage is appended to a higher-trust thought: a reader sees whose it is. */
+export const LOWER_TRUST_SOURCE = "smart_ingest, below this thought's trust";
+/** Whether a thought of trust `theirs` is above the job's captures' (`mine`; an unclassified key's, null, below any). */
+const below = (mine: string | null, theirs: unknown) =>
+  typeof theirs === "string" && TRUST_RANK[theirs] !== undefined && (mine === null || TRUST_RANK[mine] < TRUST_RANK[theirs]);
+
 /**
  * What to do with one extracted thought: skip it (too weak, said twice in the
  * job, a thought the brain holds word for word, or one it holds by meaning),
@@ -372,13 +381,13 @@ export class Unavailable {
  * brain's model a query is embedded under an instruction a document is not, so
  * the same text need not score near 1. Otherwise the match is the hit of
  * highest cosine similarity at SIMILARITY.match or more; a keyword-only hit has
- * none and is passed over.
+ * none and is passed over. A match above the job's captures' trust is never
+ * superseded (the maintainer's calls, 2026-11-11): the passage is evidence for
+ * it instead, whichever is longer (`lower_trust_than_match`). `trust` is what
+ * the job's captures are stamped with (ctx.caller.trust: the declaration
+ * capped at the key's kind), so neither declaring none nor declaring more than
+ * the key holds gets past it. Weighed again at the execute, as trusts move.
  */
-/** The trust words, lowest first (migration 073's ladder). */
-const TRUST_RANK: Record<string, number> = { ingested: 0, agent: 1, operator: 2 };
-/** The evidence entry's `source` when a lower-trust job's passage is appended to a higher-trust thought: a reader sees whose it is. */
-export const LOWER_TRUST_SOURCE = "smart_ingest, below this thought's trust";
-
 export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, seen: Set<string>, trust: string | null): Promise<Decided> {
   const none = { matched: null, similarity: null, error: null, status: "ready" as const };
   if (t.content.length < MIN_THOUGHT_LENGTH) return { ...t, ...none, action: "skip", reason: "quality_gate_short_content" };
@@ -391,10 +400,10 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
     if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
     return { ...t, ...none, action: "skip", reason: "search_refused", status: "failed", error: `search_thoughts refused: ${found.refusal.code}` };
   }
-  const failed = found.value.vectorFailed;
-  if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
   const same = found.value.hits.find((h) => sameText(h.content) === key);
   if (same) return { ...t, ...none, matched: same.id, similarity: same.similarity, action: "skip", reason: "exact_duplicate" };
+  const failed = found.value.vectorFailed;
+  if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
   let top: { id: string; content: string; similarity: number; trust: unknown } | null = null;
   for (const h of found.value.hits) {
     if (h.similarity !== null && h.similarity >= SIMILARITY.match && (top === null || h.similarity > top.similarity)) top = { id: h.id, content: h.content, similarity: h.similarity, trust: (h.metadata as Record<string, unknown> | null)?.trust };
@@ -402,19 +411,13 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   if (top === null) return { ...t, ...none, action: "add", reason: "no_semantic_match" };
   const at = { ...none, matched: top.id, similarity: top.similarity };
   if (top.similarity > SIMILARITY.skip) return { ...t, ...at, action: "skip", reason: "semantic_duplicate" };
+  if (below(trust, top.trust)) return { ...t, ...at, action: "append_evidence", reason: "lower_trust_than_match" };
   if (top.content.length >= t.content.length) return { ...t, ...at, action: "append_evidence", reason: "existing_is_richer" };
-  // A job whose captures' trust is below the matched thought's never supersedes it (the maintainer's calls, 2026-11-11):
-  // an ingested email does not demote an operator's thought. `trust` is what the job's captures are stamped with (the
-  // caller's ctx.caller.trust: the declaration capped at the key's kind), so neither declaring none nor declaring more
-  // than the key holds gets past it; an unclassified key's (null) is below any. The passage is evidence for that
-  // thought instead, its entry marked as below the thought's trust.
-  const theirs = typeof top.trust === "string" ? TRUST_RANK[top.trust] : undefined;
-  if (theirs !== undefined && (trust === null || TRUST_RANK[trust] < theirs)) return { ...t, ...at, action: "append_evidence", reason: "lower_trust_than_match" };
   return { ...t, ...at, action: "create_revision", reason: "new_has_more_info" };
 }
 
-/** What one item's execute did: its status, the thought it wrote or matched, and why it failed. */
-type Done = { status: "executed" | "existed" | "failed"; result: string | null; error: string | null };
+/** What one item's execute did: its status, the thought it wrote or matched, why it failed, and (a revision weighed down) what it was done as. */
+type Done = { status: "executed" | "existed" | "failed"; result: string | null; error: string | null; as?: { action: "append_evidence"; reason: "lower_trust_than_match" } };
 const failed = (error: string): Done => ({ status: "failed", result: null, error });
 
 /** The thought's metadata: the job and item it came from, and what the caller called its source. At most five of capture's eight keys. */
@@ -448,14 +451,17 @@ export async function itemKey(seed: string, itemId: string): Promise<string> {
  * prose text unfindable) or a refusal worth retrying throws Unavailable, the
  * job paused; any other refusal is answered, the item failed with it.
  */
-async function heldText(ctx: Pick<PluginContext, "call">, item: ItemRow, key: string): Promise<{ id: string; own: boolean } | { refused: string } | null> {
+async function heldText(ctx: Pick<PluginContext, "call">, item: ItemRow, key: string, caller: string): Promise<{ id: string; own: boolean } | { refused: string } | null> {
   const found = await ctx.call("search_thoughts", { query: item.content, limit: SEARCH_HITS });
   if (!found.ok) {
     if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
     return { refused: found.refusal.code };
   }
   const hit = found.value.hits.find((h) => sameText(h.content) === sameText(item.content));
-  if (hit) return { id: hit.id, own: (hit.metadata as Record<string, unknown> | null)?.client_key === key };
+  // Own only if it keeps the item's key and this caller's key wrote its text: a re-capture of another's text (its look
+  // missed, a fault after) records the key on that thought but leaves its writer, whose text it stays.
+  const m = (hit?.metadata ?? {}) as Record<string, unknown>;
+  if (hit) return { id: hit.id, own: m.client_key === key && m.actor_name === caller };
   const failed = found.value.vectorFailed;
   if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
   return null;
@@ -478,14 +484,40 @@ const refusedBy = (name: string, r: { code: string; retryable: boolean }): Done 
  * and merged into as any capture of known text is. A refusal the core says is
  * worth retrying throws Unavailable: the job pauses, its item still ready.
  */
-export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: ItemRow, key: string): Promise<Done> {
+/**
+ * Whether the matched thought is now above the job's captures' trust: read at
+ * the execute, since its trust, or the key's kind, may have moved since the dry
+ * run (and a job the old server's copy brought was never weighed). Through
+ * fetch, which logs the read as any fetch does. A thought it cannot read is not
+ * weighed: the write then answers for it.
+ */
+async function aboveNow(ctx: Pick<PluginContext, "call">, id: string, mine: string | null): Promise<boolean> {
+  const got = await ctx.call("fetch", { id });
+  if (!got.ok) {
+    if (got.refusal.retryable) throw new Unavailable({ refused: got.refusal.code });
+    return false;
+  }
+  return below(mine, got.value.metadata?.trust);
+}
+
+export async function execute(ctx: Pick<PluginContext, "call" | "caller">, job: Job, item: ItemRow, key: string, mine: string | null): Promise<Done> {
   const trust = job.trust ? { trust: job.trust } : {};
+  const appendTo = async (id: string, marked: boolean): Promise<Done> => {
+    const appended = await ctx.call("append_thought_evidence", {
+      id,
+      source_label: job.source_label ?? "smart_ingest",
+      excerpt: item.source_snippet.trim() ? item.source_snippet : item.content,
+      source: marked ? LOWER_TRUST_SOURCE : "smart_ingest",
+    });
+    if (!appended.ok) return refusedBy("append_thought_evidence", appended.refusal);
+    return { status: appended.value.action === "already_exists" ? "existed" : "executed", result: appended.value.id, error: null };
+  };
   const revisionHeld = (id: string) => failed(`the text is already thought ${id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
   switch (item.action) {
     case "skip":
       return { status: "executed", result: item.matched_thought_id, error: null };
     case "add": {
-      const held = await heldText(ctx, item, key);
+      const held = await heldText(ctx, item, key, ctx.caller.name);
       if (held && "refused" in held) return failed(`search_thoughts refused: ${held.refused}`);
       if (held) return { status: held.own ? "executed" : "existed", result: held.id, error: null };
       const captured = await ctx.call("capture_thought", { content: item.content, source: "smart-ingest", metadata: metadataOf(job, item), client_key: key, ...trust });
@@ -497,18 +529,15 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
     }
     case "append_evidence": {
       if (!item.matched_thought_id) return failed("append_evidence needs the matched thought");
-      const appended = await ctx.call("append_thought_evidence", {
-        id: item.matched_thought_id,
-        source_label: job.source_label ?? "smart_ingest",
-        excerpt: item.source_snippet.trim() ? item.source_snippet : item.content,
-        source: item.reason === "lower_trust_than_match" ? LOWER_TRUST_SOURCE : "smart_ingest",
-      });
-      if (!appended.ok) return refusedBy("append_thought_evidence", appended.refusal);
-      return { status: appended.value.action === "already_exists" ? "existed" : "executed", result: appended.value.id, error: null };
+      return appendTo(item.matched_thought_id, await aboveNow(ctx, item.matched_thought_id, mine));
     }
     case "create_revision": {
       if (!item.matched_thought_id) return failed("create_revision needs the matched thought");
-      const held = await heldText(ctx, item, key);
+      // A match now above the job's trust is never superseded: the passage is evidence for it, marked.
+      if (await aboveNow(ctx, item.matched_thought_id, mine)) {
+        return { ...(await appendTo(item.matched_thought_id, true)), as: { action: "append_evidence", reason: "lower_trust_than_match" } };
+      }
+      const held = await heldText(ctx, item, key, ctx.caller.name);
       if (held && "refused" in held) return failed(`search_thoughts refused: ${held.refused}`);
       if (held) return held.own ? { status: "executed", result: held.id, error: null } : revisionHeld(held.id);
       const captured = await ctx.call("capture_thought", {
@@ -538,17 +567,19 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
       SELECT id::text AS id, position, content, type, importance, tags, source_snippet, action, reason, status, matched_thought_id::text AS matched_thought_id,
              similarity_score, result_thought_id::text AS result_thought_id, error_message, executed_at
         FROM ingestion_items WHERE job_id = ${job.job_id}::bigint AND status = 'ready' ORDER BY position`);
+    const mine = await ctx.caller.trust(job.trust);
     for (const item of items) {
       let done: Done;
       try {
-        done = await execute(ctx, job, item, await itemKey(seed, item.id));
+        done = await execute(ctx, job, item, await itemKey(seed, item.id), mine);
       } catch (e) {
         if (e instanceof Unavailable) throw e;
         console.error(`smart-ingest job ${job.job_id} item ${item.id}: ${e instanceof Error ? e.message : String(e)}`);
         done = failed(FAULT);
       }
       await ctx.db.tx((sql) => sql`
-        UPDATE ingestion_items SET status = ${done.status}, result_thought_id = ${done.result}::uuid, error_message = ${done.error}, executed_at = now()
+        UPDATE ingestion_items SET status = ${done.status}, result_thought_id = ${done.result}::uuid, error_message = ${done.error}, executed_at = now(),
+               action = ${done.as?.action ?? item.action}, reason = ${done.as?.reason ?? item.reason}
          WHERE id = ${item.id}::bigint`);
     }
     return await ctx.db.tx((sql) => settle(sql, job.job_id, "complete", true));
@@ -558,8 +589,9 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
     const paused = await ctx.db.tx(async (sql) => (await sql<{ id: string }>`
         UPDATE ingestion_jobs SET status = 'dry_run_complete', error_message = ${`${why}; execute_job carries out the items still ready`}
          WHERE id = ${job.job_id}::bigint AND status = 'executing' RETURNING id::text AS id`).length > 0).catch(() => false);
-    // Its counts recounted apart, so a store that cannot read the items (the fault itself, perhaps) still leaves it resumable.
-    if (paused) await ctx.db.tx((sql) => settle(sql, job.job_id, "dry_run_complete", false)).catch(() => {});
+    // Its counts recounted apart, so a store that cannot read the items (the fault itself, perhaps) still leaves it
+    // resumable; only while it is still the paused dry run's, so a call that claimed it meanwhile is not undone.
+    if (paused) await ctx.db.tx((sql) => settle(sql, job.job_id, "dry_run_complete", false, "dry_run_complete")).catch(() => {});
     if (e instanceof Unavailable && !paused) throw new Error(`smart-ingest job ${job.job_id}: paused, but the pause could not be recorded`);
     throw e;
   }
@@ -699,7 +731,7 @@ export default definePlugin({
               await failJob(ctx, job.job_id, `the model call was refused: ${r.code}`, calls);
               if (r.code === "PROVIDER_UNAVAILABLE") return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { to: r.to, reason: r.reason });
               if (r.code === "REFUSED_EGRESS") return refused(422, "EXTRACTION_REFUSED", job.job_id, { refused: r.code, reason: r.reason });
-              return refused(422, "EXTRACTION_FAILED", job.job_id, { refused: r.code, detail: "detail" in r ? r.detail : r.message });
+              return refused(422, "EXTRACTION_FAILED", job.job_id, { refused: r.code, detail: "detail" in r ? r.detail : r.message, ...("finish_reason" in r && r.finish_reason ? { finish_reason: r.finish_reason } : {}) });
             }
             const thoughts = thoughtsOf(answer.value.json ?? {});
             if (thoughts === null) {
@@ -709,7 +741,10 @@ export default definePlugin({
             // A passage the document does not hold (the model's own words, or a document steering it) is none: the
             // evidence then quotes the thought, never text the source never said.
             const held = sameText(chunk);
-            extracted.push(...thoughts.map((t) => (t.source_snippet && !held.includes(sameText(t.source_snippet.replace(/\.\.\.$/, ""))) ? { ...t, source_snippet: "" } : t)));
+            extracted.push(...thoughts.map((t) => {
+              const quoted = sameText(t.source_snippet.replace(/\.\.\.$/, ""));
+              return quoted && held.includes(quoted) ? t : { ...t, source_snippet: "" };
+            }));
           }
 
           // The decisions, each against the brain as it is now, weighed at the trust the job's captures get.
@@ -737,14 +772,14 @@ export default definePlugin({
             return settle(sql, job.job_id, next, next === "complete");
           });
           if (req.dry_run) {
-            return ok({ existing: false, job, message: `Dry run: ${job.extracted_count} extracted. Would add ${job.added_count}, skip ${job.skipped_count}, append ${job.appended_count}, revise ${job.revised_count}.` });
+            return ok({ existing: false, job, message: `Dry run: ${job.extracted_count} extracted. Would add ${job.added_count}, skip ${job.skipped_count}, append ${job.appended_count}, revise ${job.revised_count}; ${job.failed_count} failed.` });
           }
           if (job.status === "executing") {
             try {
               job = await executeJob(ctx, job);
             } catch (e) {
               if (!(e instanceof Unavailable)) throw e;
-              return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { ...e.facts, paused: "execute_job carries out the items still ready" });
+              return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { ...e.facts, paused: "this same call, or execute_job, carries out the items still ready" });
             }
           }
           return ok({ existing: false, job, message: `Ingested: ${job.extracted_count} extracted. Added ${job.added_count}, skipped ${job.skipped_count}, appended ${job.appended_count}, revised ${job.revised_count}, already there ${job.existed_count}, failed ${job.failed_count}.` });
@@ -753,7 +788,7 @@ export default definePlugin({
     }),
     execute_job: operation({
       title: "Execute a dry-run job",
-      description: "Carries out a dry run's decisions, in order: each add captured, each skip recorded against the thought it matched, each append written as evidence, each revision captured as superseding the thought it matched. Counted by what was done (existed_count: an add whose text was a thought by now, or evidence the thought already held; failed_count: refused, with why on the item). A job already complete answers as it stands (already); one not a dry run's, or one another call is executing, is refused JOB_NOT_READY; no such job NO_SUCH_JOB. Refused PROVIDER_UNAVAILABLE (503, retryable) when a provider the core needs does not answer: the job is paused, a dry run's again with its items still ready, for execute_job once it answers.",
+      description: "Carries out a dry run's decisions, in order: each add captured, each skip recorded against the thought it matched, each append written as evidence, each revision captured as superseding the thought it matched. Counted by what was done (existed_count: an add whose text was a thought by now, or evidence the thought already held; failed_count: refused, with why on the item). A job already complete answers as it stands (already); one not a dry run's, or one another call is executing, is refused JOB_NOT_READY; no such job NO_SUCH_JOB. Refused PROVIDER_UNAVAILABLE (503, retryable) when a provider the core needs does not answer, or the core says a write may land a moment later (a thought kept busy): the job is paused, a dry run's again with its items still ready, for execute_job once it answers. A match whose trust is now above the job's captures' is given evidence, marked, never superseded.",
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -785,7 +820,7 @@ export default definePlugin({
     }),
     list_jobs: operation({
       title: "Smart-ingest jobs",
-      description: "This key's jobs (a read key, which makes none, has none), newest first, at most 200 (no cursor: status narrows), each with its status and counts: what was extracted, added, skipped, appended, revised, already there (existed) and failed. status narrows to one status (dry_run_complete: dry runs waiting for execute_job; failed: with why). truncated says there are more than limit. get_job reads one job's items.",
+      description: "This key's jobs (a read key, which makes none, has none), newest first, at most 200 (no cursor: status narrows), each with its status and counts: what was extracted, added, skipped, appended, revised, already there (existed) and failed. status narrows to one status (dry_run_complete: dry runs, and paused jobs, waiting for execute_job; failed: with why). truncated says there are more than limit. get_job reads one job's items.",
       scope: "read",
       annotations: { openWorldHint: false },
       method: "GET",
