@@ -91,13 +91,13 @@ const minTrustInput = z.enum(TRUST).optional()
 
 /** No lone UTF-16 surrogate: JSON.stringify writes one as an escape jsonb refuses (SMD-3669 review pass 6). */
 const WELL_FORMED = (v: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v);
-/** An agenda scope (SMD-3669): a non-blank string with no NUL and no lone surrogate, each refused here, before 123's jsonb. */
 /**
  * An evidence entry's text (SMD-2690 PR 3b, review pass 1): bounded, no NUL
  * and no lone surrogate — jsonb refuses both, and the write would fail as a
  * fault rather than a refusal — and not blank, which says nothing.
  */
 const EVIDENCE_TEXT = (max: number) => z.string().min(1).max(max).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
+/** An agenda scope (SMD-3669): a non-blank string with no NUL and no lone surrogate, each refused here, before 123's jsonb. */
 const AGENDA_SCOPE = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character").refine((v) => v.trim() !== "", "may not be blank").refine(WELL_FORMED, "may not hold a lone surrogate");
 
 export const SPECS = {

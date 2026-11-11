@@ -1962,6 +1962,8 @@ export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, Evidenc
       : `${named} already holds that evidence (the same source label and excerpt): nothing written. It holds ${count}.`;
   }, (r) => {
     switch (r.code) {
+      case "THOUGHT_EVIDENCE_BUSY":
+        return `Not yet: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it. Retry in a moment: an entry already added is not added twice.`;
       case "REFUSED_THOUGHT_EVIDENCE":
         switch (r.problem) {
           case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; a write key may prune metadata.evidence with update_thought.`;
@@ -1969,12 +1971,9 @@ export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, Evidenc
           case "metadata_not_object": return `Refused: ${r.id}'s metadata is not an object (a raw writer's), so it holds no evidence list.`;
           case "unstamped": return `Refused: ${r.id} has neither an updated_at nor a created_at (a raw writer's row), so an append could not be checked against another at the same moment. An update_thought that changes it stamps it; then append again.`;
         }
-        break;
-      case "THOUGHT_EVIDENCE_BUSY":
-        return `Not yet: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it. Retry in a moment: an entry already added is not added twice.`;
+      // falls through: a problem this server does not know is said as an edit's refusal
       default: return mutationRefusalText(r);
     }
-    return mutationRefusalText(r);
   }, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), action: v.action, evidenceCount: v.evidenceCount, ...(v.updatedAt ? { updatedAt: v.updatedAt } : {}) }));
 }
 

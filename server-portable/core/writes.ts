@@ -900,10 +900,10 @@ export function evidenceIdentity(sourceLabel: string, excerpt: string, id: strin
 }
 
 /**
- * How long, at most, an append waits before reading the thought again after
- * another write moved it under its read, longer each time, at random: a batch of
- * appends to one thought (smart-ingest's) all land (review pass 1: three tries
- * with no wait refused four of eight at once).
+ * An append's wait before it reads the thought again, after another write moved
+ * it under its read: at random, up to this many milliseconds times the tries so
+ * far, so a batch of appends to one thought (smart-ingest's) all land (review
+ * pass 1: three tries with no wait refused four of eight at once).
  */
 const EVIDENCE_BACKOFF_MS = 15;
 
@@ -924,10 +924,9 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
   // vendored append hashes p_thought_id::text (review pass 1: an upper-case id
   // added the same entry twice).
   const id = target.id.toLowerCase();
-  const byClientKey = target.byClientKey;
   const store = await ctx.store();
   const identity = evidenceIdentity(source_label, excerpt, id);
-  const named = byClientKey ? { byClientKey } : {};
+  const named = target.byClientKey ? { byClientKey: target.byClientKey } : {};
   for (let tries = 1; ; tries++) {
     const row = await store.getThought(id);
     if (!row) return refuse({ code: "NOT_FOUND", retryable: false, id });
@@ -942,7 +941,8 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
     if (held.some((e) => e !== null && typeof e === "object" && (e as Record<string, unknown>)._identity === identity)) {
       return ok({ id, ...named, action: "already_exists", evidenceCount: held.length, ...stamp });
     }
-    // update_thought compares COALESCE(updated_at, created_at): a raw writer's row with neither has nothing an edit is
+    // update_thought compares COALESCE(updated_at, created_at): a raw writer's row with no updated_at is checked by its
+    // created_at (review pass 1: unchecked, appends at once lost entries), and one with neither has nothing an edit is
     // checked against, so appends at once would each answer "appended" over the others (review pass 2). Refused.
     const stampedAt = row.updated_at ?? row.created_at;
     if (!stampedAt) return refuse({ code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id, problem: "unstamped" });
@@ -952,8 +952,6 @@ export async function appendThoughtEvidence(ctx: Ctx, principal: Principal, { id
     const result = await store.updateThought({
       id,
       metadataPatch: { evidence: [...held, entry] },
-      // A row with no updated_at (a raw writer's) is compared by its created_at, as update_thought compares
-      // COALESCE(updated_at, created_at) (review pass 1: unchecked, appends at once lost entries).
       ifUnchangedSince: stampedAt,
       actor: actorOf(ctx, principal),
     });

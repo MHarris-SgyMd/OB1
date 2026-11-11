@@ -1104,15 +1104,14 @@ writes the list back with the row's stamp as `if_unchanged_since`, so the event 
 records it as any metadata edit, under the caller's key. A write between the read and
 the edit is a stale read, and it reads again after a short random wait (ten reads at
 most, then `THOUGHT_EVIDENCE_BUSY`, 503 and retryable), so appends at once each keep the
-others' entries. An entry's
-identity is the sha256 of its label, its excerpt and the thought's id, kept as
-`_identity` — the vendored `schemas/smart-ingest` append's rule and shape — so the same
-entry is never added twice, and the reply says it already was. A label and a source
-are at most 200 characters and an excerpt 2,000; a thought keeps at most 100 entries,
-and `REFUSED_THOUGHT_EVIDENCE` (409) names a full list, a `metadata.evidence` another
-writer set to something that is no list, metadata that is no object, or a raw writer's
-row with neither an `updated_at` nor a `created_at`, which no edit can be checked
-against.
+others' entries. An entry's identity is the sha256 of its label, its excerpt and the
+thought's id, kept as `_identity` — the vendored `schemas/smart-ingest` append's rule
+and shape — so the same entry is never added twice, and the reply says it already was.
+A label and a source are at most 200 characters and an excerpt 2,000; a thought keeps
+at most 100 entries, and `REFUSED_THOUGHT_EVIDENCE` (409) names a full list, a
+`metadata.evidence` another writer set to something that is no list, metadata that is
+no object, or a raw writer's row with neither an `updated_at` nor a `created_at`, which
+no edit can be checked against.
 
 ## Deciding a supersession proposal (SMD-3338)
 
@@ -1409,10 +1408,11 @@ MCP tools do rather than a copy of it:
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
   `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought`,
-  `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's trimmed provenance and owned
-  pointers, the egress gate, the model calls, the write and its cites. `core/workers.ts` holds the worker actions
-  (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
-  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too.
+  `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
+  trimmed provenance and owned pointers, the egress gate, the model calls, the write and
+  its cites. `core/workers.ts` holds the worker actions (`retry_failed`,
+  `release_stale_leases`, `run_worker`'s dry run), which the keyed REST POSTs
+  (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too.
   `core/claims.ts` holds the work-claim tools (`claim_work`, `renew_claim`,
   `release_claim`, `list_claims`, SMD-3598) over migration 115's functions, and
   `core/priority.ts` and `core/items.ts` the priority and open-item tools over 116's and
@@ -1555,8 +1555,8 @@ stripped (`X-Forwarded-Prefix`).
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
-  /v1/thoughts/{id}/reset-capture-stamp` and `/evidence`, `POST /v1/search` (and `/keyword`,
-  `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
+  /v1/thoughts/{id}/reset-capture-stamp` and `/evidence`, `POST /v1/search` (and
+  `/keyword`, `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET
   /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the

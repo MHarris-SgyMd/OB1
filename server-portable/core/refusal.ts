@@ -55,7 +55,7 @@ export type Refusal =
   | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is), or is capture-only
   | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
   // append_thought_evidence (SMD-2690 PR 3b): the thought's own evidence list will not take an entry.
-  | { code: "REFUSED_THOUGHT_EVIDENCE"; retryable: false; id: string; problem: EvidenceProblem; count?: number } // full: it holds EVIDENCE_LIMITS.entries (count); not_list: its metadata.evidence is no list; metadata_not_object: its metadata is no object; unstamped: it has neither updated_at nor created_at, so no edit of it can be checked against another
+  | { code: "REFUSED_THOUGHT_EVIDENCE"; retryable: false; id: string; problem: EvidenceProblem; count?: number } // full: it holds EVIDENCE_LIMITS.entries or more (count); not_list: its metadata.evidence is no list; metadata_not_object: its metadata is no object; unstamped: it has neither updated_at nor created_at, so no edit of it can be checked against another
   | { code: "THOUGHT_EVIDENCE_BUSY"; retryable: true; id: string } // other writes moved the thought under each of the append's EVIDENCE_LIMITS.tries reads: the same call can land a moment later
   // Work claims (115, SMD-3598): claim_work, renew_claim, release_claim. Never a token: 115 returns one only to the
   // caller who claimed, in the value, and no refusal carries one.
@@ -116,10 +116,10 @@ export type ReviewArgumentProblem = "direction_on_reject" | "force_on_reject" | 
 export type EvidenceProblem = "full" | "not_list" | "metadata_not_object" | "unstamped";
 /**
  * append_thought_evidence's bounds (SMD-2690 PR 3b), beside the refusal that
- * names the list's: a label and an excerpt as smart-ingest's vendored append
- * took them, held, and a list a thought's metadata carries in every read;
- * `tries`, how often an append reads the thought before it answers that the
- * thought is busy.
+ * names the list's: a label, a source and an excerpt as smart-ingest's
+ * vendored append took them, held, and a list a thought's metadata carries in
+ * every read; `tries`, how often an append reads the thought before it answers
+ * that the thought is busy.
  */
 export const EVIDENCE_LIMITS = { label: 200, excerpt: 2_000, source: 200, entries: 100, tries: 10 } as const;
 

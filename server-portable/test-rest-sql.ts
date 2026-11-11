@@ -478,15 +478,17 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   // append_thought_evidence (SMD-2690 PR 3b): each door appends to its own
   // thought, so both say "appended"; the second append of an entry finds it.
   {
-    const evRest = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought a source supports, for REST's evidence" })).body.id);
-    const evMcp = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought a source supports, for MCP's evidence" })).body.id);
+    // A new thought's id, and a thought's metadata.evidence as a GET reads it.
+    const thought = async (content: string, extra: Record<string, unknown> = {}) => String((await rest("POST", "/v1/thoughts", { content, ...extra })).body.id);
+    const evidenceOf = async (id: string) => ((await rest("GET", `/v1/thoughts/${id}`)).body as { metadata?: { evidence?: Record<string, unknown>[] } }).metadata?.evidence ?? [];
+    const evRest = await thought("psi: a thought a source supports, for REST's evidence");
+    const evMcp = await thought("psi: a thought a source supports, for MCP's evidence");
     const entry = { source_label: "notes.pdf", excerpt: "the passage that says it", source: "smart_ingest", extracted_at: "2026-11-10T09:00:00Z" };
     const er = await rest("POST", `/v1/thoughts/${evRest}/evidence`, entry);
     const em = await mcp("append_thought_evidence", { id: evMcp, ...entry });
     const err = rendered((v) => say.renderAppendThoughtEvidence(ok(v)), swap(er.body, em.sc));
     const again = await rest("POST", `/v1/thoughts/${evRest}/evidence`, entry);
-    const stored = (await rest("GET", `/v1/thoughts/${evRest}`)).body as { metadata?: { evidence?: Record<string, unknown>[] }; updated_at?: string };
-    const held = stored.metadata?.evidence ?? [];
+    const held = await evidenceOf(evRest);
     // The vendored append's identity (schemas/smart-ingest): sha256 of the label, the excerpt and the id.
     const identity = new Bun.CryptoHasher("sha256").update(entry.source_label + entry.excerpt + evRest).digest("hex");
     assert(er.status === 200 && er.body.action === "appended" && er.body.evidenceCount === 1 && err.content[0].text === em.text && same(err.structuredContent, em.sc)
@@ -497,20 +499,20 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     const [audit] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = ${evRest}::uuid AND action = 'update' AND actor_name = 'writer' AND diff ? 'metadata' AND (diff->'metadata')::text LIKE '%the passage that says it%'`;
     assert(audit?.n === 1,
       `…recorded once in the audit trail, as an update by the writer whose metadata diff holds the entry — the second append wrote nothing (${JSON.stringify(audit)})`);
-    // Two appends at once each keep the other's entry: the one whose read went stale reads again.
-    const both = await Promise.all(["one", "two", "three"].map((n) => rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: `race ${n}`, excerpt: `passage ${n}` })));
-    const afterRace = ((await rest("GET", `/v1/thoughts/${evRest}`)).body as { metadata?: { evidence?: Record<string, unknown>[] } }).metadata?.evidence ?? [];
+    // Three appends at once each keep the others' entries: one whose read went stale reads again.
+    const three = await Promise.all(["one", "two", "three"].map((n) => rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: `race ${n}`, excerpt: `passage ${n}` })));
+    const afterRace = await evidenceOf(evRest);
     // An entry sent with no source and no time keeps the vendored shape: source null, extracted_at the server's now.
     const bare = afterRace.slice(1);
-    assert(both.every((b) => b.status === 200 && b.body.action === "appended") && afterRace.length === 4
+    assert(three.every((b) => b.status === 200 && b.body.action === "appended") && afterRace.length === 4
         && bare.every((e) => "source" in e && e.source === null && typeof e.extracted_at === "string" && Math.abs(Date.parse(e.extracted_at) - Date.now()) < 60_000),
-      `…three appends at once each land, none lost to another's write; one sent with no source or time is stored with source null and the server's time (${both.map((b) => `${b.status}:${b.body.action ?? b.body.code}`).join(",")}; ${afterRace.length} held; ${JSON.stringify(bare[0])})`);
+      `…three appends at once each land, none lost to another's write; one sent with no source or time is stored with source null and the server's time (${three.map((b) => `${b.status}:${b.body.action ?? b.body.code}`).join(",")}; ${afterRace.length} held; ${JSON.stringify(bare[0])})`);
     // Review pass 1. The id as Postgres writes it: named in upper case, the entry is the one the lower-case name finds.
     const upper = await rest("POST", `/v1/thoughts/${evRest.toUpperCase()}/evidence`, entry);
     // Eight at once all land: the append waits, at random, before each new read.
-    const evMany = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought eight sources support at once" })).body.id);
+    const evMany = await thought("psi: a thought eight sources support at once");
     const eight = await Promise.all(Array.from({ length: 8 }, (_, n) => rest("POST", `/v1/thoughts/${evMany}/evidence`, { source_label: `batch ${n}`, excerpt: `passage ${n}` })));
-    const manyHeld = ((await rest("GET", `/v1/thoughts/${evMany}`)).body as { metadata?: { evidence?: unknown[] } }).metadata?.evidence ?? [];
+    const manyHeld = await evidenceOf(evMany);
     assert(upper.status === 200 && upper.body.action === "already_exists" && upper.body.id === evRest && upper.body.evidenceCount === 4
         && eight.every((b) => b.status === 200 && b.body.action === "appended") && manyHeld.length === 8,
       `…an upper-case id finds the entry the lower-case one added; eight appends at once all land (${upper.body.action}/${upper.body.id === evRest}; ${eight.map((b) => b.body.action ?? b.body.code).join(",")}; ${manyHeld.length} held)`);
@@ -523,7 +525,7 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     // Metadata a raw writer left as a JSON null or a SQL NULL is no object: refused, and nothing written. A row whose
     // updated_at a raw writer cleared is checked by its created_at, so appends at once keep each entry.
     const rawRow = async (text: string, set: string) => {
-      const id = String((await rest("POST", "/v1/thoughts", { content: text })).body.id);
+      const id = await thought(text);
       await sql.begin(async (tx) => { await tx.unsafe("SET LOCAL session_replication_role = replica"); await tx.unsafe(`UPDATE thoughts SET ${set} WHERE id = '${id}'`); });
       return id;
     };
@@ -537,7 +539,7 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     const onSqlNull = await rest("POST", `/v1/thoughts/${sqlNull}/evidence`, entry);
     const [kept] = await sql`SELECT jsonb_typeof((SELECT metadata FROM thoughts WHERE id = ${jsonNull}::uuid)) AS j, (SELECT metadata IS NULL FROM thoughts WHERE id = ${sqlNull}::uuid) AS s`;
     const unstampedRace = await Promise.all(["a", "b", "c", "d"].map((n) => rest("POST", `/v1/thoughts/${unstamped}/evidence`, { source_label: `raw ${n}`, excerpt: `passage ${n}` })));
-    const unstampedHeld = ((await rest("GET", `/v1/thoughts/${unstamped}`)).body as { metadata?: { evidence?: unknown[] } }).metadata?.evidence ?? [];
+    const unstampedHeld = await evidenceOf(unstamped);
     assert([onJsonNull, onSqlNull].every((b) => b.status === 409 && b.body.code === "REFUSED_THOUGHT_EVIDENCE" && b.body.problem === "metadata_not_object") && kept?.j === "null" && kept?.s === true
         && unstampedRace.every((b) => b.status === 200 && b.body.action === "appended") && unstampedHeld.length === 4
         && onNoStamps.status === 409 && onNoStamps.body.code === "REFUSED_THOUGHT_EVIDENCE" && onNoStamps.body.problem === "unstamped",
@@ -559,7 +561,7 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     const atBounds = await rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: "x".repeat(200), excerpt: "y".repeat(2_000), source: "s".repeat(200), extracted_at: "2026-11-10T09:00:00+01:00" });
     // By client_key: the thought it names, and the key, in the answer.
     const keyed = "11111111-2222-4333-8444-5555555527a7";
-    const keyedId = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought named by its client_key, for evidence", client_key: keyed })).body.id);
+    const keyedId = await thought("psi: a thought named by its client_key, for evidence", { client_key: keyed });
     const byKey = await rest("POST", `/v1/thoughts/${keyed}/evidence`, entry);
     assert(noThought.status === 404 && noThought.body.code === "NOT_FOUND" && asReader.status === 403 && asReader.body.code === "FORBIDDEN"
         && notList.status === 409 && notList.body.code === "REFUSED_THOUGHT_EVIDENCE" && notList.body.problem === "not_list"
