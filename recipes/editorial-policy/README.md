@@ -138,6 +138,8 @@ The two Slack variables are read only when a run posts (`post_to_slack: true` an
 
 `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `integrations/test-auth.ts` starts it this way in CI, and `integrations/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`, so start it with `OB1_LISTEN_HOST=127.0.0.1` and it listens there alone.
 
+> **If you ran the auditor before SMD-3875, rotate your database password.** Until then the auditor sent `SUPABASE_URL` to OpenRouter as its `HTTP-Referer` header on every audit. Here that variable is the Postgres connection string, password included, and OpenRouter may log the header and show it in its analytics. It now sends a fixed Referer, the one the other recipes send.
+
 ### Step 6: Schedule the weekly run
 
 A cron line on the machine that runs the auditor — Sunday 09:00 UTC, the auditor before the weekly summary so it has the full week to inspect:

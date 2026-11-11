@@ -266,9 +266,12 @@ const WORKER = "http://extraction-worker.test";
 const reached: string[] = [];
 /** The key each call to the worker's address carried. */
 const workerKeys: (string | null)[] = [];
+/** The headers of every call, beside its URL: none may carry the connection string or its password (SMD-3875; the tail). */
+const sent: { url: string; headers: Headers }[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   reached.push(url);
+  sent.push({ url, headers: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)) });
   // The extraction worker at smart-ingest's ENTITY_EXTRACTION_WORKER_URL, POSTed to after a write with the key (SMD-2110).
   if (url.startsWith(`${WORKER}/`)) {
     workerKeys.push(new Headers(init?.headers).get("x-brain-key"));
@@ -644,7 +647,12 @@ try {
   console.log(`\n[${F}]`);
   const h = await load(F);
   // The stubbed model answers metadata, not findings: the auditor reads no findings and stores an empty report — no Slack.
+  const mark = sent.length;
   const r = await send(h, "POST", "/", { days: 30, post_to_slack: false });
+  // SMD-3875: the model call's Referer is the fixed one, where it was SUPABASE_URL — the connection string, password and all.
+  const asked = sent.slice(mark).filter((c) => c.url.endsWith("/chat/completions"));
+  assert(asked.length === 1 && asked[0].headers.get("http-referer") === "https://github.com/NateBJones-Projects/OB1",
+    `the audit's one model call sends the fixed Referer, never the connection string (${asked.length} calls; ${asked.map((c) => /postgres(ql)?:/.test(c.headers.get("http-referer") ?? "") ? "a postgres:// URL" : c.headers.get("http-referer")).join(" ")})`);
   assert(r.status === 200 && r.json?.ok === true && UUID.test(String(r.json?.stored_id)) && r.json?.finding_count === 0,
     `an audit stores its report and answers its id (${r.status} ${JSON.stringify(r.json).slice(0, 100)})`);
   const sid = String(r.json?.stored_id);
@@ -858,6 +866,14 @@ for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-15
 // URL the stub was handed, by every writer this suite drove, and smart-ingest's text: no URL built on that variable.
 assert(reached.length > 0 && !reached.some((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")),
   `no writer handed fetch() a postgres:// URL or a /functions/v1/ path, suite long (${reached.length} calls; ${reached.filter((u) => /^postgres(ql)?:/.test(u) || u.includes("/functions/v1/")).slice(0, 3).map((u) => u.replace(/\/\/[^/@]*@/, "//…@")).join(" ")})`); // userinfo redacted: it is the password
+// SMD-3875: nor a header. The auditor sent SUPABASE_URL to OpenRouter as its Referer. No header of any call, by any writer
+// this suite drove, carries the connection string, a postgres:// URL or the password (CI's DSN has one).
+{
+  const password = decodeURIComponent(new URL(URL_).password);
+  const leaks = sent.flatMap((c) => [...c.headers].filter(([, v]) => v.includes(URL_) || /postgres(ql)?:\/\//.test(v) || (password !== "" && v.includes(password))).map(([k]) => `${k} to ${new URL(c.url).host}`));
+  assert(sent.length > 0 && leaks.length === 0,
+    `no writer sent the connection string or its password in a header, suite long (${sent.length} calls${password === "" ? "; this DSN has no password, so only its URL is checked" : ""}; ${leaks.slice(0, 3).join(", ") || "none"})`); // names the header, never its value
+}
 // The literal forms — a template `${SUPABASE_URL}/…` or a concatenation `SUPABASE_URL + "/…"` — in smart-ingest's text;
 // an alias or a `new URL(path, SUPABASE_URL)` would pass this and fail the arm above at run time.
 spells("integrations/smart-ingest/index.ts",/^(?![\s\S]*(?:\$\{SUPABASE_URL\}\/|SUPABASE_URL\s*\+\s*["'`]\/))/, " writes no `${SUPABASE_URL}/…` template and no `SUPABASE_URL + \"/…\"` concatenation");
