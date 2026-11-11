@@ -90,6 +90,11 @@ const TABLES = [
   "open_item_events",
   "open_items",
   "open_item_close_proposals",
+  // 133's deliverable events (SMD-1715): no foreign key either way — an event
+  // names its thought and spec by id, and outlives a deleted thought — so its
+  // place is free. Its CASCADE takes the helpers whose arguments or result are
+  // its row type, and its triggers.
+  "deliverable_events",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -503,6 +508,25 @@ const FUNCTIONS = [
   "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)",
   "close_thought_subjects(uuid, uuid[], text)",
   "ob1_thread_lock_keys(text[])",
+  // 133 (SMD-1715): the deliverables' writers, read, drift check, rebuild and helpers (those taking or returning a
+  // deliverable_events row go with its CASCADE); the facet's triggers and index go with thought_facets.
+  "ob1_deliverable_events_guard()",
+  "ob1_deliverable_transition_ok(text, text)",
+  "ob1_deliverable_lock(uuid)",
+  "ob1_deliverable_time(timestamp with time zone)",
+  "ob1_deliverable_payload(uuid)",
+  "ob1_deliverable_event_check()",
+  "ob1_deliverable_facet_kept()",
+  "ob1_deliverable_id(text, text)",
+  "ob1_deliverable_actor(jsonb, text)",
+  "ob1_deliverable_refused(text, text)",
+  "ob1_deliverable_json(uuid)",
+  "ob1_deliverable_project(uuid)",
+  "record_deliverable(text, text, text, jsonb)",
+  "verify_deliverable(text, text, text, text, jsonb)",
+  "deliverable_history(text)",
+  "ob1_deliverable_projection_drift()",
+  "ob1_rebuild_deliverable_projection()",
 ];
 
 /**

@@ -747,12 +747,16 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // without 034 or 128 ([20bv]); 132 adds the operator's priority weights —
   // a table, two refusing triggers and six functions, 128's
   // ob1_priority_defaults replaced to read them — refusing by name without
-  // 008, 046, 061, 116, 128 or 131 ([20bw]) — all recorded by the
+  // 008, 046, 061, 116, 128 or 131 ([20bw]); 133 adds deliverables — an
+  // append-only event table, its transitions checked on every insert, a
+  // `deliverable` facet kind admitted only as the events' projection (120's
+  // validator carried with one kind more) and twenty functions — refusing by
+  // name without 042, 116, 117 or 120 ([20bx]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 103, `030 is among the last one hundred and three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 104, `030 is among the last one hundred and four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6067,6 +6071,53 @@ console.log("\n[20bw] Migration 132: onto a populated brain at the file before i
   assert(reapplied === operator && rowsAfter === rowsBefore && rowsAfter === 1 && cleared.changed === true && read(await agenda(null)) === before && await span() === 5.8,
     `a re-apply is a no-op, the setting standing and its read the same; {} clears it and the read is as before (${reapplied} | ${rowsAfter} rows)`);
   for (const r of ["ob1_upgrade_132_writer", "ob1_upgrade_132_reader", "ob1_upgrade_132_none"]) await sql.unsafe(`DROP OWNED BY ${r}; DROP ROLE ${r}`);
+  await sql.close();
+}
+
+console.log("\n[20bx] Migration 133: onto a populated brain at the file before it — refused by name without 120's thread_relink, nothing made; then applied: the facets standing as they were, a subject and a citation still judged by 120's rules; a deliverable recorded and verified, its facet the events' projection, a raw status UPDATE refused; a re-apply a no-op, its events and facet kept (SMD-1715)");
+{
+  const the133 = MIGRATIONS.find((f) => /^\d{3}_deliverables\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the133 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
+  const spec = await thought("upgrade 133: the spec"), out = await thought("upgrade 133: the output"), other = await thought("upgrade 133: a subject's thought");
+  // The facets a brain at 132 holds: a citation and a subject.
+  await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${out}::uuid, 'citation', (${JSON.stringify({ text: "rests on the spec", stance: "stated", source_id: spec })}::text)::jsonb)`;
+  await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${other}::uuid, 'subject', '{"key": "ticket:SMD-9761", "by": "metadata", "judge_key": "upgrade-133"}'::jsonb)`;
+  const facets = async () => JSON.stringify(await sql`SELECT thought_id, kind, payload, valid_until FROM thought_facets ORDER BY thought_id, kind`);
+  const table = async () => (await sql`SELECT to_regclass('deliverable_events') IS NOT NULL AS t`)[0].t as boolean;
+  const before = await facets();
+
+  // Without 120's thread_relink: refused by name, nothing made.
+  await sql`ALTER FUNCTION thread_relink(text, boolean) RENAME TO thread_relink_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the133 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION thread_relink_away(text, boolean) RENAME TO thread_relink`;
+  assert(/^migration 133 needs 120 \(thread_relink\); this schema lacks it/.test(without) && !(await table()),
+    `without 120's thread_relink the file is refused by name, and no table is made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the133 });
+  const after = await facets();
+  const refused = async (q: Promise<unknown>) => q.then(() => "written", (e: Error) => e.message);
+  const badSubject = await refused(sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${spec}::uuid, 'subject', '{"key": "not a key", "by": "metadata", "judge_key": "x"}'::jsonb)`);
+  const selfCite = await refused(sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${spec}::uuid, 'citation', (${JSON.stringify({ text: "t", stance: "stated", source_id: spec })}::text)::jsonb)`);
+  assert(await table() && after === before && /a subject's key is ticket/.test(badSubject) && /cannot cite itself/.test(selfCite),
+    `applied: the facets stand as they were, and a malformed subject and a self-citation are refused by 120's rules (${badSubject.slice(0, 60)} | ${selfCite.slice(0, 60)})`);
+
+  type R = { outcome: string; code?: string; deliverable?: { status: string } };
+  const W = (name: string) => JSON.stringify({ name, scope: "write" });
+  const rec = ((await sql`SELECT record_deliverable(${out}, ${spec}, 'c0ffee', (${W("upgrade-maker")}::text)::jsonb) AS r`)[0] as { r: R }).r;
+  const ver = ((await sql`SELECT verify_deliverable(${out}, 'verified', 'review', 'it meets the spec', (${W("upgrade-checker")}::text)::jsonb) AS r`)[0] as { r: R }).r;
+  const raw = await refused(sql`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = ${out}::uuid AND kind = 'deliverable'`);
+  assert(rec.outcome === "captured" && ver.outcome === "changed" && ver.deliverable?.status === "verified" && /a deliverable facet is the projection of its events/.test(raw),
+    `a deliverable recorded and verified by another key, and a raw UPDATE of its status refused (${rec.outcome} | ${ver.outcome} | ${raw.slice(0, 60)})`);
+
+  // A re-apply: the events and the facet kept, the projection current.
+  const kept = async () => JSON.stringify([await sql`SELECT seq, event, status FROM deliverable_events ORDER BY seq`, await facets()]);
+  const once = await kept();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the133 });
+  const drift = await sql`SELECT * FROM ob1_deliverable_projection_drift()`;
+  assert(await kept() === once && drift.length === 0, `a re-apply is a no-op: the events and the facets as they were, and no drift (${drift.length})`);
   await sql.close();
 }
 

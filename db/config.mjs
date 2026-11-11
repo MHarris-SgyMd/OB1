@@ -2669,6 +2669,19 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "open_items",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "117" }),
     Object.freeze({ table: "open_item_close_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "117" }),
   ]),
+  // Deliverables (133, SMD-1715): a unit of agent output tied to a spec, with a
+  // checkpoint and a status. Written only through record_deliverable and
+  // verify_deliverable (SECURITY INVOKER, PUBLIC's EXECUTE), read through
+  // deliverable_history. No UPDATE or DELETE on the events: a trigger refuses
+  // them. The `deliverable` facet is their projection, written and replaced,
+  // so INSERT on thought_facets, which only the structure group grants
+  // otherwise. A thought's existence and its KEY SHARE locks are the capture
+  // group's SELECT and UPDATE. Soft: a role without the group is refused the
+  // deliverable calls, naming the table, and nothing else.
+  deliverables: Object.freeze([
+    Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "133" }),
+    Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
+  ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
   // (and enabled RLS with a policy for it) — a role that does not exist on plain
@@ -2820,7 +2833,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "closedclaims", "priority", "items", "community", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "closedclaims", "priority", "items", "deliverables", "community", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read
