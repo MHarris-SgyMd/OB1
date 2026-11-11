@@ -26,7 +26,8 @@
  * follower's its own (SMD-2905); and `restart`, on a row ended by db/supervise.ts, the compose
  * services' command, which runs the follower again on its own (SMD-3214) — written there, not
  * here; and `models`, the process's model calls by pass since it began — their class, failures and own
- * time, their asks for a slot — where it has made any (SMD-3379 PR 2b-2a: no telemetry runs in a worker).
+ * time, their asks for a slot — where it has made any (SMD-3379 PR 2b-2a: no telemetry runs in a worker); and
+ * for board-sync `limited`, its passes held by Linear's rate limit until a time (SMD-4133).
  * Each stamp writes the whole value: a restarted follower's first stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
@@ -50,7 +51,7 @@
 
 import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
-import type { BudgetStop, SleepAside, SleepBudget, SleepHeld, SleepHold } from "../server-portable/brain-info.ts";
+import type { BoardLimited, BudgetStop, SleepAside, SleepBudget, SleepHeld, SleepHold } from "../server-portable/brain-info.ts";
 import { modelCallTallies } from "../server-portable/model-call.ts";
 
 /**
@@ -223,6 +224,13 @@ export interface PassStamper {
    * brain-info reads it and db/supervise.ts leaves it. Only the scheduler sets it.
    */
   holds?(holds: readonly SleepHold[] | null): void;
+  /**
+   * board-sync held by Linear's rate limit until a time (SMD-4133): `limited
+   * { until, by }` in the value, left out while not held (null), carried by
+   * the row's next write and cleared by its end — an ended process holds
+   * nothing. Only board-sync's trigger sets it.
+   */
+  limited?(mark: BoardLimited | null): void;
 }
 
 /** The longest endOnRefusal waits for its write: the refusal's exit must not wait on a database that does not answer. */
@@ -353,6 +361,7 @@ export function passStamper(opts: {
   let paused: string | null = null;
   let aside: SleepAside | null = null;
   let holds: readonly SleepHold[] = [];
+  let limited: BoardLimited | null = null;
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
@@ -362,7 +371,7 @@ export function passStamper(opts: {
     // stamp carries them — their class, failures and own time, their asks for a slot (SMD-3379 PR 2b-2a).
     const tallies = modelCallTallies();
     const models = Object.keys(tallies).length ? { models: tallies } : {};
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(holds.length ? { holds } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }), ...models });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(holds.length ? { holds } : {}), ...(limited ? { limited } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }), ...models });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -400,6 +409,7 @@ export function passStamper(opts: {
       waitingMidPass = [];
       resting = false;
       paused = null;
+      limited = null;
       if (m !== undefined) malformed = m;
       await write(false);
     },
@@ -460,6 +470,9 @@ export function passStamper(opts: {
     },
     holds(h) {
       holds = h === null ? [] : h.map((x) => ({ ...x }));
+    },
+    limited(mark) {
+      limited = mark === null ? null : { ...mark };
     },
   };
 }
