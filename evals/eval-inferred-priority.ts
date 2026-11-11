@@ -14,13 +14,13 @@
  *       The SQL that lists the population — every current thought written through the capture path, one JSON line
  *       each (id, capture time, writer, text) — for a brain whose database only a container reaches:
  *         podman exec open-brain-postgres-1 psql -U postgres -d openbrain -At -c "<that SQL>" > ~/.cache/<dir>/texts.jsonl
- *       It holds every text, so it lives outside the repo: the eval refuses a texts file inside it.
+ *       It holds every text, so it lives outside any repo: the eval refuses a texts file in a git work tree.
  *
  *   bun eval-inferred-priority.ts --run <run.jsonl> (--texts <texts.jsonl> | with DATABASE_URL)
  *       The shipped inferPriority over every text, at its own capture time, through the egress gate and the
  *       metadata model the environment names (OB1_LLM_BASE_URL, OB1_METADATA_MODEL, OB1_LLM_LOCAL). One line per
  *       id, appended, so a stopped run resumes; a call the provider failed is left out, to be retried by the next
- *       run, never recorded as reading nothing. The file holds the model's phrases, so it must sit outside the repo.
+ *       run, never recorded as reading nothing. The file holds the model's phrases, so it must sit outside any repo.
  *       --shard k/n takes every n-th text from the k-th, so n runs started together share the file.
  *
  *   bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> (--texts <texts.jsonl> | with DATABASE_URL)
@@ -37,7 +37,8 @@
  */
 
 import { SQL } from "bun";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert } from "../db/test-support.ts";
@@ -46,7 +47,7 @@ import { INFER_PROMPT_VERSION, INFERRED_CEILING, inferPriority, type Inferred } 
 import {
   BAR, CAPTURES_SQL, CEILING, CONVENTIONS, DRAW, LEVEL_WORDS, MIN_CALLS, callOf, dayOffset, drawSample, dueCategory, dueRead, fromFixture, isCall, kappa,
   levelCategory, levelRead, parseSheet, registeredSection, registrationDigits, registrationHash, renderSheet, score, toFixture, verdict,
-  writerKey, type Call, type Fixture, type Item, type Label, type Score,
+  utcDay, writerKey, type Call, type Fixture, type Item, type Label, type Score,
 } from "./inferred-priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,6 +99,8 @@ export function checkRunLines(lines: readonly RunLine[], population: readonly { 
   if (population) {
     const have = new Set(lines.map((l) => l.id)), missing = population.filter((t) => !have.has(t.id));
     if (missing.length) problems.push(`the run lacks ${missing.length} of the population's ${population.length} texts: finish it with --run first`);
+    const members = new Set(population.map((t) => t.id)), gone = lines.filter((l) => !members.has(l.id));
+    if (gone.length) problems.push(`the run holds ${gone.length} ids the population no longer does (${gone[0].id.slice(0, 8)} first): a thought superseded or removed since the run`);
   }
   return problems;
 }
@@ -109,10 +112,17 @@ export function drawSheet(lines: readonly RunLine[], population: readonly Text[]
   return { sheet: renderSheet(picked.map((p) => ({ id: p.id, at: new Date(byId.get(p.id)!.at), text: byId.get(p.id)!.text }))), picked, short };
 }
 
-/** A filled sheet's labels, refusing one with a problem of its own, an id outside the draw, or a drawn item missing. */
-export function sheetLabels(text: string, picked: readonly { id: string }[]): { labels: Map<string, Label>; problems: string[] } {
-  const { labels, problems } = parseSheet(text);
+/**
+ * A filled sheet's labels, refusing one with a problem of its own, an id outside the draw, a drawn item missing, or an
+ * item whose captured day is not its run line's UTC day (its due days are counted from the day the sheet shows).
+ */
+export function sheetLabels(text: string, picked: readonly { id: string; at: string }[]): { labels: Map<string, Label>; problems: string[] } {
+  const { labels, days, problems } = parseSheet(text);
   const drawn = new Set(picked.map((x) => x.id));
+  for (const p of picked) {
+    const shown = days.get(p.id);
+    if (shown !== undefined && shown !== utcDay(new Date(p.at))) problems.push(`${p.id.slice(0, 8)}: captured ${shown} on the sheet, ${utcDay(new Date(p.at))} in the run`);
+  }
   for (const id of labels.keys()) if (!drawn.has(id)) problems.push(`${id.slice(0, 8)} is not in the draw`);
   const absent = picked.filter((x) => !labels.has(x.id));
   if (absent.length) problems.push(`${absent.length} drawn items are not on the sheet`);
@@ -125,11 +135,16 @@ const flag = (name: string): string | undefined => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 
-/** Refuse a private file inside the repo: a run file holds the model's phrases, and a sheet the text itself. */
-function outsideRepo(path: string, what: string): string {
-  const abs = resolve(path), rel = relative(REPO, abs);
-  if (!rel.startsWith("..") && !rel.startsWith("/")) throw new Error(`${what} (${path}) is inside the repo: it holds thought text, so it lives outside it`);
-  return abs;
+/**
+ * Refuse a private file inside a git work tree: a texts file holds the text, a run file the model's phrases, and a
+ * sheet both. Any work tree, not only this checkout: from a worktree, the canonical checkout is a repo too.
+ */
+export function outsideRepo(path: string, what: string): string {
+  const abs = resolve(path);
+  for (let d = dirname(abs); ; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) throw new Error(`${what} (${path}) is inside the git work tree at ${d}: it holds thought text, so it lives outside any repo`);
+    if (dirname(d) === d) return abs;
+  }
 }
 
 const readJsonl = <T>(path: string): T[] => readFileSync(path, "utf8").split("\n").filter((l) => l.trim().startsWith("{")).map((l) => JSON.parse(l) as T);
@@ -223,7 +238,7 @@ async function draw(runPath: string, sheetPath: string): Promise<void> {
   const out = outsideRepo(sheetPath, "the sheet");
   refuseUnpinned("a sheet is drawn");
   const population = await texts();
-  const lines = runLines(runPath, population);
+  const lines = runLines(outsideRepo(runPath, "the run file"), population);
   const { sheet, picked, short } = drawSheet(lines, population);
   writeFileSync(out, sheet, { mode: 0o600 });
   const calls = lines.filter((l) => isCall(l.call)).length;
@@ -234,11 +249,12 @@ async function draw(runPath: string, sheetPath: string): Promise<void> {
 
 function freeze(runPath: string, goldPath: string, secondPath: string, note: string): void {
   refuseUnpinned("labels are frozen");
-  const lines = runLines(runPath, null);
+  const lines = runLines(outsideRepo(runPath, "the run file"), null);
   const { picked } = drawSample(lines);
   const byId = new Map(lines.map((l) => [l.id, l]));
+  const pickedAt = picked.map((p) => ({ id: p.id, at: byId.get(p.id)!.at }));
   const sheets = [goldPath, secondPath].map((p) => {
-    const { labels, problems } = sheetLabels(readFileSync(p, "utf8"), picked);
+    const { labels, problems } = sheetLabels(readFileSync(outsideRepo(p, "a filled sheet"), "utf8"), pickedAt);
     if (problems.length) throw new Error(`${p}:\n  ${problems.join("\n  ")}`);
     return labels;
   });
@@ -268,7 +284,7 @@ export function reportLines(f: Fixture, current: string = registrationHash()): s
   const bothDue = rated.filter((i) => i.gold.dues.length > 0 && i.second!.dues.length > 0);
   const sameDays = bothDue.filter((i) => JSON.stringify(i.gold.dues) === JSON.stringify(i.second!.dues)).length;
   const registered = f.registration.map((d) => d.toString(16)).join("");
-  const pinned = registered === REGISTERED && current === REGISTERED;
+  const pinned = registered === REGISTERED && current === REGISTERED && f.prompt_version === INFER_PROMPT_VERSION;
   return [
     `population ${f.population.calls + f.population.others}: ${f.population.calls} calls, ${f.population.others} others (prompt v${f.prompt_version}); sample ${items.length}`,
     `level precision  ${pct(s.level)}   bar ≥ ${BAR.levelPrecisionMin}`,
@@ -279,7 +295,7 @@ export function reportLines(f: Fixture, current: string = registrationHash()): s
     `κ between the raters: level ${kl === null ? "—" : kl.toFixed(3)}, whether a due day is stated ${kd === null ? "—" : kd.toFixed(3)} (${rated.length} items); the same days on ${sameDays} of the ${bothDue.length} both date`,
     pinned
       ? `verdict: ${v.passes ? "PASSES — PR 3 may turn count_inferred on" : `FAILS — ${v.failures.join("; ")}`}`
-      : `no verdict: the fixture was labelled under registration ${registered}, this file's is ${current}, and the pinned one ${REGISTERED}`,
+      : `no verdict: the fixture was labelled under registration ${registered} on prompt v${f.prompt_version}; this file's registration is ${current}, the pinned one ${REGISTERED}, the prompt v${INFER_PROMPT_VERSION}`,
   ];
 }
 
@@ -378,6 +394,8 @@ function selfCheck(): void {
   assert(score(items({ level: [20, 20], due: [10, 10] })).highOnNone.hit === 0, "a level read is not High on none");
   const highRead: Item = { id: id(999), stratum: "call", writer: "w", call: C(3), gold: L([4]), second: null };
   assert(score([highRead]).highOnNone.hit === 0 && score([{ ...highRead, gold: L([1]) }]).highOnNone.hit === 0, "a High the gold reads (as urgent), or one where it reads another level, is not High on none");
+  assert(score([{ ...highRead, call: C(2), gold: L([]) }]).highOnNone.hit === 0, "a Medium where the gold reads no level is not High on none");
+  assert(score([{ ...highRead, stratum: "other", call: C(null), gold: L([0]) }]).missed.level.hit === 1, "a level of none the gold reads among the others is a miss");
 
   // κ.
   assert(kappa(["a", "b", "a", "b"], ["a", "b", "a", "b"]) === 1, "full agreement is κ 1");
@@ -398,6 +416,10 @@ function selfCheck(): void {
   const read = parseSheet(filled);
   assert(read.problems.length === 0 && JSON.stringify(read.labels.get(id(1))) === JSON.stringify(L([3], [3])), "a filled item reads back as its level and its day after the capture");
   assert(JSON.stringify(read.labels.get(id(2))) === JSON.stringify(L([])), "- is none stated, and a level line inside the text is not an answer");
+  const twoDays = renderSheet([{ id: id(1), at: tue, text: "a" }, { id: id(2), at: new Date("2026-11-05T09:00:00Z"), text: "b" }])
+    .replace("level: \ndue: ", "level: -\ndue: 2026-11-06").replace("level: \ndue: ", "level: -\ndue: 2026-11-06");
+  const td = parseSheet(twoDays);
+  assert(td.labels.get(id(1))!.dues[0] === 3 && td.labels.get(id(2))!.dues[0] === 1 && td.days.get(id(2)) === "2026-11-05", "each item's due day counts from its own capture day");
   const many = parseSheet(sheet.replace("level: \ndue: ", "level: Low, urgent\ndue: 2026-11-04, 2026-11-06").replace("level: \ndue: ", "level: -\ndue: -"));
   assert(JSON.stringify(many.labels.get(id(1))) === JSON.stringify(L([1, 4], [1, 3])), "several levels and days, any case, are each read");
   const bad = parseSheet(sheet.replace("level: \ndue: ", "level: hihg\ndue: Friday").replace("level: \ndue: ", "level: -\ndue: -"));
@@ -434,6 +456,8 @@ function selfCheck(): void {
   assert(lines.some((l) => /κ between the raters: level 1\.000, whether a due day is stated 1\.000 \(60 items\); the same days on 13 of the 13 both date/.test(l)), "the report prints the raters' κ and their same-day count");
   const split = structuredClone(fx); split.items[fx.strata.other[0]].second = L([3], [5]);
   assert(reportLines({ ...split, registration: registrationDigits() }).some((l) => /the same days on 12 of the 13 both date/.test(l)), "two raters dating one item differently are not the same days");
+  const overlap = structuredClone(fx); overlap.items[fx.strata.call[fx.strata.call.length - 1]].second = L([], [2, 6]);
+  assert(reportLines({ ...overlap, registration: registrationDigits() }).some((l) => /the same days on 12 of the 13 both date/.test(l)), "lists that share a day but differ are not the same days");
   assert(reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("no verdict"), "a fixture from another registration gets no verdict");
   assert(JSON.stringify(shardOf(undefined)) === "[0,1]" && JSON.stringify(shardOf("2/3")) === "[2,3]", "no shard is the whole run; k/n is read");
   for (const bad of ["3/3", "1/0", "a/b", "1"]) {
@@ -444,6 +468,18 @@ function selfCheck(): void {
   threw = false;
   try { outsideRepo("texts.jsonl", "the texts file"); } catch { threw = true; }
   assert(threw, "a private file inside the repo is refused");
+  threw = false;
+  try { outsideRepo(join(REPO, "run.jsonl"), "the run file"); } catch { threw = true; }
+  assert(threw, "a private file at the repo's root is refused");
+  const otherRepo = mkdtempSync(join(tmpdir(), "ob1-3670-other-repo-"));
+  try {
+    mkdirSync(join(otherRepo, ".git"));
+    threw = false;
+    try { outsideRepo(join(otherRepo, "deep", "sheet.md"), "the sheet"); } catch { threw = true; }
+    assert(threw, "a private file inside another git work tree is refused, the canonical checkout from a worktree among them");
+  } finally {
+    rmSync(otherRepo, { recursive: true, force: true });
+  }
   assert(outsideRepo("/private/tmp/run.jsonl", "the run file") === "/private/tmp/run.jsonl", "one outside it is taken");
 
   // A call's outcome: only the model's own non-JSON answer is a reading of nothing; every other silence or log is a fault.
@@ -465,6 +501,7 @@ function selfCheck(): void {
   assert(checkRunLines([rl(1, { model: "a@x t=0" }), rl(2, { model: "b@x t=0" })], null).some((p) => /mixes models/.test(p)), "a run of two models is refused");
   assert(checkRunLines([rl(1, { model: "a@x t=0" }), rl(2)], null).some((p) => /mixes models/.test(p)), "a recorded model beside unrecorded lines is refused");
   assert(checkRunLines([rl(1)], [{ id: id(1) }, { id: id(2) }]).some((p) => /lacks 1 of the population's 2/.test(p)), "a run short of the population is refused");
+  assert(checkRunLines([rl(1), rl(2)], [{ id: id(1) }]).some((p) => /1 ids the population no longer does/.test(p)), "a run holding a thought the population no longer does is refused");
 
   // The drawn sheet is blind: nothing of a call or its phrases reaches it.
   const runRows = Array.from({ length: 30 }, (_, i) => ({ ...rl(i), call: i < 10 ? C(3, 2) : C(null), level_phrase: i < 10 ? "QQLEVELPHRASE" : null, due_phrase: i < 10 ? "QQDUEPHRASE" : null }));
@@ -472,16 +509,21 @@ function selfCheck(): void {
   const drawn = drawSheet(runRows, pop);
   assert(drawn.picked.length === 30 && drawn.short.length === 2, "the sheet takes a short population whole");
   assert(!/QQLEVELPHRASE|QQDUEPHRASE|stratum/.test(drawn.sheet), "the sheet holds nothing of the calls' phrases or the strata");
+  assert(drawn.sheet === renderSheet(drawn.picked.map((p) => ({ id: p.id, at: tue, text: `text of ${p.id}` }))), "the sheet is the drawn ids, capture days and texts alone, in the draw's order");
   assert(runRows.every((r) => drawn.sheet.includes(`text of ${r.id}`)), "the sheet holds every drawn text");
 
   // A filled sheet is tied to the draw.
   const fill = (sheet: string) => sheet.replaceAll("level: \ndue: ", "level: -\ndue: -");
-  const fine = sheetLabels(fill(drawn.sheet), drawn.picked);
+  const pickedAt = drawn.picked.map((p) => ({ id: p.id, at: tue.toISOString() }));
+  const fine = sheetLabels(fill(drawn.sheet), pickedAt);
   assert(fine.problems.length === 0 && fine.labels.size === 30, "a filled sheet of the draw is taken");
-  assert(sheetLabels(fill(drawn.sheet), drawn.picked.slice(1)).problems.some((p) => /not in the draw/.test(p)), "a sheet item outside the draw is refused");
-  assert(sheetLabels(fill(drawn.sheet), [...drawn.picked, { id: id(99) }]).problems.some((p) => /1 drawn items are not on the sheet/.test(p)), "a drawn item missing from the sheet is refused");
+  assert(sheetLabels(fill(drawn.sheet), pickedAt.slice(1)).problems.some((p) => /not in the draw/.test(p)), "a sheet item outside the draw is refused");
+  assert(sheetLabels(fill(drawn.sheet), [...pickedAt, { id: id(99), at: tue.toISOString() }]).problems.some((p) => /1 drawn items are not on the sheet/.test(p)), "a drawn item missing from the sheet is refused");
+  const moved = fill(drawn.sheet).replace("captured: Tuesday 2026-11-03 (UTC)", "captured: Monday 2026-11-02 (UTC)");
+  assert(sheetLabels(moved, pickedAt).problems.some((p) => /captured 2026-11-02 on the sheet, 2026-11-03 in the run/.test(p)), "a sheet item whose captured day is not the run's is refused");
 
-  // A report only at the pinned registration.
+  // A report only at the pinned registration, on this prompt version.
+  assert(!reportLines({ ...fx, registration: registrationDigits(), prompt_version: INFER_PROMPT_VERSION + 1 }).at(-1)!.startsWith("verdict"), "a fixture measured on another prompt version gets no verdict");
   assert(!reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("verdict"), "a fixture labelled under another registration gets no verdict");
   assert(!reportLines({ ...fx, registration: registrationDigits("eeeeeeeeeeeeeeee") }, "eeeeeeeeeeeeeeee").at(-1)!.startsWith("verdict"), "a fixture and a rules file moved together, away from the pinned registration, get no verdict");
 
@@ -493,6 +535,7 @@ function selfCheck(): void {
     assert(got.length === DRAW.calls + DRAW.others || f.population.calls < DRAW.calls, "the committed fixture holds the whole draw");
     assert(got.every((i) => i.second !== null), "every committed item carries the second rater's label");
     assert(f.registration.map((x) => x.toString(16)).join("") === REGISTERED, "the committed fixture was labelled under the pinned registration");
+    assert(f.prompt_version === INFER_PROMPT_VERSION, "the committed fixture was measured on the shipped prompt version");
   }
   report();
 }

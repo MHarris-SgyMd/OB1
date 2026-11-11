@@ -4906,7 +4906,7 @@ metadata model for the level and the due day its text states, and states them in
 ```bash
 bun eval-inferred-priority.ts --self-check     # the rules, the registration's hash and the fixture's shape; no database, no model
 bun eval-inferred-priority.ts --print-sql      # the population's SQL, for a brain whose database only a container reaches
-D=~/.cache/ob1-3670-pr2   # private files live outside the repo; the eval refuses a texts, run or sheet file inside it
+D=~/.cache/ob1-3670-pr2   # private files live outside any repo; the eval refuses a texts, run or sheet file in a git work tree
 bun eval-inferred-priority.ts --run $D/run.jsonl --texts $D/texts.jsonl [--shard k/n]   # the shipped inferPriority over every text
 bun eval-inferred-priority.ts --draw $D/run.jsonl --sheet $D/sheet.md --texts $D/texts.jsonl   # the blind labelling sheet
 bun eval-inferred-priority.ts --freeze <run.jsonl> <gold.md> <second.md> --note "…"     # → fixtures/inferred-priority.json
@@ -4930,7 +4930,7 @@ bun eval-inferred-priority.ts                  # the report and the verdict, fro
   maintainer's call on a quoted ticket label (a citation, not a stated level) among them.
 
 The texts file holds the text, the run file the model's phrases and the sheet both, so all three are refused inside
-the repo; the fixture holds ids and numbers only.
+any git work tree; the fixture holds ids and numbers only.
 
 ### Results, 2026-11-11: the bar fails, so `count_inferred` stays off
 
@@ -4966,6 +4966,11 @@ The operator labelled the 120 drawn texts blind.
 * **It fails under every reading.** With the second rater's labels as the gold: level 0.021, due 0.313, High on none
   0.229.
 * **Stated levels are rare in this population.** Among the 60 others, the operator read a level in 1 and a due day in 1.
+  That due day (item 054) is three days before the capture, a day the inference never gives (`modelDay` takes no day
+  before the capture's), so it is no miss the model could have made right.
+* **The run predates review pass 1's fault rule.** Then, an answer with no content was recorded as reading nothing,
+  and the egress gate saw the eval's name as the actor. Neither can move a precision: such a call lands among the
+  others, and the provider was local. At most it moves the population's count of others (1,208).
   Of the model's 54 reads on session-hook summaries (38 levels and 16 due days), the operator agrees with 8, all of
   them due days.
 

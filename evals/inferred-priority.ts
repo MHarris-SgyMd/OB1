@@ -228,11 +228,12 @@ export function renderSheet(items: readonly { id: string; at: Date; text: string
 }
 
 /**
- * A filled sheet read back: each item's id and label, its due days counted from its capture day. Refuses a sheet with
+ * A filled sheet read back: each item's id and label, its due days counted from its capture day (also returned, for
+ * the caller to tie to the run). Refuses a sheet with
  * a blank or unreadable answer, a repeated id, or an item missing its fields, naming each.
  */
-export function parseSheet(text: string): { labels: Map<string, Label>; problems: string[] } {
-  const labels = new Map<string, Label>(), problems: string[] = [];
+export function parseSheet(text: string): { labels: Map<string, Label>; days: Map<string, string>; problems: string[] } {
+  const labels = new Map<string, Label>(), days = new Map<string, string>(), problems: string[] = [];
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   for (let i = 0; i < lines.length; i++) {
     const m = ITEM_HEAD.exec(lines[i]);
@@ -262,9 +263,9 @@ export function parseSheet(text: string): { labels: Map<string, Label>; problems
     else if (levels === "bad") problems.push(`${where}: level "${fields.level}" is not - or ${Object.keys(LEVEL_WORDS).join("/")}, comma-separated`);
     if (dues === "blank") problems.push(`${where}: due is blank (write - for none stated)`);
     else if (dues === "bad") problems.push(`${where}: due "${fields.due}" is not - or YYYY-MM-DD, comma-separated`);
-    if (Array.isArray(levels) && Array.isArray(dues)) labels.set(id, { levels, dues });
+    if (Array.isArray(levels) && Array.isArray(dues)) { labels.set(id, { levels, dues }); days.set(id, cap[1]); }
   }
-  return { labels, problems };
+  return { labels, days, problems };
 }
 
 /** One answer read: "-" for none, else comma-separated values each read by `one`. */
