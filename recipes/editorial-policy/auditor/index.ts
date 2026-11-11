@@ -49,8 +49,8 @@ const SLACK_DIGEST_CHANNEL =
   process.env.SLACK_DIGEST_CHANNEL ?? SLACK_CAPTURE_CHANNEL;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
-/** The Referer OpenRouter's app attribution reads: fixed, as the other recipes send it. It was SUPABASE_URL until
- * SMD-3875, which here is the Postgres connection string, password and all. */
+/** The Referer OpenRouter's app attribution reads: fixed, as atomizer, lint-sweep and provenance-chains send it.
+ * It was SUPABASE_URL until SMD-3875, which here is the Postgres connection string, password and all. */
 const OPENROUTER_REFERER = "https://github.com/NateBJones-Projects/OB1";
 const POLICY_VERSION = process.env.POLICY_VERSION ?? "1.3"; // bump when docs/editorial-policy.md changes
 
