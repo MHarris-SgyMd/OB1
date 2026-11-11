@@ -6,8 +6,11 @@
  * "The registration" to "End of the registered section" is hashed (registrationHash), so a bar, a convention, the
  * draw or the score moved after the labels were read shows as a new registration in the diff.
  *
- * The population is every current thought written through the capture path on the measured brain (actor_kind
- * `agent`; an ingested row never reaches the inference). The inference is run over each, at the thought's own capture
+ * The population is meant to be every current thought written through the capture path on the measured brain, and is
+ * read as actor_kind `agent` (CAPTURES_SQL). That kind is the writing key's classification, not the path that wrote
+ * the row: on stable it also takes 20 rows db/ingest-records.ts upserted under a key classified agent, which never
+ * reach the inference (2 of them in the sample; review pass 1). The registration keeps the SQL as registered, and the
+ * README's results state the effect. The inference is run over each, at the thought's own capture
  * time, and the sample is drawn from the result in two strata: CALLS (the model read a level or a due day) and OTHERS
  * (it read neither). The operator labels the drawn texts blind — the text and its capture day, shuffled, never the
  * model's answer — and a second blind rater labels the same sheet for a κ. The operator's labels are the gold.
@@ -236,12 +239,19 @@ export function parseSheet(text: string): { labels: Map<string, Label>; problems
     if (!m) continue;
     const [num, id] = [m[1], m[2]];
     const fields: Record<string, string> = {};
+    const repeated: string[] = [];
     let j = i + 1;
     for (; j < lines.length && lines[j] !== TEXT_MARK && !ITEM_HEAD.test(lines[j]); j++) {
       const f = /^(captured|level|due):(.*)$/.exec(lines[j]);
-      if (f) fields[f[1]] = f[2].trim();
+      if (f) {
+        if (f[1] in fields) repeated.push(f[1]);
+        fields[f[1]] = f[2].trim();
+      }
     }
     const where = `item ${num} (${id.slice(0, 8)})`;
+    // Without its marker an item's field scan runs on into its text, where a line can read as an answer.
+    if (lines[j] !== TEXT_MARK) { problems.push(`${where}: no "${TEXT_MARK}" line before the next item`); continue; }
+    if (repeated.length) { problems.push(`${where}: ${repeated.join(", ")} given twice`); continue; }
     if (labels.has(id)) { problems.push(`${where}: listed twice`); continue; }
     const cap = /^\w+ (\d{4}-\d{2}-\d{2}) \(UTC\)$/.exec(fields.captured ?? "");
     if (!cap) { problems.push(`${where}: no captured line`); continue; }

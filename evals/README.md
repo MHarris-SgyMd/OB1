@@ -4906,14 +4906,18 @@ metadata model for the level and the due day its text states, and states them in
 ```bash
 bun eval-inferred-priority.ts --self-check     # the rules, the registration's hash and the fixture's shape; no database, no model
 bun eval-inferred-priority.ts --print-sql      # the population's SQL, for a brain whose database only a container reaches
-bun eval-inferred-priority.ts --run <run.jsonl> --texts <texts.jsonl>          # the shipped inferPriority over every text
-bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> --texts <texts.jsonl>   # the blind labelling sheet
+D=~/.cache/ob1-3670-pr2   # private files live outside the repo; the eval refuses a texts, run or sheet file inside it
+bun eval-inferred-priority.ts --run $D/run.jsonl --texts $D/texts.jsonl [--shard k/n]   # the shipped inferPriority over every text
+bun eval-inferred-priority.ts --draw $D/run.jsonl --sheet $D/sheet.md --texts $D/texts.jsonl   # the blind labelling sheet
 bun eval-inferred-priority.ts --freeze <run.jsonl> <gold.md> <second.md> --note "…"     # → fixtures/inferred-priority.json
 bun eval-inferred-priority.ts                  # the report and the verdict, from the fixture
 ```
 
-* **The population** is every current thought written through the capture path (`actor_kind` agent): an ingested row
-  never reaches the inference. On stable, 2026-11-10, that is 1,394 thoughts, 1,262 of them session-hook summaries.
+* **The population** is meant to be every current thought written through the capture path, and is read as
+  `actor_kind` agent. On stable, 2026-11-10, that is 1,394 thoughts, 1,262 of them session-hook summaries. The kind
+  is the writing key's classification, not the path, so it also takes 20 rows `db/ingest-records.ts` upserted under a
+  key classified agent, which never reach the inference (review pass 1). The registered SQL is kept; the results say
+  what the 2 of them in the sample move.
 * **The draw** is 60 of the texts the model read a level or a due day from (calls) and 60 it read nothing from
   (others), by a hash of a fixed seed, shuffled together. The operator labels the sheet blind (the text and its capture
   day, never the model's answer) and a second blind rater labels a copy for a κ. The operator's labels are the gold.
@@ -4925,8 +4929,8 @@ bun eval-inferred-priority.ts                  # the report and the verdict, fro
   pinned (`1239b47ca93a5870`) before the sheet was drawn. The conventions the raters label by are in it, the
   maintainer's call on a quoted ticket label (a citation, not a stated level) among them.
 
-The run file holds the model's phrases and the sheet the text, so both are refused inside the repo; the fixture holds
-ids and numbers only.
+The texts file holds the text, the run file the model's phrases and the sheet both, so all three are refused inside
+the repo; the fixture holds ids and numbers only.
 
 ### Results, 2026-11-11: the bar fails, so `count_inferred` stays off
 
@@ -4942,19 +4946,23 @@ The operator labelled the 120 drawn texts blind.
 
 * **Every level read came from a ticket export.** Its "Priority:" header was read as the ticket's own stated level.
   These are 9 texts written through the claude-code key, and the model read all 9 right. On the 38 level calls over
-  session-hook summaries it read none right: 24 Medium, 8 High and 6 Low where the operator read no level. Its phrase
+  session-hook summaries it read none right: 24 Medium, 8 High and 6 Low where the operator read no level (the 9th
+  High on none is a research paper's opening sentence, item 043, under the ingester's key). Its phrase
   was a ticket quoted with its label in 10, a bare level word in 10, and another phrase (a rule under discussion, a
   sentence) in 18.
 * **The raters split on those exports.** κ on level is 0.173: the second rater read the same header as a citation
-  (convention 2). κ on due is 0.829.
+  (convention 2). κ on whether a due day is stated is 0.829; of the 8 items both raters date, they give the same days
+  on 5.
 * **An unblinded review sided with the operator on those exports.** It was a reading of all 120 texts after the
   freeze, with the three answers beside each. A text that is the ticket carries its header as its own level, not a
   label beside another item. So convention 2 was ambiguous for such a text, and that is where the low κ comes from.
   The review also differed on two of the operator's due lists (029, 115). Scored against its own labels, the model
   reads 9 of 48 levels and 8 of 16 due days, the same as against the frozen gold. The review stays outside the repo
   with the sheet.
-* **Four of the 8 due reads match one day in a list.** The operator listed 4 to 11 days on texts quoting a board's due
-  dates (convention 8: any listed day counts). Reading those lists as none gives 3 of 16.
+* **Five of the 8 due reads match one day of a multi-day list.** The operator listed 2 to 11 days on texts quoting
+  a board's due dates (convention 8: any listed day counts). Reading those five lists as none gives 3 of 16.
+* **The ingester's rows move nothing that matters.** Without the 2 sampled rows `db/ingest-records.ts` wrote: level
+  9 of 47, due 8 of 16, High on none 8 of 47, misses 1 of 59 each. It fails as before.
 * **It fails under every reading.** With the second rater's labels as the gold: level 0.021, due 0.313, High on none
   0.229.
 * **Stated levels are rare in this population.** Among the 60 others, the operator read a level in 1 and a due day in 1.

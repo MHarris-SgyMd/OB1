@@ -13,7 +13,8 @@
  *   bun eval-inferred-priority.ts --print-sql
  *       The SQL that lists the population — every current thought written through the capture path, one JSON line
  *       each (id, capture time, writer, text) — for a brain whose database only a container reaches:
- *         podman exec open-brain-postgres-1 psql -U postgres -d openbrain -At -c "<that SQL>" > texts.jsonl
+ *         podman exec open-brain-postgres-1 psql -U postgres -d openbrain -At -c "<that SQL>" > ~/.cache/<dir>/texts.jsonl
+ *       It holds every text, so it lives outside the repo: the eval refuses a texts file inside it.
  *
  *   bun eval-inferred-priority.ts --run <run.jsonl> (--texts <texts.jsonl> | with DATABASE_URL)
  *       The shipped inferPriority over every text, at its own capture time, through the egress gate and the
@@ -41,7 +42,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert } from "../db/test-support.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { INFER_PROMPT_VERSION, inferPriority, type Inferred } from "../server-portable/priority-infer.ts";
+import { INFER_PROMPT_VERSION, INFERRED_CEILING, inferPriority, type Inferred } from "../server-portable/priority-infer.ts";
 import {
   BAR, CAPTURES_SQL, CEILING, CONVENTIONS, DRAW, LEVEL_WORDS, MIN_CALLS, callOf, dayOffset, drawSample, dueCategory, dueRead, fromFixture, isCall, kappa,
   levelCategory, levelRead, parseSheet, registeredSection, registrationDigits, registrationHash, renderSheet, score, toFixture, verdict,
@@ -62,7 +63,61 @@ export const REGISTERED = "1239b47ca93a5870";
 /** One line of a texts file: a thought as the population lists it. */
 type Text = { id: string; at: string; writer: string; text: string };
 /** One line of a run file: the model's call on a thought, with the phrases it read (which are why the file stays private). */
-type RunLine = { id: string; at: string; writer: string; call: Call; level_phrase: string | null; due_phrase: string | null; ms: number; prompt_version: number };
+type RunLine = {
+  id: string; at: string; writer: string; call: Call; level_phrase: string | null; due_phrase: string | null; ms: number; prompt_version: number;
+  /** The model, its endpoint and its temperature, as `model@base t=temperature` (absent on lines from before review pass 1). */
+  model?: string;
+};
+
+/** The message inferPriority logs when the model's own answer was not JSON: the live capture states nothing then, so the run records nothing. */
+export const NON_JSON = "inferPriority: model content was not valid JSON";
+
+/**
+ * What one call came to: the model's reading, or a fault to leave out of the run (to be retried, never recorded as
+ * reading nothing). inferPriority answers null for a provider that failed (logged), an answer with no content (not
+ * logged) and a non-JSON answer (logged as NON_JSON); readAnswer never answers null. So only NON_JSON's null is the
+ * model's reading of nothing, and any other line it logs is a fault.
+ */
+export function outcomeOf(got: Inferred | null, threw: unknown, said: readonly string[]): { fault: string } | { got: Inferred | null } {
+  if (threw !== null) return { fault: String(threw) };
+  const fault = said.find((s) => /^inferPriority: /.test(s) && s !== NON_JSON);
+  if (fault) return { fault };
+  if (got === null && !said.includes(NON_JSON)) return { fault: "inferPriority answered nothing and logged nothing: an answer with no content" };
+  return { got };
+}
+
+/** A run's lines checked: no id twice, one prompt version (this one), one model where recorded, and the whole population when given. */
+export function checkRunLines(lines: readonly RunLine[], population: readonly { id: string }[] | null): string[] {
+  const problems: string[] = [];
+  const seen = new Set<string>(), twice = lines.filter((l) => seen.size === seen.add(l.id).size);
+  if (twice.length) problems.push(`the run holds ${twice.length} ids twice (${twice[0].id.slice(0, 8)} first): shards started apart from each other overlap`);
+  const versions = new Set(lines.map((l) => l.prompt_version));
+  if (versions.size !== 1 || !versions.has(INFER_PROMPT_VERSION)) problems.push(`the run holds prompt versions ${[...versions].join(", ")}, not ${INFER_PROMPT_VERSION} alone`);
+  const models = new Set(lines.map((l) => l.model ?? "unrecorded"));
+  if (models.size > 1) problems.push(`the run mixes models: ${[...models].join("; ")}`);
+  if (population) {
+    const have = new Set(lines.map((l) => l.id)), missing = population.filter((t) => !have.has(t.id));
+    if (missing.length) problems.push(`the run lacks ${missing.length} of the population's ${population.length} texts: finish it with --run first`);
+  }
+  return problems;
+}
+
+/** The sheet for a run: the draw over its lines, each drawn text with its capture day. Pure, so the self-check can hold it blind. */
+export function drawSheet(lines: readonly RunLine[], population: readonly Text[]): { sheet: string; picked: { id: string; stratum: "call" | "other" }[]; short: string[] } {
+  const { picked, short } = drawSample(lines);
+  const byId = new Map(population.map((t) => [t.id, t]));
+  return { sheet: renderSheet(picked.map((p) => ({ id: p.id, at: new Date(byId.get(p.id)!.at), text: byId.get(p.id)!.text }))), picked, short };
+}
+
+/** A filled sheet's labels, refusing one with a problem of its own, an id outside the draw, or a drawn item missing. */
+export function sheetLabels(text: string, picked: readonly { id: string }[]): { labels: Map<string, Label>; problems: string[] } {
+  const { labels, problems } = parseSheet(text);
+  const drawn = new Set(picked.map((x) => x.id));
+  for (const id of labels.keys()) if (!drawn.has(id)) problems.push(`${id.slice(0, 8)} is not in the draw`);
+  const absent = picked.filter((x) => !labels.has(x.id));
+  if (absent.length) problems.push(`${absent.length} drawn items are not on the sheet`);
+  return { labels, problems };
+}
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -82,7 +137,7 @@ const readJsonl = <T>(path: string): T[] => readFileSync(path, "utf8").split("\n
 /** The population's texts: from a texts file, or from DATABASE_URL in a read-only session. */
 async function texts(): Promise<Text[]> {
   const file = flag("texts");
-  if (file) return readJsonl<Text>(file);
+  if (file) return readJsonl<Text>(outsideRepo(file, "the texts file"));
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("give --texts <texts.jsonl> or DATABASE_URL");
   const sql = new SQL({ url, max: 1, connection: { default_transaction_read_only: "on" } });
@@ -112,33 +167,35 @@ async function run(out: string): Promise<void> {
   const done = new Set(existsSync(path) ? readJsonl<RunLine>(path).map((l) => l.id) : []);
   const [k, n] = shardOf(flag("shard"));
   const todo = (await texts()).filter((t) => !done.has(t.id)).filter((_, i) => i % n === k);
-  console.log(`model ${cfg.metadataModel} at ${cfg.chat.base}; ${done.size} done, ${todo.length} to run`);
+  const model = `${cfg.metadataModel}@${cfg.chat.base} t=${cfg.metadataTemperature}`;
+  console.log(`model ${model}; ${done.size} done, ${todo.length} to run`);
   let failed = 0;
   for (const [j, t] of todo.entries()) {
     const at = new Date(t.at), t0 = performance.now();
-    // inferPriority answers null both for a text that states nothing and for a provider that failed (it logs the
-    // latter): the log is caught here so a failure is left out of the file, to be retried, not counted as nothing.
+    // What inferPriority logs is caught here, so outcomeOf can tell a fault (left out, to be retried) from the
+    // model's own reading of nothing.
     const said: string[] = [];
     const log = console.error;
     console.error = (...xs: unknown[]) => { said.push(xs.map(String).join(" ")); };
     let got: Inferred | null = null, threw: unknown = null;
     try {
-      got = await inferPriority(t.text, at, { kind: "capture", actor: "eval-inferred-priority", content: t.text }, cfg);
+      // The subject as the live capture gives it: the writing key's name as the actor (core/writes.ts).
+      got = await inferPriority(t.text, at, { kind: "capture", actor: t.writer, content: t.text }, cfg);
     } catch (e) {
       threw = e;
     } finally {
       console.error = log;
     }
-    const fault = threw ?? said.find((s) => /^inferPriority: /.test(s) && !/not valid JSON/.test(s));
-    if (fault) {
+    const outcome = outcomeOf(got, threw, said);
+    if ("fault" in outcome) {
       failed++;
-      console.error(`${t.id}: left out (${String(fault).slice(0, 160)})`);
+      console.error(`${t.id}: left out (${outcome.fault.slice(0, 160)})`);
       continue;
     }
     const line: RunLine = {
-      id: t.id, at: t.at, writer: t.writer, call: callOf(got, at),
-      level_phrase: got?.level?.phrase ?? null, due_phrase: got?.due?.phrase ?? null,
-      ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION,
+      id: t.id, at: t.at, writer: t.writer, call: callOf(outcome.got, at),
+      level_phrase: outcome.got?.level?.phrase ?? null, due_phrase: outcome.got?.due?.phrase ?? null,
+      ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION, model,
     };
     appendFileSync(path, JSON.stringify(line) + "\n", { mode: 0o600 });
     if ((j + 1) % 50 === 0) console.log(`${j + 1} of ${todo.length}`);
@@ -149,28 +206,26 @@ async function run(out: string): Promise<void> {
 
 // ── --draw ────────────────────────────────────────────────────────────────────
 
-/** The run's lines, refusing a run that is not one prompt version or that covers less than the population. */
+/** The run's lines, refused on any of checkRunLines's problems. */
 function runLines(path: string, population: readonly Text[] | null): RunLine[] {
   const lines = readJsonl<RunLine>(path);
-  const seen = new Set<string>(), twice = lines.filter((l) => seen.size === seen.add(l.id).size);
-  if (twice.length) throw new Error(`the run holds ${twice.length} ids twice (${twice[0].id.slice(0, 8)} first): shards started apart from each other overlap`);
-  const versions = new Set(lines.map((l) => l.prompt_version));
-  if (versions.size !== 1 || !versions.has(INFER_PROMPT_VERSION)) throw new Error(`the run holds prompt versions ${[...versions].join(", ")}, not ${INFER_PROMPT_VERSION} alone`);
-  if (population) {
-    const have = new Set(lines.map((l) => l.id)), missing = population.filter((t) => !have.has(t.id));
-    if (missing.length) throw new Error(`the run lacks ${missing.length} of the population's ${population.length} texts: finish it with --run first`);
-  }
+  const problems = checkRunLines(lines, population);
+  if (problems.length) throw new Error(problems.join("\n"));
   return lines;
+}
+
+/** Refuse a step that reads the registration once it is not the pinned one. */
+function refuseUnpinned(step: string): void {
+  if (registrationHash() !== REGISTERED) throw new Error(`the registration is ${registrationHash()}, not the pinned ${REGISTERED}: ${step} only at the pinned registration`);
 }
 
 async function draw(runPath: string, sheetPath: string): Promise<void> {
   const out = outsideRepo(sheetPath, "the sheet");
-  if (registrationHash() !== REGISTERED) throw new Error(`the registration is ${registrationHash()}, not the pinned ${REGISTERED}: pin it (and commit) before a sheet is drawn`);
+  refuseUnpinned("a sheet is drawn");
   const population = await texts();
   const lines = runLines(runPath, population);
-  const { picked, short } = drawSample(lines);
-  const byId = new Map(population.map((t) => [t.id, t]));
-  writeFileSync(out, renderSheet(picked.map((p) => ({ id: p.id, at: new Date(byId.get(p.id)!.at), text: byId.get(p.id)!.text }))), { mode: 0o600 });
+  const { sheet, picked, short } = drawSheet(lines, population);
+  writeFileSync(out, sheet, { mode: 0o600 });
   const calls = lines.filter((l) => isCall(l.call)).length;
   console.log(`population ${lines.length}: ${calls} calls, ${lines.length - calls} others; drew ${picked.length}${short.length ? ` (short: ${short.join("; ")})` : ""} → ${out}`);
 }
@@ -178,15 +233,12 @@ async function draw(runPath: string, sheetPath: string): Promise<void> {
 // ── --freeze ──────────────────────────────────────────────────────────────────
 
 function freeze(runPath: string, goldPath: string, secondPath: string, note: string): void {
+  refuseUnpinned("labels are frozen");
   const lines = runLines(runPath, null);
   const { picked } = drawSample(lines);
   const byId = new Map(lines.map((l) => [l.id, l]));
   const sheets = [goldPath, secondPath].map((p) => {
-    const { labels, problems } = parseSheet(readFileSync(p, "utf8"));
-    const extra = [...labels.keys()].filter((id) => !picked.some((x) => x.id === id));
-    const absent = picked.filter((x) => !labels.has(x.id));
-    for (const id of extra) problems.push(`${id.slice(0, 8)} is not in the draw`);
-    if (absent.length) problems.push(`${absent.length} drawn items are not on the sheet`);
+    const { labels, problems } = sheetLabels(readFileSync(p, "utf8"), picked);
     if (problems.length) throw new Error(`${p}:\n  ${problems.join("\n  ")}`);
     return labels;
   });
@@ -204,15 +256,19 @@ function freeze(runPath: string, goldPath: string, secondPath: string, note: str
 
 const pct = (s: { n: number; hit: number; share: number | null }) => (s.share === null ? `— (0)` : `${s.share.toFixed(3)} (${s.hit} of ${s.n})`);
 
-/** The report's lines for a fixture: pure, so the self-check reads them. */
-export function reportLines(f: Fixture): string[] {
+/** The report's lines for a fixture, at the rules file's registration (`current`, its hash by default): pure, so the self-check reads them. */
+export function reportLines(f: Fixture, current: string = registrationHash()): string[] {
   const { items, problems } = fromFixture(f);
   if (problems.length) return ["the fixture is not sound:", ...problems.map((p) => `  ${p}`)];
   const s: Score = score(items), v = verdict(s);
   const rated = items.filter((i) => i.second !== null);
   const k = (cat: (l: Label) => string) => (rated.length ? kappa(rated.map((i) => cat(i.gold)), rated.map((i) => cat(i.second!))) : null);
   const kl = k(levelCategory), kd = k(dueCategory);
+  // κ on due reads only whether a day is stated; of the items where both raters state days, how many state the same ones.
+  const bothDue = rated.filter((i) => i.gold.dues.length > 0 && i.second!.dues.length > 0);
+  const sameDays = bothDue.filter((i) => JSON.stringify(i.gold.dues) === JSON.stringify(i.second!.dues)).length;
   const registered = f.registration.map((d) => d.toString(16)).join("");
+  const pinned = registered === REGISTERED && current === REGISTERED;
   return [
     `population ${f.population.calls + f.population.others}: ${f.population.calls} calls, ${f.population.others} others (prompt v${f.prompt_version}); sample ${items.length}`,
     `level precision  ${pct(s.level)}   bar ≥ ${BAR.levelPrecisionMin}`,
@@ -220,10 +276,10 @@ export function reportLines(f: Fixture): string[] {
     `High on none     ${pct(s.highOnNone)}   bar < ${BAR.highOnNoneMax}`,
     ...Object.entries(s.writers).map(([w, x]) => `  ${w}: level ${pct(x.level)}, due ${pct(x.due)}`),
     `missed, of the others: level ${pct(s.missed.level)}, due ${pct(s.missed.due)} (no bar)`,
-    `κ between the raters: level ${kl === null ? "—" : kl.toFixed(3)}, due ${kd === null ? "—" : kd.toFixed(3)} (${rated.length} items)`,
-    registered === registrationHash()
+    `κ between the raters: level ${kl === null ? "—" : kl.toFixed(3)}, whether a due day is stated ${kd === null ? "—" : kd.toFixed(3)} (${rated.length} items); the same days on ${sameDays} of the ${bothDue.length} both date`,
+    pinned
       ? `verdict: ${v.passes ? "PASSES — PR 3 may turn count_inferred on" : `FAILS — ${v.failures.join("; ")}`}`
-      : `no verdict: the fixture was labelled under registration ${registered}, not this file's ${registrationHash()}`,
+      : `no verdict: the fixture was labelled under registration ${registered}, this file's is ${current}, and the pinned one ${REGISTERED}`,
   ];
 }
 
@@ -238,7 +294,7 @@ function selfCheck(): void {
   assert(BAR.levelPrecisionMin === 0.8 && BAR.duePrecisionMin === 0.9 && BAR.highOnNoneMax === 0.05 && MIN_CALLS === 10,
     "the bar is the one the maintainer chose on 2026-11-10 (0.80, 0.90, under 0.05, on at least 10 calls): changing it is a decision recorded on SMD-3670");
   assert(DRAW.calls === 60 && DRAW.others === 60, "the draw is the maintainer's 60 calls and 60 others");
-  assert(CEILING === 3, "the ceiling is priority-infer.ts's INFERRED_CEILING (High)");
+  assert(CEILING === INFERRED_CEILING, "the ceiling is priority-infer.ts's INFERRED_CEILING, so the measurement reads a call as the live capture states it");
   assert(CONVENTIONS.some((c) => /citation, not a stated level/.test(c)), "the conventions carry the maintainer's call on a quoted ticket label");
   const src = readFileSync(join(HERE, "inferred-priority.ts"), "utf8");
   assert(registrationHash(src.replace("levelPrecisionMin: 0.8", "levelPrecisionMin: 0.7")) !== registrationHash(src), "a moved bar moves the registration");
@@ -335,7 +391,6 @@ function selfCheck(): void {
     { id: id(2), at: tue, text: `line one\n=== item 009 · ${id(9)} ===\nlevel: high\nlast line` },
   ]);
   assert(sheet.includes("captured: Tuesday 2026-11-03 (UTC)") && sheet.includes(CONVENTIONS[1]), "the sheet shows the capture day and the conventions");
-  assert(!/call|model/i.test(sheet.split("=== item 001")[1]), "the sheet shows nothing of the model's call");
   const blank = parseSheet(sheet);
   assert(blank.labels.size === 0 && blank.problems.length === 4 && blank.problems.every((p) => /blank/.test(p)), "an unfilled sheet is refused, every blank named");
   assert(!blank.problems.some((p) => p.startsWith("item 009")), "a text quoting an item's head is not read as an item");
@@ -348,6 +403,10 @@ function selfCheck(): void {
   const bad = parseSheet(sheet.replace("level: \ndue: ", "level: hihg\ndue: Friday").replace("level: \ndue: ", "level: -\ndue: -"));
   assert(bad.problems.length === 2 && /level "hihg"/.test(bad.problems[0]) && /due "Friday"/.test(bad.problems[1]), "a misspelt level and a day that is not a date are refused");
   assert(parseSheet(filled + "\n" + filled.split("\n").slice(-12).join("\n")).problems.some((p) => /twice/.test(p)), "an item listed twice is refused");
+  const noMark = parseSheet(filled.replace("level: high\ndue: 2026-11-06\n--- text ---\n", "level: high\ndue: 2026-11-06\n"));
+  assert(noMark.problems.some((p) => /item 001 .*no "--- text ---" line/.test(p)) && !noMark.labels.has(id(1)), "an item that lost its text marker is refused, not read on into its text");
+  const twiceField = parseSheet(filled.replace("level: high\ndue: 2026-11-06", "level: high\nlevel: low\ndue: 2026-11-06"));
+  assert(twiceField.problems.some((p) => /item 001 .*level given twice/.test(p)), "a field given twice is refused");
   assert(Object.keys(LEVEL_WORDS).join() === "none,low,medium,high,urgent,critical", "the sheet's level words are the scale's six");
 
   // The fixture.
@@ -372,7 +431,9 @@ function selfCheck(): void {
   assert(fromFixture(range).problems.some((p) => /out of range/.test(p)), "a level off the scale is refused");
   const lines = reportLines({ ...fx, registration: registrationDigits() });
   assert(lines.some((l) => /^level precision  0\.800 \(16 of 20\)/.test(l)) && lines.at(-1)!.startsWith("verdict: PASSES"), "the report prints each half and the verdict");
-  assert(lines.some((l) => /κ between the raters: level 1\.000, due 1\.000 \(60 items\)/.test(l)), "the report prints the raters' κ");
+  assert(lines.some((l) => /κ between the raters: level 1\.000, whether a due day is stated 1\.000 \(60 items\); the same days on 13 of the 13 both date/.test(l)), "the report prints the raters' κ and their same-day count");
+  const split = structuredClone(fx); split.items[fx.strata.other[0]].second = L([3], [5]);
+  assert(reportLines({ ...split, registration: registrationDigits() }).some((l) => /the same days on 12 of the 13 both date/.test(l)), "two raters dating one item differently are not the same days");
   assert(reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("no verdict"), "a fixture from another registration gets no verdict");
   assert(JSON.stringify(shardOf(undefined)) === "[0,1]" && JSON.stringify(shardOf("2/3")) === "[2,3]", "no shard is the whole run; k/n is read");
   for (const bad of ["3/3", "1/0", "a/b", "1"]) {
@@ -381,9 +442,48 @@ function selfCheck(): void {
     assert(threw, `--shard ${bad} is refused`);
   }
   threw = false;
-  try { outsideRepo(join(REPO, "evals", "run.jsonl"), "the run file"); } catch { threw = true; }
+  try { outsideRepo("texts.jsonl", "the texts file"); } catch { threw = true; }
   assert(threw, "a private file inside the repo is refused");
   assert(outsideRepo("/private/tmp/run.jsonl", "the run file") === "/private/tmp/run.jsonl", "one outside it is taken");
+
+  // A call's outcome: only the model's own non-JSON answer is a reading of nothing; every other silence or log is a fault.
+  const got = inf(3, null);
+  assert("got" in outcomeOf(got, null, []) && (outcomeOf(got, null, []) as { got: Inferred }).got === got, "an answer is the model's reading");
+  assert(JSON.stringify(outcomeOf(null, null, [NON_JSON])) === JSON.stringify({ got: null }), "a non-JSON answer is a reading of nothing, as the live capture states nothing");
+  assert("fault" in outcomeOf(null, null, []), "null with nothing logged (an answer with no content) is a fault, not nothing");
+  assert("fault" in outcomeOf(null, null, ["inferPriority: the request timed out (OB1_LLM_TIMEOUT)"]), "a provider failure is a fault");
+  assert("fault" in outcomeOf(null, null, ["inferPriority: HTTP 500: the body was not valid JSON"]), "a provider failure whose body says not valid JSON is still a fault");
+  assert("fault" in outcomeOf(null, new Error("boom"), []), "a thrown error is a fault");
+  assert("got" in outcomeOf(got, null, ["capture: something else"]), "a line another module logs is not inferPriority's fault");
+
+  // A run's lines.
+  const rl = (n: number, over: Partial<{ prompt_version: number; model: string }> = {}) =>
+    ({ id: id(n), at: tue.toISOString(), writer: "w", call: C(null), level_phrase: null, due_phrase: null, ms: 1, prompt_version: INFER_PROMPT_VERSION, ...over });
+  assert(checkRunLines([rl(1), rl(2)], [{ id: id(1) }, { id: id(2) }]).length === 0, "a whole run of one version and one model is sound");
+  assert(checkRunLines([rl(1), rl(1)], null).some((p) => /ids twice/.test(p)), "a run listing an id twice is refused");
+  assert(checkRunLines([rl(1), rl(2, { prompt_version: INFER_PROMPT_VERSION + 1 })], null).some((p) => /prompt versions/.test(p)), "a run of two prompt versions is refused");
+  assert(checkRunLines([rl(1, { model: "a@x t=0" }), rl(2, { model: "b@x t=0" })], null).some((p) => /mixes models/.test(p)), "a run of two models is refused");
+  assert(checkRunLines([rl(1, { model: "a@x t=0" }), rl(2)], null).some((p) => /mixes models/.test(p)), "a recorded model beside unrecorded lines is refused");
+  assert(checkRunLines([rl(1)], [{ id: id(1) }, { id: id(2) }]).some((p) => /lacks 1 of the population's 2/.test(p)), "a run short of the population is refused");
+
+  // The drawn sheet is blind: nothing of a call or its phrases reaches it.
+  const runRows = Array.from({ length: 30 }, (_, i) => ({ ...rl(i), call: i < 10 ? C(3, 2) : C(null), level_phrase: i < 10 ? "QQLEVELPHRASE" : null, due_phrase: i < 10 ? "QQDUEPHRASE" : null }));
+  const pop = runRows.map((r) => ({ id: r.id, at: r.at, writer: "w", text: `text of ${r.id}` }));
+  const drawn = drawSheet(runRows, pop);
+  assert(drawn.picked.length === 30 && drawn.short.length === 2, "the sheet takes a short population whole");
+  assert(!/QQLEVELPHRASE|QQDUEPHRASE|stratum/.test(drawn.sheet), "the sheet holds nothing of the calls' phrases or the strata");
+  assert(runRows.every((r) => drawn.sheet.includes(`text of ${r.id}`)), "the sheet holds every drawn text");
+
+  // A filled sheet is tied to the draw.
+  const fill = (sheet: string) => sheet.replaceAll("level: \ndue: ", "level: -\ndue: -");
+  const fine = sheetLabels(fill(drawn.sheet), drawn.picked);
+  assert(fine.problems.length === 0 && fine.labels.size === 30, "a filled sheet of the draw is taken");
+  assert(sheetLabels(fill(drawn.sheet), drawn.picked.slice(1)).problems.some((p) => /not in the draw/.test(p)), "a sheet item outside the draw is refused");
+  assert(sheetLabels(fill(drawn.sheet), [...drawn.picked, { id: id(99) }]).problems.some((p) => /1 drawn items are not on the sheet/.test(p)), "a drawn item missing from the sheet is refused");
+
+  // A report only at the pinned registration.
+  assert(!reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("verdict"), "a fixture labelled under another registration gets no verdict");
+  assert(!reportLines({ ...fx, registration: registrationDigits("eeeeeeeeeeeeeeee") }, "eeeeeeeeeeeeeeee").at(-1)!.startsWith("verdict"), "a fixture and a rules file moved together, away from the pinned registration, get no verdict");
 
   // The committed fixture, once there is one.
   if (existsSync(FIXTURE)) {
