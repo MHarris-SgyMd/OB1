@@ -18,11 +18,15 @@
 #   slots       its parallel setting: Ollama's OLLAMA_NUM_PARALLEL, which is
 #               per model, so each model on it has this many;
 #   reserve     the slots per model background never takes, kept for live
-#               calls (default 1; background keeps at least one).
+#               calls (default 1; background keeps at least one);
+#   per_model   true (the default): each model has `slots` of its own, as
+#               Ollama's; false: the server's `slots` whatever the model, as
+#               a decide tier answering one call at a time.
 # brains        each brain by name, with the sha256 of its broker key:
 #               `bun deploy/federated/federated.ts key --brain <name>` prints
 #               a new key once, for that brain's deploy/.env, and this line.
-#               Never the key itself; quoted, so YAML reads it as text.
+#               Never the key itself; quoted, so YAML reads it as text. The
+#               placeholders below are refused until replaced.
 #
 # This Mac's Ollama (OLLAMA_NUM_PARALLEL=3), shared by stable and a canary:
 broker:
@@ -33,8 +37,15 @@ servers:
       - http://host.containers.internal:11434/v1
     slots: 3
     reserve: 1
+  # The decide tier both brains reach (jev/h2o/README.md), one call at a time:
+  # h2o:
+  #   bases:
+  #     - http://host.containers.internal:8022
+  #   slots: 1
+  #   reserve: 0
+  #   per_model: false
 brains:
   stable:
-    key: "0000000000000000000000000000000000000000000000000000000000000001"
+    key: "from: bun deploy/federated/federated.ts key --brain stable"
   canary:
-    key: "0000000000000000000000000000000000000000000000000000000000000002"
+    key: "from: bun deploy/federated/federated.ts key --brain canary"

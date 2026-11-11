@@ -61,7 +61,7 @@ export function mintKey(brain: string, bytes = randomBytes(32)): { key: string; 
 
 /** Why the registry's file can't be read by the broker's unprivileged user, or "". */
 export function modeProblem(mode: number, path: string): string {
-  return (mode & 0o004) ? "" : `${path} is not readable by others (mode ${(mode & 0o777).toString(8)}), and the broker's container reads it as an unprivileged user: chmod 644 it (a registry holds only hashes)`;
+  return (mode & 0o004) ? "" : `${path} is not readable by others (mode ${(mode & 0o777).toString(8)}), and the broker's container reads it as an unprivileged user: chmod 644 it (the registry holds only hashes; broker.ts no secret)`;
 }
 
 const sha256 = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
@@ -106,7 +106,7 @@ async function main(cmd: string, args: string[]) {
   if (cmd === "key") {
     if (!o.brain || !NAME.test(o.brain)) { console.error("key --brain NAME: a name is lower-case letters, digits and hyphens, starting with a letter"); process.exit(2); }
     const { key, lines } = mintKey(o.brain);
-    console.log(`\n  The broker key for brain "${o.brain}" — shown once, not recoverable:\n\n    ${key}\n\n  For that brain's deploy/.env (SMD-3379 PR 3b reads it; until then nothing does).\n  Under brains: in the registry (its hash, never the key):\n\n${lines}`);
+    console.log(`\n  The broker key for brain "${o.brain}" — shown once, not recoverable:\n\n    ${key}\n\n  For that brain's deploy/.env, as OB1_SLOT_BROKER_KEY (its coordinator reads it from SMD-3379 PR 3b; until then\n  nothing does, and a key minted again then serves as well).\n  Under brains: in the registry (its hash, never the key):\n\n${lines}`);
     return;
   }
   const loaded = bunEnvProblem(process.execArgv);

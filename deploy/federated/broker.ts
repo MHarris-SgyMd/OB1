@@ -11,41 +11,48 @@
 // Self-contained — no import but Bun's and node's own — since the federated project (deploy/federated/compose.yaml)
 // mounts this one file into the stack's pinned Bun image, as the stack's forwarder is. Nothing it holds survives a
 // restart; a brain re-registers the slots it holds (`held`) when it reconnects, and for `warm_s` after a start no
-// background call is granted, so a restart never hands out a slot a running call still holds.
+// background call is granted — so a restart hands out no slot a running call still holds, for the brains that
+// reconnect within it.
 //
 // The protocol: a WebSocket at /v1/slots, the brain's key in an `x-brain-key` header on the upgrade (an unknown one is
 // a 401 before it; a brain's 17th socket at once a 429), JSON text frames, each id a string the socket never reuses.
-//   brain → broker  {op:"ask", id, base, model, cls, first?, max_wait_s?}  a slot for one call to `base`'s `model`
-//                   {op:"held", id, base, model, cls}                       one its call held before it connected: after
-//                                                                           the broker's restart, or its own socket's
-//                                                                           drop (counted as it is, past the room if
-//                                                                           need be; said once a socket outside the
-//                                                                           warm-up)
-//                   {op:"done", id}                                         the call ended, or the ask is withdrawn
-//   broker → brain  {op:"hello", brain, lease_s, warm_s_left, servers}      on open
-//                   {op:"go", id}                                           granted (a `held` too); it may come with no
-//                                                                           `queued` before it, and after the brain's own
-//                                                                           `done` withdrew the ask — the slot is given
-//                                                                           back already, so the brain ignores it
-//                   {op:"queued", id}                                       the ask waits
-//                   {op:"no", id, why}                                      not brokered: `server` (no server of the
-//                                                                           registry's has that base: the brain's own
-//                                                                           share holds it), `bad`, `id` (in use),
-//                                                                           `limit` (256 at once on the socket)
-//                   {op:"lapsed", id}                                       held past lease_s, taken back
-// A model is a name the brain uses the same way each call: unnamed is one model, `?`. A closed socket — closed, silent
-// past idle_s (pings unanswered), or not reading its frames (1 MiB unread) — gives back every grant it
-// held and withdraws every ask it had waiting. GET /health answers `ok`, with no key and no figures.
+//   brain → broker  {op:"ask", id, base, model, cls, first?, max_wait_s?, waited_s?}
+//                                     a slot for one call to `base`'s `model`; `waited_s` the time it waited already,
+//                                     asked again after a drop, so it keeps its age (`max_wait_s` 0: goes first)
+//                   {op:"held", id, base, model, cls}
+//                                     one its call held before it connected: after the broker's restart, or its own
+//                                     socket's drop (counted as it is, past the room if need be; said once a socket
+//                                     outside the warm-up)
+//                   {op:"done", id}   the call ended, or the ask is withdrawn; ignored for an id not held (lapsed)
+//   broker → brain  {op:"hello", brain, boot, lease_s, idle_s, warm_s_left, max_waiting, max_held, max_sockets,
+//                    max_frame, servers: [{name, bases, slots, reserve, per_model}]}
+//                                     on open; `boot` changes when the broker restarts
+//                   {op:"go", id}     granted (a `held` too). It may come with no `queued` before it, and after the
+//                                     brain's own `done` withdrew the ask — given back already, so the brain ignores it.
+//                                     A live ask is granted at once unless `no`.
+//                   {op:"queued", id} the ask waits
+//                   {op:"no", id, why}
+//                                     not brokered: `server` (no server of the registry's has that base: the brain's own
+//                                     share holds it), `bad`, `id` (in use), `limit` (max_waiting background asks
+//                                     waiting on the socket, or max_held in all: the brain holds the call and asks again
+//                                     as one of its own ends — never its own share, which would run it uncounted)
+//                   {op:"lapsed", id} held past lease_s, taken back: the brain asks no `held` for it again
+// A model is a name the brain uses the same way each call: unnamed is one model, `?`; a server with `per_model: false`
+// (a decide tier serving one call at a time) is one pool whatever the model. A closed socket — closed, silent past
+// idle_s (pings unanswered), or not reading its frames (1 MiB backed up in the broker, past the kernel's buffers) —
+// gives back every grant it held and withdraws every ask it had waiting: a brain asks those again on its next socket.
+// GET /health answers `ok`, with no key and no figures.
 //
 // The rule, per (server, model) — Ollama's parallel setting is per model — with `slots` the server's setting:
 //   live         granted at once, always, and counted: the model server queues it anyway, and a wait here would add
 //                one to it (draft 4 had it wait while every slot held a live call; not taken, 2026-11-10). Over
-//                `slots` in all is logged at most once a minute; one brain over `slots` live, once each time.
+//                `slots` in all, or one brain over `slots` live, is logged at most once a minute.
 //   background   granted while background holds fewer than max(1, slots − reserve) and live and background together
 //                fewer than `slots`: a live call in flight, any brain's, takes background's room.
-//   whose turn   the waiting brain holding the fewest background grants there, ties going round from the brain served
-//                last — two backlogged brains split the slots, whatever their calls' lengths; within a brain, the first
-//                ask its brain put first (`first`, 2c-2's consolidation) or that has waited its `max_wait_s` (60
+//   whose turn   the waiting brain that has had the least background slot time there — remembered with a half-life of
+//                USE_HALF_LIFE_S, its grants' running time added — ties going round from the brain served last: two
+//                backlogged brains split the slot time, whatever their calls' lengths and the room; within a brain, the
+//                first ask its brain put first (`first`, 2c-2's consolidation) or that has waited its `max_wait_s` (60
 //                unset), else its oldest — 2c-2's turn, held here brain-wide.
 // The trust (SMD-3268, no implicit trust): a key per brain, the registry holding only its hash; a brain sees its own
 // grants and asks, and `hello` names no other brain. A brain can call every call live, or say every call was held:
@@ -63,8 +70,14 @@ export const DEFAULT_MAX_WAIT_S = 60;
 export const MAX_MAX_WAIT_S = 86_400;
 /** The most a server's parallel setting may say: slots.ts's MAX_SLOTS. */
 export const MAX_SLOTS = 16;
-/** The most asks and grants one socket may have at once. */
-export const MAX_OUTSTANDING = 256;
+/** The most asks one socket may have waiting at once: past it a background ask is `no limit`, and its brain holds it
+ *  and asks again as one ends. Live and `held` don't count: a relay carrying a brain's whole traffic is never refused
+ *  a live call for a backlog (review pass 2). */
+export const MAX_WAITING = 1024;
+/** The most asks and grants one socket may hold at all, live included: a bound on a socket's memory. */
+export const MAX_HELD = 4096;
+/** A brain's background slot time is remembered with this half-life, so the turn evens slot time over the last minutes. */
+export const USE_HALF_LIFE_S = 60;
 /** The most sockets one brain may hold open at once: 3b's brain holds one, its coordinator's. */
 export const MAX_SOCKETS = 16;
 /** The most a socket may have unread before it is closed. */
@@ -74,7 +87,7 @@ export const MAX_FRAME = 4096;
 /** A broker key's mark: the key itself, which the registry never holds (its hash does). */
 export const KEY_PREFIX = "slot_";
 
-export type ModelServer = { name: string; bases: string[]; slots: number; reserve: number };
+export type ModelServer = { name: string; bases: string[]; slots: number; reserve: number; perModel: boolean };
 export type Brain = { name: string; hash: string };
 export type Registry = { port: number; leaseS: number; warmS: number; idleS: number; servers: ModelServer[]; brains: Brain[] };
 
@@ -124,7 +137,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
     const at = `servers.${name}`;
     if (!NAME.test(name) || YAML_WORDS.has(name)) { problems.push(`${at}: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null`); continue; }
     if (!isMapping(raw)) { problems.push(`${at}: not a mapping`); continue; }
-    for (const k of Object.keys(raw)) if (!["bases", "slots", "reserve"].includes(k)) problems.push(`${at}.${k}: not a key of a server (bases, slots, reserve)`);
+    for (const k of Object.keys(raw)) if (!["bases", "slots", "reserve", "per_model"].includes(k)) problems.push(`${at}.${k}: not a key of a server (bases, slots, reserve, per_model)`);
     const bases: string[] = [];
     if (!Array.isArray(raw.bases) || raw.bases.length === 0) problems.push(`${at}.bases: the base URLs brains reach it by, at least one`);
     else for (const b of raw.bases) {
@@ -141,7 +154,9 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
     const slots = isInt(raw.slots, 1, MAX_SLOTS) ? raw.slots : 1;
     let reserve = Math.min(1, slots);
     if (raw.reserve !== undefined) { if (isInt(raw.reserve, 0, slots)) reserve = raw.reserve; else problems.push(`${at}.reserve: the slots background never takes (it keeps at least one), 0 to its slots (${slots})`); }
-    servers.push({ name, bases, slots, reserve });
+    let perModel = true;
+    if (raw.per_model !== undefined) { if (typeof raw.per_model === "boolean") perModel = raw.per_model; else problems.push(`${at}.per_model: true (each model its own slots, as Ollama's) or false (the server's slots whatever the model, as a one-at-a-time decide tier's)`); }
+    servers.push({ name, bases, slots, reserve, perModel });
   }
   const brains: Brain[] = [];
   const hashOwner = new Map<string, string>();
@@ -154,7 +169,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
     const key = raw.key;
     if (typeof key === "string" && key.startsWith(KEY_PREFIX)) { problems.push(`${at}.key: that is the key itself — the registry holds its hash (federated.ts key prints both)`); continue; }
     if (typeof key === "number") { problems.push(`${at}.key: YAML read it as a number — quote the hash, as federated.ts key prints it`); continue; }
-    if (typeof key !== "string" || !HEX64.test(key)) { problems.push(`${at}.key: the sha256 of the brain's key, 64 lower-case hex digits (federated.ts key prints it)`); continue; }
+    if (typeof key !== "string" || !HEX64.test(key)) { problems.push(`${at}.key: the sha256 of the brain's key, 64 lower-case hex digits — \`bun deploy/federated/federated.ts key --brain ${name}\` prints it`); continue; }
     const owner = hashOwner.get(key);
     if (owner) { problems.push(`${at}.key: brains.${owner}'s too — a key is one brain's`); continue; }
     hashOwner.set(key, name);
@@ -172,7 +187,7 @@ export function brainOf(brains: Brain[], key: string | null): Brain | null {
   return found;
 }
 
-type Conn = { id: number; brain: Brain; brainAt: number; closed: boolean; heldLate: boolean; sent: (m: object) => void; held: Map<string, Ask | Grant> };
+type Conn = { id: number; brain: Brain; brainAt: number; closed: boolean; heldLate: boolean; waiting: number; sent: (m: object) => void; held: Map<string, Ask | Grant> };
 type Ask = { kind: "ask"; conn: Conn; id: string; pool: Pool; first: boolean; maxWaitMs: number; at: number };
 type Grant = { kind: "grant"; conn: Conn; id: string; pool: Pool; live: boolean; at: number };
 type Pool = {
@@ -180,14 +195,11 @@ type Pool = {
   live: Set<Grant>; bg: Set<Grant>;
   /** Each brain's asks waiting, by its index in the registry, in the order asked (a Set: a withdrawal is O(1)). */
   queues: Set<Ask>[];
-  /** Each brain's background grants here, by its index: the turn goes to the waiting brain holding fewest. */
-  bgBy: number[];
+  /** Each brain's background slot time here, ms, decayed (USE_HALF_LIFE_S) as of `usedAt`: with its grants running, whose turn it is. */
+  used: number[];
+  usedAt: number;
   /** The index of the brain served last, -1 before any: ties go round from it. */
   last: number;
-  /** When the over-the-slots line was last said, so a boundary crossed often is said once a minute. */
-  overSaidAt: number;
-  /** The brains over `slots` live here, said once each time they go over. */
-  liveOver: Set<number>;
 };
 
 /** What a test reads of the broker: each pool's counts, and each brain's asks waiting in it. */
@@ -205,61 +217,86 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const serverOf = new Map<string, ModelServer>();
   for (const s of reg.servers) for (const b of s.bases) serverOf.set(b, s);
   let nextConn = 1;
+  /** This start's id, in each hello: a brain that sees it change knows the broker restarted, not only its own socket. */
+  const boot = crypto.randomUUID();
 
   // A pool lives while it holds a grant or an ask: a brain naming a new model each call costs nothing once it is done
   // (review pass 1: kept, 300k models grew the broker 18 MB to 530 MB).
-  const poolFor = (server: ModelServer, model: string): Pool => {
+  const poolFor = (server: ModelServer, asked: string): Pool => {
+    // A server whose slots are the server's, whatever the model (`per_model: false`: a decide tier serving one call at
+    // a time), is one pool however its brains name their models (review pass 2).
+    const model = server.perModel ? asked : "*";
     const key = `${server.name}/${model}`;
     let p = pools.get(key);
-    if (!p) { p = { key, server, model, live: new Set(), bg: new Set(), queues: reg.brains.map(() => new Set()), bgBy: reg.brains.map(() => 0), last: -1, overSaidAt: -Infinity, liveOver: new Set() }; pools.set(key, p); }
+    if (!p) { p = { key, server, model, live: new Set(), bg: new Set(), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: performance.now(), last: -1 }; pools.set(key, p); }
     return p;
   };
   const prune = (p: Pool) => { if (p.live.size === 0 && p.bg.size === 0 && p.queues.every((q) => q.size === 0)) pools.delete(p.key); };
   const room = (p: Pool) => p.bg.size < Math.max(1, p.server.slots - p.server.reserve) && p.live.size + p.bg.size < p.server.slots;
   const warming = () => performance.now() < warmUntil;
 
-  /** The over-capacity line, at most once a minute a pool, and the live-bound line, once each time a brain goes over. */
+  /**
+   * The over-capacity line and a brain's over-its-slots-live line, each at most once a minute a server (and brain):
+   * kept here, not on a pool, which goes when it empties (review pass 2: a brain looping two live calls on a one-slot
+   * server had each said a thousand times a second). Bounded by the registry's servers and brains.
+   */
+  const saidAt = new Map<string, number>();
+  const sayOnce = (key: string, line: () => string) => { const now = performance.now(); if (now - (saidAt.get(key) ?? -Infinity) < 60_000) return; saidAt.set(key, now); log(line()); };
   const watch = (p: Pool, by?: Conn) => {
-    const now = performance.now();
-    if (p.live.size + p.bg.size > p.server.slots && now - p.overSaidAt >= 60_000) { p.overSaidAt = now; log(`${p.key}: ${p.live.size} live and ${p.bg.size} background calls run on ${p.server.slots} slots — the server queues the rest`); }
+    if (p.live.size + p.bg.size > p.server.slots) sayOnce(p.server.name, () => `${p.key}: ${p.live.size} live and ${p.bg.size} background calls run on ${p.server.slots} slots — the server queues the rest`);
     if (!by) return;
     let mine = 0;
     for (const g of p.live) if (g.conn.brainAt === by.brainAt) mine++;
-    if (mine > p.server.slots && !p.liveOver.has(by.brainAt)) { p.liveOver.add(by.brainAt); log(`${p.key}: brain ${by.brain.name} has ${mine} live calls running, past the server's ${p.server.slots} slots`); }
-    else if (mine <= p.server.slots) p.liveOver.delete(by.brainAt);
+    if (mine > p.server.slots) sayOnce(`${p.server.name}\n${by.brainAt}`, () => `${p.key}: brain ${by.brain.name} has ${mine} live calls running, past the server's ${p.server.slots} slots`);
+  };
+  /** Decays the pool's remembered slot time to now. */
+  const decay = (p: Pool, now: number) => {
+    const f = 0.5 ** ((now - p.usedAt) / (USE_HALF_LIFE_S * 1000));
+    for (let i = 0; i < p.used.length; i++) p.used[i] *= f;
+    p.usedAt = now;
   };
 
   const grant = (conn: Conn, id: string, p: Pool, live: boolean) => {
     const g: Grant = { kind: "grant", conn, id, pool: p, live, at: performance.now() };
-    if (live) p.live.add(g); else { p.bg.add(g); p.bgBy[conn.brainAt]++; }
+    (live ? p.live : p.bg).add(g);
     conn.held.set(id, g);
     conn.sent({ op: "go", id });
     watch(p, live ? conn : undefined);
   };
 
   /**
-   * Hands the pool's free background room out while any brain has an ask waiting: to the waiting brain holding the
-   * fewest background grants here, ties going round from the brain served last — so two backlogged brains split the
-   * slots, not the grants, whatever their calls' lengths (review pass 1: by turns alone, a brain of 1–5 ms calls had
-   * 6% of the slot time beside one of 40–50 ms) — and within it, its first ask put first or past its max_wait_s, else
-   * its oldest.
+   * Hands the pool's free background room out while any brain has an ask waiting: to the waiting brain that has had the
+   * least background slot time here — its remembered time, decayed, and its grants' running time — ties going round
+   * from the brain served last, so two backlogged brains split the slot time whatever their calls' lengths and
+   * whatever the room (review pass 1: by turns, a brain of 1–5 ms calls had 6% beside one of 40–50 ms; review pass 2:
+   * by grants held, the same 6% wherever the room is one slot); and within it, its first ask put first or past its
+   * max_wait_s, else its oldest.
    */
   const pump = (p: Pool) => {
     if (warming()) return;
     const n = p.queues.length;
     while (room(p)) {
+      const now = performance.now();
+      decay(p, now);
+      const score = [...p.used];
+      for (const g of p.bg) score[g.conn.brainAt] += now - g.at;
       let at = -1;
       for (let i = 1; i <= n; i++) {
         const b = (p.last + i + n) % n;
-        if (p.queues[b].size && (at < 0 || p.bgBy[b] < p.bgBy[at])) at = b;
+        if (p.queues[b].size && (at < 0 || score[b] < score[at])) at = b;
       }
       if (at < 0) return;
       const q = p.queues[at];
-      const now = performance.now();
-      let a: Ask | undefined;
-      for (const x of q) if (x.first || now - x.at >= x.maxWaitMs) { a = x; break; }
-      a ??= q.values().next().value!;
+      // The oldest of its asks put first or past their max_wait_s, else its oldest — by when each began waiting, which
+      // `waited_s` dates back, so not always the order asked.
+      let a: Ask | undefined, oldest: Ask | undefined;
+      for (const x of q) {
+        if ((x.first || now - x.at >= x.maxWaitMs) && (!a || x.at < a.at)) a = x;
+        if (!oldest || x.at < oldest.at) oldest = x;
+      }
+      a ??= oldest!;
       q.delete(a);
+      a.conn.waiting--;
       p.last = at;
       a.conn.held.delete(a.id);
       grant(a.conn, a.id, p, false);
@@ -268,8 +305,13 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
 
   const release = (x: Ask | Grant) => {
     if (x.conn.held.get(x.id) === x) x.conn.held.delete(x.id);
-    if (x.kind === "ask") { x.pool.queues[x.conn.brainAt].delete(x); prune(x.pool); return; }
-    if (x.live) { if (!x.pool.live.delete(x)) return; } else { if (!x.pool.bg.delete(x)) return; x.pool.bgBy[x.conn.brainAt]--; }
+    if (x.kind === "ask") { if (x.pool.queues[x.conn.brainAt].delete(x)) x.conn.waiting--; prune(x.pool); return; }
+    if (x.live) { if (!x.pool.live.delete(x)) return; } else {
+      if (!x.pool.bg.delete(x)) return;
+      const now = performance.now();
+      decay(x.pool, now);
+      x.pool.used[x.conn.brainAt] += now - x.at;
+    }
     watch(x.pool);
     pump(x.pool);
     prune(x.pool);
@@ -284,10 +326,11 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     if (m.op !== "ask" && m.op !== "held") { conn.sent({ op: "no", id, why: "bad" }); return; }
     const model = m.model === undefined || m.model === null ? "?" : typeof m.model === "string" && m.model.length >= 1 && m.model.length <= 256 ? m.model : null;
     const cls = m.cls === "live" || m.cls === "background" ? m.cls : null;
-    const maxWait = m.max_wait_s === undefined ? DEFAULT_MAX_WAIT_S : isNum(m.max_wait_s, Number.MIN_VALUE, MAX_MAX_WAIT_S) ? m.max_wait_s : null;
-    if (typeof m.base !== "string" || m.base.length > 2048 || model === null || cls === null || maxWait === null || (m.first !== undefined && typeof m.first !== "boolean")) { conn.sent({ op: "no", id, why: "bad" }); return; }
+    const maxWait = m.max_wait_s === undefined ? DEFAULT_MAX_WAIT_S : isNum(m.max_wait_s, 0, MAX_MAX_WAIT_S) ? m.max_wait_s : null;
+    const waited = m.waited_s === undefined ? 0 : isNum(m.waited_s, 0, MAX_MAX_WAIT_S) ? m.waited_s : null;
+    if (typeof m.base !== "string" || m.base.length > 2048 || model === null || cls === null || maxWait === null || waited === null || (m.first !== undefined && typeof m.first !== "boolean")) { conn.sent({ op: "no", id, why: "bad" }); return; }
     if (conn.held.has(id)) { conn.sent({ op: "no", id, why: "id" }); return; }
-    if (conn.held.size >= MAX_OUTSTANDING) { conn.sent({ op: "no", id, why: "limit" }); return; }
+    if (conn.held.size >= MAX_HELD || (m.op === "ask" && cls === "background" && conn.waiting >= MAX_WAITING)) { conn.sent({ op: "no", id, why: "limit" }); return; }
     const server = serverOf.get(normalisedBase(m.base));
     if (!server) { conn.sent({ op: "no", id, why: "server" }); return; }
     const p = poolFor(server, model);
@@ -295,8 +338,9 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     // it is: those calls run whether counted or not. Said once a socket, since it can take background past its room.
     if (m.op === "held" && !warming() && !conn.heldLate) { conn.heldLate = true; log(`brain ${conn.brain.name} (socket ${conn.id}) re-registers held slots outside the warm-up: counted, past the room if need be`); }
     if (m.op === "held" || cls === "live") { grant(conn, id, p, cls === "live"); return; }
-    const a: Ask = { kind: "ask", conn, id, pool: p, first: m.first === true, maxWaitMs: maxWait * 1000, at: performance.now() };
+    const a: Ask = { kind: "ask", conn, id, pool: p, first: m.first === true, maxWaitMs: maxWait * 1000, at: performance.now() - waited * 1000 };
     p.queues[conn.brainAt].add(a);
+    conn.waiting++;
     conn.held.set(id, a);
     pump(p);
     if (conn.held.get(id) === a) conn.sent({ op: "queued", id });
@@ -306,7 +350,9 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     hostname: opts.hostname ?? "127.0.0.1",
     port: opts.port ?? reg.port,
     fetch(req, srv) {
-      const url = new URL(req.url);
+      // The path alone, read so that no Host header, however written, throws (review pass 2: `a b` was a 500 and a stack).
+      let url: URL;
+      try { url = new URL(req.url); } catch { return new Response(null, { status: 400 }); }
       if (url.pathname === "/health") return req.method === "GET" ? new Response("ok\n") : new Response(null, { status: 405 });
       if (url.pathname !== "/v1/slots") return new Response(null, { status: 404 });
       if (req.method !== "GET") return new Response(null, { status: 405 });
@@ -314,7 +360,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       if (!brain) return new Response("no brain has that key\n", { status: 401 });
       const brainAt = reg.brains.indexOf(brain);
       if (sockets[brainAt] >= MAX_SOCKETS) return new Response(`brain ${brain.name} has ${MAX_SOCKETS} sockets open already\n`, { status: 429 });
-      const conn: Conn = { id: nextConn++, brain, brainAt, closed: false, heldLate: false, sent: () => {}, held: new Map() };
+      const conn: Conn = { id: nextConn++, brain, brainAt, closed: false, heldLate: false, waiting: 0, sent: () => {}, held: new Map() };
       if (srv.upgrade(req, { data: conn })) return undefined;
       return new Response("a WebSocket upgrade, please\n", { status: 426 });
     },
@@ -332,7 +378,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         sockets[conn.brainAt]++;
         conn.sent = (m) => { ws.send(JSON.stringify(m)); };
         log(`brain ${conn.brain.name} connected (socket ${conn.id})`);
-        conn.sent({ op: "hello", brain: conn.brain.name, lease_s: reg.leaseS, warm_s_left: Math.max(0, Math.ceil(warmUntil - performance.now()) / 1000), servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve })) });
+        conn.sent({ op: "hello", brain: conn.brain.name, boot, lease_s: reg.leaseS, idle_s: reg.idleS, warm_s_left: Math.max(0, Math.ceil(warmUntil - performance.now()) / 1000), max_waiting: MAX_WAITING, max_held: MAX_HELD, max_sockets: MAX_SOCKETS, max_frame: MAX_FRAME, servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve, per_model: s.perModel })) });
       },
       message(ws: ServerWebSocket<Conn>, msg: string | Buffer) {
         if (typeof msg !== "string") { ws.data.sent({ op: "no", id: null, why: "bad" }); return; }
@@ -392,7 +438,8 @@ function selfCheck() {
   const r = ok(base);
   const cases: [string, boolean][] = [
     ["the smallest registry reads, with the defaults", !!r && r.port === DEFAULT_PORT && r.leaseS === DEFAULT_LEASE_S && r.warmS === DEFAULT_WARM_S && r.idleS === DEFAULT_IDLE_S && r.servers[0].reserve === 1 && r.servers[0].bases[0] === "http://host.containers.internal:11434/v1"],
-    ["the example registry reads", !!ok(readFileSync(new URL("./federation.example.yaml", import.meta.url), "utf8"))],
+    ["the example registry reads but for its placeholder keys, each naming the command that prints one", (() => { const pr = parseRegistry(readFileSync(new URL("./federation.example.yaml", import.meta.url), "utf8")).problems; return pr.length === 2 && pr.every((x) => /federated.ts key --brain (stable|canary)/.test(x)); })()],
+    ["per_model defaults to true, takes false, and refuses anything else", ok(base)?.servers[0].perModel === true && ok(base.replace("slots: 3", "slots: 3\n    per_model: false"))?.servers[0].perModel === false && /per_model: true/.test(problems(base.replace("slots: 3", "slots: 3\n    per_model: no-way")))],
     ["a base is normalised: host lower-cased, trailing slashes gone", ok(base.replace("http://host.containers.internal:11434/v1", "HTTP://Host.Containers.Internal:11434/v1//"))?.servers[0].bases[0] === "http://host.containers.internal:11434/v1"],
     ["a reserve of one slot's server defaults to 1, and 0 is allowed", ok(base.replace("slots: 3", "slots: 1"))?.servers[0].reserve === 1 && ok(base.replace("slots: 3", "slots: 3\n    reserve: 0"))?.servers[0].reserve === 0],
     ["a reserve past the slots is refused", /reserve: the slots background never takes/.test(problems(base.replace("slots: 3", "slots: 3\n    reserve: 4")))],

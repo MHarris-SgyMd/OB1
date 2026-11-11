@@ -23,9 +23,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const BASE = "http://host.containers.internal:11434/v1";
 const KEYS = { stable: "slot_stable-key", canary: "slot_canary-key", third: "slot_third-key" };
 
-function registry(over: { slots?: number; reserve?: number; lease?: number; warm?: number; idle?: number } = {}): Registry {
+function registry(over: { slots?: number; reserve?: number; lease?: number; warm?: number; idle?: number; extra?: string } = {}): Registry {
   const text = `broker:\n  lease_s: ${over.lease ?? 900}\n  warm_s: ${over.warm ?? 0}\n  idle_s: ${over.idle ?? 30}\n`
-    + `servers:\n  ollama:\n    bases: [${BASE}, http://localhost:11434/v1]\n    slots: ${over.slots ?? 3}\n    reserve: ${over.reserve ?? 1}\n`
+    + `servers:\n  ollama:\n    bases: [${BASE}, http://localhost:11434/v1]\n    slots: ${over.slots ?? 3}\n    reserve: ${over.reserve ?? 1}\n${over.extra ?? ""}`
     + `brains:\n${Object.entries(KEYS).map(([n, k]) => `  ${n}:\n    key: "${hashKey(k)}"\n`).join("")}`;
   const { registry: r, problems } = parseRegistry(text);
   if (!r) throw new Error(problems.join("; "));
@@ -165,7 +165,9 @@ await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
     order.push(...fresh);
     held.push(...fresh);
   }
-  ok(order.slice(0, 6).join() === "c1,s3,c2,s4,c3,s5", "two backlogs split the slots in turn, each brain in its own order", order);
+  const ss = order.slice(0, 6).filter((id) => id.startsWith("s")), cs = order.slice(0, 6).filter((id) => id.startsWith("c"));
+  ok(order[0] === "c1" && ss.length >= 2 && cs.length >= 2, "two backlogs split the slots: the first freed goes to the brain with none, and each has its share of six", order);
+  ok(ss.join() === ss.slice().sort().join() && cs.join() === cs.slice().sort().join(), "each brain's asks in its own order", order);
   await s.close(); await c.close();
 });
 
@@ -181,6 +183,33 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   done(t, "t1");
   ok(!!(await s.next("go", "s1")), "then round to stable again");
   await s.close(); await c.close(); await t.close();
+});
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  // A tie — two brains that have had no slot time here — goes round from the brain served last, not from the
+  // registry's first: canary served, then stable and third both waiting, third goes next.
+  const [s, c, t] = [await connect(b, KEYS.stable), await connect(b, KEYS.canary), await connect(b, KEYS.third)];
+  ask(c, "c1", "background"); await c.next("go", "c1");
+  ask(s, "s1", "background"); ask(t, "t1", "background");
+  await t.next("queued", "t1");
+  done(c, "c1");
+  ok(!!(await t.next("go", "t1")) && !s.seen("go", "s1"), "a tie goes round from the brain served last (canary), to third before stable");
+  await s.close(); await c.close(); await t.close();
+});
+
+await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
+  // A long call still running counts against its brain: canary's b1 has run 300 ms when stable's 200 ms call ends,
+  // so the slot goes to stable, though canary has given none back yet.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(c, "b1", "background"); await c.next("go", "b1");
+  await sleep(100);
+  ask(s, "a1", "background"); await s.next("go", "a1");
+  ask(c, "b2", "background"); ask(s, "a2", "background");
+  await s.next("queued", "a2");
+  await sleep(200);
+  done(s, "a1");
+  ok(!!(await s.next("go", "a2")) && !c.seen("go", "b2"), "a brain's calls still running count against its turn: the slot goes to the brain that has had less");
+  await s.close(); await c.close();
 });
 
 section("[4] a brain's own order: first, and aging");
@@ -257,7 +286,7 @@ await withBroker(registry({ slots: 1, reserve: 0, lease: 1 }), async (b, lines) 
   await s.close(); await c.close();
 });
 
-await withBroker(registry({ slots: 2, reserve: 0, warm: 0.6 }), async (b) => {
+await withBroker(registry({ slots: 2, reserve: 0, warm: 1.5 }), async (b) => {
   const s = await connect(b, KEYS.stable);
   const c = await connect(b, KEYS.canary);
   s.send({ op: "held", id: "h1", base: BASE, model: "qwen3:8b", cls: "background" });
@@ -269,20 +298,20 @@ await withBroker(registry({ slots: 2, reserve: 0, warm: 0.6 }), async (b) => {
   s.send({ op: "held", id: "h2", base: BASE, model: "qwen3:8b", cls: "background" });
   await s.next("go", "h2");
   done(c, "l1");
-  await sleep(700);
+  await sleep(1600);
   ok(!c.seen("go", "c1"), "after it, the held slots fill the share, so the waiting ask still waits: no over-grant", pool(b));
   done(s, "h1");
   ok(!!(await c.next("go", "c1")), "and is granted once one is given back");
   await s.close(); await c.close();
 });
 
-await withBroker(registry({ slots: 2, reserve: 0, warm: 0.4 }), async (b) => {
+await withBroker(registry({ slots: 2, reserve: 0, warm: 1.5 }), async (b) => {
   const c = await connect(b, KEYS.canary);
   const hello = await c.next("hello");
-  ok(typeof hello?.warm_s_left === "number" && (hello.warm_s_left as number) > 0 && (hello.warm_s_left as number) <= 0.4, "the hello says how much of the warm-up is left", hello);
+  ok(typeof hello?.warm_s_left === "number" && (hello.warm_s_left as number) > 0 && (hello.warm_s_left as number) <= 1.5, "the hello says how much of the warm-up is left", hello);
   ask(c, "c1", "background");
   ok(!!(await c.next("queued", "c1")), "an ask in the warm-up is queued");
-  ok(!!(await c.next("go", "c1", 1500)), "the warm-up's end turns the asks it held, with nothing given back");
+  ok(!!(await c.next("go", "c1", 3000)), "the warm-up's end turns the asks it held, with nothing given back");
   await c.close();
 });
 
@@ -297,7 +326,7 @@ await withBroker(registry(), async (b) => {
   ok((await s.next("no", "n"))?.why === "id", "an id in use: no, id");
   s.raw("not json");
   ok((await s.next("no", null))?.why === "bad", "a frame that is not JSON: no, bad, with no id");
-  for (const [id, m] of [["c", { cls: "urgent" }], ["w", { max_wait_s: 0 }], ["f", { first: "yes" }], ["m", { model: "" }], ["o", { op: "grab" }]] as const) {
+  for (const [id, m] of [["c", { cls: "urgent" }], ["w", { max_wait_s: -1 }], ["v", { waited_s: -1 }], ["f", { first: "yes" }], ["m", { model: "" }], ["o", { op: "grab" }]] as const) {
     s.send({ op: "ask", id, base: BASE, model: "x", cls: "background", ...m });
     ok((await s.next("no", id))?.why === "bad", `an ask with ${JSON.stringify(m)}: no, bad`);
   }
@@ -311,13 +340,17 @@ await withBroker(registry(), async (b) => {
 
 await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   const s = await connect(b, KEYS.stable);
-  for (let i = 0; i < 256; i++) ask(s, `k${i}`, "background");
-  await s.next("queued", "k255");
-  ask(s, "k256", "background");
-  ok((await s.next("no", "k256"))?.why === "limit", "past 256 asks and grants at once: no, limit");
+  for (let i = 0; i <= 1024; i++) ask(s, `k${i}`, "background");
+  await s.next("queued", "k1024");
+  ask(s, "k1025", "background");
+  ok((await s.next("no", "k1025"))?.why === "limit", "past 1024 background asks waiting on a socket: no, limit");
+  ask(s, "live", "live");
+  ok(!!(await s.next("go", "live")), "a live ask beside them is granted: a backlog never costs a live call its count");
+  s.send({ op: "held", id: "h", base: BASE, model: "qwen3:8b", cls: "background" });
+  ok(!!(await s.next("go", "h")), "and so is a held one");
   done(s, "k10");
-  ask(s, "k256", "background");
-  ok(!!(await s.next("queued", "k256")), "a withdrawn ask frees its place");
+  ask(s, "k1025", "background");
+  ok(!!(await s.next("queued", "k1025")), "a withdrawn ask frees its place");
   await s.close();
 });
 
@@ -370,48 +403,62 @@ await withBroker(registry(), async (b) => {
   await other.close();
 });
 
-section("[9] two backlogs split the slots, not the grants");
-await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
-  // Two brains backlogged on one server of two slots, one's calls 5 ms, the other's 60 ms: each holds one slot.
-  const brains = [{ c: await connect(b, KEYS.stable), ms: 5, busy: 0 }, { c: await connect(b, KEYS.canary), ms: 60, busy: 0 }];
-  const end = performance.now() + 1500;
-  let n = 0;
-  await Promise.all(brains.map(async (x, k) => {
-    const workers = [0, 1].map(async () => {
-      while (performance.now() < end) {
-        const id = `w${k}-${n++}`;
-        ask(x.c, id, "background");
-        const go = await x.c.next("go", id, 3000);
-        if (!go) return;
-        const t0 = performance.now();
-        await sleep(x.ms);
-        x.busy += performance.now() - t0;
-        done(x.c, id);
-      }
-    });
-    await Promise.all(workers);
-  }));
-  const share = brains[0].busy / (brains[0].busy + brains[1].busy);
-  ok(share > 0.35 && share < 0.65, `the 5 ms brain's share of slot time is about half (${share.toFixed(2)}), where turns alone gave it 6%`, share);
-  for (const x of brains) await x.c.close();
-});
+section("[9] two backlogs split the slot time, whatever the room");
+for (const room of [1, 2, 3]) {
+  await withBroker(registry({ slots: room, reserve: 0 }), async (b) => {
+    // Two brains backlogged, one's calls 5 ms, the other's 60 ms, each with a worker more than the room.
+    const brains = [{ c: await connect(b, KEYS.stable), ms: 5, busy: 0 }, { c: await connect(b, KEYS.canary), ms: 60, busy: 0 }];
+    const end = performance.now() + 2000;
+    let n = 0;
+    await Promise.all(brains.map(async (x, k) => {
+      await Promise.all(Array.from({ length: room + 1 }, async () => {
+        while (performance.now() < end) {
+          const id = `w${k}-${n++}`;
+          ask(x.c, id, "background");
+          const go = await x.c.next("go", id, 3000);
+          if (!go) return;
+          const t0 = performance.now();
+          await sleep(x.ms);
+          x.busy += performance.now() - t0;
+          done(x.c, id);
+        }
+      }));
+    }));
+    const share = brains[0].busy / (brains[0].busy + brains[1].busy);
+    ok(share > 0.35 && share < 0.65, `room ${room}: the 5 ms brain's share of slot time is about half (${share.toFixed(2)}), where turns or grants alone gave it 6–8%`, share);
+    for (const x of brains) await x.c.close();
+  });
+}
 
 section("[10] a socket that stops reading is closed; a quiet one that answers pings is not");
 await withBroker(registry({ slots: 1, reserve: 0, idle: 60 }), async (b) => {
-  // A brain that floods frames and then stops reading: its replies back up past 1 MiB and the broker closes it, long
-  // before idle_s (60 s), giving its grant back.
-  const child = spawn(process.execPath, ["-e", `
-    const ws = new WebSocket("ws://127.0.0.1:${b.port}/v1/slots", { headers: { "x-brain-key": ${JSON.stringify(KEYS.third)} } });
-    ws.onopen = () => ws.send(JSON.stringify({ op: "ask", id: "z", base: ${JSON.stringify(BASE)}, model: "qwen3:8b", cls: "background" }));
-    ws.onmessage = (e) => { if (JSON.parse(String(e.data)).op === "go") { for (let i = 0; i < 100000; i++) ws.send("x"); setTimeout(() => process.kill(process.pid, "SIGSTOP"), 0); } };
-    setInterval(() => {}, 1000);`], { stdio: ["ignore", "ignore", "inherit"] });
+  // A brain that asks, then floods frames and stops reading — a raw client in this process, so every byte it writes
+  // reaches the broker whatever the load, and its own socket paused, so the broker's replies back up past the
+  // kernel's buffers into its own: it is closed long before idle_s (60 s), its grant given back.
+  const net = await import("node:net");
+  const frame = (text: string) => {
+    const body = Buffer.from(text), mask = Buffer.from([1, 2, 3, 4]);
+    const head = body.length < 126 ? Buffer.from([0x81, 0x80 | body.length]) : Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]);
+    return Buffer.concat([head, mask, Buffer.from(body.map((x, i) => x ^ mask[i % 4]))]);
+  };
+  const raw = net.connect(b.port, "127.0.0.1");
+  let got = "";
+  raw.on("data", (d: Buffer) => { got += d.toString("latin1"); });
+  raw.on("error", () => {});
+  await new Promise<void>((r) => raw.on("connect", () => r()));
+  raw.write(`GET /v1/slots HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-brain-key: ${KEYS.third}\r\n\r\n`);
+  ok(await until(() => got.includes(" 101 "), 5000), "the raw brain is upgraded");
+  raw.write(frame(JSON.stringify({ op: "ask", id: "z", base: BASE, model: "qwen3:8b", cls: "background" })));
+  ok(await until(() => pool(b).background === 1, 5000), "and holds the slot");
+  raw.pause();
+  const one = frame("x");
+  raw.write(Buffer.concat(Array.from({ length: 600_000 }, () => one)));
   const c = await connect(b, KEYS.canary);
-  ok(await until(() => pool(b).background === 1, 10_000), "the flooding brain holds the slot");
   ask(c, "c1", "background");
   const t0 = performance.now();
-  const got = await c.next("go", "c1", 30_000);
-  ok(!!got && performance.now() - t0 < 20_000, `a brain not reading its frames is closed and its slot handed on, well before idle_s (${Math.round(performance.now() - t0)} ms)`);
-  child.kill("SIGKILL");
+  const went = await c.next("go", "c1", 30_000);
+  ok(!!went && performance.now() - t0 < 20_000, `a brain not reading its frames is closed and its slot handed on, well before idle_s (${Math.round(performance.now() - t0)} ms)`);
+  raw.destroy();
   await c.close();
 });
 
@@ -436,7 +483,69 @@ await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
   await s.close();
 });
 
-section("[12] the base is the brain's, read the same way");
+section("[12] per_model: false, the hello, a request's age, the logs, the door's Host");
+await withBroker(registry({ slots: 1, reserve: 0, extra: `  jev:\n    bases: [http://host.containers.internal:8022]\n    slots: 1\n    reserve: 0\n    per_model: false\n` }), async (b) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  s.send({ op: "ask", id: "d1", base: "http://host.containers.internal:8022", model: "h2o-lightning-4b", cls: "background" });
+  await s.next("go", "d1");
+  c.send({ op: "ask", id: "d2", base: "http://host.containers.internal:8022", model: null, cls: "background" });
+  ok(!!(await c.next("queued", "d2")), "per_model: false — one brain naming its model and another not share the server's one slot");
+  ok(Object.keys(b.snapshot()).join() === "jev/*", "one pool, whatever the model", b.snapshot());
+  done(s, "d1");
+  ok(!!(await c.next("go", "d2")), "and it is handed on");
+  await s.close(); await c.close();
+});
+
+{
+  const reg = registry({ idle: 12 });
+  const [b1, b2] = [startBroker(reg, { port: 0, log: () => {} }), startBroker(reg, { port: 0, log: () => {} })];
+  try {
+    const [h1, h2] = await Promise.all([connect(b1, KEYS.stable).then((c) => c.next("hello")), connect(b2, KEYS.stable).then((c) => c.next("hello"))]);
+    ok(typeof h1?.boot === "string" && h1.boot !== h2?.boot, "each start's hello carries a boot id of its own", [h1?.boot, h2?.boot]);
+    ok(h1?.idle_s === 12 && h1?.max_waiting === 1024 && h1?.max_held === 4096 && h1?.max_sockets === 16 && h1?.max_frame === 4096, "and the limits a brain must keep to", h1);
+    ok((h1?.servers as { per_model: boolean }[])[0].per_model === true, "and each server's per_model");
+  } finally { await b1.stop(); await b2.stop(); }
+}
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  const s = await connect(b, KEYS.stable);
+  ask(s, "h", "background"); await s.next("go", "h");
+  ask(s, "young", "background"); ask(s, "f", "background", { first: true }); ask(s, "old", "background", { waited_s: 120 });
+  await s.next("queued", "old");
+  done(s, "h");
+  ok(!!(await s.next("go", "old")) && !s.seen("go", "f"), "an ask that says it waited past its max_wait_s already goes first: a call asked again after a drop keeps its age");
+  done(s, "old");
+  ok(!!(await s.next("go", "f")), "then the one put first");
+  ask(s, "zero", "background", { max_wait_s: 0 });
+  await s.next("queued", "zero");
+  done(s, "f");
+  ok(!!(await s.next("go", "zero")) && !s.seen("go", "young"), "an ask with max_wait_s 0 goes first at once, before an older one");
+  await s.close();
+});
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b, lines) => {
+  const s = await connect(b, KEYS.stable);
+  for (let i = 0; i < 200; i++) { ask(s, `a${i}`, "live"); ask(s, `b${i}`, "live"); ask(s, `c${i}`, "live"); done(s, `a${i}`); done(s, `b${i}`); done(s, `c${i}`); }
+  ask(s, "end", "live"); await s.next("go", "end");
+  ok(lines.filter((l) => /calls run on 1 slots/.test(l)).length === 1, "a server over its slots two hundred times in a second is said once", lines.length);
+  ok(lines.filter((l) => /has \d+ live calls running, past/.test(l)).length === 1, "and a brain over them live, once", lines.length);
+  await s.close();
+});
+
+await withBroker(registry(), async (b) => {
+  const answers: string[] = [];
+  for (const host of ["a b", "[", "%", "@x"]) {
+    const r = await new Promise<string>((res) => {
+      const sock = require("node:net").connect(b.port, "127.0.0.1", () => sock.write(`GET /health HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
+      let got = ""; sock.on("data", (d: Buffer) => { got += d; }); sock.on("end", () => res(got.split("\r\n")[0])); sock.on("error", () => res("error"));
+    });
+    answers.push(r);
+  }
+  ok(answers.every((a) => !/ 500 /.test(a)), "a Host header no URL reads is no 500", answers);
+  ok((await fetch(`http://127.0.0.1:${b.port}/health`)).ok, "and the broker answers on");
+});
+
+section("[13] the base is the brain's, read the same way");
 for (const base of ["http://Host.Containers.Internal:11434/v1/", "https://openrouter.ai/api/v1", "http://u:p@h:1/v1//", "not a url/", "http://[::1]:11434/v1"]) {
   ok(normalisedBase(base) === slotsBase(base), `normalisedBase matches server-portable/slots.ts's for ${base}`, [normalisedBase(base), slotsBase(base)]);
 }

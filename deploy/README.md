@@ -384,8 +384,8 @@ free:
   the live calls leave. Each server keeps `reserve` slots per model that
   background never takes, though background always keeps at least one.
 - **A brain alone** may use every background slot. Two backlogged brains
-  split them: the turn goes to the waiting brain holding fewer, so each holds
-  half whatever its calls' lengths.
+  split the slot time: the turn goes to the waiting brain that has had less
+  of it lately, so each has about half, whatever its calls' lengths.
 
 **No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
 and fall back to the brain's own share while it is down.
@@ -397,7 +397,7 @@ its port is published on the host's loopback alone.
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
-bun deploy/federated/federated.ts key --brain stable    # a key, shown once, and its registry line
+bun deploy/federated/federated.ts key --brain stable    # a key, shown once (for stable's deploy/.env as OB1_SLOT_BROKER_KEY, read from 3b), and its registry line
 # deploy/federated/federation.local.yaml: the shared servers (their bases, slots, reserve), each brain's key hash
 bun --no-env-file deploy/federated/federated.ts check   # the registry, the runtime, the port; starts nothing
 bun --no-env-file deploy/federated/federated.ts up
@@ -411,7 +411,8 @@ bun --no-env-file deploy/federated/federated.ts down
   `OLLAMA_NUM_PARALLEL`, which applies per model, so the broker counts each
   model on the server apart. `reserve` (1 unless set) is kept for live calls,
   but background keeps at least one slot, so with `slots: 1` background and
-  live share it.
+  live share it. A server whose slots are its own whatever the model, such as
+  a decide tier answering one call at a time, takes `per_model: false`.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1`. A call to any other base isn't
   brokered.
@@ -423,6 +424,13 @@ bun --no-env-file deploy/federated/federated.ts down
 - **The broker keeps nothing across a restart.** A brain re-registers the
   slots it holds when it reconnects. For `warm_s` (10 unless set) after a
   start, background calls wait while that happens.
+- **A registry change, a brain removed or a key rotated** is an edit and
+  another `up`, which recreates the broker: every brain's slots are dropped and
+  re-registered within `warm_s`. A brain no longer listed is refused at its
+  next connection.
+- **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
+  broker's log (`podman compose -p ob1-federated logs slots`) says each brain's
+  connections, and any server over its slots, at most once a minute.
 
 ## What is reachable from where
 
