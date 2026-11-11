@@ -4947,6 +4947,12 @@ The operator labelled the 120 drawn texts blind.
   sentence) in 18.
 * **The raters split on those exports.** κ on level is 0.173: the second rater read the same header as a citation
   (convention 2). κ on due is 0.829.
+* **An unblinded review sided with the operator on those exports.** It was a reading of all 120 texts after the
+  freeze, with the three answers beside each. A text that is the ticket carries its header as its own level, not a
+  label beside another item. So convention 2 was ambiguous for such a text, and that is where the low κ comes from.
+  The review also differed on two of the operator's due lists (029, 115). Scored against its own labels, the model
+  reads 9 of 48 levels and 8 of 16 due days, the same as against the frozen gold. The review stays outside the repo
+  with the sheet.
 * **Four of the 8 due reads match one day in a list.** The operator listed 4 to 11 days on texts quoting a board's due
   dates (convention 8: any listed day counts). Reading those lists as none gives 3 of 16.
 * **It fails under every reading.** With the second rater's labels as the gold: level 0.021, due 0.313, High on none
