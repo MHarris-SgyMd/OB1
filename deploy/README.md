@@ -391,8 +391,12 @@ free:
   never cut short, so a brain of minute-long calls has a little more (0.54
   of the time for 71 s calls beside 50 ms ones).
 
-**No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
-and fall back to the brain's own share while it is down.
+**A brain asks it through its coordinator** (SMD-3379 PR 3b-1), with
+`OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
+coordinator holds the brain's one connection, and its passes ask through it.
+While the broker is away, a call waits a few seconds for it, then runs on the
+brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
+back. The api's calls join in SMD-3379 PR 3b-2.
 
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
@@ -401,7 +405,7 @@ its port is published on the host's loopback alone.
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
-bun deploy/federated/federated.ts key --brain stable    # a key, shown once (for stable's deploy/.env as OB1_SLOT_BROKER_KEY, read from 3b), and its registry line
+bun deploy/federated/federated.ts key --brain stable    # a key, shown once (stable's deploy/.env: OB1_SLOT_BROKER_KEY), and its registry line
 # deploy/federated/federation.local.yaml: the shared servers (their bases, slots, reserve), each brain's key hash
 bun --no-env-file deploy/federated/federated.ts check   # the registry, the runtime, the port; starts nothing
 bun --no-env-file deploy/federated/federated.ts up

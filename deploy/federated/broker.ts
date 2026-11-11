@@ -25,6 +25,7 @@
 //                                     socket's drop (counted as it is, past the room if need be; said once a socket
 //                                     outside the warm-up)
 //                   {op:"done", id}   the call ended, or the ask is withdrawn; ignored for an id not held (lapsed)
+//                   {op:"ping", id}   answered {op:"pong", id}: a brain's own liveness check (PR 3b-1's relay)
 //   broker → brain  {op:"hello", brain, boot, lease_s, idle_s, warm_s_left, max_waiting, max_held, max_sockets,
 //                    max_frame, servers: [{name, bases, slots, reserve, per_model}]}
 //                                     on open; `boot` changes when the broker restarts
@@ -36,7 +37,8 @@
 //                                     not brokered: `server` (no server of the registry's has that base: the brain's own
 //                                     share holds it), `bad`, `id` (in use), `limit` (max_waiting background asks
 //                                     waiting on the socket, or max_held in all: the brain holds the call and asks again
-//                                     as one of its own ends — never its own share, which would run it uncounted)
+//                                     as one of its own ends — never its own share, which would run it uncounted; PR
+//                                     3b-1's relay keeps max_waiting itself, parking the rest)
 //                   {op:"lapsed", id} held past lease_s, taken back: the brain asks no `held` for it again
 // A model is a name the brain uses the same way each call: unnamed is one model, `?`; a server with `per_model: false`
 // (a decide tier serving one call at a time) is one pool whatever the model. A closed socket — closed, silent past
@@ -346,6 +348,8 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const id = typeof m.id === "string" && m.id.length >= 1 && m.id.length <= 64 ? m.id : null;
     if (id === null) { conn.sent({ op: "no", id: null, why: "bad" }); return; }
     if (m.op === "done") { const x = conn.held.get(id); if (x) release(x); return; }
+    // A brain's liveness check (SMD-3379 PR 3b-1): answered, nothing else.
+    if (m.op === "ping") { conn.sent({ op: "pong", id }); return; }
     if (m.op !== "ask" && m.op !== "held") { conn.sent({ op: "no", id, why: "bad" }); return; }
     const model = m.model === undefined || m.model === null ? "?" : typeof m.model === "string" && m.model.length >= 1 && m.model.length <= 256 ? m.model : null;
     const cls = m.cls === "live" || m.cls === "background" ? m.cls : null;

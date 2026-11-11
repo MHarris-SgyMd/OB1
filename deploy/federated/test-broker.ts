@@ -389,6 +389,8 @@ await withBroker(registry(), async (b) => {
     s.send({ op: "ask", id, base: BASE, model: "x", cls: "background", ...m });
     ok((await s.next("no", id))?.why === "bad", `an ask with ${JSON.stringify(m)}: no, bad`);
   }
+  s.send({ op: "ping", id: "p1" });
+  ok(!!(await s.next("pong", "p1")), "a ping is answered pong: a brain's liveness check");
   s.send({ op: "done", id: "never-asked" });
   s.send({ op: "ask", id: "after", base: BASE, model: "x", cls: "live" });
   ok(!!(await s.next("go", "after")), "a done for an id never asked is ignored, the socket carries on");

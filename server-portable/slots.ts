@@ -334,6 +334,8 @@ type RelayClient = {
   ask(call: ResolvedModelCall, signal: AbortSignal, waiting: () => void, first: boolean, maxWaitS: number): Promise<{ go: string } | { own: true }>;
   /** A live call, counted and not waited for: its id to end it with. */
   live(call: ResolvedModelCall): string;
+  /** A call running on this process's own share, after `own`, so the broker counts it too: its id to end it with. */
+  running(call: ResolvedModelCall): string;
   done(id: string): void;
 };
 
@@ -372,6 +374,11 @@ function relayClient(env: Record<string, string | undefined>, log: (line: string
     live(call) {
       const id = `l${++next}`;
       send(frame(id, call));
+      return id;
+    },
+    running(call) {
+      const id = `o${++next}`;
+      send({ slot: "running", id, base: call.base, model: call.model ?? null, cls: call.cls });
       return id;
     },
     done(id) { send({ slot: "done", id }); },
@@ -415,7 +422,10 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   const setting = slotsSettingFrom(opts.raw, opts.modelSlots);
   for (const p of setting.problems) log(p);
   const problem = setting.problems.length ? setting.problems.join("; ") : undefined;
-  if (!setting.set && !setting.defaults) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
+  // The coordinator's relay, where it started this process with one (SMD-3379 PR 3b-1): read before `off`, which holds
+  // nothing to this process's own shares but leaves the host's broker in (review pass 1: `off` dropped it unsaid).
+  const relay = relayClient(opts.env ?? process.env, log);
+  if (!setting.set && !setting.defaults && !relay) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
   const ended = new AbortController();
   const stop = opts.stop ? AbortSignal.any([opts.stop, ended.signal]) : ended.signal;
   const boundS = opts.connectS ?? CONNECT_S;
@@ -816,30 +826,12 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       else void close(held);
     }
   };
-  // The coordinator's relay first, where it started this process with one (SMD-3379 PR 3b-1): the host's broker hands
-  // out the slot, the brain's other processes' and other brains' calls counted with it; its `own` falls through here.
-  const relay = relayClient(opts.env ?? process.env, log);
-  const hook: ModelCallHook = async (call, run, waiting) => {
-    if (relay && !relay.gone()) {
-      if (call.cls === "live") {
-        // Counted, never waited for: the broker grants live at once, always (the maintainer, 2026-11-11).
-        const id = relay.live(call);
-        try { return await run(); } finally { relay.done(id); }
-      }
-      const asked = performance.now();
-      let waited = false;
-      const got = await relay.ask(call, call.signal ? AbortSignal.any([call.signal, stop]) : stop, () => { waited = true; waiting(); }, call.pass !== undefined && FIRST_PASSES.has(call.pass), maxWaitMs / 1000).catch((e) => {
-        noteSlotWait(call, performance.now() - asked, "stopped", waited);
-        throw e;
-      });
-      if ("go" in got) {
-        noteSlotWait(call, performance.now() - asked, "held", waited);
-        try { return await run(); } finally { relay.done(got.go); }
-      }
-    }
-    const share = shareOf(setting, call);
-    if (!share) return run();
-    // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a).
+  // The coordinator's relay first (SMD-3379 PR 3b-1): the host's broker hands out the slot, the brain's other
+  // processes' and other brains' calls counted with it; its `own` falls through here, the call then reported running
+  // so the broker counts it as well (review pass 1: own calls ran uncounted after a hand-back).
+  const hook: ModelCallHook = async (call, plain, waiting) => {
+    // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a) —
+    // from the first ask, the relay's wait carried into its own share's (review pass 1).
     const asked = performance.now();
     // Whether it waited at all, by the hook's own word, apart from a slot taken at once (review pass 1).
     let waited = false;
@@ -847,6 +839,29 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       waited = true;
       waiting();
     };
+    let run = plain;
+    if (relay && !relay.gone()) {
+      if (call.cls === "live") {
+        // Counted, never waited for: the broker grants live at once, always (the maintainer, 2026-11-11).
+        const id = relay.live(call);
+        try { return await run(); } finally { relay.done(id); }
+      }
+      const got = await relay.ask(call, call.signal ? AbortSignal.any([call.signal, stop]) : stop, told, call.pass !== undefined && FIRST_PASSES.has(call.pass), maxWaitMs / 1000).catch((e) => {
+        noteSlotWait(call, performance.now() - asked, "stopped", waited);
+        throw e;
+      });
+      if ("go" in got) {
+        noteSlotWait(call, performance.now() - asked, "held", waited);
+        try { return await plain(); } finally { relay.done(got.go); }
+      }
+      run = async () => {
+        if (relay.gone()) return plain();
+        const id = relay.running(call);
+        try { return await plain(); } finally { relay.done(id); }
+      };
+    }
+    const share = shareOf(setting, call);
+    if (!share) return run();
     let held: Held | null;
     try {
       held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told, call.pass !== undefined && FIRST_PASSES.has(call.pass));

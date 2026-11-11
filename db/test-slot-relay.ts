@@ -47,7 +47,7 @@ writeFileSync(CHILD, `
 import { installBackgroundSlots } from ${JSON.stringify(join(SP, "slots.ts"))};
 import { asPass, modelCall, withCallWaits } from ${JSON.stringify(join(SP, "model-call.ts"))};
 const send = (m) => process.send?.(m);
-installBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: "chat=1", connectS: 1, log: (l) => send({ ev: "log", line: l }) });
+installBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: process.argv[3] ?? "chat=1", connectS: 1, log: (l) => send({ ev: "log", line: l }) });
 const ends = new Map();
 async function call(m) {
   const stop = m.abortAfter ? AbortSignal.timeout(m.abortAfter) : undefined;
@@ -63,6 +63,16 @@ async function call(m) {
 }
 process.on("message", (m) => {
   if (m?.cmd === "call") void call(m);
+  else if (m?.cmd === "raw") process.send(m.frame);
+  else if (m?.cmd === "burst") {
+    // n calls at once, each ending as it runs: how many ran, and the most at once.
+    let ran = 0, now = 0, most = 0;
+    void Promise.all(Array.from({ length: m.n }, (_, i) => modelCall({ type: "chat", model: "m", base: ${JSON.stringify(BASE)}, purpose: "test", cls: "background" }, async () => {
+      now++; most = Math.max(most, now); ran++;
+      await new Promise((r) => setTimeout(r, 1));
+      now--;
+    }))).then(() => send({ ev: "burst", ran, most }));
+  }
   else if (m?.cmd === "end") ends.get(m.id)?.();
   else if (m?.cmd === "once") void call({ id: "once" }).then(() => send({ ev: "onceDone" }));
 });
@@ -77,9 +87,9 @@ type Ev = { ev: string; id?: string; line?: string; ms?: number };
 type Pass = { evs: Ev[]; port: RelayPort | null; proc: ReturnType<typeof Bun.spawn>; cmd(m: object): void; saw(ev: string, id?: string): boolean; wait(ev: string, id?: string, ms?: number): Promise<boolean> };
 
 /** A pass started as supervise.ts starts one under a relay: a channel, OB1_SLOT_RELAY=ipc, the relay's frames to its port. */
-async function startPass(port: RelayPort | null, opts: { relayEnv?: boolean; mode?: string } = {}): Promise<Pass> {
+async function startPass(port: RelayPort | null, opts: { relayEnv?: boolean; mode?: string; raw?: string } = {}): Promise<Pass> {
   const evs: Ev[] = [];
-  const proc = Bun.spawn([process.execPath, "--no-env-file", CHILD, ...(opts.mode ? [opts.mode] : [])], {
+  const proc = Bun.spawn([process.execPath, "--no-env-file", CHILD, opts.mode ?? "keep", ...(opts.raw ? [opts.raw] : [])], {
     env: { PATH: process.env.PATH ?? "", HOME: DIR, ...(opts.relayEnv === false ? {} : { OB1_SLOT_RELAY: "ipc" }) },
     stdio: ["ignore", "inherit", "inherit"],
     ipc: (m: Ev & { slot?: string }) => { if (m && typeof m === "object" && "slot" in m) port?.onMessage(m); else evs.push(m); },
@@ -166,7 +176,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await relay.stop();
 });
 
-section("[4] the broker away: own shares meanwhile, running calls re-registered on its return");
+section("[4] the broker away: a grace, then own shares, and every call running counted on its return");
 {
   const reg = registry({ slots: 1 });
   const logs: string[] = [];
@@ -178,20 +188,160 @@ section("[4] the broker away: own shares meanwhile, running calls re-registered 
   a.cmd({ cmd: "call", id: "r1" }); await a.wait("run", "r1");
   a.cmd({ cmd: "call", id: "r2" }); await a.wait("waiting", "r2");
   await b.stop();
-  ok(await a.wait("run", "r2"), "the broker gone, the waiting call runs on the pass's own share");
-  ok(await until(() => relay.state().broker === "down"), "the relay says the broker is down", relay.state());
+  const lostAt = performance.now();
+  ok(await until(() => relay.state().broker === "down"), "the relay sees the broker gone", relay.state());
+  ok(!(await a.wait("run", "r2", 2000)), "the waiting call waits out the grace for it, not on its own share at once");
+  ok(await a.wait("run", "r2", 4000), "then runs on the pass's own share");
+  const waitedMs = performance.now() - lostAt;
+  ok(waitedMs >= 2500, `after GRACE_MS (${Math.round(waitedMs)} ms)`, waitedMs);
   a.cmd({ cmd: "call", id: "r3" });
-  ok(await a.wait("run", "r3"), "and a call asked meanwhile runs on its own share at once");
-  ok(logs.some((l) => /own shares meanwhile/.test(l)), "said once", logs);
+  ok(await a.wait("run", "r3"), "a call asked past the grace runs on its own share at once");
+  ok(logs.filter((l) => /asks wait 3 s for it/.test(l)).length === 1, "the loss said once for the spell", logs);
   b = startBroker(reg, { port, log: () => {} });
   try {
     ok(await upOf(relay), "the broker back, the relay reconnects");
-    ok(await until(() => pool(b).background === 1), "and re-registers the call still running on a grant: the broker counts it", b.snapshot());
-    ok(logs.some((l) => /restarted.*1 call still running re-registered/.test(l)), "saying the broker restarted", logs);
+    ok(await until(() => pool(b).background === 3), "and every call still running is counted there — the grant and the two on the pass's own share", b.snapshot());
+    ok(logs.some((l) => /restarted.*3 calls still running re-registered/.test(l)), "saying the broker restarted", logs);
     a.cmd({ cmd: "end", id: "r1" }); a.cmd({ cmd: "end", id: "r2" }); a.cmd({ cmd: "end", id: "r3" });
-    ok(await until(() => pool(b).background === 0), "the re-registered call's done lands at the new broker", b.snapshot());
+    ok(await until(() => pool(b).background === 0), "their dones land at the new broker", b.snapshot());
   } finally { await kill(a); await relay.stop(); await b.stop(); }
 }
+
+{
+  // A link lost and back within the grace: the waiting ask is asked again, its time carried — never its own share.
+  const reg = registry({ slots: 1 });
+  let b = startBroker(reg, { port: 0, log: () => {} });
+  const port = b.port;
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const a = await startPass(relay.port("sleep"));
+  a.cmd({ cmd: "call", id: "q1" }); await a.wait("run", "q1");
+  a.cmd({ cmd: "call", id: "q2" }); await a.wait("waiting", "q2");
+  await b.stop();
+  await until(() => relay.state().broker === "down");
+  b = startBroker(reg, { port, log: () => {} });
+  try {
+    ok(await upOf(relay), "the broker back within the grace");
+    ok(await until(() => pool(b).background === 1 && pool(b).waiting.stable === 1), "the running call re-registered and the waiting ask asked again", b.snapshot());
+    ok(!a.saw("run", "q2"), "the waiting call never ran on its own share");
+    a.cmd({ cmd: "end", id: "q1" });
+    ok(await a.wait("run", "q2"), "it runs on the broker's grant once the slot is given back");
+    a.cmd({ cmd: "end", id: "q2" });
+    ok(await until(() => pool(b).background === 0), "and its done lands", b.snapshot());
+  } finally { await kill(a); await relay.stop(); await b.stop(); }
+}
+
+{
+  // An ask parked over a lost link carries its time waited to the next socket: aged there (max_wait_s 1, parked 1.2 s), it
+  // goes before an ask of the same brain put first after the reconnect — asked afresh it would not have aged.
+  const reg = registry({ slots: 1 });
+  let b = startBroker(reg, { port: 0, log: () => {} });
+  const port0 = b.port;
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const got: { slot: string; id: string }[] = [];
+  const port = relay.port("probe");
+  port.attach((m) => got.push(m));
+  port.onMessage({ slot: "ask", id: "hold", base: BASE, model: "m", cls: "background" });
+  await until(() => got.some((m) => m.slot === "go" && m.id === "hold"));
+  await b.stop();
+  await until(() => relay.state().broker === "down");
+  port.onMessage({ slot: "ask", id: "aged", base: BASE, model: "m", cls: "background", max_wait_s: 1 });
+  await sleep(1200);
+  b = startBroker(reg, { port: port0, log: () => {} });
+  try {
+    await upOf(relay);
+    await until(() => pool(b).background === 1 && pool(b).waiting.stable === 1);
+    port.onMessage({ slot: "ask", id: "first", base: BASE, model: "m", cls: "background", first: true });
+    await until(() => pool(b).waiting.stable === 2);
+    port.onMessage({ slot: "done", id: "hold" });
+    ok(await until(() => got.some((m) => m.slot === "go" && (m.id === "aged" || m.id === "first"))) && got.some((m) => m.slot === "go" && m.id === "aged") && !got.some((m) => m.slot === "go" && m.id === "first"),
+      "an ask parked over a lost link keeps its age at the next broker (waited_s): aged, it goes before a later ask put first", got);
+    port.detach();
+  } finally { await relay.stop(); await b.stop(); }
+}
+
+section("[7] past the broker's limit: asks wait in the relay, never on their own share");
+await withBroker(registry({ slots: 1 }), async (b) => {
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const a = await startPass(relay.port("sleep"));
+  let most = 0;
+  const watch = setInterval(() => { most = Math.max(most, pool(b).background); }, 2);
+  a.cmd({ cmd: "burst", n: 1100 });
+  ok(await a.wait("burst", undefined, 60_000), "1100 calls at once all run");
+  clearInterval(watch);
+  const burst = a.evs.find((e) => e.ev === "burst") as unknown as { ran: number; most: number };
+  ok(burst.ran === 1100 && burst.most === 1 && most <= 1, `one at a time on the one slot, none on its own share beside it (ran ${burst.ran}, most at once ${burst.most}, the broker's most ${most})`);
+  ok(relay.state().parked === 0 && relay.state().asks === 0, "the relay holds nothing after", relay.state());
+  await kill(a); await relay.stop();
+});
+
+section("[8] a broker frozen, a bad frame, a refused key, `off`");
+{
+  // The broker as a process of its own, frozen (SIGSTOP) with its socket open: the relay drops it once it has said
+  // nothing for idle_s, and the waiting call runs on its own share after the grace.
+  const brokerFile = resolve(import.meta.dir, "../deploy/federated/broker.ts");
+  const regFile = join(DIR, "frozen.yaml");
+  const port = 18_400 + Math.floor(Math.random() * 400);
+  writeFileSync(regFile, `broker:\n  port: ${port}\n  idle_s: 8\n  warm_s: 0\nservers:\n  ollama:\n    bases: [${BASE}]\n    slots: 1\n    reserve: 0\nbrains:\n  stable:\n    key: "${hashKey(KEYS.stable)}"\n`);
+  const bp = Bun.spawn([process.execPath, "--no-env-file", brokerFile, "--registry", regFile], { stdio: ["ignore", "ignore", "inherit"] });
+  const logs: string[] = [];
+  const relay = startRelay({ url: `ws://127.0.0.1:${port}/v1/slots`, key: KEYS.stable, log: (l) => logs.push(l), reconnectMs: { first: 50, max: 200 } });
+  try {
+    ok(await until(() => relay.state().broker === "up", 8000), "the relay reaches a broker of its own process");
+    const a = await startPass(relay.port("sleep"));
+    a.cmd({ cmd: "call", id: "f1" }); await a.wait("run", "f1");
+    a.cmd({ cmd: "call", id: "f2" }); await a.wait("waiting", "f2");
+    bp.kill("SIGSTOP");
+    const t0 = performance.now();
+    ok(await a.wait("run", "f2", 25_000), "the broker frozen, the waiting call runs on its own share");
+    const took = performance.now() - t0;
+    ok(took > 6000 && took < 20_000, `after the relay heard nothing for idle_s and the grace (${Math.round(took)} ms)`, took);
+    ok(logs.some((l) => /silent for 8 s/.test(l)), "saying the broker went silent", logs);
+    a.cmd({ cmd: "end", id: "f1" }); a.cmd({ cmd: "end", id: "f2" });
+    await kill(a);
+  } finally {
+    bp.kill("SIGCONT"); bp.kill("SIGKILL"); await bp.exited;
+    await relay.stop();
+  }
+}
+
+await withBroker(registry({ slots: 1 }), async (b) => {
+  const logs: string[] = [];
+  const relay = relayTo(b, KEYS.stable, logs);
+  await upOf(relay);
+  const boot = relay.state().boot;
+  const a = await startPass(relay.port("sleep"));
+  a.cmd({ cmd: "call", id: "g1" }); await a.wait("run", "g1");
+  const owns: unknown[] = [];
+  const port = relay.port("probe");
+  port.attach((m) => owns.push(m));
+  port.onMessage({ slot: "ask", id: "big", base: "h".repeat(5000), model: "m", cls: "background" });
+  port.onMessage({ slot: "ask", id: "neg", base: BASE, model: "m", cls: "background", max_wait_s: -1 });
+  await sleep(200);
+  ok(JSON.stringify(owns) === JSON.stringify([{ slot: "own", id: "big" }, { slot: "own", id: "neg" }]), "a frame the broker would refuse is answered own, never passed on", owns);
+  ok(relay.state().broker === "up" && relay.state().boot === boot && !logs.some((l) => /was lost|the broker refused/.test(l)) && pool(b).background === 1, "and the brain's socket stays up, the pass's grant with it, the broker never asked", { s: relay.state(), logs });
+  port.onMessage({ slot: "running", id: "own1", base: BASE, model: "m", cls: "background" });
+  ok(await until(() => pool(b).background === 2), "a call a pass runs on its own share, the broker up, is counted there at once", b.snapshot());
+  port.onMessage({ slot: "done", id: "own1" });
+  ok(await until(() => pool(b).background === 1), "and given back at its done", b.snapshot());
+  a.cmd({ cmd: "end", id: "g1" });
+  await kill(a); await relay.stop();
+
+  const refusedLogs: string[] = [];
+  const refused = relayTo(b, "slot_not-a-brain", refusedLogs);
+  ok(await until(() => refusedLogs.some((l) => /refused this brain's key \(401\)/.test(l)), 5000), "a key the broker refuses is named, not read as an outage", refusedLogs);
+  await refused.stop();
+
+  const relay2 = relayTo(b, KEYS.stable);
+  await upOf(relay2);
+  const off = await startPass(relay2.port("sleep"), { raw: "off" });
+  off.cmd({ cmd: "call", id: "o1" });
+  ok(await off.wait("run", "o1") && await until(() => pool(b).background === 1), "OB1_BACKGROUND_SLOTS=off holds nothing to the pass's own shares but leaves the broker in", b.snapshot());
+  off.cmd({ cmd: "end", id: "o1" });
+  await kill(off); await relay2.stop();
+});
 
 section("[5] what the broker does not broker, a live call, a stop while waiting");
 await withBroker(registry({ slots: 1 }), async (b) => {

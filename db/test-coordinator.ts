@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, relaySettings, runOnce, type Child } from "./coordinator.ts";
 import type { Relay, RelayPort } from "./slot-relay.ts";
+import { hashKey, parseRegistry, startBroker } from "../deploy/federated/broker.ts";
 import { supervise } from "./supervise.ts";
 
 let pass = 0;
@@ -242,7 +243,7 @@ if (!existsSync(composePath)) {
     await Promise.race([c.done, Bun.sleep(5000)]);
     return { seen: existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : null, frames, attached, detached };
   };
-  const fake: Relay = { port: () => ({ onMessage: () => {}, attach: () => {}, detach: () => {} }) as RelayPort, state: () => ({ broker: "up", boot: null, since: 0, asks: 0, grants: 0 }), stop: async () => {} };
+  const fake: Relay = { port: () => ({ onMessage: () => {}, attach: () => {}, detach: () => {} }) as RelayPort, state: () => ({ broker: "up", boot: null, since: 0, asks: 0, parked: 0, grants: 0, own: 0 }), stop: async () => {} };
   const withRelay = await runWith(fake, join(dir, "with.json"));
   ok(withRelay.seen?.relay === "ipc" && withRelay.seen?.channel === "function" && withRelay.seen?.key === false,
     `under a relay, a child is told OB1_SLOT_RELAY=ipc and has a channel — never the broker's key (${JSON.stringify(withRelay.seen)})`);
@@ -250,6 +251,24 @@ if (!existsSync(composePath)) {
     `its frames reach the relay's port, attached at its start and detached at its end (${withRelay.frames.length} frame, ${withRelay.attached}/${withRelay.detached})`);
   const without = await runWith(null, join(dir, "without.json"));
   ok(without.seen?.relay === null && without.seen?.channel === "undefined", `without one, no flag and no channel (${JSON.stringify(without.seen)})`);
+
+  // The relay the coordinator opens itself, from its environment, to a real broker: the planted child's ask counted there.
+  const reg = parseRegistry(`broker:\n  warm_s: 0\nservers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\n    reserve: 0\nbrains:\n  b:\n    key: "${hashKey("slot_k")}"\n`).registry!;
+  const broker = startBroker(reg, { port: 0, log: () => {} });
+  try {
+    const out = join(dir, "real.json");
+    const c = coordinate({
+      env: { PATH: process.env.PATH ?? "", PROBE_OUT: out, OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${broker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k" }, sql: null, asOwnUsers: false,
+      children: [{ ...CHILDREN["board-sync"], script: probe, args: () => [] }], writer: { out: () => {}, err: () => {} },
+    });
+    let counted = false;
+    for (let i = 0; i < 100 && !counted; i++) { await Bun.sleep(50); counted = broker.snapshot()["o/m"]?.background === 1; }
+    c.stop("SIGTERM");
+    await Promise.race([c.done, Bun.sleep(5000)]);
+    let gone = false;
+    for (let i = 0; i < 40 && !gone; i++) { await Bun.sleep(50); gone = !("o/m" in broker.snapshot()); }
+    ok(counted && gone, `the coordinator opens the relay from OB1_SLOT_BROKER_URL and _KEY: its pass's ask is granted at the broker, and given back when the pass ends (${counted}, ${gone})`);
+  } finally { await broker.stop(); }
   rmSync(dir, { recursive: true, force: true });
 }
 
