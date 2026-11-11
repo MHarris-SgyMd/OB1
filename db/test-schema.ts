@@ -17234,8 +17234,8 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   // A role granted the priority group as 116 listed it, not re-granted after 117: every priority call it made still answers; only an item of kind item reaches open_items (review pass 2).
   const OLDROLE = "ob1_test_priority_at_116";
   await db.exec(`CREATE ROLE ${OLDROLE} NOLOGIN`);
-  // 117's open items and 132's weights joined the group later.
-  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON (?:open_item|priority_weight_settings)/.test(st));
+  // 117's open items, 132's weights and 133's thought_sources joined the group later.
+  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON (?:open_item|priority_weight_settings|thought_sources)/.test(st));
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${OLDROLE}`, ...grantStatements(OLDROLE, { groups: ["capture", "server"] }), ...at116]) await db.exec(st);
   const capOld = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role granted at 116");
   const oldUse = async (sql: string, params: unknown[]) => {
@@ -19373,6 +19373,201 @@ console.log("\n[119] Migration 132: the operator's priority weights — priority
   await reapply(file.slice(0, 4));
   assert((await rows()).length === kept && await eff() === "SMD-9964 5, SMD-9967 5" && Number(await span()) === 9, "a re-apply is a no-op: the rows kept, the setting standing, the same reads");
   await set({}, OP);
+}
+
+console.log("\n[120] Migration 133: a ticket and its own rows are one item to the writers — a maker's new statement on either closes its statement on the other, a clear naming either closes both, the same words on the item named unchanged and on another item of the pool moved; another maker's untouched; the pool's winner, priority_of and history (its lock: test-upgrade [20bx], on Postgres); each exact item's projection re-made, no drift; an item that is no ticket's row a pool of one; on upgrade a maker's older open statements across a pool closed as replaced by its newest; the group's thought_sources grant carried; a re-apply a no-op (SMD-4127)");
+{
+  type Assertion = { id: string; item: { kind: string; key: string }; level: number; maker: { name: string }; tier_name: string; closed_at: string | null; close_reason: string | null; closed_by: string | null };
+  type Answer = { outcome: string; code: string | null; assertion: Assertion | null; replaced: Assertion | null; winner: Assertion | null };
+  const file = files.find((f) => /^\d{3}_priority_ticket_pool_writers\.sql$/.test(f)) ?? "no NNN_priority_ticket_pool_writers.sql";
+  // [104] and [105] re-apply 116 and 117, which put back their writers: 133 is applied again first, as a brain at 133 has it.
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[120] op', 'operator'), ('[120] bot', 'agent')`);
+  const OP = { name: "[120] op", scope: "write" }, BOT = { name: "[120] bot", scope: "write" };
+  const NOW = "2027-03-10T15:00:00Z";
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[120] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  // A ticket as board-sync writes it: its own row, a linear source row (053). Returns the row's id.
+  const ticket = async (issue: string) => {
+    const content = `[120] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    return id;
+  };
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: String((e as { code?: string }).code ?? "?"), assertion: null, replaced: null, winner: null }; }
+  };
+  const put = (kind: string, key: string, level: number, actor: object) =>
+    ans(`SELECT assert_priority($1, $2, $3, NULL, NULL, NULL, NULL, NULL, false, $4::jsonb) AS r`, [kind, key, level, JSON.stringify(actor)]);
+  const clear = (kind: string, key: string, actor: object) => ans(`SELECT clear_priority($1, $2, $3::jsonb) AS r`, [kind, key, JSON.stringify(actor)]);
+  // Every open statement on a set of exact items, in the order written, as "kind:maker:level".
+  const openOn = async (items: [string, string][]) =>
+    (await db.query<{ s: string }>(`SELECT a.item_kind || ':' || a.maker_name || ':' || a.level AS s FROM priority_assertions a
+       JOIN jsonb_to_recordset($1::jsonb) AS i(kind text, key text) ON a.item_kind = i.kind AND a.item_key = i.key WHERE a.closed_at IS NULL ORDER BY a.seq`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key })))])).rows.map((r) => r.s);
+  const history = async (kind: string, key: string) => (await db.query<{ r: Assertion[] }>(`SELECT priority_history($1, $2) AS r`, [kind, key])).rows[0].r;
+  const of = async (kind: string, key: string) =>
+    (await db.query<{ level: number | null; winner: Assertion | null; assertions: Assertion[] }>(`SELECT * FROM priority_of($1::jsonb)`, [JSON.stringify([{ kind, key }])])).rows[0];
+  const effLevel = async (kind: string, key: string) =>
+    (await db.query<{ level: number | null }>(`SELECT level FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`, [JSON.stringify([{ kind, key }]), NOW])).rows[0].level;
+  const current = async (kind: string, key: string) =>
+    (await db.query<{ level: number; open_count: number }>(`SELECT level, open_count FROM priority_current WHERE item_kind = $1 AND item_key = $2`, [kind, key])).rows[0] ?? null;
+  const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
+
+  // The shape: the new function STABLE and commented; the replaced ones say 133; the lock PL/pgSQL.
+  const fns = (await db.query<{ n: string; v: string; l: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, l.lanname AS l, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_pool_items', 'ob1_priority_lock', 'ob1_priority_winner', 'ob1_priority_project', 'ob1_rebuild_priority_projection', 'assert_priority', 'clear_priority', 'priority_of', 'priority_history', 'ob1_priority_counted') ORDER BY 1`)).rows;
+  assert(fns.length === 10 && fns.every((f) => /[Mm]igration 133 \/ SMD-4127/.test(f.c ?? "")) && fns.find((f) => f.n === "ob1_priority_pool_items")?.v === "s"
+         && fns.find((f) => f.n === "ob1_priority_lock")?.l === "plpgsql",
+    `ten functions name 133: one new (STABLE), eight replaced, and ob1_priority_counted's comment; the lock now PL/pgSQL (${fns.map((f) => `${f.n}:${f.v}:${f.l}`).join(", ")})`);
+
+  const rowA = await ticket("SMD-9985");
+  const rowB = await ticket("SMD-9986");
+  const T: [string, string] = ["ticket", "SMD-9985"], R: [string, string] = ["thought", rowA];
+
+  // The ticket's Verify, first: an operator's Critical on the ticket's row, then Low on the ticket — one stays open, the Low.
+  const crit = await put("thought", rowA, 5, OP);
+  const botRow = await put("thought", rowA, 3, BOT);
+  const low = await put("ticket", "SMD-9985", 1, OP);
+  const critNow = (await history(...R)).find((h) => h.id === crit.assertion?.id);
+  assert(crit.outcome === "asserted" && low.outcome === "asserted" && low.replaced?.id === crit.assertion?.id
+         && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] bot:3", "ticket:[120] op:1"])
+         && critNow?.close_reason === "replaced" && critNow?.closed_by === low.assertion?.id,
+    `Critical on the row, then Low on the ticket: one of the operator's stays open, the Low; the Critical closed as replaced by it and named as replaced; the agent's statement on the row untouched (${JSON.stringify(await openOn([T, R]))})`);
+  // The pool's winner in each reply: the agent's High on the row named the operator's Critical; the Low names itself.
+  assert(botRow.winner?.id === crit.assertion?.id && low.winner?.id === low.assertion?.id,
+    `each reply's winner is the pool's: the agent's High on the row named the operator's Critical, then on the row; the Low on the ticket names itself (${botRow.winner?.level}, ${low.winner?.level})`);
+  // Each exact item's projection re-made: the row's winner now the agent's, the ticket's the Low; no drift.
+  assert(JSON.stringify(await current(...R)) === JSON.stringify({ level: 3, open_count: 1 }) && JSON.stringify(await current(...T)) === JSON.stringify({ level: 1, open_count: 1 }) && await drift() === 0,
+    `priority_current is re-made for the row whose statement closed and for the ticket, keyed by the exact item; no drift (${JSON.stringify(await current(...R))}, ${JSON.stringify(await current(...T))})`);
+
+  // The history, named either way, is the pool's: every statement, closed ones included, each naming its own item.
+  const hT = await history(...T), hR = await history(...R);
+  assert(JSON.stringify(hT) === JSON.stringify(hR) && JSON.stringify(hT.map((h) => `${h.item.kind}:${h.level}:${h.closed_at === null ? "open" : h.close_reason}`)) === JSON.stringify(["thought:5:replaced", "thought:3:open", "ticket:1:open"]),
+    `priority_history on the ticket and on its row is one list, oldest first, each statement naming its item (${hT.map((h) => `${h.item.kind}:${h.level}`).join(", ")})`);
+  // priority_of and the winner, named either way: the pool's open statements, the operator's Low first.
+  const oT = await of(...T), oR = await of(...R);
+  assert(oT.level === 1 && oR.level === 1 && oT.winner?.id === low.assertion?.id && oR.winner?.id === low.assertion?.id && oT.assertions.length === 2 && oR.assertions.length === 2
+         && oT.assertions[0]?.id === low.assertion?.id,
+    `priority_of names the pool's winner and lists its open statements in the rule's order whichever item is asked (${oT.level}/${oR.level}, ${oT.assertions.length}/${oR.assertions.length})`);
+
+  // The same words again on the item named are unchanged; on the other item of the pool they move there.
+  const again = await put("ticket", "SMD-9985", 1, OP);
+  const moved = await put("thought", rowA, 1, OP);
+  assert(again.outcome === "unchanged" && moved.outcome === "asserted" && moved.replaced?.id === low.assertion?.id
+         && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] bot:3", "thought:[120] op:1"]),
+    `the same statement on the ticket again is unchanged; the same words on its row move it there, the ticket's closed (${again.outcome}, ${moved.outcome}; ${JSON.stringify(await openOn([T, R]))})`);
+
+  // The ticket's Verify, second and third: clearing the ticket closes the operator's statement on the row, leaving none of
+  // its own open, the agent's on the row untouched; once the agent clears too, effective_priority reads unknown.
+  const cleared = await clear(...T, OP);
+  const opOpen = await openOn([T, R]);
+  // The row's projection re-made by the clear naming the ticket: its winner now the agent's.
+  const rowAfterClear = await current(...R), driftAfterClear = await drift();
+  const levelWithBot = await effLevel(...T);
+  await clear(...R, BOT);
+  const levelNone = await effLevel(...T), levelNoneRow = await effLevel(...R);
+  assert(cleared.outcome === "cleared" && cleared.assertion?.id === moved.assertion?.id && cleared.assertion?.item.kind === "thought"
+         && JSON.stringify(opOpen) === JSON.stringify(["thought:[120] bot:3"]) && JSON.stringify(rowAfterClear) === JSON.stringify({ level: 3, open_count: 1 }) && driftAfterClear === 0
+         && levelWithBot === 3 && levelNone === null && levelNoneRow === null
+         && await current(...T) === null && await current(...R) === null && await drift() === 0,
+    `clearing the ticket closes the operator's statement on its row (named in the reply), the agent's untouched (the row's projection re-made to it, no drift; the read then the agent's 3); once the agent clears, effective_priority reads unknown on the ticket and the row; no projection row, no drift (${cleared.outcome}, ${levelWithBot}, ${levelNone})`);
+  // A clear naming the row reaches the ticket's.
+  await put(...T, 4, OP);
+  const clearedViaRow = await clear(...R, OP);
+  const nothing = await clear(...T, OP);
+  assert(clearedViaRow.outcome === "cleared" && clearedViaRow.assertion?.item.kind === "ticket" && nothing.outcome === "nothing_to_clear" && (await openOn([T, R])).length === 0,
+    `a clear naming the row closes the maker's statement on the ticket; a second, on the ticket, has nothing to clear (${clearedViaRow.outcome}, ${nothing.outcome})`);
+
+  // Another ticket's pool is its own; a thought that is no ticket's row is a pool of one.
+  const loneA = await thoughtAs("[120] a note"), loneB = await thoughtAs("[120] another note");
+  await put("ticket", "SMD-9985", 2, OP); await put("ticket", "SMD-9986", 3, OP); await put("thought", rowB, 3, OP);
+  await put("thought", loneA, 2, OP); await put("thought", loneB, 4, OP);
+  const spread = await openOn([T, ["ticket", "SMD-9986"], ["thought", rowB], ["thought", loneA], ["thought", loneB]]);
+  assert(JSON.stringify(spread) === JSON.stringify(["ticket:[120] op:2", "thought:[120] op:3", "thought:[120] op:2", "thought:[120] op:4"])
+         && (await history("thought", loneA)).length === 1,
+    `another ticket's statements are its own pool (its ticket's closed by its row's); two notes that are no ticket's rows keep one each; a note's history is its own (${JSON.stringify(spread)})`);
+
+  // A thought that becomes a ticket's row after both were made joins the pool with both standing (not changed by 133): the
+  // winner takes the maker's newest alone, as the read does, though its older one was made at a lower tier before the
+  // key was reclassified; the maker's next write closes both, even one saying what its newest says (two open is no
+  // `unchanged`).
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[120] late', 'operator')`);
+  const LATE = { name: "[120] late", scope: "write" };
+  await ticket("SMD-9987");
+  const late = await thoughtAs("[120] a note that becomes SMD-9987's row");
+  await put("thought", late, 5, LATE);
+  await db.query(`SELECT set_agent_kind('[120] late', 'agent')`);
+  await put("ticket", "SMD-9987", 1, LATE);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[120] op" })]);
+    await tx.query(`UPDATE thoughts SET metadata = '{"source": "linear", "issue": "SMD-9987"}'::jsonb WHERE id = $1::uuid`, [late]);
+  });
+  const lateT: [string, string] = ["ticket", "SMD-9987"], lateR: [string, string] = ["thought", late];
+  const bothOpen = await openOn([lateT, lateR]);
+  const lateOf = await of(...lateT);
+  const lateEff = await effLevel(...lateT);
+  const lateNext = await put("ticket", "SMD-9987", 1, LATE);
+  assert(JSON.stringify(bothOpen) === JSON.stringify(["thought:[120] late:5", "ticket:[120] late:1"]) && lateOf.level === 1 && lateOf.winner?.tier_name === "agent"
+         && lateOf.assertions.length === 2 && lateOf.assertions[0]?.id === lateOf.winner?.id && lateOf.assertions[1]?.level === 5 && lateEff === 1
+         && lateNext.outcome === "asserted" && JSON.stringify(await openOn([lateT, lateR])) === JSON.stringify(["ticket:[120] late:1"]),
+    `a thought that becomes a ticket's row late joins its pool with the maker's two statements standing: the winner is its newest (the Low, at the agent tier it has since), not its older Critical made at the operator tier, as effective_priority reads it; priority_of lists the winner first, the older after; the maker's next write closes both, the same Low again included (${lateNext.outcome}; ${JSON.stringify(bothOpen)}, winner ${lateOf.level} ${lateOf.winner?.tier_name}, read ${lateEff})`);
+
+  // On upgrade: a maker's two open statements across a pool, written raw as 116's writers could leave them — the older (the
+  // ticket's) closes as replaced by the newest (the row's); another maker's lone statement untouched; no drift after.
+  const raw = async (kind: string, key: string, level: number, maker: string) =>
+    (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ($1, $2, $3, $4, (SELECT canonical_agent_id FROM ob1_agents WHERE label = $4), 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [kind, key, level, maker])).rows[0].id;
+  const onTicket = (await db.query<{ id: string }>(`SELECT id::text FROM priority_assertions WHERE item_kind = 'ticket' AND item_key = 'SMD-9985' AND closed_at IS NULL`)).rows[0].id;
+  const onRow = await raw("thought", rowA, 5, "[120] op");
+  const botLone = await raw("thought", rowB, 2, "[120] bot");
+  // A raw write leaves its own item's projection behind: rebuilt first, so any drift after is the upgrade's.
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  const behind = await drift();
+  await reapply(file.slice(0, 4));
+  const after = (await db.query<{ id: string; close_reason: string | null; closed_by: string | null }>(`SELECT id::text, close_reason, closed_by::text FROM priority_assertions WHERE id = ANY($1::uuid[])`,
+    [[onTicket, onRow, botLone]])).rows;
+  const byId = (id: string) => after.find((a) => a.id === id);
+  assert(behind === 0 && byId(onTicket)?.close_reason === "replaced" && byId(onTicket)?.closed_by === onRow && byId(onRow)?.close_reason === null && byId(botLone)?.close_reason === null
+         && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
+    `on upgrade the operator's older open statement across SMD-9985's pool (the ticket's) closes as replaced by its newest (the row's, written raw); the agent's lone statement on another ticket's row untouched; the closed item's projection re-made, no drift (${JSON.stringify([byId(onTicket)?.close_reason, byId(onTicket)?.closed_by === onRow, byId(onRow)?.close_reason, byId(botLone)?.close_reason])}, ${JSON.stringify(await openOn([T, R]))}, drift ${await drift()})`);
+
+  // The group's grant: a role granted capture and priority states on a ticket and reads its history (thought_sources now
+  // the group's); a role holding 116's grants alone is given SELECT on thought_sources by 133.
+  const ROLE = "ob1_test_pool", OLD = "ob1_test_pool_old";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN; CREATE ROLE ${OLD} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${OLD}; GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ${OLD}`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "priority"] })]) await db.exec(st);
+  let roleUse = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${ROLE}`);
+      roleUse = (await tx.query<{ r: Answer }>(`SELECT assert_priority('ticket', 'SMD-9986', 2, p_actor => $1::jsonb) AS r`, [JSON.stringify(BOT)])).rows[0].r.outcome;
+      await tx.query(`SELECT priority_history('thought', $1)`, [rowB]);
+      await tx.query(`SELECT clear_priority('ticket', 'SMD-9986', $1::jsonb)`, [JSON.stringify(BOT)]);
+    });
+  } catch (e) { roleUse = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const before = (await db.query<{ g: boolean }>(`SELECT has_table_privilege('${OLD}', 'thought_sources', 'SELECT') AS g`)).rows[0].g;
+  await reapply(file.slice(0, 4));
+  const carried = (await db.query<{ g: boolean }>(`SELECT has_table_privilege('${OLD}', 'thought_sources', 'SELECT') AS g`)).rows[0].g;
+  assert(roleUse === "asserted" && before === false && carried === true,
+    `a role granted capture and priority states, reads and clears on a ticket's pool; a role holding priority_assertions' grants before 133 is granted SELECT on thought_sources by it (${roleUse}, ${before} → ${carried})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ${OLD}; DROP ROLE ${OLD}`);
+
+  // A re-apply is a no-op: nothing more closed, the same statements open.
+  const closedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)).rows[0].n;
+  const closedBefore = await closedCount();
+  await reapply(file.slice(0, 4));
+  const closedAfter = await closedCount();
+  assert(closedAfter === closedBefore && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
+    `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} → ${closedAfter})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

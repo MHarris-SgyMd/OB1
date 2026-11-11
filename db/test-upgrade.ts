@@ -747,12 +747,17 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // without 034 or 128 ([20bv]); 132 adds the operator's priority weights —
   // a table, two refusing triggers and six functions, 128's
   // ob1_priority_defaults replaced to read them — refusing by name without
-  // 008, 046, 061, 116, 128 or 131 ([20bw]) — all recorded by the
+  // 008, 046, 061, 116, 128 or 131 ([20bw]); 133 replaces 116's and 117's
+  // writers, readers, lock, winner and projection to take a ticket and its
+  // own rows as one item, adds ob1_priority_pool_items, closes a maker's
+  // older statements across one pool and carries the priority group's
+  // thought_sources grant, refusing by name without 116, 117 or 122
+  // ([20bx]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 103, `030 is among the last one hundred and three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 104, `030 is among the last one hundred and four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5317,15 +5322,17 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
          && bot.outcome === "asserted" && bot.assertion?.tier_name === "agent" && bot.winner?.maker.name === "upgrade-op",
     `applied, the file moves no thought nor audit row; an operator's High and an agent's Urgent on one thought, the operator's the winner (${op.outcome}, ${bot.assertion?.tier_name}, ${bot.winner?.maker.name})`);
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["priority"] });
-  // 117's open items join the group (SELECT on open_items and open_item_events), and 132's operator's weights (SELECT,
-  // INSERT and UPDATE on priority_weight_settings): the statements are the group's whole list.
-  assert(grants.length === 7 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
+  // 117's open items join the group (SELECT on open_items and open_item_events), 132's operator's weights (SELECT,
+  // INSERT and UPDATE on priority_weight_settings), and 133's thought_sources (SELECT: a ticket's row is its ticket's to
+  // the writers): the statements are the group's whole list.
+  assert(grants.length === 8 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
          && grants[1] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO "ob1_upgrade_probe";`
          && grants[2] === `GRANT SELECT ON priority_sources TO "ob1_upgrade_probe";`
          && grants[3] === `GRANT SELECT, INSERT, UPDATE ON priority_weight_settings TO "ob1_upgrade_probe";`
          && grants[4] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`
-         && grants[5] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[6] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`,
-    `--grant's priority group: SELECT, INSERT and UPDATE on the assertions, all four on the projection, SELECT alone on the sources and on the entities an assertion may name, SELECT, INSERT and UPDATE on the operator's weights (${grants.join("; ")})`);
+         && grants[5] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[6] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`
+         && grants[7] === `GRANT SELECT ON thought_sources TO "ob1_upgrade_probe";`,
+    `--grant's priority group: SELECT, INSERT and UPDATE on the assertions, all four on the projection, SELECT alone on the sources and on the entities an assertion may name, SELECT, INSERT and UPDATE on the operator's weights, SELECT on the source rows (${grants.join("; ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the116 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM priority_assertions`)[0].n);
   const drift = Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
@@ -6067,6 +6074,110 @@ console.log("\n[20bw] Migration 132: onto a populated brain at the file before i
   assert(reapplied === operator && rowsAfter === rowsBefore && rowsAfter === 1 && cleared.changed === true && read(await agenda(null)) === before && await span() === 5.8,
     `a re-apply is a no-op, the setting standing and its read the same; {} clears it and the read is as before (${reapplied} | ${rowsAfter} rows)`);
   for (const r of ["ob1_upgrade_132_writer", "ob1_upgrade_132_reader", "ob1_upgrade_132_none"]) await sql.unsafe(`DROP OWNED BY ${r}; DROP ROLE ${r}`);
+  await sql.close();
+}
+
+console.log("\n[20bx] Migration 133: onto a populated brain at the file before it — refused by name without 122's ob1_priority_open, nothing replaced; then applied: a maker's two open statements across a ticket and its row (116's writers allowed them) closed to its newest, another maker's and a note's untouched, the projection exact; a write naming the row takes the ticket's lock; a clear on the ticket reaches the row; the priority group's roles given SELECT on thought_sources; a re-apply a no-op (SMD-4127)");
+{
+  const the133 = MIGRATIONS.find((f) => /^\d{3}_priority_ticket_pool_writers\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the133 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator'), ('upgrade-bot', 'agent')`;
+  const OP = JSON.stringify({ name: "upgrade-op", via: "open-brain", scope: "write" }), BOT = JSON.stringify({ name: "upgrade-bot", via: "open-brain", scope: "write" });
+  const content = "upgrade 133: SMD-9781";
+  const meta = { source: "linear", issue: "SMD-9781", status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" };
+  const row = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+  await sql`SELECT record_thought_source(${row}::uuid, 'linear', 'SMD-9781', ${content}, 'text/markdown')`;
+  const note = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 133: a note') RETURNING id`)[0].id);
+  const put = async (kind: string, key: string, level: number, actor: string) =>
+    ((await sql`SELECT assert_priority(${kind}, ${key}, ${level}::int, NULL, NULL, NULL, NULL, NULL, false, (${actor}::text)::jsonb) AS r`)[0] as { r: { outcome: string } }).r.outcome;
+  // At 132: the operator's Critical on the row, then its Low on the ticket — both stay open under 116's writers; the agent's
+  // High on the row; the operator's Medium on a note.
+  const at132 = [await put("thought", row, 5, OP), await put("ticket", "SMD-9781", 1, OP), await put("thought", row, 3, BOT), await put("thought", note, 2, OP)];
+  const open = async () => ((await sql`SELECT a.item_kind || ':' || a.maker_name || ':' || a.level AS s FROM priority_assertions a
+      WHERE a.closed_at IS NULL AND (a.item_key IN ('SMD-9781', ${row}, ${note})) ORDER BY a.seq`) as { s: string }[]).map((r) => r.s);
+  const before = await open();
+  for (const r of ["ob1_upgrade_133_writer", "ob1_upgrade_133_reader", "ob1_upgrade_133_none"]) await sql.unsafe(`CREATE ROLE ${r} NOLOGIN`);
+  await sql.unsafe(`GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ob1_upgrade_133_writer; GRANT SELECT ON priority_assertions TO ob1_upgrade_133_reader`);
+  const held = async (role: string) => (await sql`SELECT has_table_privilege(${role}, 'thought_sources', 'SELECT') AS h`)[0].h as boolean;
+  const pool = async () => (await sql`SELECT to_regprocedure('ob1_priority_pool_items(text, text)') IS NOT NULL AS p`)[0].p as boolean;
+
+  // Without 122's ob1_priority_open: refused by name, nothing replaced.
+  await sql`ALTER FUNCTION ob1_priority_open(text, text) RENAME TO ob1_priority_open_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the133 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_priority_open_away(text, text) RENAME TO ob1_priority_open`;
+  assert(/^migration 133 needs 122 \(ob1_priority_open\); this schema lacks it/.test(without) && !(await pool()) && JSON.stringify(await open()) === JSON.stringify(before),
+    `without 122's ob1_priority_open the file is refused by name; no function made, no statement closed (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the133 });
+  const after = await open();
+  const drift = Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
+  const replaced = (await sql`SELECT a.close_reason, b.item_kind AS by_kind FROM priority_assertions a JOIN priority_assertions b ON b.id = a.closed_by
+      WHERE a.item_key = ${row} AND a.maker_name = 'upgrade-op'`)[0] as { close_reason: string; by_kind: string } | undefined;
+  assert(JSON.stringify(at132) === JSON.stringify(["asserted", "asserted", "asserted", "asserted"])
+         && JSON.stringify(before) === JSON.stringify(["thought:upgrade-op:5", "ticket:upgrade-op:1", "thought:upgrade-bot:3", "thought:upgrade-op:2"])
+         && JSON.stringify(after) === JSON.stringify(["ticket:upgrade-op:1", "thought:upgrade-bot:3", "thought:upgrade-op:2"])
+         && replaced?.close_reason === "replaced" && replaced?.by_kind === "ticket" && drift === 0,
+    `applied: the operator's older statement across SMD-9781's pool (the Critical on its row) closed as replaced by its newest (the Low on the ticket); the agent's on the row and the operator's on a note untouched; no drift (${JSON.stringify(after)})`);
+  const grants = { writer: await held("ob1_upgrade_133_writer"), reader: await held("ob1_upgrade_133_reader"), none: await held("ob1_upgrade_133_none") };
+  assert(grants.writer && grants.reader && !grants.none,
+    `the file grants SELECT on thought_sources to the roles holding the priority group already, a writer and a reader, and none to a role without it (${JSON.stringify(grants)})`);
+
+  // The pool's lock, on Postgres: a write naming the row takes the ticket's key (116's hash of 'ticket:SMD-9781'), so a
+  // writer naming the ticket waits on it; a note's lock is its own.
+  const locks = await sql.begin(async (tx) => {
+    await tx`SELECT ob1_priority_lock('thought', ${row})`;
+    await tx`SELECT ob1_priority_lock('thought', ${note})`;
+    const held = ((await tx`SELECT ((l.classid::bigint << 32) | l.objid::bigint)::text AS k FROM pg_locks l
+        WHERE l.locktype = 'advisory' AND l.pid = pg_backend_pid() ORDER BY 1`) as { k: string }[]).map((r) => r.k);
+    const want = ((await tx`SELECT k::text FROM (SELECT hashtextextended('ob1:priority:ticket:SMD-9781', 0) AS k
+        UNION ALL SELECT hashtextextended('ob1:priority:thought:' || ${note}, 0)) w ORDER BY 1`) as { k: string }[]).map((r) => r.k);
+    return { held, want };
+  });
+  assert(locks.held.length === 2 && JSON.stringify(locks.held) === JSON.stringify(locks.want),
+    `a write naming a ticket's row takes the ticket's lock, 116's hash of its key; a note's is its own (${JSON.stringify(locks)})`);
+
+  // The writers, after: a clear naming the ticket closes the operator's statement wherever it stands in the pool.
+  const cleared = ((await sql`SELECT clear_priority('ticket', 'SMD-9781', (${OP}::text)::jsonb) AS r`)[0] as { r: { outcome: string } }).r.outcome;
+  await put("thought", row, 4, OP);
+  const viaRow = ((await sql`SELECT clear_priority('ticket', 'SMD-9781', (${OP}::text)::jsonb) AS r`)[0] as { r: { outcome: string; assertion: { item: { kind: string } } } }).r;
+  assert(cleared === "cleared" && viaRow.outcome === "cleared" && viaRow.assertion.item.kind === "thought"
+         && JSON.stringify(await open()) === JSON.stringify(["thought:upgrade-bot:3", "thought:upgrade-op:2"]),
+    `after it a clear on the ticket closes the operator's statement there, and one stated on the row since (${cleared}, ${viaRow.outcome} on its ${viaRow.assertion.item.kind})`);
+
+  // The rebuild takes its locks in their subjects' order (review pass 1): drift on a row of SMD-9789 and on ticket
+  // SMD-9782, which by (kind, key) put the row first and so SMD-9789's lock before SMD-9782's. With another session
+  // holding SMD-9782's lock, the rebuild must wait there holding nothing, so SMD-9789's lock stays free to take; then it
+  // finishes once that session ends.
+  const row89 = String((await sql`INSERT INTO thoughts (content, metadata) VALUES ('upgrade 133: SMD-9789',
+      '{"source": "linear", "issue": "SMD-9789", "status": "Backlog", "status_type": "backlog"}'::jsonb) RETURNING id`)[0].id);
+  await sql`SELECT record_thought_source(${row89}::uuid, 'linear', 'SMD-9789', 'upgrade 133: SMD-9789', 'text/markdown')`;
+  for (const [kind, key] of [["thought", row89], ["ticket", "SMD-9782"]]) {
+    await sql`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_source, tier, asserted_at) VALUES (${kind}, ${key}, 2, 'upgrade-raw', false, 4, now())`;
+  }
+  const other = new SQL({ url: URL_, max: 1 });
+  let rebuilt: Promise<unknown> = Promise.resolve();
+  let freeWhileWaiting: boolean | null = null;
+  await other.begin(async (tx) => {
+    await tx`SELECT ob1_priority_lock('ticket', 'SMD-9782')`;
+    rebuilt = sql`SELECT * FROM ob1_rebuild_priority_projection()`.then((r) => r);
+    await Bun.sleep(750);
+    freeWhileWaiting = Boolean((await tx`SELECT pg_try_advisory_xact_lock(hashtextextended('ob1:priority:ticket:SMD-9789', 0)) AS got`)[0].got);
+  });
+  await rebuilt;
+  await other.close();
+  const driftAfter = Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
+  assert(freeWhileWaiting === true && driftAfter === 0,
+    `the rebuild takes its items' locks in their subjects' order: waiting on ticket SMD-9782's it holds none, so a row of SMD-9789's lock is free meanwhile; it then repairs both (free ${freeWhileWaiting}, drift ${driftAfter})`);
+
+  // A re-apply is a no-op: nothing more closed.
+  const closed = async () => Number((await sql`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)[0].n);
+  const closedBefore = await closed();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the133 });
+  assert(await closed() === closedBefore && JSON.stringify(await open()) === JSON.stringify(["thought:upgrade-bot:3", "thought:upgrade-op:2"]),
+    `a re-apply is a no-op: nothing more closed (${closedBefore})`);
+  for (const r of ["ob1_upgrade_133_writer", "ob1_upgrade_133_reader", "ob1_upgrade_133_none"]) await sql.unsafe(`DROP OWNED BY ${r}; DROP ROLE ${r}`);
   await sql.close();
 }
 

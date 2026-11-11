@@ -1300,12 +1300,17 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   its tier the key's (operator, a declared priority source, agent, inferred), never an
   argument's. The caller's new statement on an item replaces its earlier one there; the
   same statement again is `unchanged`, nothing written. The reply names what it
-  replaced and the item's winner, the lowest tier's newest statement.
+  replaced and the item's winner, the lowest tier's newest statement. A ticket and
+  its own board-sync rows are one item (SMD-4127, migration 133): a statement on
+  either replaces the caller's on the other, and the winner is the two's.
 - **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
-  the caller's own statement, never another key's, and names the winner after.
+  the caller's own statement, never another key's, and names the winner after. On a
+  ticket or one of its rows it closes the caller's statements on both.
 - **`priority_history`** (`GET /v1/priorities/{kind}/{key}`, read scope): the winner
   and its level (null: unknown, not low), and every statement in the order written,
-  each with its maker, tier, reason and how its window closed. `exists: false` is an
+  each with its maker, tier, reason and how its window closed. A ticket's history and
+  each of its rows' are one list, each statement naming its own item, and the text says
+  where one stands when it is not on the item asked. `exists: false` is an
   item since removed, whose statements are kept.
 - **`set_priority_weights`** (`POST /v1/priority-weights`, write scope; SMD-4193 PR 2,
   migration 132): the operator's weights, which every read takes as its defaults (the
