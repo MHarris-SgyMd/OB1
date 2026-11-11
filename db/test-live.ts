@@ -23251,6 +23251,25 @@ if (want("36")) {
   assert(flooded === 101, `the burst and its writer's older row are planted under one actor_name (${flooded} of 101)`);
   const planted = [...rows, ...earlier];
 
+  // What matters first (SMD-4112): two days ago, an Urgent ticket's own row (a linear row reads as its ticket) and a
+  // Medium item overdue since yesterday; a day ago, two Low ones, newer than both. Stated by a key classified operator.
+  const prio = {
+    urgent: { id: recordId("fork", "digest-urgent"), content: "zqprio urgent — the ticket's own row, Urgent on the board", days: 2 },
+    overdue: { id: recordId("fork", "digest-overdue"), content: "zqprio overdue — the medium item due yesterday", days: 2 },
+    low1: { id: recordId("fork", "digest-low-1"), content: "zqprio low one — newer, and Low", days: 1 },
+    low2: { id: recordId("fork", "digest-low-2"), content: "zqprio low two — newer, and Low", days: 1 },
+  };
+  for (const [k, r] of Object.entries(prio)) {
+    const meta = k === "urgent" ? { source: "linear", issue: "SMD-90361" } : { source: "fork" };
+    await wsql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
+      VALUES (${r.id}::uuid, ${r.content}, ${meta}::jsonb, content_fingerprint_of(${r.content}), now() - make_interval(days => ${r.days}::int))`;
+  }
+  const op = { name: "live-36-op", scope: "write" };
+  await wsql`SELECT set_agent_kind('live-36-op', 'operator')`;
+  await wsql`SELECT assert_priority('ticket', 'SMD-90361', 4, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'Urgent on the board', false, ${op}::jsonb)`;
+  await wsql`SELECT assert_priority('thought', ${prio.overdue.id}, 2, now() - interval '1 day', NULL::timestamptz, NULL::text, NULL::text, 'due yesterday', false, ${op}::jsonb)`;
+  for (const r of [prio.low1, prio.low2]) await wsql`SELECT assert_priority('thought', ${r.id}, 1, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'can wait', false, ${op}::jsonb)`;
+
   // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
   // /bot<token>/sendMessage counts the Telegram sends (tgReqs) and keeps the
   // last one's Authorization (tgAuth). The last synthesis prompt is chatPrompt.
@@ -23307,6 +23326,17 @@ if (want("36")) {
     const burst = (chatPrompt.match(/zqflood \d+/g) ?? []).length;
     assert(planted.every((r) => chatPrompt.includes(r.content)) && chatPrompt.includes(floodEarlier) && burst > 0 && !/"importance"\s*:/.test(chatPrompt),
       `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
+    // SMD-4112: the Urgent ticket's row, then the overdue item, lead; every unknown row after them, and the newer Low ones after
+    // those, or left out; each of the two says why it matters.
+    const place = (s: string) => chatPrompt.indexOf(s);
+    const [u, o] = [place(prio.urgent.content), place(prio.overdue.content)];
+    const unknownAt = [...planted.map((r) => r.content), floodEarlier].map(place);
+    const lowAt = [prio.low1, prio.low2].map((r) => place(r.content));
+    assert(u >= 0 && o > u && unknownAt.every((i) => i > o) && lowAt.every((i) => i === -1 || unknownAt.every((j) => i > j))
+      && chatPrompt.includes('"priority":"urgent, stated"') && /"priority":"medium, stated; overdue, due \d{4}-/.test(chatPrompt)
+      // Earlier sections' statements may rank rows of theirs in the window too: at least these two are known.
+      && Number((denied.out.match(/the most pressing first \((\d+) with a known priority\)/) ?? [])[1]) >= 2,
+      `the picks lead with the Urgent ticket's row and the overdue item, before newer unknown rows and the newer Low ones (${lowAt.filter((i) => i >= 0).length} of 2 Low in the prompt), each saying why: urgent at ${u}, overdue at ${o}, the first unknown at ${Math.min(...unknownAt)}; ${(denied.out.match(/picked .*/) ?? [""])[0]}; ${(chatPrompt.match(/"priority":"[^"]*"/g) ?? []).join(", ")}`);
 
     tgReqs = 0; chatReqs = 0;
     const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
@@ -23342,7 +23372,7 @@ if (want("36")) {
     }
   } finally {
     stub.stop(true);
-    await wsql`DELETE FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' OR id = ANY(${wsql.array(earlier.map((r) => r.id), "UUID")})`;
+    await wsql`DELETE FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' OR id = ANY(${wsql.array([...earlier, ...Object.values(prio)].map((r) => r.id), "UUID")})`;
     await wsql.close();
   }
 }

@@ -7202,13 +7202,21 @@ no `sensitivity_tier` column the run refuses rather than page every row, unless
 `--no-sensitivity-filter` says so. A row is left out by the column or by its
 `metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
 `--include-personal`): the import recipes set the facet and leave the column
-at its default (SMD-2493). The prompt takes a share of each day and
+at its default (SMD-2493). The prompt takes the most pressing first, by each
+thought's effective priority (`docs/priority.md` decision 8, SMD-4112), read for
+the window in one call of `effective_priority` (up to 1,000 rows, the read's
+limit), and each such row says why it matters: its level and where it came
+from, its due time or overdue. Among equals it takes a share of each day and
 writer (`metadata.actor_name`), a turn at a time, newest first within each, so
-neither a busy day nor one key's burst fills it; `importance`, which any key
-could set on its own rows, is retired (SMD-2653, `docs/priority.md` decision 8). `test-weekly-digest.ts` holds the pick, the
+neither a busy day nor one key's burst fills it. A brain before migration 122,
+or a priority read that fails (a role without the priority group's grants, a
+refused operator's setting), leaves that order alone, and the run says why;
+`importance`, which any key could set on its own rows, is retired (SMD-2653). `test-weekly-digest.ts` holds the pick, the
+priority read's fallbacks, each pick's reason, the
 chunking and the gate over a digest subject (the drop-the-gate mutant and each
 allow term); `test-live.ts` [36] the sink end to end — a stub that records zero
-Telegram sends under deny and one when allowed.
+Telegram sends under deny and one when allowed, and an Urgent ticket's row and an
+overdue item leading the prompt before newer rows.
 
 ```bash
 bun weekly-digest.ts --url … --output stdout                 # synthesize + print; no send hop
