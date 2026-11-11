@@ -212,6 +212,15 @@ jobs:
       # in front of the stack and a second brain.
       - name: The edge proxy's registry, table and shape
         run: bun deploy/edge/edge.ts --self-check
+      # SMD-3379 PR 3a: the federated coordinator's slot broker. Its registry's
+      # reading and its runner's checks on fixtures, then the broker itself over
+      # real WebSockets on loopback: live at once, background within the room
+      # live leaves, turns across brains, the lease, the warm-up, a socket that
+      # closes or goes silent. Bun only, no container.
+      - name: The slot broker's registry and runner
+        run: bun deploy/federated/broker.ts --self-check && bun deploy/federated/federated.ts --self-check
+      - name: The slot broker over WebSockets
+        run: bun deploy/federated/test-broker.ts
       # SMD-3305: the maintainer scripts' parsing and figures on fixtures — a CI job's step times over runs, and a
       # suite's sections by wall time. Neither is a gate; their self-checks keep the fixtures from going stale. The
       # first also holds the shifts ci-shift.yml warns of on main (SMD-3467) to four of main's real series.
@@ -599,6 +608,15 @@ jobs:
       - name: Plan-context eval rules
         working-directory: evals
         run: bun eval-plan-context.ts --self-check
+
+      # Where "the brain has little on this" begins (SMD-4212 PR 1): the draw
+      # of the two kinds of ticket and the paraphrases' checks, a reply's hits
+      # and literal matches read, each candidate signal at its threshold, the
+      # dev/test split, the choice and the bar at their edges, and the blind
+      # sheets. No brain, no model; the run itself is by hand.
+      - name: Little-on-this eval rules
+        working-directory: evals
+        run: bun eval-little.ts --self-check
 
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:

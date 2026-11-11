@@ -11,6 +11,7 @@ import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
 import * as claims from "./claims.ts";
 import * as priority from "./priority.ts";
+import * as weights from "./weights.ts";
 import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
@@ -60,6 +61,7 @@ export function createCore(deps: CoreDeps) {
     updateThought: bind(ctx, writes.updateThought),
     deleteThought: bind(ctx, writes.deleteThought),
     resetCaptureStamp: bind(ctx, writes.resetCaptureStamp),
+    appendThoughtEvidence: bind(ctx, writes.appendThoughtEvidence),
     reviewSupersessionProposal: bind(ctx, writes.reviewSupersessionProposal),
     retryFailed: bind(ctx, workers.retryFailed),
     releaseStaleLeases: bind(ctx, workers.releaseStaleLeases),
@@ -73,6 +75,7 @@ export function createCore(deps: CoreDeps) {
     setPriority: bind(ctx, priority.setPriority),
     clearPriority: bind(ctx, priority.clearPriority),
     priorityHistory: bind(ctx, priority.priorityHistory),
+    setPriorityWeights: bind(ctx, weights.setPriorityWeights),
     openItem: bind(ctx, items.openItem),
     updateItem: bind(ctx, items.updateItem),
     setItemStatus: bind(ctx, items.setItemStatus),

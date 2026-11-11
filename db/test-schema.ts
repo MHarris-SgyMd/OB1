@@ -17234,7 +17234,8 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   // A role granted the priority group as 116 listed it, not re-granted after 117: every priority call it made still answers; only an item of kind item reaches open_items (review pass 2).
   const OLDROLE = "ob1_test_priority_at_116";
   await db.exec(`CREATE ROLE ${OLDROLE} NOLOGIN`);
-  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON open_item/.test(st));
+  // 117's open items and 132's weights joined the group later.
+  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON (?:open_item|priority_weight_settings)/.test(st));
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${OLDROLE}`, ...grantStatements(OLDROLE, { groups: ["capture", "server"] }), ...at116]) await db.exec(st);
   const capOld = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role granted at 116");
   const oldUse = async (sql: string, params: unknown[]) => {
@@ -18033,8 +18034,10 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const file = files.find((f) => /^\d{3}_agenda\.sql$/.test(f)) ?? "no NNN_agenda.sql";
   await reapply(file.slice(0, 4));
   // 124 (SMD-4162) replaced 123's agenda under a ninth argument; 123's re-apply puts its eight-argument one back beside
-  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's).
+  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's), and so
+  // does 129's ten-argument one (SMD-4192), so its shape row counts 123's alone; the restore makes both again.
   await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean)`);
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
   // or compares this section's own items among themselves.
   const P = "Agenda [110]";
@@ -18287,7 +18290,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
-  // The shipped agenda back: 124's, which drops 123's eight-argument one.
+  // The shipped agenda back: the last definer's (129's), which drops 123's eight-argument one.
   await restoreShipped("agenda");
 }
 
@@ -18295,6 +18298,9 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
 {
   const file = files.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f)) ?? "no NNN_agenda_unstarted.sql";
   await reapply(file.slice(0, 4));
+  // 129's ten-argument agenda (SMD-4192), which [110]'s restore made, goes while this section and [113] hold the
+  // nine-argument one, so their shape rows count one agenda. [117] puts it back.
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [111]";
   const NOW = "2027-03-10T15:00:00Z";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag111-op', 'operator')`);
@@ -18554,8 +18560,10 @@ console.log("\n[112] Migration 125: a note's open items reach its priority — a
 console.log("\n[113] Migration 126: the agenda's keys scope — the tickets named alone, no open item, under every other rule; a named ticket that is settled, or whose status type is unknown, and a key no thought records, said beside the list; query_log's plan_context kind and its shape; a re-apply a no-op (SMD-2684)");
 {
   const file = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
-  // [111] re-applied 124's agenda over this one (one signature): put 126's back first.
+  // [111] re-applied 124's agenda over this one (one signature): put 126's back first. 129's ten-argument one
+  // stays away until [117] ([111] dropped it).
   await reapply(file.slice(0, 4));
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [113]";
   const NOW = "2027-03-10T15:00:00Z";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag112-op', 'operator')`);
@@ -18748,7 +18756,7 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
   // commented; effective_priority reads the defaults and holds no literal.
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
-      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') ORDER BY 1`)).rows;
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') AND p.pronargs = 0 ORDER BY 1`)).rows;  // 128's; 131's span of a read's weights is [118]'s
   const def = (await db.query<{ d: string }>(`SELECT pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0].d;
   assert(fns.length === 2 && fns.every((f) => f.v === "s" && /Migration 128 \/ SMD-4194/.test(f.c ?? "")) && /c_defaults CONSTANT jsonb := ob1_priority_defaults\(\);/.test(def) && !/"overdue":/.test(def),
     `ob1_priority_defaults and ob1_priority_span are STABLE and commented; effective_priority reads its defaults from the function and holds no literal (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
@@ -19075,6 +19083,296 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   assert(JSON.stringify(after) === JSON.stringify(before) && after.fns === 6 && after.old === 0, `130 applied again moves nothing: ${JSON.stringify(after)}`);
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
+}
+
+console.log("\n[117] Migration 129: the agenda takes an order — priority, the default, 126's order unchanged; due, the dated items first, soonest first so the longest overdue leads, a tie on the due time to the higher priority, then the undated by priority; the order applied before the limit; the answer says it; any other order refused; query_log.filter's comment names it; the shape; a re-apply a no-op (SMD-4192)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_order\.sql$/.test(f)) ?? "no NNN_agenda_order.sql";
+  // [111] and [113] re-applied 124's and 126's nine-argument agenda: put 129's back first, its wrapper in their place.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [117]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag116-op', 'operator')`);
+  const OP = { name: "ag116-op", scope: "write" };
+  type Ag = { items: { key: string; effective: number; due_at: string | null }[]; total: number; order?: string };
+  const ticket = async (issue: string, level: number | null, due: string | null) => {
+    const content = `${issue} — [117] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag116-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (level !== null || due !== null) {
+      await db.query(`SELECT assert_priority('ticket', $1, $2::int, $3::timestamptz, NULL, NULL, NULL, NULL, false, $4::jsonb)`, [issue, level, due, JSON.stringify(OP)]);
+    }
+  };
+  // An Urgent with no date; a High due tomorrow; a Medium and a Low overdue at one moment; a Medium due within the
+  // week; a High with no date.
+  await ticket("SMD-9951", 4, null); await ticket("SMD-9952", 3, "2027-03-11T00:00:00Z");
+  await ticket("SMD-9953", 2, "2027-03-01T00:00:00Z"); await ticket("SMD-9954", 1, "2027-03-01T00:00:00Z");
+  await ticket("SMD-9955", 2, "2027-03-15T00:00:00Z"); await ticket("SMD-9956", 3, null);
+  // A stated None due long ago (review pass 3): undated under due, as 122 gives it no urgency; last under both orders.
+  await ticket("SMD-9957", 0, "2027-02-01T00:00:00Z");
+  const scope = JSON.stringify({ project: P });
+  const nine = async (limit = 100) => (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false) AS a`, [scope, limit, NOW])).rows[0].a;
+  const ten = async (order: string | null, limit = 100) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false, $4) AS a`, [scope, limit, NOW, order])).rows[0].a;
+  const keys = (a: Ag) => a.items.map((i) => i.key.slice(4)).join(" ");
+
+  // The shape (review pass 2): the ten-argument agenda, plpgsql, no argument defaulted; and the nine-argument one, a
+  // SQL wrapper with 126's defaults calling it with priority. Both STABLE, each commented for 129.
+  const fns = (await db.query<{ n: number; v: string; l: string; d: string | null; c: string | null }>(
+    `SELECT p.pronargs::int AS n, p.provolatile::text AS v, l.lanname AS l, pg_get_function_arguments(p.oid) AS d, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname = 'agenda' ORDER BY p.pronargs`)).rows;
+  assert(fns.map((f) => `${f.n}:${f.l}:${f.v}`).join(" ") === "9:sql:s 10:plpgsql:s"
+      && /p_include_started boolean DEFAULT false$/.test(fns[0].d ?? "") && !/DEFAULT/.test(fns[1].d ?? "") && /p_order text$/.test(fns[1].d ?? "")
+      && /The agenda in the priority order: the ten-argument agenda with p_order priority/.test(fns[0].c ?? "") && /Migration 129 \(SMD-4192\)/.test(fns[0].c ?? "")
+      && /126 \(SMD-2684\) and 129 \(SMD-4192\)/.test(fns[1].c ?? "") && /sorted by p_order: priority by effective/.test(fns[1].c ?? ""),
+    `two agendas: nine arguments, a SQL wrapper with 126's defaults; ten, plpgsql, none defaulted; both STABLE and commented for 129 (${fns.map((f) => `${f.n}:${f.l}:${f.v}:${(f.d ?? "").slice(-36)}`).join(", ")})`);
+
+  // priority: 126's order, as a nine-argument call gets it — the Urgent, the High due tomorrow, the High, the
+  // overdue Medium (2.6), the Medium due within the week (2.2), the overdue Low.
+  const byNine = await nine(), byPriority = await ten("priority");
+  const strip = (a: Ag) => JSON.stringify({ ...a, order: undefined, now: undefined });
+  assert(keys(byNine) === "9951 9952 9956 9953 9955 9954 9957" && strip(byPriority) === strip(byNine) && byNine.order === "priority" && byPriority.order === "priority",
+    `the priority order is 126's, and a nine-argument call gets it, the answer saying priority (${keys(byNine)} | ${keys(byPriority)} | ${byNine.order})`);
+
+  // due: the overdue two first, the Medium before the Low (one moment, the higher priority first), then tomorrow's,
+  // then the week's; the undated after, the Urgent before the High.
+  const byDue = await ten("due");
+  assert(keys(byDue) === "9953 9954 9952 9955 9951 9956 9957" && byDue.order === "due" && byDue.total === 7,
+    `the due order: the dated first, soonest first, a tie on the moment to the higher priority, then the undated by priority, the stated None among them; the answer says due (${keys(byDue)} | ${byDue.order})`);
+
+  // The order is applied before the limit: due's first two are the overdue ones, not priority's first two re-sorted.
+  const dueTwo = await ten("due", 2), priorityTwo = await ten("priority", 2);
+  assert(keys(dueTwo) === "9953 9954" && keys(priorityTwo) === "9951 9952" && dueTwo.total === 7,
+    `the order is applied before the limit (${keys(dueTwo)} | ${keys(priorityTwo)})`);
+
+  // Refused 22023: any other order, NULL, a different case, padding, an empty string.
+  const code = async (order: string | null) => { try { await ten(order); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const refused = [await code("Due"), await code(null), await code("due "), await code(""), await code("soonest")];
+  assert(refused.join(",") === "22023,22023,22023,22023,22023", `an order that is not priority or due is refused 22023 (${refused.join(",")})`);
+
+  // query_log.filter's comment names the agenda row's order.
+  const filterComment = (await db.query<{ f: string | null }>(
+    `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
+  assert(/its order \(priority or due; migration 129\)/.test(filterComment) && /On a plan_context row/.test(filterComment),
+    `query_log.filter's comment names the agenda row's order, and keeps plan_context's row (${filterComment.slice(-160)})`);
+
+  // 126 re-applied alone after 129 (review pass 2): it replaces the wrapper with its own body, so a nine-argument
+  // call still names one function and reads in the priority order, and the ten-argument one still answers.
+  const the126 = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
+  await reapply(the126.slice(0, 4));
+  let after126 = "";
+  try { after126 = `${keys(await nine())} | ${keys(await ten("due"))}`; } catch (e) { after126 = `threw: ${(e as Error).message}`; }
+  const count126 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'agenda'`)).rows[0].n;
+  assert(after126 === `${keys(byNine)} | ${keys(byDue)}` && count126 === 2,
+    `126 re-applied after 129: a nine-argument call names one function, in the priority order, and due still answers (${after126}; ${count126} agendas)`);
+
+  // A re-apply is a no-op: the same reads.
+  await reapply(file.slice(0, 4));
+  assert(strip(await ten("due")) === strip(byDue) && strip(await nine()) === strip(byNine), "a re-apply is a no-op: the same reads under both orders");
+}
+
+console.log("\n[118] Migration 131: the span under a read's own weights — ob1_priority_span(jsonb), 128's composition over the defaults with the weights laid over them, NULL the defaults' span; a bad weight refused 22023 by effective_priority's rule, naming it, cap below unblocks_many_at among them; 128's ob1_priority_span() unchanged; query_log.filter's comment names the agenda row's weights; the shape; a re-apply a no-op (SMD-4193)");
+{
+  const file = files.find((f) => /^\d{3}_priority_span_weights\.sql$/.test(f)) ?? "no NNN_priority_span_weights.sql";
+  await reapply(file.slice(0, 4));
+  // 122's own weights (migration 122, before SMD-4177 scaled the terms by 0.2).
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const span = async (w: unknown) =>
+    String((await db.query<{ s: string | null }>(`SELECT ob1_priority_span($1::jsonb)::text AS s`, [w === null ? null : JSON.stringify(w)])).rows[0].s);
+  const span0 = async () => String((await db.query<{ s: string | null }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s);
+
+  // The shape: 128's function and 131's beside it, both STABLE, each commented by its migration.
+  const fns = (await db.query<{ a: string; v: string; c: string | null }>(
+    `SELECT pg_get_function_identity_arguments(p.oid) AS a, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname = 'public' AND p.proname = 'ob1_priority_span' ORDER BY 1`)).rows;
+  assert(fns.length === 2 && fns[0].a === "" && fns[1].a === "p_weights jsonb" && fns.every((f) => f.v === "s")
+         && /Migration 128 \/ SMD-4194/.test(fns[0].c ?? "") && /Migration 131 \/ SMD-4193/.test(fns[1].c ?? ""),
+    `ob1_priority_span() is 128's and ob1_priority_span(jsonb) 131's, both STABLE and commented (${fns.map((f) => `(${f.a}):${f.v}`).join(", ")})`);
+
+  // The values: the defaults' span with none or none overridden; 122's weights 5 + overdue 3 + unblocks_many 1; unknown
+  // past a critical level taken; every term zeroed leaves the level's 5. 128's function unchanged.
+  const vals = [await span(null), await span({}), await span(W122), await span({ unknown: 7 }), await span({ soon: 0, week: 0, overdue: 0, unblocks_one: 0, unblocks_many: 0 }), await span({ soon: 4 }), await span0()].map(Number);
+  assert(vals.join(" ") === "5.8 5.8 9 7.8 5 9.2 5.8",
+    `the span: the defaults' 5.8 for NULL and {}, 9 under 122's weights, 7.8 with unknown 7, 5 with every term zeroed, 9.2 with soon 4 (the largest urgency term), and ob1_priority_span() still 5.8 (${vals.join(" ")})`);
+
+  // Refused 22023 by effective_priority's own rule, in its words, naming the weight.
+  const refusal = async (w: unknown) => {
+    try { await span(w); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split(" (")[0]}`; }
+  };
+  const refused = [await refusal({ overdu: 1 }), await refusal({ overdue: 11 }), await refusal({ hops: 1.5 }), await refusal({ cap: 2 }), await refusal([])];
+  assert(refused[0] === "22023 not a weight: overdu" && refused[1] === "22023 a weight out of range: overdue" && refused[2] === "22023 a weight out of range: hops"
+         && /^22023 a weight out of range: cap is below unblocks_many_at/.test(refused[3]) && /^22023 effective_priority's weights are a JSON object/.test(refused[4]),
+    `a bad weight is refused 22023 in effective_priority's words, naming it: an unknown name, a value out of range, a fraction where a whole number goes, cap below the default unblocks_many_at, an array (${refused.join(" | ")})`);
+
+  // query_log.filter's comment names the agenda row's weights, and keeps 129's order and 126's plan_context row.
+  const filterComment = async () => (await db.query<{ f: string | null }>(
+    `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
+  const comment = await filterComment();
+  assert(/the weights it overrode, when it passed any \(migration 131\)/.test(comment) && /its order \(priority or due; migration 129\)/.test(comment) && /On a plan_context row/.test(comment),
+    `query_log.filter's comment names the agenda row's weights, and keeps its order and plan_context's row (${comment.slice(-200)})`);
+
+  // A re-apply is a no-op: the same spans, the same comment.
+  await reapply(file.slice(0, 4));
+  assert(Number(await span(W122)) === 9 && Number(await span0()) === 5.8 && (await filterComment()) === comment, "a re-apply is a no-op: the same spans, the same comment");
+}
+
+console.log("\n[119] Migration 132: the operator's priority weights — priority_weight_settings, one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_priority_builtin() 127's weights; ob1_priority_weights_refusal held to effective_priority's checks at each weight's edges; ob1_priority_defaults() the built-in weights under the standing setting, so every read and both spans take it and a call's own weights still override it; set_priority_weights an operator key's alone, by its agent id, refusing bad weights in effective_priority's words, writing nothing for the weights standing, {} clearing; a stored setting the refusal names failing every read 22000, naming it; priority_weight_setting() saying it without raising; the shape; a re-apply a no-op (SMD-4193)");
+{
+  const file = files.find((f) => /^\d{3}_priority_weight_setting\.sql$/.test(f)) ?? "no NNN_priority_weight_setting.sql";
+  // [115] re-applies 128's ob1_priority_defaults, which 132 replaces: this section holds 132's.
+  await restoreShipped("ob1_priority_defaults");
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const BUILT_IN = { cap: 50, hop: 1, hops: 2, soon: 0.4, week: 0.2, depth: 3, overdue: 0.6, unknown: 2, soon_days: 1, week_days: 7, unblocks_one: 0.1, unblocks_many: 0.2, count_inferred: false, unblocks_many_at: 3 };
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const W127 = { soon: 0.4, week: 0.2, overdue: 0.6, unblocks_one: 0.1, unblocks_many: 0.2 };
+  // [114]'s ladder, as [115] reads it: the High due tomorrow and the overdue Medium.
+  const NOW = "2027-03-10T15:00:00Z";
+  const eff = async (w: unknown = null) => (await q<{ item_key: string; effective: string }>(`SELECT item_key, effective::text AS effective FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+    [JSON.stringify([{ kind: "ticket", key: "SMD-9964" }, { kind: "ticket", key: "SMD-9967" }]), w === null ? null : JSON.stringify(w), NOW])).map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
+  const span = async (w: unknown = undefined) => String((await one<{ s: string | null }>(w === undefined ? `SELECT ob1_priority_span()::text AS s` : `SELECT ob1_priority_span($1::jsonb)::text AS s`, w === undefined ? [] : [JSON.stringify(w)])).s);
+  const defaults = async () => (await one<{ d: Record<string, unknown> }>(`SELECT ob1_priority_defaults() AS d`)).d;
+  const set = async (w: unknown, actor: unknown) => (await one<{ r: Record<string, unknown> }>(`SELECT set_priority_weights($1::jsonb, $2::jsonb) AS r`, [w === null ? null : JSON.stringify(w), actor === null ? null : JSON.stringify(actor)])).r;
+  const rows = async () => q<{ id: string; weights: Record<string, unknown>; set_by: string; ended_by: string | null; ended_by_agent_id: string | null; standing: boolean }>(
+    `SELECT id::text AS id, weights, set_by, ended_by, ended_by_agent_id::text AS ended_by_agent_id, ended_at IS NULL AS standing FROM priority_weight_settings ORDER BY id`);
+
+  // The shape: the table, its key and one-standing index, two triggers; six functions, each commented by 132, the reads
+  // STABLE, none SECURITY DEFINER; 132 the last definer of each.
+  const cols = (await q<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'priority_weight_settings'::regclass AND attnum > 0 AND NOT attisdropped`))[0].c;
+  const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('priority_weight_settings_one_standing')) AS d`)).d ?? "";
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'priority_weight_settings'::regclass AND NOT tgisinternal`)).t;
+  const FNS = ["ob1_priority_builtin()", "ob1_priority_weights_refusal(jsonb)", "ob1_priority_weight_settings_guard()", "ob1_priority_defaults()", "set_priority_weights(jsonb, jsonb)", "priority_weight_setting()"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  assert(cols === "id bigint not null, weights jsonb not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
+         && /UNIQUE INDEX priority_weight_settings_one_standing ON public\.priority_weight_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
+         && trig === "priority_weight_settings_history:31 priority_weight_settings_no_truncate:34"
+         && fns.length === 6 && fns.every((f) => !f.d && /[Mm]igration 132 \/ SMD-4193/.test(f.c ?? ""))
+         && vol["ob1_priority_builtin()"] === "s" && vol["ob1_priority_weights_refusal(jsonb)"] === "s" && vol["ob1_priority_defaults()"] === "s" && vol["priority_weight_setting()"] === "s"
+         && vol["set_priority_weights(jsonb,jsonb)"] === "v"
+         && ["ob1_priority_builtin", "ob1_priority_weights_refusal", "ob1_priority_weight_settings_guard", "ob1_priority_defaults", "set_priority_weights", "priority_weight_setting"].every((f) => lastDefinerOf(f) === file),
+    `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; six functions commented by 132, the reads STABLE, none SECURITY DEFINER, 132 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+
+  // No setting: the defaults are the built-in weights, 127's; every number and both spans as before 132.
+  await db.exec(`DELETE FROM priority_weight_settings WHERE false`);
+  const none = { d: await defaults(), b: (await one<{ b: Record<string, unknown> }>(`SELECT ob1_priority_builtin() AS b`)).b, e: await eff(), s: await span(), sw: await span(W122), r: (await one<{ r: unknown }>(`SELECT priority_weight_setting() AS r`)).r };
+  assert(JSON.stringify(none.b) === JSON.stringify(BUILT_IN) && JSON.stringify(none.d) === JSON.stringify(BUILT_IN) && none.e === "SMD-9964 3.4, SMD-9967 2.6" && Number(none.s) === 5.8 && Number(none.sw) === 9 && none.r === null
+         && (await rows()).every((r) => !r.standing),
+    `with no setting standing the defaults are the built-in weights, 127's: the ladder at 3.4 and 2.6, the span 5.8 and 9 under 122's weights, and no setting said (${none.e}; ${none.s})`);
+
+  // The refusal is effective_priority's, word for word, at each weight's edges: every probe answered alike by both.
+  const probes: unknown[] = [[], "x", 3, { overdu: 1 }, { overdue: 1, nope: 2 }, { cap: 2 }, { cap: 5, unblocks_many_at: 6 }, { cap: 6, unblocks_many_at: 6 }, {}];
+  for (const n of ["unknown", "hop", "soon", "week", "overdue", "unblocks_one", "unblocks_many"]) probes.push({ [n]: -0.001 }, { [n]: 0 }, { [n]: 10 }, { [n]: 10.001 }, { [n]: "1" }, { [n]: true }, { [n]: null });
+  const whole: [string, number, number][] = [["hops", 0, 2], ["soon_days", 0, 366], ["week_days", 0, 366], ["unblocks_many_at", 1, 366], ["depth", 0, 5], ["cap", 1, 1000]];
+  for (const [n, lo, hi] of whole) probes.push({ [n]: lo - 1 }, { [n]: lo }, { [n]: hi }, { [n]: hi + 1 }, { [n]: lo + 0.5 }, { [n]: `${lo}` });
+  probes.push({ count_inferred: true }, { count_inferred: false }, { count_inferred: 1 }, { count_inferred: "true" }, { unblocks_many_at: 50 }, { unblocks_many_at: 51 });
+  const differ: string[] = [];
+  let refusedN = 0;
+  for (const p of probes) {
+    const refusal = (await one<{ r: string | null }>(`SELECT ob1_priority_weights_refusal($1::jsonb) AS r`, [JSON.stringify(p)])).r;
+    let raised: string | null = null;
+    try { await db.query(`SELECT count(*) FROM effective_priority('[]'::jsonb, $1::jsonb, now())`, [JSON.stringify(p)]); } catch (e) { raised = String((e as Error).message).split("\n")[0]; }
+    // A null weight is the one place the two part: effective_priority reads it as a weight its defaults lack (22000,
+    // a fault: no client sends one, the schema refusing it), and the refusal as a value out of range, so a stored
+    // setting never holds one.
+    const isNull = p !== null && typeof p === "object" && !Array.isArray(p) && Object.values(p).includes(null);
+    if (isNull ? !/^a weight out of range: /.test(refusal ?? "") || !/lacks weight\(s\)/.test(raised ?? "") : refusal !== raised) differ.push(`${JSON.stringify(p)}: ${refusal} | ${raised}`);
+    if (refusal !== null) refusedN++;
+  }
+  assert(differ.length === 0 && probes.length === 100 && refusedN === 71 && (await one<{ r: string | null }>(`SELECT ob1_priority_weights_refusal(NULL) AS r`)).r === null,
+    `ob1_priority_weights_refusal answers each of ${probes.length} probes at the weights' edges as effective_priority does, word for word (${refusedN} refused, the rest taken), a null weight refused as out of range where effective_priority faults, and NULL for NULL (${differ.slice(0, 3).join(" ; ")})`);
+
+  // Who may: an operator key by its agent id; a name alone, an agent's key, an unclassified key refused, saying what it
+  // is; no envelope raises.
+  await db.exec(`SELECT set_agent_kind('[119] op', 'operator'); SELECT set_agent_kind('[119] agent', 'agent'); INSERT INTO ob1_agents (label) VALUES ('[119] plain') ON CONFLICT DO NOTHING`);
+  const idOf = async (label: string) => (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).id;
+  const OP = { name: "[119] op", agent_id: await idOf("[119] op") };
+  const refusedBy = [await set(W122, { name: "[119] op" }), await set(W122, { name: "[119] agent", agent_id: await idOf("[119] agent") }), await set(W122, { name: "[119] plain", agent_id: await idOf("[119] plain") })];
+  const noEnvelope = await failure(`SELECT set_priority_weights('{"overdue": 3}'::jsonb)`);
+  assert(refusedBy.every((r) => r.ok === false && r.error === "NOT_OPERATOR") && refusedBy[0].kind === null && /named by its name alone$/.test(String(refusedBy[0].message))
+         && refusedBy[1].kind === "agent" && refusedBy[2].kind === null && /is unclassified$/.test(String(refusedBy[2].message))
+         && /^42501 set_priority_weights needs a maker/.test(noEnvelope) && (await rows()).every((r) => !r.standing),
+    `only an operator key by its agent id: a name alone, an agent's key and an unclassified key answer NOT_OPERATOR with what each is, no envelope raises 42501, and nothing is written (${refusedBy.map((r) => `${r.error}:${r.kind}`).join(", ")}; ${noEnvelope.slice(0, 60)})`);
+  const bad = [await set({ overdu: 3 }, OP), await set({ cap: 2 }, OP), await set([], OP)];
+  assert(bad.every((r) => r.ok === false && r.error === "BAD_WEIGHTS") && /^not a weight: overdu \(/.test(String(bad[0].message))
+         && /^a weight out of range: cap is below unblocks_many_at/.test(String(bad[1].message)) && /^effective_priority's weights are a JSON object/.test(String(bad[2].message)),
+    `bad weights answer BAD_WEIGHTS in effective_priority's words: an unknown name, cap below the built-in unblocks_many_at, not an object (${bad.map((r) => String(r.message).split(" (")[0]).join(" | ")})`);
+
+  // Set: every read and both spans take it — 122's weights put the overdue Medium beside the High at 5 (as [115]'s
+  // replaced defaults did) and the span at 9 — and a call's own weights still override it by name.
+  const first = await set(W122, OP);
+  const under = { d: await defaults(), e: await eff(), s: await span(), back: await eff(W127), sBack: await span(W127), setting: (await one<{ r: Record<string, unknown> }>(`SELECT priority_weight_setting() AS r`)).r };
+  assert(first.ok === true && first.changed === true && first.previous === null && first.set_by === "[119] op" && JSON.stringify(first.weights) === JSON.stringify({ soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 })
+         && JSON.stringify(under.d) === JSON.stringify({ ...BUILT_IN, ...W122 }) && under.e === "SMD-9964 5, SMD-9967 5" && Number(under.s) === 9
+         && under.back === "SMD-9964 3.4, SMD-9967 2.6" && Number(under.sBack) === 5.8
+         && JSON.stringify(under.setting.weights) === JSON.stringify(first.weights) && under.setting.set_by === "[119] op" && under.setting.refused === null,
+    `the operator's 122's weights: the defaults the built-in under them, the ladder at 5 and 5, the span 9; a call's 127 weights read 3.4, 2.6 and 5.8 again; the setting said (${under.e}; ${under.s}; ${under.back})`);
+  // The weights standing again write nothing; another setting ends the first, by its key; a clear ends that, writing none.
+  const again = await set({ unblocks_many: 1, overdue: 3.0, soon: 2, week: 1, unblocks_one: 0.5 }, OP);
+  const before = (await rows()).length;
+  const second = await set({ soon: 1 }, OP);
+  const afterSecond = await rows();
+  assert(again.ok === true && again.changed === false && before === afterSecond.length - 1 && second.changed === true && JSON.stringify(second.previous) === JSON.stringify(first.weights)
+         && afterSecond.filter((r) => r.standing).length === 1 && afterSecond.at(-2)?.ended_by === "[119] op" && afterSecond.at(-2)?.ended_by_agent_id === OP.agent_id
+         && JSON.stringify(afterSecond.at(-1)?.weights) === '{"soon":1}',
+    `the weights standing again write nothing (changed false); a new setting ends the standing one, by the operator's key and agent id, and stands alone (${afterSecond.map((r) => `${JSON.stringify(r.weights)}:${r.standing ? "standing" : `ended by ${r.ended_by}`}`).join(", ")})`);
+
+  // History: a row changes only to end, once; a DELETE, a TRUNCATE refused; a raw row checked when written; one standing.
+  const hist = [
+    await failure(`UPDATE priority_weight_settings SET weights = '{"soon": 3}' WHERE ended_at IS NULL`),
+    await failure(`UPDATE priority_weight_settings SET ended_by = 'x' WHERE ended_at IS NOT NULL`),
+    await failure(`DELETE FROM priority_weight_settings WHERE ended_at IS NOT NULL`),
+    await failure(`TRUNCATE priority_weight_settings`),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"overdue": 11}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    // A raw row names an operator key, and stands when written (review pass 1): a role holding the group could
+    // otherwise write a setting under any name, or one already ended.
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', gen_random_uuid(), now())`),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', $1::uuid, now())`, [await idOf("[119] agent")]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at, ended_at, ended_by, ended_by_agent_id) VALUES ('{"soon": 3}', 'x', $1::uuid, now(), now(), 'x', $1::uuid)`, [OP.agent_id]),
+    await failure(`UPDATE priority_weight_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [await idOf("[119] agent")]),
+  ];
+  assert(/^23001 priority_weight_settings is history: a row changes only to end, once/.test(hist[0]) && /^23001 .* a row changes only to end, once/.test(hist[1])
+         && /^23001 priority_weight_settings is history: DELETE refused/.test(hist[2]) && /^23001 priority_weight_settings is history: TRUNCATE refused/.test(hist[3])
+         && /^22023 a weight out of range: overdue \(/.test(hist[4]) && /^23505 .*priority_weight_settings_one_standing/.test(hist[5]) && /^23514 /.test(hist[6])
+         && /^42501 priority_weight_settings: set_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[7]) && /^42501 priority_weight_settings: set_by_agent_id /.test(hist[8])
+         && /^23001 priority_weight_settings: a setting stands when written/.test(hist[9]) && /^42501 priority_weight_settings: ended_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[10])
+         && (await rows()).filter((r) => r.standing).length === 1,
+    `history: an UPDATE of a standing row's weights and of an ended row refused, a DELETE and a TRUNCATE refused (for the owner too); a raw row with a bad weight refused in effective_priority's words, a second standing row by the index, an empty one by the check; a raw row naming no operator key (an unknown id, an agent's) or written already ended refused, and an end by an agent's key; the setting stands (${hist.map((h) => h.slice(0, 40)).join(" | ")})`);
+
+  // A stored setting the refusal names (the trigger off, as a later migration narrowing a range would leave one): every
+  // read and both spans fail 22000 naming the setting and the weight; the setting said, not raised; a clear mends it.
+  await db.exec(`ALTER TABLE priority_weight_settings DISABLE TRIGGER priority_weight_settings_history; UPDATE priority_weight_settings SET weights = '{"soon": 20}' WHERE ended_at IS NULL; ALTER TABLE priority_weight_settings ENABLE TRIGGER priority_weight_settings_history`);
+  const broken = [await failure(`SELECT count(*) FROM effective_priority('[{"kind":"ticket","key":"SMD-9964"}]'::jsonb)`), await failure(`SELECT ob1_priority_span()`), await failure(`SELECT ob1_priority_span('{"soon": 1}'::jsonb)`)];
+  const said = (await one<{ r: Record<string, unknown> }>(`SELECT priority_weight_setting() AS r`)).r;
+  const mended = await set({}, OP);
+  assert(broken.every((b) => /^22000 the operator's priority weights \(set \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z by \[119\] op\) are refused, so no effective priority is read: a weight out of range: soon \(/.test(b))
+         && /^a weight out of range: soon \(/.test(String(said.refused)) && JSON.stringify(said.weights) === '{"soon":20}'
+         && mended.ok === true && mended.changed === true && mended.weights === null && JSON.stringify(mended.previous) === '{"soon":20}'
+         && JSON.stringify(await defaults()) === JSON.stringify(BUILT_IN) && await eff() === "SMD-9964 3.4, SMD-9967 2.6" && Number(await span()) === 5.8
+         && (await one<{ r: unknown }>(`SELECT priority_weight_setting() AS r`)).r === null && (await rows()).every((r) => !r.standing),
+    `a stored setting the refusal names fails the read and both spans 22000, naming the setting, its key and the weight; priority_weight_setting says it without raising; {} clears it and every number is 127's again (${broken[0].slice(0, 120)})`);
+  const clearAgain = await set(null, OP);
+  assert(clearAgain.ok === true && clearAgain.changed === false && clearAgain.weights === null, `clearing with none standing writes nothing (${JSON.stringify(clearAgain)})`);
+
+  // A re-apply is a no-op: the rows kept, the same reads.
+  await set(W122, OP);
+  const kept = (await rows()).length;
+  await reapply(file.slice(0, 4));
+  assert((await rows()).length === kept && await eff() === "SMD-9964 5, SMD-9967 5" && Number(await span()) === 9, "a re-apply is a no-op: the rows kept, the setting standing, the same reads");
+  await set({}, OP);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

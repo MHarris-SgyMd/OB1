@@ -40,6 +40,7 @@ export const CALLS = {
   update_thought: (c, p, i) => c.updateThought(p, i),
   delete_thought: (c, p, i) => c.deleteThought(p, i),
   reset_capture_stamp: (c, p, i) => c.resetCaptureStamp(p, i),
+  append_thought_evidence: (c, p, i) => c.appendThoughtEvidence(p, i),
   review_supersession_proposal: (c, p, i) => c.reviewSupersessionProposal(p, i),
   retry_failed: (c, p, i) => c.retryFailed(p, i),
   release_stale_leases: (c, p, i) => c.releaseStaleLeases(p, i),
@@ -53,6 +54,7 @@ export const CALLS = {
   // The plugin rides here too: 117 lets a plugin's call state a priority on an item its row stands for (SMD-3665 PR 2).
   set_priority: (c, p, i, o) => c.setPriority(p, i, { plugin: o.plugin }),
   clear_priority: (c, p, i) => c.clearPriority(p, i),
+  set_priority_weights: (c, p, i) => c.setPriorityWeights(p, i),
   priority_history: (c, p, i) => c.priorityHistory(p, i),
   // The plugin a ctx.call came through rides to 117's envelope (SMD-3665 PR 2): a plugin row's item is the plugin's.
   open_item: (c, p, i, o) => c.openItem(p, i, { plugin: o.plugin }),

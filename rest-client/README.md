@@ -70,8 +70,12 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
     removes a dot segment however it is encoded, so such a request would reach
     another route.
   - text with a lone surrogate in the path or the query. A JSON body carries one.
-  - an object, or a list holding one, in a GET's or a DELETE's input, which a query
-    string has no form for.
+  - a list holding an object or a list, in a GET's or a DELETE's input, which a
+    query string has no form for. An object of one level rides as one parameter a
+    field, `weights[overdue]=3` (OpenAPI's deepObject, which openapi-fetch sends and
+    the core reads; SMD-4193). One holding anything but text, a number or a boolean,
+    or a field name a URL would split, is refused here. The core refuses such an
+    object for a field that is not one, naming the field.
   - a query field name that is not letters, digits, `_`, `.` or `-`. A name rides the
     URL as it is, so a `#` in one would make the rest a fragment.
 
