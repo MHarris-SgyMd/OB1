@@ -422,6 +422,7 @@ export { INGESTED_NOTICE, ingestedNotice };
 // decision's guard (proposal-review.ts) reads without this file's imports.
 export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
 import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { dueText, LEVEL_WORDS } from "./priority-scale.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
 export function standingFlagText(f: StandingFlag): string {
@@ -2341,18 +2342,8 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 // Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
 // null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
 
-const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
-/**
- * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
- * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
- * and any other as the instant itself.
- */
-const dueText = (iso: string) => {
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
-};
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
   `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
