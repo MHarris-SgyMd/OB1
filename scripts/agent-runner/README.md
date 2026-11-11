@@ -61,7 +61,7 @@ To make the directory and put a key in it without the key reaching your shell's 
 (umask 077 && read -rs KEY && printf '%s\n' "$KEY" > ~/.config/open-brain/agent-runner/linear.key)   # paste the key, then Enter
 ```
 
-The parentheses keep `umask 077` to those commands alone.
+The parentheses keep `umask 077` to those commands alone. Or use `setup.ts` ("Provisioning and rotating the identities" below), which places any of the keys with a shape check and a read-back, and never prints the value.
 
 * **The keys** are at fixed paths, so no config can send a read elsewhere:
   * `linear.key`, the runner's own Linear key: required;
@@ -91,6 +91,29 @@ The parentheses keep `umask 077` to those commands alone.
 | `restUrl` | `null` | The stable brain's REST core, as this host reaches it. It must be http or https, with no credentials, query or fragment, and plain http only on a loopback address. Plain http proves nothing about the server: while stable is down, any process on this Mac that takes its port receives the key. |
 
 An unknown key is refused, and so is a file that isn't JSON. A refusal names the setting at fault and never quotes a value from the file. It counts unknown keys rather than naming them, since a name put there by mistake could be a secret. The labels' names are not config: they are SMD-4086's, fixed in the code.
+
+## Provisioning and rotating the identities (SMD-4089)
+
+The runner acts as itself, never as the maintainer: its own agent-kind brain key, Linear key, Anthropic key and (from cut 3) a GitHub identity. **Creating the accounts and minting the keys is the maintainer's**, on the brain host — CLAUDE.md's "Keys" is clear that sessions do not change keys. `setup.ts` only places a minted secret into its file and checks it; it never creates a key, and it never prints one.
+
+```bash
+bun scripts/agent-runner/setup.ts dirs                      # make the directory (0700), idempotent
+bun scripts/agent-runner/setup.ts install linear            # copy the key first; this reads it from the clipboard (pbpaste)
+bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
+bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork)
+bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot cannot push here (needs gh)
+```
+
+`install` reads the secret from the clipboard (or `--stdin`), checks it against the runner's own shape (the same `KEY_SHAPES` the dry run reads with), writes it `0600` without following a link, and reads it back through the same owner-only read the runner uses — so a value it stores is one the runner will read. It prints only a masked line, never the value. `verify` reports each secret's presence, mode and shape (and, with `--bot`, that the fork exists and the bot is not a collaborator here) without printing any value.
+
+**Rotating a key is the same two steps: install the new value, then revoke the old one at its provider.** The runner reads each file fresh on every run, so no runner restart is needed. Per identity:
+
+* **`brain.key` — the agent-kind brain key, on stable.** Mint it with the maintainer's "Keys" steps: `bun server-portable/keygen.ts --name agent-runner --scope write`, add the printed `agent-runner:write:<hash>` line to stable's `MCP_ACCESS_KEYS` (a line of its own — a repeated name stops the REST core), recreate the REST core so it re-reads the env (`compose … up -d --force-recreate api`), then `set_agent_kind('agent-runner','agent')` on stable's database so a claim reads `holderKind: "agent"`. Store the 64-hex key with `setup.ts install brain`. Rotate it only while the runner holds no live claims — a new name is a new agent id, which cannot renew or release the old key's claims (CLAUDE.md, "Keys") — then mint under a new name, install, recreate `api`, set the kind, and remove the old line once the runner has read the new key.
+* **`linear.key` — the runner's Linear key.** Create a Linear API key, `setup.ts install linear`, then revoke the old one in Linear. *Pilot (2026-11-11): this is the maintainer's own personal key, so the runner's Linear moves and its hand-back comment show as the maintainer. The SMD-4089 Verify bullet "a comment names the bot, not the maintainer" is deferred; to meet it, give the runner a separate Linear identity (a bot user or a Linear app) and install its key.*
+* **`anthropic.key` — the runner's Anthropic key.** Create a key in a Console workspace with a spend limit (the ceiling past the runner's own caps), `setup.ts install anthropic`, then revoke the old. Claude Code reads it through `apiKeyHelper` (`/bin/cat` of this file), so a rotation is just the install.
+* **`github.token` — the bot's GitHub token. Deferred to cut 3** (the first push; it is unused before then). When provisioned: a classic `public_repo` token on the bot account (decision 13: the bot pushes only to its own fork and opens the PR from there), `setup.ts install github`, then `setup.ts check-github <login>`. *The fork-versus-GitHub-App choice (decision 13 is a fork) is open and revisited at cut 3.* To rotate: mint a new token, install, revoke the old; an App would rotate its private key instead.
+
+`setup.ts --self-check` proves the shape gate, the `0600` write, the no-symlink write, the owner-only read and the directory check offline, on a temp directory — no clipboard, no network, no key. CI runs it.
 
 ## The criteria (SMD-4086)
 
