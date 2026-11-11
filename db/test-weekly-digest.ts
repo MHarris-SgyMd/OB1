@@ -2,9 +2,10 @@
 /**
  * test-weekly-digest.ts — db/weekly-digest.ts's pure core (SMD-2239), hermetic.
  *
- * No Postgres, no model, no network. Covers the pick (the most pressing first by
- * effective priority, SMD-4112; among equals a share of each day and writer,
- * newest first; no key's `importance` steers it, SMD-2653), the priority read
+ * No Postgres, no model, no network. Covers the pick (a share of each day and
+ * writer a turn at a time, each share taken what matters most first by
+ * effective priority, then newest, SMD-4112; no key's `importance` or own
+ * Urgent captures take more than their share, SMD-2653), the priority read
  * and its fallbacks over a stub, each pick's reason, the prompt,
  * the Telegram chunking, and the digest's egress subject — including the gate
  * itself: a digest carries no row's source/type/topic, so it declares its own
@@ -25,6 +26,7 @@ import {
   telegramEndpoint,
   priorityReason,
   readPriorities,
+  readThoughts,
   type DigestPriority,
   type DigestThought,
 } from "./weekly-digest.ts";
@@ -178,8 +180,13 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   ok(priorityReason(p([{ term: "level", value: 4, detail: { level: 4 } }])) === "urgent, stated", "a stated level");
   ok(priorityReason(p([{ term: "level", value: 0, detail: { level: 0 } }])) === "none, stated", "a stated None is a statement");
   ok(priorityReason(p([{ term: "from_items", value: 3, detail: { level: 3, item: "i1" } }])) === "high, from its open item", "a level read from the thought's open items");
-  ok(priorityReason(p([{ term: "inherited", value: 3, detail: { from: { kind: "ticket", key: "SMD-1", level: 4, hops: 1 } } }])) === "high, inherited from ticket SMD-1",
-    "an inherited level, after its hops, and the ticket it came from");
+  ok(priorityReason(p([{ term: "inherited", value: 3, detail: { from: { kind: "ticket", key: "SMD-1", level: 4, hops: 1 } } }])) === "high, inherited from urgent ticket SMD-1",
+    "an inherited level, after its hops, and the ticket it came from at its own level");
+  ok(priorityReason(p([{ term: "level", value: 4, detail: { level: 4, as: { kind: "ticket", key: "SMD-7" } } }])) === "ticket SMD-7's own row; urgent, stated",
+    "a ticket's own row says the statement is its ticket's, not the note's");
+  ok(priorityReason(p([{ term: "unknown", value: 2, detail: { as: { kind: "ticket", key: "SMD-8" } } }])) === null, "a ticket's row with no priority known: no reason");
+  ok(priorityReason(p([{ term: "unknown", value: 2, detail: {} }, { term: "urgency", value: 0.4, detail: { due_at: "2026-11-12T15:00:00Z", due_from: "from_items", item: "i9" } }])) === "no level stated; due 2026-11-12T15:00:00Z (from its open item)",
+    "a due time read from the thought's open items is said as theirs");
   ok(priorityReason(p([{ term: "inherited", value: 2.5, detail: { from: { kind: "item", key: "i2" } } }])) === "level 2.5, inherited from open item i2",
     "an operator's fractional hop is said as a number, and an item as an open item");
   ok(priorityReason(p([{ term: "unknown", value: 2, detail: {} }, { term: "overdue", value: 0.6, detail: { due_at: "2026-11-04T00:00:00Z" } }])) === "no level stated; overdue, due by the end of 2026-11-03 (UTC)",
@@ -245,6 +252,34 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const chunked = stub({ has: true, rows: (keys) => keys.map((k) => row(k, { effective: 2, terms: [{ term: "unknown", value: 2 }] })) });
   const all = await readPriorities(chunked.sql, many);
   ok(all.read?.size === 2500 && chunked.asked.map((k) => k.length).join() === "1000,1000,500", `a window past the read's 1,000 is read in chunks, every row ranked (${chunked.asked.map((k) => k.length).join()})`);
+}
+
+// ---------------------------------------------------------------------------
+// readThoughts' cap (review pass 2) — the text cut to the prompt's 280, one row
+// past the cap read to say the window held more. A stub stands for SQL.
+// ---------------------------------------------------------------------------
+{
+  const window = (n: number) => {
+    const asked: string[] = [];
+    const fn = Object.assign(
+      (strings: TemplateStringsArray) => (/information_schema/.test(strings.join("$")) ? Promise.resolve([{ has_sensitivity: true }]) : Promise.reject(new Error("unexpected"))),
+      {
+        unsafe: (q: string) => {
+          asked.push(q);
+          const limit = Number(/LIMIT (\d+)/.exec(q)?.[1]);
+          return Promise.resolve(Array.from({ length: Math.min(n, limit) }, (_, i) => ({ id: `t${i}`, content: "x", created_at: "2026-11-01T00:00:00Z", metadata: null, turn: 1, group: "g" })));
+        },
+        array: (v: unknown) => v,
+      });
+    return { sql: fn as unknown as SQL, asked };
+  };
+  const opts = { windowDays: 7, includePersonal: false, noSensitivityFilter: false };
+  const full = window(5001);
+  const over = await readThoughts(full.sql, opts);
+  ok(!over.failClosed && over.rows.length === 5000 && over.more === true, `a window past 5,000 is read to 5,000 and said to hold more (${over.failClosed ? "" : `${over.rows.length}, ${over.more}`})`);
+  ok(/left\(content, 280\) AS content/.test(full.asked[0] ?? "") && /LIMIT 5001\b/.test(full.asked[0] ?? ""), "the text is read only as far as the prompt reads it");
+  const under = await readThoughts(window(5000).sql, opts);
+  ok(!under.failClosed && under.rows.length === 5000 && under.more === false, "a window of exactly 5,000 is all read, with nothing more said");
 }
 
 // ---------------------------------------------------------------------------

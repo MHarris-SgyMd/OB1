@@ -169,10 +169,13 @@ type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
  * unreadable time sorts last.
  */
 export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_CAP): DigestThought[] {
-  const at = (t: DigestThought) => {
+  // Each row's time parsed once, not at every comparison of three sorts over up to 5,000 rows (review pass 2).
+  const times = new Map<DigestThought, number>();
+  for (const t of thoughts) {
     const ms = new Date(t.created_at).getTime();
-    return Number.isFinite(ms) ? ms : -Infinity;
-  };
+    times.set(t, Number.isFinite(ms) ? ms : -Infinity);
+  }
+  const at = (t: DigestThought) => times.get(t) ?? -Infinity;
   const newestFirst = (a: DigestThought, b: DigestThought) => (at(a) === at(b) ? 0 : at(a) < at(b) ? 1 : -1);
   const effective = (t: DigestThought) => t.priority?.effective ?? 0;
   const mattersMost = (a: DigestThought, b: DigestThought) => effective(b) - effective(a);
@@ -210,18 +213,24 @@ export function priorityReason(p: DigestPriority | undefined): string | null {
   const parts: string[] = [];
   for (const t of p.terms) {
     const d = t.detail ?? {};
+    // A due time read from the thought's open items (migration 125) is said as theirs.
+    const fromItem = d.due_from === "from_items" ? " (from its open item)" : "";
     if (t.term === "level") parts.push(`${levelWord(d.level)}, stated`);
     else if (t.term === "from_items") parts.push(`${levelWord(d.level)}, from its open item`);
     else if (t.term === "inherited") {
-      const f = (d.from ?? {}) as { kind?: string; key?: string };
-      parts.push(`${levelWord(t.value)}, inherited from ${f.kind === "item" ? "open item" : f.kind ?? "?"} ${f.key ?? "?"}`);
-    } else if (t.term === "overdue") parts.push(`overdue, due ${dueWords(d.due_at)}`);
-    else if (t.term === "urgency") parts.push(`due ${dueWords(d.due_at)}`);
+      // The level after its hops, then the level it came from: "high, inherited from urgent ticket SMD-1" (review pass 2).
+      const f = (d.from ?? {}) as { kind?: string; key?: string; level?: unknown };
+      parts.push(`${levelWord(t.value)}, inherited from ${f.level === undefined ? "" : `${levelWord(f.level)} `}${f.kind === "item" ? "open item" : f.kind ?? "?"} ${f.key ?? "?"}`);
+    } else if (t.term === "overdue") parts.push(`overdue, due ${dueWords(d.due_at)}${fromItem}`);
+    else if (t.term === "urgency") parts.push(`due ${dueWords(d.due_at)}${fromItem}`);
     else if (t.term === "unblocks") parts.push(`unblocks ${Number(d.count)}`);
   }
   if (parts.length === 0) return null;
   // A due time or an unblock on an item with no level of its own: said as such, so the words never read as a level.
   if (p.terms[0]?.term === "unknown") parts.unshift("no level stated");
+  // A ticket's own row reads as its ticket (122): said, so the statement reads as the ticket's, not the note's (review pass 2).
+  const as = p.terms[0]?.detail?.as as { kind?: string; key?: string } | undefined;
+  if (as?.key) parts.unshift(`${as.kind ?? "ticket"} ${as.key}'s own row`);
   if (p.settled) parts.push("settled");
   return parts.join("; ");
 }
@@ -316,7 +325,7 @@ const FAIL_CLOSED =
 export async function readThoughts(
   sql: SQL,
   opts: { windowDays: number; includePersonal: boolean; noSensitivityFilter: boolean },
-): Promise<{ failClosed: true } | { failClosed: false; rows: DigestThought[] }> {
+): Promise<{ failClosed: true } | { failClosed: false; rows: DigestThought[]; more: boolean }> {
   const [cols] = await sql`
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has_sensitivity`;
@@ -329,6 +338,9 @@ export async function readThoughts(
   // caller input — so building the select list is safe. Values go as $-params.
   const selectCols = ["id", "content", "created_at", "metadata"];
   if (filter && hasSensitivity) selectCols.push("sensitivity_tier");
+  // The text cut to what the prompt reads (buildUserPrompt's 280), so a window of imported documents is not read whole
+  // (review pass 2): 280 characters hold at least the 280 UTF-16 units it takes.
+  const innerCols = selectCols.map((c) => (c === "content" ? "left(content, 280) AS content" : c));
 
   const params: unknown[] = [opts.windowDays];
   let where = "created_at >= now() - make_interval(days => $1::int)";
@@ -342,16 +354,18 @@ export async function readThoughts(
   }
 
   // `group` names the row's (day, writer), for pickForDigest to number again once priorities are read (SMD-4112).
+  // One row past the cap says the window held more (review pass 2).
   const rows = (await sql.unsafe(
     `SELECT ${selectCols.join(", ")}, turn, "group" FROM (
-       SELECT ${selectCols.join(", ")},
+       SELECT ${innerCols.join(", ")},
               (row_number() OVER (PARTITION BY created_at::date, metadata->>'actor_name' ORDER BY created_at DESC, id))::int AS turn,
               jsonb_build_array(created_at::date, metadata->>'actor_name')::text AS "group"
          FROM thoughts WHERE ${where}) w
-      ORDER BY turn, created_at DESC LIMIT ${FETCH_HARD_CAP}`,
+      ORDER BY turn, created_at DESC LIMIT ${FETCH_HARD_CAP + 1}`,
     params,
   )) as DigestThought[];
-  return { failClosed: false, rows };
+  const more = rows.length > FETCH_HARD_CAP;
+  return { failClosed: false, rows: more ? rows.slice(0, FETCH_HARD_CAP) : rows, more };
 }
 
 /**
@@ -540,6 +554,9 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
     );
   }
   console.log(`  read ${read.rows.length} thought(s) in the window`);
+  if (read.more) {
+    console.error(`  ⚠ the window holds more than ${FETCH_HARD_CAP} thoughts: each day and writer's newest ${FETCH_HARD_CAP} by turn were read and ranked, the rest not (narrow --window)`);
+  }
   if (read.rows.length === 0) {
     console.log("  nothing in the window; no digest");
     return 0;

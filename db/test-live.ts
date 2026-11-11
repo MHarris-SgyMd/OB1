@@ -23333,14 +23333,15 @@ if (want("36")) {
     assert(planted.every((r) => chatPrompt.includes(r.content)) && chatPrompt.includes(floodEarlier) && burst > 0 && !/"importance"\s*:/.test(chatPrompt),
       `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, each stated Urgent (SMD-4112), that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
     // SMD-4112: the Urgent ticket's row, then the overdue item, lead; every unknown row after them, and the newer Low ones after
-    // those, or left out; each of the two says why it matters. Each is the first turn of its day's share, what matters most
-    // first in it (the maintainer, 2026-11-11).
+    // those, or left out; each of the two says why it matters. Both are planted two days ago under one writer, so they are
+    // that share's first two turns, what matters most first in it (the maintainer, 2026-11-11); the rows of the run's
+    // other groups at turns 1 and 2 are far fewer than 80.
     const place = (s: string) => chatPrompt.indexOf(s);
     const [u, o] = [place(prio.urgent.content), place(prio.overdue.content)];
     const unknownAt = [...planted.map((r) => r.content), floodEarlier].map(place);
     const lowAt = [prio.low1, prio.low2].map((r) => place(r.content));
     assert(u >= 0 && o > u && unknownAt.every((i) => i > o) && lowAt.every((i) => i === -1 || unknownAt.every((j) => i > j))
-      && chatPrompt.includes('"priority":"urgent, stated"') && /"priority":"medium, stated; overdue, due \d{4}-/.test(chatPrompt)
+      && chatPrompt.includes(`"priority":"ticket SMD-90361's own row; urgent, stated"`) && /"priority":"medium, stated; overdue, due \d{4}-/.test(chatPrompt)
       // Earlier sections' statements may rank rows of theirs in the window too: at least these two are known.
       && Number((denied.out.match(/what matters most first in each \((\d+) with a known priority\)/) ?? [])[1]) >= 2,
       `the picks lead with the Urgent ticket's row and the overdue item, before newer unknown rows and the newer Low ones (${lowAt.filter((i) => i >= 0).length} of 2 Low in the prompt), each saying why: urgent at ${u}, overdue at ${o}, the first unknown at ${Math.min(...unknownAt)}; ${(denied.out.match(/picked .*/) ?? [""])[0]}; ${(chatPrompt.match(/"priority":"[^"]*"/g) ?? []).join(", ")}`);
