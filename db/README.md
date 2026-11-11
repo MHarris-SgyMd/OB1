@@ -2518,7 +2518,8 @@ the agenda, search's ranking and both spans take it, and a call's own weights st
 override it by name. `ob1_priority_weights_refusal` checks a setting in
 `effective_priority`'s words, by a copy of its rule that test-schema holds to it
 probe by probe. A row is history: it changes only to end, once, when the next
-setting or a clear (`{}`) replaces it, and a DELETE or TRUNCATE is refused. A
+setting or a clear (`{}`) replaces it, and a DELETE or TRUNCATE is refused; a row,
+and its end, name a key the registry classifies operator, by its agent id. A
 stored setting the check refuses (a later migration narrowing a range, a raw write
 with the trigger off) raises 22000 on every read, naming the setting and the weight;
 `priority_weight_setting()` says it without raising, for `brain_info`. Its own

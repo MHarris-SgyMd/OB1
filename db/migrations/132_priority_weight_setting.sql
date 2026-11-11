@@ -54,8 +54,9 @@
 --   `priority` group (db/config.mjs) gains SELECT, INSERT and UPDATE on it,
 --   which the server roles that call effective_priority already hold. As for
 --   every core table a group writes, a role holding it can still write the
---   table directly; the trigger holds what a row may be, the function who may
---   write one (116's convention).
+--   table directly; the trigger holds what a row may be, the setting standing
+--   when written and an operator key's agent id on it and on its end, and the
+--   function who may call it (116's convention, narrowed in review pass 1).
 --
 -- SAFETY
 --   One new table, its key and a partial unique index, two triggers and six
@@ -183,7 +184,7 @@ CREATE TABLE IF NOT EXISTS priority_weight_settings (
   CHECK ((ended_at IS NULL) = (ended_by IS NULL) AND (ended_at IS NULL) = (ended_by_agent_id IS NULL))
 );
 COMMENT ON TABLE priority_weight_settings IS
-  'The operator''s priority weights, which every read takes as its defaults (ob1_priority_defaults(): ob1_priority_builtin() with the standing row''s weights laid over them by name). One row per setting, at most one standing (ended_at NULL); a row changes only to end, once, when the next setting or a clear replaces it, and a DELETE or TRUNCATE is refused, so the rows say which weights stood when. weights are overrides by name, never empty, checked by ob1_priority_weights_refusal when written. set_by and ended_by name the operator key by its name then, with its agent id. Written through set_priority_weights, an operator key''s alone. Migration 132 / SMD-4193.';
+  'The operator''s priority weights, which every read takes as its defaults (ob1_priority_defaults(): ob1_priority_builtin() with the standing row''s weights laid over them by name). One row per setting, at most one standing (ended_at NULL); a row changes only to end, once, when the next setting or a clear replaces it, and a DELETE or TRUNCATE is refused, so the rows say which weights stood when. weights are overrides by name, never empty, checked by ob1_priority_weights_refusal when written. set_by and ended_by name the operator key by its name then, with its agent id, which the trigger holds to a key the registry classifies operator. Written through set_priority_weights, an operator key''s alone. Migration 132 / SMD-4193.';
 
 CREATE UNIQUE INDEX IF NOT EXISTS priority_weight_settings_one_standing ON priority_weight_settings ((true)) WHERE ended_at IS NULL;
 
@@ -201,6 +202,17 @@ BEGIN
     IF v_bad IS NOT NULL THEN
       RAISE EXCEPTION USING MESSAGE = v_bad, ERRCODE = 'invalid_parameter_value';
     END IF;
+    -- A setting stands when written, and names an operator key by its agent
+    -- id, as set_priority_weights admits one: a role writing the table
+    -- directly cannot name any other (review pass 1).
+    IF NEW.ended_at IS NOT NULL THEN
+      RAISE EXCEPTION USING MESSAGE = 'priority_weight_settings: a setting stands when written; it ends when the next replaces it',
+        ERRCODE = 'restrict_violation';
+    END IF;
+    IF ob1_registry_kind(NEW.set_by_agent_id, NULL) IS DISTINCT FROM 'operator' THEN
+      RAISE EXCEPTION USING MESSAGE = format('priority_weight_settings: set_by_agent_id %s is no key the registry classifies operator', NEW.set_by_agent_id),
+        ERRCODE = 'insufficient_privilege';
+    END IF;
     RETURN NEW;
   END IF;
   IF TG_OP = 'UPDATE' THEN
@@ -209,6 +221,11 @@ BEGIN
     IF OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL
        AND to_jsonb(NEW) - ARRAY['ended_at', 'ended_by', 'ended_by_agent_id']
            = to_jsonb(OLD) - ARRAY['ended_at', 'ended_by', 'ended_by_agent_id'] THEN
+      -- Ended by an operator key too, by its agent id.
+      IF ob1_registry_kind(NEW.ended_by_agent_id, NULL) IS DISTINCT FROM 'operator' THEN
+        RAISE EXCEPTION USING MESSAGE = format('priority_weight_settings: ended_by_agent_id %s is no key the registry classifies operator', NEW.ended_by_agent_id),
+          ERRCODE = 'insufficient_privilege';
+      END IF;
       RETURN NEW;
     END IF;
     RAISE EXCEPTION USING
@@ -221,7 +238,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_weight_settings_guard() IS
-  'Refuses a priority_weight_settings row whose weights ob1_priority_weights_refusal names (22023, in its words), an UPDATE other than a standing row ending once (ended_at, ended_by, ended_by_agent_id), and every DELETE and TRUNCATE — for the owner too. Migration 132 / SMD-4193.';
+  'Refuses a priority_weight_settings row whose weights ob1_priority_weights_refusal names (22023, in its words), one written already ended, one whose set_by_agent_id (or, ending it, ended_by_agent_id) the registry does not classify operator (42501), an UPDATE other than a standing row ending once (ended_at, ended_by, ended_by_agent_id), and every DELETE and TRUNCATE — for the owner too. Migration 132 / SMD-4193.';
 
 CREATE OR REPLACE TRIGGER priority_weight_settings_history
   BEFORE INSERT OR UPDATE OR DELETE ON priority_weight_settings

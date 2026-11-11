@@ -19334,14 +19334,23 @@ console.log("\n[119] Migration 132: the operator's priority weights — priority
     await failure(`UPDATE priority_weight_settings SET ended_by = 'x' WHERE ended_at IS NOT NULL`),
     await failure(`DELETE FROM priority_weight_settings WHERE ended_at IS NOT NULL`),
     await failure(`TRUNCATE priority_weight_settings`),
-    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"overdue": 11}', 'x', gen_random_uuid(), now())`),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"overdue": 11}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    // A raw row names an operator key, and stands when written (review pass 1): a role holding the group could
+    // otherwise write a setting under any name, or one already ended.
     await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', gen_random_uuid(), now())`),
-    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at, ended_at, ended_by, ended_by_agent_id) VALUES ('{}', 'x', gen_random_uuid(), now(), now(), 'x', gen_random_uuid())`),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', $1::uuid, now())`, [await idOf("[119] agent")]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at, ended_at, ended_by, ended_by_agent_id) VALUES ('{"soon": 3}', 'x', $1::uuid, now(), now(), 'x', $1::uuid)`, [OP.agent_id]),
+    await failure(`UPDATE priority_weight_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [await idOf("[119] agent")]),
   ];
   assert(/^23001 priority_weight_settings is history: a row changes only to end, once/.test(hist[0]) && /^23001 .* a row changes only to end, once/.test(hist[1])
          && /^23001 priority_weight_settings is history: DELETE refused/.test(hist[2]) && /^23001 priority_weight_settings is history: TRUNCATE refused/.test(hist[3])
-         && /^22023 a weight out of range: overdue \(/.test(hist[4]) && /^23505 .*priority_weight_settings_one_standing/.test(hist[5]) && /^23514 /.test(hist[6]),
-    `history: an UPDATE of a standing row's weights and of an ended row refused, a DELETE and a TRUNCATE refused (for the owner too), a raw row with a bad weight refused in effective_priority's words, a second standing row refused by the index, an empty one by the check (${hist.map((h) => h.slice(0, 40)).join(" | ")})`);
+         && /^22023 a weight out of range: overdue \(/.test(hist[4]) && /^23505 .*priority_weight_settings_one_standing/.test(hist[5]) && /^23514 /.test(hist[6])
+         && /^42501 priority_weight_settings: set_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[7]) && /^42501 priority_weight_settings: set_by_agent_id /.test(hist[8])
+         && /^23001 priority_weight_settings: a setting stands when written/.test(hist[9]) && /^42501 priority_weight_settings: ended_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[10])
+         && (await rows()).filter((r) => r.standing).length === 1,
+    `history: an UPDATE of a standing row's weights and of an ended row refused, a DELETE and a TRUNCATE refused (for the owner too); a raw row with a bad weight refused in effective_priority's words, a second standing row by the index, an empty one by the check; a raw row naming no operator key (an unknown id, an agent's) or written already ended refused, and an end by an agent's key; the setting stands (${hist.map((h) => h.slice(0, 40)).join(" | ")})`);
 
   // A stored setting the refusal names (the trigger off, as a later migration narrowing a range would leave one): every
   // read and both spans fail 22000 naming the setting and the weight; the setting said, not raised; a clear mends it.

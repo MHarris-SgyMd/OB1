@@ -1941,17 +1941,19 @@ export type LedgerStatus = "current" | "behind" | "ahead" | null;
  * takes as its defaults. `setAt` and `setBy` say when and by which operator key; `refused`, what is wrong with a stored
  * setting in effective_priority's words (every priority read fails while it stands), else null.
  */
-export type PriorityWeightSetting = { weights: Record<string, number | boolean>; setAt: string | null; setBy: string | null; refused: string | null };
-/** priority_weight_setting()'s jsonb → the record's setting; null when none stands. A weight that is no number or boolean, or no setting at all, throws. */
+export type PriorityWeightSetting = { weights: Record<string, unknown>; setAt: string | null; setBy: string | null; refused: string | null };
+/**
+ * priority_weight_setting()'s jsonb → the record's setting; null when none stands. Its weights are kept as stored,
+ * whatever they hold: a refused setting (a null, a string, past a range) is the one this row exists to say (review
+ * pass 1: a read refusing it left the row unread while every priority read failed). No setting at all throws.
+ */
 export function weightSettingValue(r: unknown): PriorityWeightSetting | null {
   if (r === null || r === undefined) return null;
   const o = typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null;
   const w = o && o.weights !== null && typeof o.weights === "object" && !Array.isArray(o.weights) ? (o.weights as Record<string, unknown>) : null;
-  if (!o || !w || Object.values(w).some((v) => typeof v !== "boolean" && (typeof v !== "number" || !Number.isFinite(v)))) {
-    throw new Error("the priority weights read answered no setting");
-  }
+  if (!o || !w) throw new Error("the priority weights read answered no setting");
   const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
-  return { weights: w as Record<string, number | boolean>, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
+  return { weights: w, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
 }
 
 /** The threads' census as the record carries it: its counts, and no key (see DatabaseFacts.threads). */
@@ -2369,10 +2371,6 @@ function relationsLine(db: DatabaseSummary): string {
   return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})${apart}`;
 }
 
-/**
- * The Threads row (SMD-3306 PR 7a-2c): the threads and whether every key read is linked, how far a bounded census read,
- * or why it was not read.
- */
 /** The operator's priority weights (SMD-4193 PR 2): built in, the operator's, or the operator's refused (every priority read fails). */
 export function priorityWeightsLine(db: Pick<DatabaseSummary, "priorityWeights" | "unread">): string {
   const w = db.priorityWeights;
@@ -2382,13 +2380,18 @@ export function priorityWeightsLine(db: Pick<DatabaseSummary, "priorityWeights" 
   }
   if (w.standing === null) return "built in (no operator's setting)";
   const s = w.standing;
-  const set = Object.entries(s.weights).map(([k, v]) => `${k} ${String(v)}`).join(", ");
+  // A number or a boolean as written; anything else a stored setting holds as its JSON, so a null or a string shows.
+  const set = Object.entries(s.weights).map(([k, v]) => `${k} ${typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(v)}`).join(", ");
   const when = `set ${s.setAt ?? "?"}${s.setBy ? ` by ${s.setBy}` : ""}`;
   return s.refused === null
     ? `the operator's: ${set}, the rest built in (${when})`
     : `the operator's, REFUSED, so every priority read fails: ${set} (${when}): ${s.refused}. An operator key sets them again, or clears them with {}, through set_priority_weights`;
 }
 
+/**
+ * The Threads row (SMD-3306 PR 7a-2c): the threads and whether every key read is linked, how far a bounded census read,
+ * or why it was not read.
+ */
 export function threadsLine(db: Pick<DatabaseSummary, "threads" | "unread">): string {
   const t = db.threads;
   if (t === null) {

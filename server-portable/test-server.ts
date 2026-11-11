@@ -7565,6 +7565,19 @@ console.log("\n[36d] The operator's priority weights in the core and the words (
   // An envelope 132 does not answer is a fault, never a value (an unknown error, no changed flag, a BAD_WEIGHTS without words).
   const strays = [{ ok: false, error: "NOPE" }, { ok: true }, { ok: false, error: "BAD_WEIGHTS" }, null].map((a) => { try { normaliseSetWeights(a); return "read"; } catch { return "threw"; } });
   assert(strays.every((s) => s === "threw"), `an envelope set_priority_weights does not answer throws (${strays.join(",")})`);
+  // No agent id (review pass 1): the registry away is said as set_priority says it, retryable; a principal with none
+  // by design is named so. Neither reaches the store, nor is told to classify a key that may be the operator's.
+  const before = asked.length;
+  const away = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { weights: { overdue: 3 } } as never);
+  const stuck = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { weights: { overdue: 3 } } as never);
+  const none = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write" } as never, { weights: { overdue: 3 } } as never);
+  const awayText = text(say.renderSetPriorityWeights(away)), stuckText = text(say.renderSetPriorityWeights(stuck)), noneText = text(say.renderSetPriorityWeights(none));
+  assert(asked.length === before && !away.ok && away.refusal.code === "PRIORITY_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "PRIORITY_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR"
+      && awayText === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && /until an operator acts/.test(stuckText) && /reached the brain with none; call with the operator's own key\.$/.test(noneText) && !/set_agent_kind/.test(awayText + stuckText + noneText),
+    `with no agent id nothing reaches the store: the registry away PRIORITY_UNATTRIBUTED (retryable, or not when an operator must act), a principal with none named so, and no line to classify the key (${awayText} | ${noneText})`);
 
   const words = [set, cleared, same, agent, unclassified, bad].map((o) => text(say.renderSetPriorityWeights(o)));
   assert(words[0] === "Set the operator's priority weights: every read now takes overdue 3, unblocks_many 1, the rest built in as its defaults, and a call's own weights still override them by name. Before: the built-in weights. A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it."
@@ -7601,12 +7614,14 @@ console.log("\n[36d] The operator's priority weights in the core and the words (
     priorityWeightsLine({ priorityWeights: { standing }, unread: {} }),
     priorityWeightsLine({ priorityWeights: { standing: refusedS }, unread: {} }),
   ];
-  const badRead = [{ weights: "x" }, { weights: { soon: "2" } }, [], 3].map((r) => { try { weightSettingValue(r); return "read"; } catch { return "threw"; } });
+  const badRead = [{ weights: "x" }, { weights: [1] }, [], 3].map((r) => { try { weightSettingValue(r); return "read"; } catch { return "threw"; } });
+  // A refused setting holding what no weight may (a null, a string) is read and said, never left unread (review pass 1).
+  const oddLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: null, week: "x" }, set_at: "2026-11-11T03:30:44Z", set_by: "op-key", refused: "a weight out of range: soon, week (…)" }) }, unread: {} });
   assert(lines[0] === "built in (no operator's setting before migration 132)" && /^\? \(priority_weight_settings /.test(lines[1]) && lines[2] === "built in (no operator's setting)"
       && lines[3] === "the operator's: overdue 3, the rest built in (set 2026-11-11T03:30:44.937Z by op-key)"
       && lines[4] === "the operator's, REFUSED, so every priority read fails: soon 20 (set 2026-11-11T03:30:44.937Z by op-key): a weight out of range: soon (…). An operator key sets them again, or clears them with {}, through set_priority_weights"
-      && badRead.every((r) => r === "threw"),
-    `brain_info's Priority weights row: before 132, unread, built in, the operator's, the operator's refused; a read answering no setting throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+      && badRead.every((r) => r === "threw") && oddLine.startsWith(`the operator's, REFUSED, so every priority read fails: soon null, week "x" (set 2026-11-11T03:30:44.000Z by op-key)`),
+    `brain_info's Priority weights row: before 132, unread, built in, the operator's, the operator's refused, a refused one holding a null and a string; a read answering no setting throws (${lines.join(" | ")} | ${oddLine.slice(0, 90)} | ${badRead.join(",")})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");

@@ -8,9 +8,10 @@
 import type { PriorityWeights } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
-import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
+import { NO_AGENT_ID, ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { PRIORITY_WEIGHT_NAMES, type Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
+import { unattributedAs } from "./caller.ts";
 
 /** 122's (128's) refusals of the weights, by their words: lc_messages never translates a RAISE's own message. */
 const WEIGHTS_RAISE = /^(?:not a weight: |a weight out of range: |effective_priority's weights are a JSON object)/;
@@ -35,12 +36,18 @@ export function weightsRefused(e: unknown, weights: Partial<PriorityWeights> | u
  * over the built-in ones (null: none, the built-in weights stand), the setting it replaced, when and by which key the
  * standing one was set, and whether anything was written.
  */
-export type WeightsSet = { changed: boolean; weights: Partial<PriorityWeights> | null; previous: Partial<PriorityWeights> | null; setAt: string | null; setBy: string | null; caller: string };
-export type WeightsSetCode = "REFUSED_NOT_OPERATOR" | "REFUSED_WEIGHTS";
+export type WeightsSet ={ changed: boolean; weights: Partial<PriorityWeights> | null; previous: Partial<PriorityWeights> | null; setAt: string | null; setBy: string | null; caller: string };
+export type WeightsSetCode = "REFUSED_NOT_OPERATOR" | "REFUSED_WEIGHTS" | "PRIORITY_UNATTRIBUTED";
 
 export async function setPriorityWeights(ctx: Ctx, principal: Principal, { weights }: Input<"set_priority_weights">): Promise<Outcome<WeightsSet, WeightsSetCode>> {
   // Who may is the database's to say: the key's registry kind by its agent id, which the server does not hold. The
   // weights are checked there again, in effective_priority's words (cap against unblocks_many_at). {} clears.
+  // Without the agent id the database can tell no operator (a name lends no kind): the registry's absence is said as
+  // set_priority says it, and a principal that has none by design is named so, never told to classify a key that may
+  // be the operator's already (review pass 1).
+  const away = unattributedAs("PRIORITY_UNATTRIBUTED", principal);
+  if (away) return away;
+  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: NO_AGENT_ID });
   const result = await (await ctx.store()).setPriorityWeights({ weights: Object.keys(weights).length === 0 ? null : weights, actor: actorOf(ctx, principal) });
   if (!result.ok) {
     if (result.error === "NOT_OPERATOR") return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: result.kind });

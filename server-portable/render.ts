@@ -27,7 +27,7 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { failure, NO_AGENT_ID, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
@@ -610,7 +610,7 @@ export function priorityHint(msg: string): string {
     : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
     ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), which 128 leaves to PUBLIC's EXECUTE: the database's default privileges or a REVOKE took it from the server's role, so grant EXECUTE on both to it (migrate.ts --grant does not); search without them meanwhile"
     : /ob1_priority_defaults/.test(msg) && /does not exist|could not find|lacks weight/i.test(msg)
-    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128), which is missing or lacks a weight; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
+    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128; since 132 the built-in weights ob1_priority_builtin under the operator's setting), which is missing or lacks a weight; re-apply every migration, so the last to define each stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
     : /ob1_priority_span answered no span/.test(msg)
     ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without priority_weight meanwhile"
     : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -1970,7 +1970,11 @@ export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>)
     const before = v.previous ? `${weightsText(v.previous)}, the rest built in` : "the built-in weights";
     return `${v.weights ? "Set" : "Cleared"} the operator's priority weights: every read now takes ${now} as its defaults, and a call's own weights still override them by name. Before: ${before}.`
       + (v.weights ? " A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it." : "");
-  }, (r) => r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.kind === NO_AGENT_ID
+      ? `Refused: only a key the operator classified \`operator\` may set the priority weights, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
+    : r.code === "PRIORITY_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
     : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
     : unknownRefusal(r),
   (v) => ({ changed: v.changed, weights: v.weights, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
