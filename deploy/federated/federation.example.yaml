@@ -17,8 +17,9 @@
 #               OB1_CHAT_BASE_URL…), each one server's;
 #   slots       its parallel setting: Ollama's OLLAMA_NUM_PARALLEL, which is
 #               per model, so each model on it has this many;
-#   reserve     the slots per model background never takes, kept for live
-#               calls (default 1; background keeps at least one);
+#   reserve     the slots of each model (the server's, with per_model:
+#               false) background never takes, kept for live calls
+#               (default 1; background keeps at least one);
 #   per_model   true (the default): each model has `slots` of its own, as
 #               Ollama's; false: the server's `slots` whatever the model, as
 #               a decide tier answering one call at a time.

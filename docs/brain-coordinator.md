@@ -303,7 +303,7 @@ The federated coordinator comes with SMD-3379's third PR, its slot service, and 
 
 ## Not decided here
 
-- **The federated coordinator's protocol** beyond slots: what else it holds for a federation (SMD-2877, SMD-3268). How a live call's slot request reaches it is decided (2026-11-10): through the brain's coordinator, as every model call's does (row 2).
+- **The federated coordinator's protocol** beyond slots: what else it holds for a federation (SMD-2877, SMD-3268). How a live call's slot request reaches it is decided (2026-11-10, row 2): through the brain's coordinator.
 - **Workflows a brain writes on request** (SMD-2274). Under this record, only reviewed templates run.
 - **Multiple users per brain** (SMD-1716).
 - **Each port's details:** which of upstream's `user_id` columns survive, and which tables are adopted (SMD-2311's own decisions).

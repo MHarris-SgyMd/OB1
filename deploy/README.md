@@ -381,8 +381,9 @@ to another brain's live calls. The federated coordinator's slot broker
 free:
 - **A live call** is granted at once, always.
 - **A background call** is granted in turn across the brains, within the room
-  the live calls leave. Each server keeps `reserve` slots per model that
-  background never takes, though background always keeps at least one.
+  the live calls leave. Each server keeps `reserve` slots per model (or in
+  all, with `per_model: false`) that background never takes, though
+  background always keeps at least one.
 - **A brain alone** may use every background slot. Two backlogged brains
   split the slot time: the turn goes to the waiting brain that has had less
   of it over the last minutes, and a brain arriving starts level with the
@@ -413,11 +414,11 @@ bun --no-env-file deploy/federated/federated.ts down
   either otherwise.
 - **`slots` is the server's parallel setting.** For Ollama this is
   `OLLAMA_NUM_PARALLEL`, which applies per model, so the broker counts each
-  model on the server apart (with `per_model: false`, the server's slots are
-  counted together). `reserve` (1 unless set) is kept for live calls,
-  but background keeps at least one slot, so with `slots: 1` background and
-  live share it. A server whose slots are its own whatever the model, such as
-  a decide tier answering one call at a time, takes `per_model: false`.
+  model on the server apart. A server whose slots are its own whatever the
+  model, such as a decide tier answering one call at a time, takes
+  `per_model: false`, and its slots are counted together. `reserve` (1 unless
+  set) is kept for live calls, but background keeps at least one slot, so with
+  `slots: 1` background and live share it.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1`. A call to any other base isn't
   brokered.
@@ -434,8 +435,9 @@ bun --no-env-file deploy/federated/federated.ts down
   re-registered within `warm_s`. A brain no longer listed is refused at its
   next connection.
 - **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
-  broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says each brain's
-  connections, and any server over its slots, at most once a minute.
+  broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says
+  each brain's connections, and any server over its slots, at most once a
+  minute.
 
 ## What is reachable from where
 

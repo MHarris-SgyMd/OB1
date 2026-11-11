@@ -8,8 +8,9 @@
  *   bun deploy/federated/test-broker.ts
  */
 import { spawn } from "node:child_process";
+import * as net from "node:net";
 import { normalisedBase as slotsBase } from "../../server-portable/slots.ts";
-import { hashKey, normalisedBase, parseRegistry, startBroker, type Broker, type Registry } from "./broker.ts";
+import { hashKey, normalisedBase, parseRegistry, startBroker, type Broker, type Registry, type Snapshot } from "./broker.ts";
 
 let pass = 0;
 let fail = 0;
@@ -62,7 +63,7 @@ async function connect(b: Broker, key: string): Promise<Client> {
 
 const ask = (c: Client, id: string, cls: "live" | "background", extra: object = {}) => c.send({ op: "ask", id, base: BASE, model: "qwen3:8b", cls, ...extra });
 const done = (c: Client, id: string) => c.send({ op: "done", id });
-const pool = (b: Broker) => b.snapshot()["ollama/qwen3:8b"] ?? { live: 0, background: 0, waiting: {} };
+const pool = (b: Broker): Snapshot[string] => b.snapshot()["ollama/qwen3:8b"] ?? { live: 0, background: 0, waiting: {}, used: {} };
 /** Until `cond` holds or `ms` passes; whether it held. */
 async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
   const end = performance.now() + ms;
@@ -221,13 +222,13 @@ await withBroker(registry({ slots: 3, reserve: 0 }), async (b) => {
     ask(s, "keep", "live"); await s.next("go", "keep");
     ask(s, "g", "background"); await s.next("go", "g");
     t += 10_000; done(s, "g");
-    await until(() => (b.snapshot()["ollama/qwen3:8b"]?.used.stable ?? 0) > 0);
-    const before = b.snapshot()["ollama/qwen3:8b"].used.stable;
+    await until(() => (pool(b).used.stable ?? 0) > 0);
+    const before = pool(b).used.stable;
     t += 300_000;
-    const after = b.snapshot()["ollama/qwen3:8b"].used.stable;
-    ok(before === 10_000 && Math.abs(after - 5_000) <= 1, `a brain's slot time is charged as held (${before} ms) and halves in ${300} s (${after} ms)`, [before, after]);
+    const after = pool(b).used.stable;
+    ok(before === 10_000 && Math.abs(after - 5_000) <= 1, `a brain's slot time is charged as held (${before} ms) and halves in 300 s (${after} ms)`, [before, after]);
     t += 300_000;
-    ok(Math.abs(b.snapshot()["ollama/qwen3:8b"].used.stable - 2_500) <= 1, "and halves again", b.snapshot());
+    ok(Math.abs(pool(b).used.stable - 2_500) <= 1, "and halves again", b.snapshot());
     await s.close();
   } finally { await b.stop(); }
 }
@@ -261,7 +262,7 @@ await withBroker(registry({ slots: 3, reserve: 0 }), async (b) => {
     ask(s, "a0", "background"); await s.next("go", "a0");
     for (let i = 1; i <= 10; i++) { ask(s, `a${i}`, "background"); await s.next("queued", `a${i}`); t += 60_000; done(s, `a${i - 1}`); await s.next("go", `a${i}`); }
     t += 60_000; done(s, "a10");
-    await until(() => (b.snapshot()["ollama/qwen3:8b"]?.background ?? 1) === 0);
+    await until(() => pool(b).background === 0);
     ask(c, "c1", "background"); await c.next("go", "c1");
     ask(s, "s1", "background"); ask(c, "c2", "background"); await c.next("queued", "c2");
     t += 60_000; done(c, "c1");
@@ -493,7 +494,6 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 60 }), async (b) => {
   // A brain that asks, then floods frames and stops reading — a raw client in this process, so every byte it writes
   // reaches the broker whatever the load, and its own socket paused, so the broker's replies back up past the
   // kernel's buffers into its own: it is closed long before idle_s (60 s), its grant given back.
-  const net = await import("node:net");
   const frame = (text: string) => {
     const body = Buffer.from(text), mask = Buffer.from([1, 2, 3, 4]);
     const head = body.length < 126 ? Buffer.from([0x81, 0x80 | body.length]) : Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]);
@@ -541,7 +541,7 @@ await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
   await s.close();
 });
 
-section("[12] per_model: false, the hello, a request's age, the logs, the door's Host");
+section("[12] per_model: false, the hello, an ask's age, the logs, the door's Host");
 await withBroker(registry({ slots: 1, reserve: 0, extra: `  jev:\n    bases: [http://host.containers.internal:8022]\n    slots: 1\n    reserve: 0\n    per_model: false\n` }), async (b) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   s.send({ op: "ask", id: "d1", base: "http://host.containers.internal:8022", model: "h2o-lightning-4b", cls: "background" });
@@ -594,7 +594,7 @@ await withBroker(registry(), async (b) => {
   const answers: string[] = [];
   for (const host of ["a b", "[", "%", "@x"]) {
     const r = await new Promise<string>((res) => {
-      const sock = require("node:net").connect(b.port, "127.0.0.1", () => sock.write(`GET /health HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
+      const sock = net.connect(b.port, "127.0.0.1", () => sock.write(`GET /health HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
       let got = ""; sock.on("data", (d: Buffer) => { got += d; }); sock.on("end", () => res(got.split("\r\n")[0])); sock.on("error", () => res("error"));
     });
     answers.push(r);

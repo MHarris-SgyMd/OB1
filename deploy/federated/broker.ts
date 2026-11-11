@@ -14,8 +14,9 @@
 // background call is granted — so a restart hands out no slot a running call still holds, for the brains that
 // reconnect within it.
 //
-// The protocol: a WebSocket at /v1/slots, the brain's key in an `x-brain-key` header on the upgrade (an unknown one is
-// a 401 before it; a brain's 17th socket at once a 429), JSON text frames, each id a string the socket never reuses.
+// The protocol: a WebSocket at /v1/slots, the brain's broker key in an `x-brain-key` header on the upgrade (an unknown
+// one is a 401 before it; a brain's 17th socket at once a 429), JSON text frames, each id a string the socket never
+// reuses.
 //   brain → broker  {op:"ask", id, base, model, cls, first?, max_wait_s?, waited_s?}
 //                                     a slot for one call to `base`'s `model`; `waited_s` the time it waited already,
 //                                     asked again after a drop, so it keeps its age (`max_wait_s` 0: goes first)
@@ -56,8 +57,9 @@
 //                half-life (a call is never cut short: one of 71 s beside 50 ms calls has 0.54, of 300 s 0.64); a
 //                grant taken back at lease_s is charged all of it; a brain with one call at a time has less than
 //                half beside a backlog, since a slot it frees goes on before its next ask comes (0.33 of a room of 2);
-//                with no brain at work in a pool, all start level again; within a brain, the first ask its brain put first (`first`, 2c-2's consolidation) or that has waited its `max_wait_s` (60
-//                unset), else its oldest — 2c-2's turn, held here brain-wide.
+//                with no brain at work in a pool, all start level again; within a brain, the oldest of the asks it
+//                put first (`first`, 2c-2's consolidation) or that have waited their `max_wait_s` (60 unset), else its
+//                oldest — 2c-2's turn, held here brain-wide.
 // The trust (SMD-3268, no implicit trust): a key per brain, the registry holding only its hash; a brain sees its own
 // grants and asks, and `hello` names no other brain. A brain can call every call live, or say every call was held:
 // counted and logged, not capped.
@@ -161,7 +163,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
     }
     if (!isInt(raw.slots, 1, MAX_SLOTS)) problems.push(`${at}.slots: its parallel setting (Ollama: OLLAMA_NUM_PARALLEL), 1 to ${MAX_SLOTS}`);
     const slots = isInt(raw.slots, 1, MAX_SLOTS) ? raw.slots : 1;
-    let reserve = Math.min(1, slots);
+    let reserve = 1;
     if (raw.reserve !== undefined) { if (isInt(raw.reserve, 0, slots)) reserve = raw.reserve; else problems.push(`${at}.reserve: the slots background never takes (it keeps at least one), 0 to its slots (${slots})`); }
     let perModel = true;
     if (raw.per_model !== undefined) { if (typeof raw.per_model === "boolean") perModel = raw.per_model; else problems.push(`${at}.per_model: true (each model its own slots, as Ollama's) or false (the server's slots whatever the model, as a one-at-a-time decide tier's)`); }
@@ -206,14 +208,15 @@ type Pool = {
   liveBy: number[];
   /** Each brain's asks waiting, by its index in the registry, in the order asked (a Set: a withdrawal is O(1)). */
   queues: Set<Ask>[];
-  /** Each brain's background slot time here, ms, decayed (USE_HALF_LIFE_S) as of `usedAt`: with its grants running, whose turn it is. */
+  /** Each brain's background slot time here, ms, decayed (USE_HALF_LIFE_S) as of `usedAt`: with its grants running,
+   *  whose turn it is. */
   used: number[];
   usedAt: number;
   /** The index of the brain served last, -1 before any: ties go round from it. */
   last: number;
 };
 
-/** What a test reads of the broker: each pool's counts, and each brain's asks waiting in it. */
+/** What a test reads of the broker: each pool's counts, and each brain's asks waiting and slot time there. */
 export type Snapshot = Record<string, { live: number; background: number; waiting: Record<string, number>; used: Record<string, number> }>;
 
 export type Broker = { port: number; stop(): Promise<void>; snapshot(): Snapshot };
@@ -290,9 +293,9 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
    * Hands the pool's free background room out while any brain has an ask waiting: to the waiting brain that has had the
    * least background slot time here — its remembered time, decayed, and its grants' running time — ties going round
    * from the brain served last, so two backlogged brains split the slot time whatever the room, about half each for
-   * calls well under the half-life (review pass 1: by turns, a brain of 5 ms calls had 6% beside one of 60 ms; review pass 2:
-   * by grants held, 8% wherever the room is one slot); and within it, its first ask put first or past its
-   * max_wait_s, else its oldest.
+   * calls well under the half-life (review pass 1: by turns, a brain of 5 ms calls had 6% beside one of 60 ms; review
+   * pass 2: by grants held, 8% wherever the room is one slot); and within it, the oldest of its asks put first or past
+   * their max_wait_s, else its oldest.
    */
   const pump = (p: Pool) => {
     if (warming()) return;

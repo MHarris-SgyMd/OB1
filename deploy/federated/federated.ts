@@ -46,20 +46,22 @@ export function measured(f: Facts): { ok: boolean; why: string } {
   return { ok: false, why: `${what}: no shape of the federated coordinator was measured there — a brain's container must reach the broker's port at its host alias (deploy/federated/federated.ts says why Docker Engine on Linux is not yet)` };
 }
 
-/** The environment compose runs in: the shell's, less anything that would steer compose or the project's settings, then the project's. */
+/** The environment compose runs in: the shell's, less anything that would steer compose or the project's settings,
+ *  then the project's. */
 export function composeEnv(env: Record<string, string | undefined>, r: Pick<Registry, "port">, registryPath: string, brokerSha: string, registrySha: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) if (v !== undefined && !/^(COMPOSE_|FEDERATED_)/.test(k)) out[k] = v;
   return { ...out, FEDERATED_PORT: String(r.port), FEDERATED_REGISTRY: registryPath, FEDERATED_BROKER_SHA256: brokerSha, FEDERATED_REGISTRY_SHA256: registrySha };
 }
 
-/** A new key for a brain, and the registry's lines for it: the key once, for the brain's deploy/.env; its hash, quoted, for the registry. */
+/** A new key for a brain, and the registry's lines for it: the key once, for the brain's deploy/.env; its hash, quoted,
+ *  for the registry. */
 export function mintKey(brain: string, bytes = randomBytes(32)): { key: string; lines: string } {
   const key = `${KEY_PREFIX}${bytes.toString("hex")}`;
   return { key, lines: `  ${brain}:\n    key: "${hashKey(key)}"\n` };
 }
 
-/** Why the registry's file can't be read by the broker's unprivileged user, or "". */
+/** Why a file the broker's container mounts (the registry, broker.ts) can't be read by its unprivileged user, or "". */
 export function modeProblem(mode: number, path: string): string {
   return (mode & 0o004) ? "" : `${path} is not readable by others (mode ${(mode & 0o777).toString(8)}), and the broker's container reads it as an unprivileged user: chmod 644 it (the registry holds only hashes; broker.ts no secret)`;
 }
@@ -122,7 +124,7 @@ async function main(cmd: string, args: string[]) {
   const { registry, problems } = parseRegistry(text);
   if (!registry) { console.error(`${o.registry}:\n${problems.map((p) => `  ${p}`).join("\n")}`); process.exit(2); }
   const refusals: string[] = [];
-  for (const path of [o.registry, BROKER]) { const mode = modeProblem(statSync(path).mode, path); if (mode) refusals.push(mode); }
+  for (const path of [o.registry, BROKER]) { const problem = modeProblem(statSync(path).mode, path); if (problem) refusals.push(problem); }
   const facts = factsOf(o.runtime);
   if (typeof facts === "string") refusals.push(facts);
   else { const m = measured(facts); if (!m.ok) refusals.push(m.why); else console.log(`federated: ${m.why}`); }
