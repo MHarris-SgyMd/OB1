@@ -47,6 +47,19 @@ export function levelOf(scale: PriorityScale, value: string | null | undefined, 
 }
 
 /** A calendar day's end: the next day's start in UTC, as an ISO instant (SMD-3778). */
+/** The scale's words, 0 to 5, as the replies say a level (render.ts) and the weekly digest does (SMD-4112). */
+export const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
+/**
+ * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
+ * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
+ * and any other as the instant itself. Here beside the scale, not in render.ts, so a db/ script the import runner's
+ * image builds (it copies server-portable/*.ts, not core/) can say it too (SMD-4112).
+ */
+export const dueText = (iso: string) => {
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
+};
+
 export const endOfDay = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString();
 
 /** Each scale's name as a reason says it. */
