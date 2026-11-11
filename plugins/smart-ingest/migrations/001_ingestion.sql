@@ -5,13 +5,14 @@
 -- README's copy block moves an old brain's rows). The thoughts themselves are
 -- the core's: an item names the thought it matched or wrote by id, with no
 -- foreign key into the core, and keeps what capture_thought's metadata has no
--- room for (the extracted type, importance, tags and the passage it came from).
+-- room for (the extracted importance, tags and the passage it came from; the
+-- type is on the thought too, as extraction_type).
 
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
   id               bigserial   PRIMARY KEY,
-  -- The text's sha256, hex; a reprocess of the same text adds -v2, -v3 …
+  -- The text's sha256, hex; another job of the same text (a reprocess, or a resend after a failed job) adds -v2, -v3 …
   input_hash       text        NOT NULL UNIQUE,
-  -- The caller's session key (source_metadata.import_key): one job per key unless reprocess.
+  -- The caller's session key (source_metadata.import_key): one live job per key unless reprocess (a failed job answers no one).
   import_key       text,
   source_label     text,
   source_type      text,

@@ -52,6 +52,12 @@ export const LIMITS = {
  * (README, "Deduplication"; measuring them is SMD-4216).
  */
 export const SIMILARITY = { skip: 0.92, match: 0.85 } as const;
+/**
+ * How many of the search's hits are read for a match and for the exact text:
+ * the exact text need not rank first on the brain's model (a query is embedded
+ * under an instruction a thought is not), so more than the old server's five.
+ */
+const SEARCH_HITS = 20;
 /** A thought shorter than this, or rated below MIN_IMPORTANCE, is skipped as too weak to keep. */
 const MIN_THOUGHT_LENGTH = 30;
 const MIN_IMPORTANCE = 3;
@@ -374,7 +380,7 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   const key = sameText(t.content);
   if (seen.has(key)) return { ...t, ...none, action: "skip", reason: "duplicate_within_job" };
   seen.add(key);
-  const found = await ctx.call("search_thoughts", { query: t.content, limit: 5 });
+  const found = await ctx.call("search_thoughts", { query: t.content, limit: SEARCH_HITS });
   if (!found.ok) {
     if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
     return { ...t, ...none, action: "skip", reason: "search_refused", status: "failed", error: `search_thoughts refused: ${found.refusal.code}` };
@@ -412,21 +418,45 @@ const metadataOf = (job: Job, item: ItemRow) => ({
  * The thought holding this text word for word (up to case and spacing), or
  * null: looked for before a capture, since a capture of a text the brain holds
  * is a re-capture, which merges the capture's metadata into that thought (its
- * `source` relabelled, the job's keys added). A search that fails finds none,
- * and the capture goes ahead.
+ * `source` relabelled, the job's keys added). Answered with whether that
+ * thought is this very item's write (a job resumed after a fault that came
+ * between the capture and the item's row). A search that cannot answer for
+ * the text throws, so nothing is captured blind: its vector not made (which
+ * leaves a prose text unfindable) or a refusal worth retrying is Unavailable,
+ * the job paused; any other refusal is a fault, the item failed.
  */
-async function heldText(ctx: Pick<PluginContext, "call">, content: string): Promise<string | null> {
-  const found = await ctx.call("search_thoughts", { query: content, limit: 5 });
-  if (!found.ok) return null;
-  return found.value.hits.find((h) => sameText(h.content) === sameText(content))?.id ?? null;
+async function heldText(ctx: Pick<PluginContext, "call">, job: Job, item: ItemRow): Promise<{ id: string; own: boolean } | null> {
+  const found = await ctx.call("search_thoughts", { query: item.content, limit: SEARCH_HITS });
+  if (!found.ok) {
+    if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
+    throw new Error(`search_thoughts refused the item's text: ${found.refusal.code}`);
+  }
+  const hit = found.value.hits.find((h) => sameText(h.content) === sameText(item.content));
+  if (hit) {
+    const m = (hit.metadata ?? {}) as Record<string, unknown>;
+    return { id: hit.id, own: m.smart_ingest_job === Number(job.job_id) && m.smart_ingest_item === Number(item.id) };
+  }
+  const failed = found.value.vectorFailed;
+  if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
+  return null;
 }
+
+/** A core refusal that says a moment later may do pauses the job (Unavailable); any other fails the item. */
+const refusedBy = (name: string, r: { code: string; retryable: boolean }): Done => {
+  if (r.retryable) throw new Unavailable({ refused: r.code });
+  return failed(`${name} refused: ${r.code}`);
+};
 
 /**
  * One item carried out: as the dry run decided, counted by what was done
  * (SMD-2154). An add or a revision whose text the brain holds by now (a
  * capture since the dry run, or another job's) writes nothing: the add is
- * `existed`, the revision fails. A text captured in the moment between that
- * look and the capture is a re-capture, told by the capture's `existed`.
+ * `existed`, the revision fails; one this item wrote itself, before a fault,
+ * is `executed`. A held text the look does not find (captured in the moment
+ * between the look and the capture, past the search's first SEARCH_HITS, or
+ * one the key cannot read) is a re-capture, told by the capture's `existed`,
+ * and merged into as any capture of known text is. A refusal the core says is
+ * worth retrying throws Unavailable: the job pauses, its item still ready.
  */
 export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: ItemRow): Promise<Done> {
   const trust = job.trust ? { trust: job.trust } : {};
@@ -435,10 +465,10 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
     case "skip":
       return { status: "executed", result: item.matched_thought_id, error: null };
     case "add": {
-      const held = await heldText(ctx, item.content);
-      if (held) return { status: "existed", result: held, error: null };
+      const held = await heldText(ctx, job, item);
+      if (held) return { status: held.own ? "executed" : "existed", result: held.id, error: null };
       const captured = await ctx.call("capture_thought", { content: item.content, source: "smart-ingest", metadata: metadataOf(job, item), ...trust });
-      if (!captured.ok) return failed(`capture_thought refused: ${captured.refusal.code}`);
+      if (!captured.ok) return refusedBy("capture_thought", captured.refusal);
       return { status: captured.value.existed === true ? "existed" : "executed", result: captured.value.id, error: null };
     }
     case "append_evidence": {
@@ -449,17 +479,17 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
         excerpt: item.source_snippet.trim() ? item.source_snippet : item.content,
         source: "smart_ingest",
       });
-      if (!appended.ok) return failed(`append_thought_evidence refused: ${appended.refusal.code}`);
+      if (!appended.ok) return refusedBy("append_thought_evidence", appended.refusal);
       return { status: appended.value.action === "already_exists" ? "existed" : "executed", result: appended.value.id, error: null };
     }
     case "create_revision": {
       if (!item.matched_thought_id) return failed("create_revision needs the matched thought");
-      const held = await heldText(ctx, item.content);
-      if (held) return revisionHeld(held);
+      const held = await heldText(ctx, job, item);
+      if (held) return held.own ? { status: "executed", result: held.id, error: null } : revisionHeld(held.id);
       const captured = await ctx.call("capture_thought", {
         content: item.content, source: "smart-ingest", supersedes: item.matched_thought_id, metadata: metadataOf(job, item), ...trust,
       });
-      if (!captured.ok) return failed(`capture_thought refused: ${captured.refusal.code}`);
+      if (!captured.ok) return refusedBy("capture_thought", captured.refusal);
       // A re-capture writes no pointer (the thought's provenance stays its own), so the revision was not written.
       if (captured.value.existed === true) return revisionHeld(captured.value.id);
       return { status: "executed", result: captured.value.id, error: null };
@@ -471,8 +501,9 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
  * Every ready item of an executing job carried out in order, each recorded as
  * it finishes; then the job complete. A fault on one item fails that item, the
  * rest going on, as the old server's did. A fault outside one (a store that
- * stops answering) leaves the job a dry run's again, its error saying so, so
- * execute_job carries out the items still ready; the fault is thrown.
+ * stops answering), or Unavailable from one (a provider down, a thought kept
+ * busy), leaves the job a dry run's again, its error saying why, so
+ * execute_job carries out the items still ready; it is thrown.
  */
 async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
   try {
@@ -485,6 +516,7 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
       try {
         done = await execute(ctx, job, item);
       } catch (e) {
+        if (e instanceof Unavailable) throw e;
         console.error(`smart-ingest job ${job.job_id} item ${item.id}: ${e instanceof Error ? e.message : String(e)}`);
         done = failed(FAULT);
       }
@@ -494,8 +526,9 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
     }
     return await ctx.db.tx((sql) => settle(sql, job.job_id, "complete", true));
   } catch (e) {
+    const why = e instanceof Unavailable ? "paused: a service the core needs did not answer" : `interrupted by ${FAULT}`;
     await ctx.db.tx((sql) => sql`
-      UPDATE ingestion_jobs SET status = 'dry_run_complete', error_message = ${`interrupted by ${FAULT}; execute_job carries out the items still ready`}
+      UPDATE ingestion_jobs SET status = 'dry_run_complete', error_message = ${`${why}; execute_job carries out the items still ready`}
        WHERE id = ${job.job_id}::bigint AND status = 'executing'`).catch(() => {});
     throw e;
   }
@@ -512,6 +545,15 @@ const SourceMetadata = z
 /** A label trimmed, or null for none. */
 const label = (max: number) => text(max).transform((s) => s.trim() || null).nullish();
 
+/** What to do with an earlier job its text or import_key answered, by its status (a failed one answers no one). */
+const NEXT: Record<(typeof STATUSES)[number], string> = {
+  dry_run_complete: "execute_job carries out its decisions (reprocess extracts the text again)",
+  complete: "reprocess extracts the text again",
+  extracting: "it is still extracting, or a server stopped while it did (reprocess extracts the text again)",
+  executing: "it is executing, or a server stopped while it did (reprocess extracts the text again)",
+  failed: "reprocess extracts the text again",
+};
+
 /** Why execute_job will not carry out a job in each status but a dry run's (and a complete one, answered as it stands). */
 const NOT_READY: Partial<Record<(typeof STATUSES)[number], string>> = {
   extracting: "it is still extracting",
@@ -524,11 +566,11 @@ const refused = (status: 422 | 503, code: string, job: string | null, facts: Rec
 export default definePlugin({
   name: "smart-ingest",
   title: "Smart ingest",
-  description: "A document's durable thoughts: extracted by the brain's model, matched by meaning against the thoughts the brain holds, and added, skipped, appended as evidence or written as revisions through the core, after a dry run that shows each decision.",
+  description: "A document's durable thoughts: extracted by the brain's model, matched by meaning against the thoughts the brain holds, and added, skipped, appended as evidence or written as revisions through the core, optionally after a dry run that shows each decision.",
   operations: {
     ingest: operation({
       title: "Ingest a document",
-      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess; a failed job answers no one, so the same call after a refusal runs again. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count.`,
+      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess; a failed job answers no one, so the same call after a refusal runs again. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer (while executing, the job paused for execute_job), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count.`,
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -578,7 +620,7 @@ export default definePlugin({
         });
         if (made.kind === "existing") {
           const why = importKey ? `this text, or this import_key (${importKey}), was ingested` : "this text was ingested";
-          return ok({ existing: true, job: made.job, message: `${why} as job ${made.job.job_id}; reprocess runs it again` });
+          return ok({ existing: true, job: made.job, message: `${why} as job ${made.job.job_id}; ${NEXT[made.job.status]}` });
         }
         let job = made.job;
         let calls = 0;
@@ -646,14 +688,21 @@ export default definePlugin({
           if (req.dry_run) {
             return ok({ existing: false, job, message: `Dry run: ${job.extracted_count} extracted. Would add ${job.added_count}, skip ${job.skipped_count}, append ${job.appended_count}, revise ${job.revised_count}.` });
           }
-          if (job.status === "executing") job = await executeJob(ctx, job);
+          if (job.status === "executing") {
+            try {
+              job = await executeJob(ctx, job);
+            } catch (e) {
+              if (!(e instanceof Unavailable)) throw e;
+              return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { ...e.facts, message: "paused; execute_job carries out the items still ready" });
+            }
+          }
           return ok({ existing: false, job, message: `Ingested: ${job.extracted_count} extracted. Added ${job.added_count}, skipped ${job.skipped_count}, appended ${job.appended_count}, revised ${job.revised_count}, already there ${job.existed_count}, failed ${job.failed_count}.` });
         }
       },
     }),
     execute_job: operation({
       title: "Execute a dry-run job",
-      description: "Carries out a dry run's decisions, in order: each add captured, each skip recorded against the thought it matched, each append written as evidence, each revision captured as superseding the thought it matched. Counted by what was done (existed_count: an add whose text was a thought by now, or evidence the thought already held; failed_count: refused, with why on the item). A job already complete answers as it stands (already); one not a dry run's, or one another call is executing, is refused JOB_NOT_READY.",
+      description: "Carries out a dry run's decisions, in order: each add captured, each skip recorded against the thought it matched, each append written as evidence, each revision captured as superseding the thought it matched. Counted by what was done (existed_count: an add whose text was a thought by now, or evidence the thought already held; failed_count: refused, with why on the item). A job already complete answers as it stands (already); one not a dry run's, or one another call is executing, is refused JOB_NOT_READY; no such job NO_SUCH_JOB. Refused PROVIDER_UNAVAILABLE (503, retryable) when a provider the core needs does not answer: the job is paused, a dry run's again with its items still ready, for execute_job once it answers.",
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -674,7 +723,12 @@ export default definePlugin({
           if (claimed.job.status === "complete") return ok({ already: true, job: claimed.job });
           return refuse(409, "JOB_NOT_READY", { job_id, job_status: claimed.job.status, message: NOT_READY[claimed.job.status] ?? "only a dry run's job (dry_run_complete) is executed" });
         }
-        return ok({ already: false, job: await executeJob(ctx, claimed.job) });
+        try {
+          return ok({ already: false, job: await executeJob(ctx, claimed.job) });
+        } catch (e) {
+          if (!(e instanceof Unavailable)) throw e;
+          return refused(503, "PROVIDER_UNAVAILABLE", job_id, { ...e.facts, message: "paused; execute_job carries out the items still ready" });
+        }
       },
     }),
     list_jobs: operation({

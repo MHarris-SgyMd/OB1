@@ -13,7 +13,7 @@ A plugin adds operations to the brain itself (SMD-2310). It runs inside the brai
 | [meal-planning](meal-planning/) | Recipes, the week's meals and the shopping list made from them: the learning path's Extension 4 (SMD-2311) |
 | [professional-crm](professional-crm/) | Contacts, their interactions and opportunities, and the brain's thoughts linked to them: the learning path's Extension 5 (SMD-2311) |
 | [readwise](readwise/) | Readwise's highlights as thoughts: a webhook Readwise posts each new highlight to, captured once by its id as outside text, and the highlights it captured, by book. Ported from the Readwise Capture integration's server (SMD-2690) |
-| [smart-ingest](smart-ingest/) | A document's durable thoughts: extracted by the brain's model, matched by meaning against the thoughts the brain holds, and added, skipped, appended as evidence or written as revisions through the core, after a dry run that shows each decision. Ported from the Smart Ingest integration's server and schema (SMD-2690) |
+| [smart-ingest](smart-ingest/) | A document's durable thoughts: extracted by the brain's model, matched by meaning against the thoughts the brain holds, and added, skipped, appended as evidence or written as revisions through the core, optionally after a dry run that shows each decision. Ported from the Smart Ingest integration's server and schema (SMD-2690) |
 
 ## Turning plugins on
 
