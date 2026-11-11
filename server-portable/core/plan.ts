@@ -268,8 +268,9 @@ const ingested = (h: { metadata?: Record<string, unknown> | null }) => h.metadat
 
 /**
  * The gaps the knowledge section shows: no hit at all, every hit superseded, every hit outside text, no vector. Not
- * how relevant the hits are: the search keeps its nearest matches whatever their similarity, which each hit says, and
- * a bar for "little on this" is PR 2's to measure.
+ * how relevant the hits are: the search keeps its nearest matches whatever their similarity, which each hit says. The
+ * bar for "little on this" is SMD-4212's: measured in its PR 1 (evals/eval-little.ts) as the best hit's similarity
+ * below 0.74 on qwen3-embedding:4b@1024, and raised as a gap in its PR 2.
  */
 export function knowledgeGaps(hits: readonly Pick<SearchHit, "supersededBy" | "metadata">[], vectorFailed: QueryVectorFailed | undefined): PlanGap[] {
   const gaps: PlanGap[] = [];
