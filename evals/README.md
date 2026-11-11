@@ -4908,8 +4908,8 @@ bun eval-inferred-priority.ts --self-check     # the rules, the registration's h
 bun eval-inferred-priority.ts --print-sql      # the population's SQL, for a brain whose database only a container reaches
 D=~/.cache/ob1-3670-pr2   # private files live outside any repo; the eval refuses a texts, run or sheet file in a git work tree
 bun eval-inferred-priority.ts --run $D/run.jsonl --texts $D/texts.jsonl [--shard k/n]   # the shipped inferPriority over every text
-bun eval-inferred-priority.ts --draw $D/run.jsonl --sheet $D/sheet.md --texts $D/texts.jsonl   # the blind labelling sheet
-bun eval-inferred-priority.ts --freeze <run.jsonl> <gold.md> <second.md> --note "…"     # → fixtures/inferred-priority.json
+bun eval-inferred-priority.ts --draw $D/run.jsonl --sheet $D/sheet.md --texts $D/texts.jsonl   # the blind sheet, and a reply file beside it
+bun eval-inferred-priority.ts --freeze $D/run.jsonl <gold> <second> --note "…"   # each a filled sheet or reply file → fixtures/inferred-priority.json
 bun eval-inferred-priority.ts                  # the report and the verdict, from the fixture
 ```
 
@@ -4931,6 +4931,16 @@ bun eval-inferred-priority.ts                  # the report and the verdict, fro
 
 The texts file holds the text, the run file the model's phrases and the sheet both, so all three are refused inside
 any git work tree; the fixture holds ids and numbers only.
+
+**What `--draw` prints and writes** (after the measurement, from its lessons):
+* **The population by writer,** before drawing. On stable it shows `ingest-records: 20 texts` at once, the frame gap
+  review pass 1 found after the registration was pinned.
+* **A reply file** beside the sheet (`<sheet>.replies.txt`): one `NNN <id> | level | due` line per item. A rater may
+  fill it in instead of the sheet, and `--freeze` reads either. This run's labels came back as such a list and were
+  copied into the sheet by script; re-frozen from a reply file, they give the committed fixture exactly.
+* **The sheet's size:** characters, the median item, a reading estimate with the long items' share apart, and each
+  item over 20,000 characters by number. On this sheet: 462,059 characters, two papers (items 007 and 043) holding
+  189,413 of them.
 
 ### Results, 2026-11-11: the bar fails, so `count_inferred` stays off
 

@@ -23,12 +23,16 @@
  *       run, never recorded as reading nothing. The file holds the model's phrases, so it must sit outside any repo.
  *       --shard k/n takes every n-th text from the k-th, so n runs started together share the file.
  *
- *   bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> (--texts <texts.jsonl> | with DATABASE_URL)
- *       The sample (DRAW: 60 calls and 60 others), shuffled, as a labelling sheet: each text and its capture day,
- *       never the model's call. Outside any repo too. Copy it once per rater.
+ *   bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> [--answers <replies.txt>] (--texts <texts.jsonl> | with DATABASE_URL)
+ *       Prints the population by writer, then draws the sample (DRAW: 60 calls and 60 others), shuffled, as a
+ *       labelling sheet: each text and its capture day, never the model's call. Beside it, a reply file (one
+ *       `NNN <id> | level | due` line per item; the sheet's name with .replies.txt by default) a rater may fill instead
+ *       of the sheet. Prints the sheet's size, a reading estimate and its long items. Outside any repo too. Copy both
+ *       once per rater.
  *
- *   bun eval-inferred-priority.ts --freeze <run.jsonl> <gold-sheet.md> <second-sheet.md> --note "<who labelled, when>"
- *       The filled sheets and the run → fixtures/inferred-priority.json (ids and numbers only). Refuses a sheet with
+ *   bun eval-inferred-priority.ts --freeze <run.jsonl> <gold> <second> --note "<who labelled, when>"
+ *       The two raters' filled sheets or reply files, and the run → fixtures/inferred-priority.json (ids and numbers
+ *       only). Refuses a sheet with
  *       a blank or unreadable answer, one that is not the draw, or a captured day that is not the run's, and refuses
  *       everything at a registration other than the pinned one.
  *
@@ -47,7 +51,7 @@ import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { INFER_PROMPT_VERSION, INFERRED_CEILING, inferPriority, type Inferred } from "../server-portable/priority-infer.ts";
 import {
   BAR, CAPTURES_SQL, CEILING, CONVENTIONS, DRAW, LEVEL_WORDS, MIN_CALLS, callOf, dayOffset, drawSample, dueCategory, dueRead, fromFixture, isCall, kappa,
-  levelCategory, levelRead, parseSheet, registeredSection, registrationDigits, registrationHash, renderSheet, score, toFixture, verdict,
+  isSheet, levelCategory, levelRead, parseAnswers, parseSheet, readAnswer, registeredSection, renderAnswers, registrationDigits, registrationHash, renderSheet, score, toFixture, verdict,
   utcDay, writerKey, type Call, type Fixture, type Item, type Label, type Score,
 } from "./inferred-priority.ts";
 
@@ -128,6 +132,48 @@ export function sheetLabels(text: string, picked: readonly { id: string; at: str
   const absent = picked.filter((x) => !labels.has(x.id));
   if (absent.length) problems.push(`${absent.length} drawn items are not on the sheet`);
   return { labels, problems };
+}
+
+/**
+ * A filled file's labels, tied to the draw: a sheet as sheetLabels reads it, or a reply file (renderAnswers's), each
+ * item's due days counted from its run line's capture day, refusing an id outside the draw or a drawn item missing.
+ */
+export function filledLabels(text: string, picked: readonly { id: string; at: string }[]): { labels: Map<string, Label>; problems: string[] } {
+  if (isSheet(text)) return sheetLabels(text, picked);
+  const { labels, problems } = parseAnswers(text, new Map(picked.map((p) => [p.id, p.at])));
+  const absent = picked.filter((x) => !labels.has(x.id));
+  if (absent.length) problems.push(`${absent.length} drawn items are not in the reply file`);
+  return { labels, problems };
+}
+
+/** The population's makeup by writer, printed before a draw: a frame read by a proxy (actor_kind) shows what it took. */
+export function makeupLines(lines: readonly RunLine[]): string[] {
+  const by = new Map<string, { n: number; calls: number }>();
+  for (const l of lines) {
+    const w = by.get(l.writer) ?? { n: 0, calls: 0 };
+    w.n++;
+    if (isCall(l.call)) w.calls++;
+    by.set(l.writer, w);
+  }
+  return [...by].sort((a, b) => b[1].n - a[1].n || (a[0] < b[0] ? -1 : 1)).map(([w, x]) => `  ${w}: ${x.n} texts, ${x.calls} calls`);
+}
+
+/** An item this long is flagged before the sheet goes out: a rater should know it is coming, or skim it. */
+export const LONG_ITEM_CHARS = 20_000;
+/** A rough reading pace for the estimate, in characters a minute (about 200 words). */
+export const READ_CHARS_PER_MIN = 1_000;
+
+/** The drawn sheet's size: its characters, the median item, a reading estimate, and each item past LONG_ITEM_CHARS by number. */
+export function sizeLines(texts: readonly string[]): string[] {
+  const lengths = texts.map((t) => t.length), total = lengths.reduce((a, b) => a + b, 0);
+  const median = [...lengths].sort((a, b) => a - b)[Math.floor(lengths.length / 2)] ?? 0;
+  const long = lengths.flatMap((n, i) => (n > LONG_ITEM_CHARS ? [`item ${String(i + 1).padStart(3, "0")} (${n.toLocaleString("en-US")} characters)`] : []));
+  const hours = (n: number) => (n / READ_CHARS_PER_MIN / 60).toFixed(1);
+  const longChars = lengths.filter((n) => n > LONG_ITEM_CHARS).reduce((a, b) => a + b, 0);
+  return [
+    `sheet: ${lengths.length} items, ${total.toLocaleString("en-US")} characters, median item ${median.toLocaleString("en-US")}; about ${hours(total)} h to read every word at ${READ_CHARS_PER_MIN} characters a minute${long.length ? `, ${hours(longChars)} h of it the ${long.length} long items` : ""}`,
+    ...(long.length ? [`  long items to skim or warn of: ${long.join(", ")}`] : []),
+  ];
 }
 
 const args = process.argv.slice(2);
@@ -235,15 +281,20 @@ function refuseUnpinned(step: string): void {
   if (registrationHash() !== REGISTERED) throw new Error(`the registration is ${registrationHash()}, not the pinned ${REGISTERED}: ${step} only at the pinned registration`);
 }
 
-async function draw(runPath: string, sheetPath: string): Promise<void> {
-  const out = outsideRepo(sheetPath, "the sheet");
+async function draw(runPath: string, sheetPath: string, answersPath: string): Promise<void> {
+  const out = outsideRepo(sheetPath, "the sheet"), replies = outsideRepo(answersPath, "the reply file");
   refuseUnpinned("a sheet is drawn");
   const population = await texts();
   const lines = runLines(outsideRepo(runPath, "the run file"), population);
+  const calls = lines.filter((l) => isCall(l.call)).length;
+  console.log(`population ${lines.length}: ${calls} calls, ${lines.length - calls} others, by writer:`);
+  for (const l of makeupLines(lines)) console.log(l);
   const { sheet, picked, short } = drawSheet(lines, population);
   writeFileSync(out, sheet, { mode: 0o600 });
-  const calls = lines.filter((l) => isCall(l.call)).length;
-  console.log(`population ${lines.length}: ${calls} calls, ${lines.length - calls} others; drew ${picked.length}${short.length ? ` (short: ${short.join("; ")})` : ""} → ${out}`);
+  writeFileSync(replies, renderAnswers(picked.map((p) => p.id)), { mode: 0o600 });
+  console.log(`drew ${picked.length}${short.length ? ` (short: ${short.join("; ")})` : ""} → ${out}, replies → ${replies}`);
+  const byId = new Map(population.map((t) => [t.id, t.text]));
+  for (const l of sizeLines(picked.map((p) => byId.get(p.id)!))) console.log(l);
 }
 
 // ── --freeze ──────────────────────────────────────────────────────────────────
@@ -255,7 +306,7 @@ function freeze(runPath: string, goldPath: string, secondPath: string, note: str
   const byId = new Map(lines.map((l) => [l.id, l]));
   const pickedAt = picked.map((p) => ({ id: p.id, at: byId.get(p.id)!.at }));
   const sheets = [goldPath, secondPath].map((p) => {
-    const { labels, problems } = sheetLabels(readFileSync(outsideRepo(p, "a filled sheet"), "utf8"), pickedAt);
+    const { labels, problems } = filledLabels(readFileSync(outsideRepo(p, "a filled sheet or reply file"), "utf8"), pickedAt);
     if (problems.length) throw new Error(`${p}:\n  ${problems.join("\n  ")}`);
     return labels;
   });
@@ -523,6 +574,32 @@ function selfCheck(): void {
   const moved = fill(drawn.sheet).replace("captured: Tuesday 2026-11-03 (UTC)", "captured: Monday 2026-11-02 (UTC)");
   assert(sheetLabels(moved, pickedAt).problems.some((p) => /captured 2026-11-02 on the sheet, 2026-11-03 in the run/.test(p)), "a sheet item whose captured day is not the run's is refused");
 
+  // The reply file: drawn beside the sheet, read back alike, tied to the draw.
+  const replies = renderAnswers(drawn.picked.map((p) => p.id));
+  assert(replies.split("\n").filter((l) => /^\d{3} /.test(l)).length === 30 && replies.includes(`001 ${drawn.picked[0].id} |  | `), "the reply file has one blank line per drawn item, in the sheet's order");
+  assert(!isSheet(replies) && isSheet(drawn.sheet), "a reply file is told from a sheet");
+  const answered = replies.replace(/\|  \| $/gm, "| - | -").replace(`001 ${drawn.picked[0].id} | - | -`, `001 ${drawn.picked[0].id} | High, urgent | 2026-11-06`);
+  const viaReplies = filledLabels(answered, pickedAt);
+  assert(viaReplies.problems.length === 0 && viaReplies.labels.size === 30, "a filled reply file of the draw is taken");
+  assert(JSON.stringify(viaReplies.labels.get(drawn.picked[0].id)) === JSON.stringify(L([3, 4], [3])), "a reply's due day counts from its run line's capture day, as the sheet's does");
+  const viaSheet = filledLabels(fill(drawn.sheet), pickedAt);
+  assert(viaSheet.problems.length === 0 && [...viaSheet.labels.keys()].every((k) => JSON.stringify(viaSheet.labels.get(k)) === JSON.stringify(L([]))), "a filled sheet is still read as a sheet");
+  assert(filledLabels(replies, pickedAt).problems.filter((p) => /blank/.test(p)).length === 60, "an unfilled reply file is refused, every blank named");
+  assert(filledLabels(answered.replace(/^030 .*\n/m, ""), pickedAt).problems.some((p) => /1 drawn items are not in the reply file/.test(p)), "a reply file missing a drawn item is refused");
+  assert(filledLabels(answered + `031 ${id(99)} | - | -\n`, pickedAt).problems.some((p) => /item 031 .*not in the draw/.test(p)), "a reply for an id outside the draw is refused");
+  assert(filledLabels(answered + answered.split("\n").find((l) => l.startsWith("030 "))! + "\n", pickedAt).problems.some((p) => /listed twice/.test(p)), "a reply listed twice is refused");
+  assert(filledLabels(answered + "030 high -\n", pickedAt).problems.some((p) => /not "NNN <id> \| level \| due"/.test(p)), "a line that is not a reply line is refused");
+  assert(filledLabels(answered.replace(`| High, urgent | 2026-11-06`, `| hihg | Friday`), pickedAt).problems.filter((p) => /level "hihg"|due "Friday"/.test(p)).length === 2, "a misspelt level and a day that is not a date are refused in a reply");
+  assert(JSON.stringify(readAnswer("-", "2026-11-04", tue, "x")) === JSON.stringify({ label: L([], [1]) }) && "problems" in readAnswer("", "-", tue, "x"), "one item's answers read alike from either file");
+
+  // The draw's reports: the population by writer, and the sheet's size.
+  const mk = makeupLines([...runRows.slice(0, 3).map((r) => ({ ...r, writer: "hook" })), { ...runRows[20], writer: "notes" }]);
+  assert(JSON.stringify(mk) === JSON.stringify(["  hook: 3 texts, 3 calls", "  notes: 1 texts, 0 calls"]), "the makeup counts each writer's texts and calls, largest first");
+  const sz = sizeLines(["a".repeat(1_000), "b".repeat(30_000), "c".repeat(2_000)]);
+  assert(/^sheet: 3 items, 33,000 characters, median item 2,000; about 0\.6 h to read every word .*, 0\.5 h of it the 1 long items$/.test(sz[0]), "the size says the characters, the median item and a reading estimate, the long items' share apart");
+  assert(sz.length === 2 && /item 002 \(30,000 characters\)/.test(sz[1]) && !/item 001|item 003/.test(sz[1]), "only an item past the long line is flagged, by its sheet number");
+  assert(sizeLines(["x"]).length === 1, "a sheet with no long item flags none");
+
   // A report only at the pinned registration, on this prompt version.
   assert(!reportLines({ ...fx, registration: registrationDigits(), prompt_version: INFER_PROMPT_VERSION + 1 }).at(-1)!.startsWith("verdict"), "a fixture measured on another prompt version gets no verdict");
   assert(!reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("verdict"), "a fixture labelled under another registration gets no verdict");
@@ -548,11 +625,11 @@ if (import.meta.main) {
   else if (args.includes("--print-sql")) console.log(CAPTURES_SQL.replace(/\s+/g, " "));
   else if (flag("run")) await run(flag("run")!);
   else if (flag("draw")) {
-    if (!flag("sheet")) throw new Error("--draw <run.jsonl> needs --sheet <sheet.md>");
-    await draw(flag("draw")!, flag("sheet")!);
+    if (!flag("sheet")) throw new Error("--draw <run.jsonl> needs --sheet <sheet.md> [--answers <replies.txt>]");
+    await draw(flag("draw")!, flag("sheet")!, flag("answers") ?? flag("sheet")!.replace(/(\.md)?$/, ".replies.txt"));
   } else if (flag("freeze")) {
     const i = args.indexOf("--freeze"), [r, g, s] = args.slice(i + 1, i + 4);
-    if (!r || !g || !s || !flag("note")) throw new Error("--freeze <run.jsonl> <gold-sheet.md> <second-sheet.md> --note \"<who labelled, when>\"");
+    if (!r || !g || !s || !flag("note")) throw new Error("--freeze <run.jsonl> <gold> <second> --note \"<who labelled, when>\" (each a filled sheet or reply file)");
     freeze(r, g, s, flag("note")!);
   } else {
     if (!existsSync(FIXTURE)) throw new Error(`no fixture yet (${relative(REPO, FIXTURE)}): --run, --draw, label, --freeze`);

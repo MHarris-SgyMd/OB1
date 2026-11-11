@@ -257,15 +257,25 @@ export function parseSheet(text: string): { labels: Map<string, Label>; days: Ma
     const cap = /^\w+ (\d{4}-\d{2}-\d{2}) \(UTC\)$/.exec(fields.captured ?? "");
     if (!cap) { problems.push(`${where}: no captured line`); continue; }
     const at = new Date(cap[1] + "T00:00:00Z");
-    const levels = readList(fields.level, (w) => LEVEL_WORDS[w.toLowerCase()] ?? null);
-    const dues = readList(fields.due, (d) => dayOffset(at, d));
-    if (levels === "blank") problems.push(`${where}: level is blank (write - for none stated)`);
-    else if (levels === "bad") problems.push(`${where}: level "${fields.level}" is not - or ${Object.keys(LEVEL_WORDS).join("/")}, comma-separated`);
-    if (dues === "blank") problems.push(`${where}: due is blank (write - for none stated)`);
-    else if (dues === "bad") problems.push(`${where}: due "${fields.due}" is not - or YYYY-MM-DD, comma-separated`);
-    if (Array.isArray(levels) && Array.isArray(dues)) { labels.set(id, { levels, dues }); days.set(id, cap[1]); }
+    const read = readAnswer(fields.level, fields.due, at, where);
+    if ("label" in read) { labels.set(id, read.label); days.set(id, cap[1]); } else problems.push(...read.problems);
   }
   return { labels, days, problems };
+}
+
+/**
+ * One item's two answers read, its due days counted from `at` (its capture day): the label, or what is wrong with each
+ * answer, under `where`. The sheet and the reply file read answers alike.
+ */
+export function readAnswer(levelRaw: string | undefined, dueRaw: string | undefined, at: Date, where: string): { label: Label } | { problems: string[] } {
+  const problems: string[] = [];
+  const levels = readList(levelRaw, (w) => LEVEL_WORDS[w.toLowerCase()] ?? null);
+  const dues = readList(dueRaw, (d) => dayOffset(at, d));
+  if (levels === "blank") problems.push(`${where}: level is blank (write - for none stated)`);
+  else if (levels === "bad") problems.push(`${where}: level "${levelRaw}" is not - or ${Object.keys(LEVEL_WORDS).join("/")}, comma-separated`);
+  if (dues === "blank") problems.push(`${where}: due is blank (write - for none stated)`);
+  else if (dues === "bad") problems.push(`${where}: due "${dueRaw}" is not - or YYYY-MM-DD, comma-separated`);
+  return Array.isArray(levels) && Array.isArray(dues) ? { label: { levels, dues } } : { problems };
 }
 
 /** One answer read: "-" for none, else comma-separated values each read by `one`. */
@@ -276,6 +286,47 @@ function readList(raw: string | undefined, one: (s: string) => number | null): n
   const out = s.split(",").map((x) => one(x.trim()));
   return out.some((x) => x === null) ? "bad" : [...new Set(out as number[])].sort((a, b) => a - b);
 }
+
+// ── The reply file ────────────────────────────────────────────────────────────
+
+/** A line of the reply file: the sheet's item number, the item's id, then the two answers. */
+const ANSWER_LINE = /^(\d{3}) ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \|(.*)\|(.*)$/;
+
+/**
+ * The reply file drawn beside a sheet: one line per item, in the sheet's order, `NNN <id> | level | due`, its answers
+ * blank. A rater fills it in instead of the sheet, so no one copies answers between the two by hand.
+ */
+export function renderAnswers(ids: readonly string[]): string {
+  return [
+    "# SMD-3670 PR 2 replies: fill in each line's level and due, as the sheet's item with that number says.",
+    `# level: - or ${Object.keys(LEVEL_WORDS).join("/")}; due: - or YYYY-MM-DD; several comma-separated. Leave nothing blank.`,
+    ...ids.map((id, i) => `${String(i + 1).padStart(3, "0")} ${id} |  | `),
+    "",
+  ].join("\n");
+}
+
+/**
+ * A filled reply file read back, each item's due days counted from its run line's capture day (`atById`). Refuses, naming
+ * each, a line that is not a reply line, an id listed twice or not in `atById`, and a blank or unreadable answer.
+ */
+export function parseAnswers(text: string, atById: ReadonlyMap<string, string>): { labels: Map<string, Label>; problems: string[] } {
+  const labels = new Map<string, Label>(), problems: string[] = [];
+  for (const [n, line] of text.replace(/\r\n/g, "\n").split("\n").entries()) {
+    if (line.trim() === "" || line.startsWith("#")) continue;
+    const m = ANSWER_LINE.exec(line);
+    if (!m) { problems.push(`line ${n + 1}: not "NNN <id> | level | due"`); continue; }
+    const [num, id] = [m[1], m[2]], where = `item ${num} (${id.slice(0, 8)})`;
+    const at = atById.get(id);
+    if (at === undefined) { problems.push(`${where}: not in the draw`); continue; }
+    if (labels.has(id)) { problems.push(`${where}: listed twice`); continue; }
+    const read = readAnswer(m[3].trim(), m[4].trim(), new Date(at), where);
+    if ("label" in read) labels.set(id, read.label); else problems.push(...read.problems);
+  }
+  return { labels, problems };
+}
+
+/** Whether a filled file is a sheet (its item heads) rather than a reply file. */
+export const isSheet = (text: string): boolean => text.split("\n").some((l) => ITEM_HEAD.test(l));
 
 // ── The fixture ───────────────────────────────────────────────────────────────
 
