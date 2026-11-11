@@ -179,7 +179,8 @@ export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_
   const newestFirst = (a: DigestThought, b: DigestThought) => (at(a) === at(b) ? 0 : at(a) < at(b) ? 1 : -1);
   const effective = (t: DigestThought) => t.priority?.effective ?? 0;
   const mattersMost = (a: DigestThought, b: DigestThought) => effective(b) - effective(a);
-  // Each group's rows numbered again, what matters most first, then newest (then by id, as readThoughts breaks a tie).
+  // Each group's rows numbered again, what matters most first, then by readThoughts' own turn: Postgres' order to the
+  // microsecond, then by id, where a JavaScript Date keeps milliseconds (review pass 3). A row without one, newest first.
   const turns = new Map<DigestThought, number>();
   const groups = new Map<string, DigestThought[]>();
   for (const t of thoughts) {
@@ -189,7 +190,7 @@ export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_
     else groups.set(t.group, [t]);
   }
   for (const g of groups.values()) {
-    g.sort((a, b) => mattersMost(a, b) || newestFirst(a, b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).forEach((t, i) => turns.set(t, i + 1));
+    g.sort((a, b) => mattersMost(a, b) || (a.turn ?? 0) - (b.turn ?? 0) || newestFirst(a, b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).forEach((t, i) => turns.set(t, i + 1));
   }
   const turn = (t: DigestThought) => turns.get(t) ?? t.turn ?? 1;
   return [...thoughts]
@@ -396,6 +397,10 @@ export async function readPriorities(
         read.set(p.item.key, { effective: p.effective, settled: p.settled, terms: p.terms });
       }
     }
+    // Every thought answered, or none is ranked: a row left out would rank below a stated Low, as though None were
+    // stated of it (review pass 3).
+    const missing = ids.filter((id) => !read.has(id)).length;
+    if (missing > 0) return { read: null, why: `effective_priority answered ${ids.length - missing} of the ${ids.length} thoughts asked`, failed: true };
     return { read };
   } catch (e) {
     return { read: null, why: oneLine(String((e as Error)?.message ?? e)), failed: true };
@@ -555,7 +560,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   }
   console.log(`  read ${read.rows.length} thought(s) in the window`);
   if (read.more) {
-    console.error(`  ⚠ the window holds more than ${FETCH_HARD_CAP} thoughts: each day and writer's newest ${FETCH_HARD_CAP} by turn were read and ranked, the rest not (narrow --window)`);
+    console.error(`  ⚠ the window holds more than ${FETCH_HARD_CAP} thoughts: ${FETCH_HARD_CAP} in all were read and ranked, each day and writer's newest turns, and the rest not (narrow --window)`);
   }
   if (read.rows.length === 0) {
     console.log("  nothing in the window; no digest");

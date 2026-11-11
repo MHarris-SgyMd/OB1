@@ -160,12 +160,19 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
     { id: "oldHigh", group: "b|1", created_at: at(1, 9), priority: stated(3) },
   ]);
   ok(ids(pickForDigest(within, 1)) === "oldHigh", `within a turn what matters most is taken first (${ids(pickForDigest(within, 1))})`);
-  // Equals keep readThoughts' tie: newest, then by id.
-  const tie = grouped([
-    { id: "b-same", group: "g|1", created_at: at(1, 9), priority: stated(3) },
-    { id: "a-same", group: "g|1", created_at: at(1, 9), priority: stated(3) },
-  ]);
-  ok(ids(pickForDigest(tie, 1)) === "a-same", `a tie in priority and time goes by id, as readThoughts' (${ids(pickForDigest(tie, 1))})`);
+  // Equals keep readThoughts' own turn: Postgres orders to the microsecond, then by id, where a Date keeps milliseconds.
+  // Two rows in one millisecond, the larger id newer by microseconds, so readThoughts made it turn 1.
+  const sameMs = [
+    thought({ id: "b-newer", group: "g|1", created_at: at(1, 9), turn: 1, priority: stated(3) }),
+    thought({ id: "a-older", group: "g|1", created_at: at(1, 9), turn: 2, priority: stated(3) }),
+  ];
+  ok(ids(pickForDigest(sameMs, 1)) === "b-newer", `a tie in priority keeps readThoughts' turn, not the millisecond and the id (${ids(pickForDigest(sameMs, 1))})`);
+  // No turn at all: newest, then by id.
+  const tie = [
+    thought({ id: "b-same", group: "g|1", created_at: at(1, 9), priority: stated(3) }),
+    thought({ id: "a-same", group: "g|1", created_at: at(1, 9), priority: stated(3) }),
+  ];
+  ok(ids(pickForDigest(tie, 1)) === "a-same", `with no turn, a tie in priority and time goes by id (${ids(pickForDigest(tie, 1))})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +255,8 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
 
   const none = stub({ has: true });
   ok((await readPriorities(none.sql, [])).read?.size === 0 && none.asked.length === 0, "an empty window: nothing read");
+  const short = await guard(readPriorities(stub({ has: true, rows: (keys) => keys.slice(1).map((k) => row(k, { effective: 2, terms: [{ term: "unknown", value: 2 }] })) }).sql, [ida, idb]));
+  ok(short.read === null && short.failed && /answered 1 of the 2/.test(short.why), `a thought left out of the answer is a failed read, not a None (${short.read === null ? short.why : ""})`);
   const many = Array.from({ length: 2500 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
   const chunked = stub({ has: true, rows: (keys) => keys.map((k) => row(k, { effective: 2, terms: [{ term: "unknown", value: 2 }] })) });
   const all = await readPriorities(chunked.sql, many);
