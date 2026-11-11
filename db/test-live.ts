@@ -8933,11 +8933,17 @@ if (want("10h")) {
     await sql`SELECT requeue_thought_work(${POOL}, ${fresh}::uuid)`;
     const setDry = await sweep({ dryRun: true });
     asked = ownCalls;
-    const setSwept = await sweep();
+    // Bounded, so a sweep that asks the thought again stops at three, not at the alarm, which this section runs off.
+    const setSwept = await sweep({ limit: 3 });
     assert(/would: of 1 thought\(s\), record none by the rules; ask stub-judge about 1 \(1 with an out-of-date subject\)\./.test(setDry.stdout)
         && setSwept.code === 0 && tally(setSwept) === "0 subject(s) recorded; 1 the model named nothing for (1 out-of-date subject(s) closed)"
         && (await standingOf(fresh)) === undefined && ownCalls === asked + 1 && (await claimOf(fresh))?.status === "succeeded",
       `a thought holding an out-of-date set the model names nothing for: counted once by a dry run, asked once, its whole set closed and its claim finished (exit ${setSwept.code}, ${ownCalls - asked} asked: ${tally(setSwept)}; dry: ${setDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 120)})`);
+    // The thought left as a passing run leaves it, whatever this run did: a set still standing, or its claim pending,
+    // would loop a later unbounded sweep of this section, the alarm off.
+    await sql`SELECT record_thought_subjects(${fresh}::uuid, NULL, NULL, 'subject:stub-judge@p1', NULL, NULL, NULL)`;
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
+                WHERE thought_id = ${fresh}::uuid AND work_type = ${POOL} AND status <> 'succeeded'`;
     // An unread answer about a text edited while the model answered: its failed claim is no longer this run's when
     // released — the edit pooled it again — so it is said, and the run, taking it again and finishing it, exits 0
     // (review pass 2: it counted as this run's failure, for --retry-failed).
