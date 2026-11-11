@@ -4441,6 +4441,26 @@ else {
       `a failed last pass and a malformed alarm each warn on a fresh heartbeat (${row(wrong.out, "workers")})`);
     assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row carries the block until the follower judges its next block \(48 answers or more\)\. A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers\./.test(fix(wrong.out, "workers")),
       `…each with its own remedy (${fix(wrong.out, "workers")})`);
+    // Held by Linear's rate limit (SMD-4133): the row says the hold and its time left, the fix that it passes on its
+    // own and the hour's sum — not "its log says why".
+    {
+      const until = new Date(Date.now() + 20 * 60_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until, by: "linear" } }), 60);
+      const held = await run(SQL_ENV);
+      const at = until.replace(/\./g, "\\.");
+      assert(new RegExp(`!\\s+workers\\s+board-sync alive, its last pass rate-limited by Linear: no pass, and no request, until ${at} \\(in (19|20|21) min; the reset time Linear sent\\) \\(last stamped`).test(row(held.out, "workers")),
+        `a held board-sync's row says the hold and its time left (${row(held.out, "workers")})`);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: it sends no request until ${at} \\(the reset time Linear sent\\), then passes again on its own\\. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user`).test(fix(held.out, "workers"))
+          && !/its log says why/.test(fix(held.out, "workers")),
+        `…and its fix that it passes again on its own, with the hour's sum (${fix(held.out, "workers")})`);
+      // A hold already past is said as past, not "no request until" a time gone (review pass 1).
+      const gone = new Date(Date.now() - 30_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until: gone, by: "backoff" } }), 60);
+      const past = await run(SQL_ENV);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: its hold ended at ${gone.replace(/\./g, "\\.")} \\(a backoff: Linear sent no reset time\\), and its next trigger passes\\.`).test(fix(past.out, "workers")),
+        `…and a hold already past is said as past (${fix(past.out, "workers")})`);
+      await beat("heartbeat:board-sync", v({ outcome: "failed" }), 60);
+    }
 
     // A custom --job: the restart names the job the follower works, not its key (review pass 1).
     await beat("heartbeat:extract:my-job", v({ job: "my-job", every_s: 60 }), 600);

@@ -1336,6 +1336,23 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const waits = [["extract"], ["extract", "consolidate"], [], ["extract", "extract"], ["board-sync"], "extract", ["extract", "consolidate", "extract"]].map((w) => markOf("heartbeat:sleep", { waiting: w })?.waiting ?? null);
   assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
     `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
+  // board-sync's hold on Linear's rate limit (SMD-4133): carried on its own live row when of the shape, else left off.
+  {
+    const until = "2026-10-05T12:10:00.000Z";
+    const limits = [
+      { until, by: "linear" }, { until, by: "backoff" }, { until, by: "guess" }, { until: "soon", by: "linear" }, { by: "linear" }, "x",
+    ].map((l) => markOf("heartbeat:board-sync", { outcome: "failed", limited: l })?.limited ?? null);
+    const offRows = [markOf("heartbeat:sleep", { limited: { until, by: "linear" } })?.limited, markOf("heartbeat:board-sync", { outcome: "stopped", limited: { until, by: "linear" } })?.limited,
+      markOf("heartbeat:board-sync", { ended: true, limited: { until, by: "linear" } })?.limited];
+    assert(JSON.stringify(limits) === JSON.stringify([{ until, by: "linear" }, { until, by: "backoff" }, null, null, null, null]) && offRows.every((x) => x === undefined),
+      `board-sync's rate-limit hold is carried when of the shape, on its own live row alone (${JSON.stringify(limits)}; ${JSON.stringify(offRows)})`);
+    // In words: the hold and how long it has left by the row's own clock, or that it has passed; never "its last pass failed" alone.
+    const words = (age: number) => heartbeatState(parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify({ ...good, outcome: "failed", limited: { until, by: "linear" } }), at, age_s: age }]).heartbeats[0]!);
+    const ahead = words(60), past = words(700);
+    assert(ahead.startsWith("alive, its last pass rate-limited by Linear: no pass, and no request, until 2026-10-05T12:10:00.000Z (in 9 min; the reset time Linear sent)")
+        && past.startsWith("alive, its last pass rate-limited by Linear until 2026-10-05T12:10:00.000Z (the reset time Linear sent), which has passed: the next trigger passes"),
+      `a held board-sync says the hold and its time left, or that it passed (${ahead} / ${past})`);
+  }
   // Re-embed's among them since the scheduler runs it (SMD-2679 PR 4b), at its start and mid-pass.
   const reWaits = [markOf("heartbeat:sleep", { waiting: ["reembed", "extract"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["reembed"] })?.waitingMidPass];
   assert(JSON.stringify(reWaits) === JSON.stringify([["reembed", "extract"], ["reembed"]]),
