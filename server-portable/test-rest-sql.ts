@@ -2296,7 +2296,7 @@ const relationsDeniedCore = () => coreWhoseReadThrows("relationsAmong", "permiss
 const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
 const STALE_KEY_HEAD = "A relation marked edited since judged was judged on a text that has changed since";
 
-console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3669, SMD-4162): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; a started ticket left out and counted unless include_started, listed with its status; holder mine lists the tickets the key holds a claim on");
+console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3669, SMD-4162, SMD-4193): REST's GET /v1/agenda and MCP's agenda give one value, a ticket due tomorrow ranked above a High with no date and a completed one left out; the call's own weights over both, 122's ordering as 125 did, a bad one refused 400 naming it; the MCP text says each item's place and terms and what carries no priority; a read key reads it, a capture-only key does not; a started ticket left out and counted unless include_started, listed with its status; holder mine lists the tickets the key holds a claim on");
 {
   await sql`SELECT set_agent_kind('writer', 'operator')`;
   const P = "Agenda rest [17]";
@@ -2359,6 +2359,24 @@ console.log("\n[17] The agenda through both doors (migrations 123 and 124, SMD-3
       && r.body.order === "priority" && !dueMcp.isError && same({ ...dueMcp.sc, now: null }, { ...dueRest.body, now: null })
       && /^3 of 3 items, soonest due first, the undated after:\n1\. ticket SMD-9912 /.test(dueMcp.text) && badOrder.status === 400,
     `order due lists the dated ticket first over REST and MCP, each saying the order; another order is refused 400 (${((dueRest.body.items ?? []) as It[]).map((i) => i.key)} | ${dueRest.body.order} | ${dueMcp.text.split("\n")[0]} | ${badOrder.status})`);
+  // SMD-4193: the call's own weights through both doors. 122's (the order 125 read in) put the Medium due tomorrow
+  // (2 + soon 2) above the High with no date (3); the answer echoes them and the text says them. A bad weight is refused
+  // 400 naming it: the schema's name and range, the database's cap below the default unblocks_many_at.
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const wq = `${q}&${Object.entries(W122).map(([k, v]) => `weights[${k}]=${v}`).join("&")}`;
+  const [wRest, wMcp] = [await rest("GET", wq), await mcp("agenda", { project: P, weights: W122 })];
+  const wItems = (wRest.body.items ?? []) as It[];
+  assert(wRest.status === 200 && wItems.map((i) => `${i.key} ${i.effective}`).join(", ") === "SMD-9912 4, SMD-9911 3, SMD-9914 2" && same(wRest.body.weights, W122) && r.body.weights === null
+      && !wMcp.isError && same({ ...wMcp.sc, now: null }, { ...wRest.body, now: null })
+      && /\nUnder this call's weights, soon 2, week 1, overdue 3, unblocks_one 0\.5, unblocks_many 1 \(the rest the brain's defaults\): a term may cross a level\./.test(wMcp.text),
+    `122's weights over REST (weights[name]=value) and MCP give one agenda, the Medium due tomorrow above the High as 125 read it, the weights echoed and said; without them, null (${wItems.map((i) => `${i.key} ${i.effective}`).join(", ")} | ${firstDiff(wMcp.sc, wRest.body)})`);
+  const [badName, badRange, badCap, badCapMcp, badNameMcp] = [await rest("GET", `${q}&weights[overdu]=3`), await rest("GET", `${q}&weights[overdue]=11`), await rest("GET", `${q}&weights[cap]=2`),
+    await mcp("agenda", { project: P, weights: { cap: 2 } }), await mcp("agenda", { project: P, weights: { overdu: 3 } })];
+  const issues = (b: Record<string, unknown>) => JSON.stringify(b.issues ?? null);
+  assert(badName.status === 400 && badName.body.code === "REFUSED_INPUT" && /overdu/.test(issues(badName.body)) && badRange.status === 400 && /"path":"weights\.overdue"/.test(issues(badRange.body))
+      && badCap.status === 400 && badCap.body.code === "REFUSED_WEIGHTS" && badCap.body.problem === "rule" && same(badCap.body.named, ["unblocks_many_at", "cap"])
+      && badCapMcp.isError && /^Refused: a weight out of range: cap is below unblocks_many_at/.test(badCapMcp.text) && badNameMcp.isError && /overdu/.test(badNameMcp.text),
+    `a bad weight is refused 400 naming it: an unknown name and a value out of range by the schema, cap below unblocks_many_at by the database as REFUSED_WEIGHTS, over both doors (${badName.status} ${issues(badName.body).slice(0, 80)} | ${badRange.status} | ${badCap.status} ${badCap.body.code} ${JSON.stringify(badCap.body.named)} | ${badCapMcp.text.slice(0, 80)} | ${badNameMcp.text.slice(0, 80)})`);
   // holder mine: the tickets this key holds a live claim on, claimed as they are.
   const claim = await rest("POST", "/v1/claims", { ticket: "SMD-9914", label: "test-rest-sql [17]", lease_seconds: 3600 });
   const mine = await rest("GET", "/v1/agenda?holder=mine");
@@ -2888,6 +2906,60 @@ console.log("\n[19] The priority label through both doors (SMD-3668 PR 2): a tho
   await sql`DELETE FROM thoughts WHERE content LIKE '%[19] the priority label%'`;
   // The key's kind as [11] left it, before [17] classified it (review pass 1: left as operator for a section after).
   await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+}
+
+console.log("\n[19b] A search's own priority weights through both doors (SMD-4193): 122's weights put an overdue Medium above a High with no date at priority_weight 1, where the defaults keep it below; the blend's scale is 131's span under them (9); the hits' labels read under them; the note says them; weights with no ranking, or cap below unblocks_many_at, refused 400 naming why; the schema's names and ranges held to effective_priority's, weight by weight");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  const overdue = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+  const row = async (issue: string, words: string) => {
+    const content = `${issue} — [19b] "zephyr weights gamma" ${words}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog" })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    return String(id);
+  };
+  const high = await row("SMD-9931", "the High with no date");
+  const late = await row("SMD-9932", "the Medium overdue");
+  const setH = await rest("POST", "/v1/priorities/ticket/SMD-9931", { level: 3 });
+  const setL = await rest("POST", "/v1/priorities/ticket/SMD-9932", { level: 2, due_at: overdue });
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const ask = { query: '"zephyr weights gamma"', limit: 10, priority_weight: 1 };
+  type Hit = { id: string; priority?: { key: string; effective: number }[] | null };
+  type Ranking = { weights: unknown; span: number | null };
+  const [plainR, wR, wM] = [await rest("POST", "/v1/search", ask), await rest("POST", "/v1/search", { ...ask, weights: W122 }), await mcp("search_thoughts", { ...ask, weights: W122 })];
+  const order = (b: Record<string, unknown>) => ((b.hits ?? []) as Hit[]).filter((h) => h.id === high || h.id === late).map((h) => (h.id === high ? "high" : "late")).join(" ");
+  const lateHit = ((wR.body.hits ?? []) as Hit[]).find((h) => h.id === late);
+  const plainP = plainR.body.priority as Ranking | undefined, wP = wR.body.priority as Ranking | undefined;
+  assert(setH.status === 200 && setL.status === 200 && plainR.status === 200 && wR.status === 200 && order(plainR.body) === "high late" && order(wR.body) === "late high"
+      && plainP?.weights === null && plainP?.span === 5.8 && same(wP?.weights, W122) && wP?.span === 9 && lateHit?.priority?.[0]?.effective === 5
+      && !wM.isError && /Under this call's weights, soon 2, week 1, overdue 3, unblocks_one 0\.5, unblocks_many 1 \(the rest the brain's defaults\), the blend's scale 9; a term may cross a level\./.test(wM.text),
+    `at priority_weight 1 the defaults keep the overdue Medium below the High and 122's weights put it above, over the scale 9 (131's span), its label read under them (5), the note saying them over MCP (${order(plainR.body)} → ${order(wR.body)} | ${plainP?.span} → ${wP?.span} | ${lateHit?.priority?.[0]?.effective})`);
+  const [unranked, capR, capM] = [await rest("POST", "/v1/search", { query: ask.query, limit: 10, weights: W122 }), await rest("POST", "/v1/search", { ...ask, weights: { cap: 2 } }), await mcp("search_thoughts", { ...ask, weights: { cap: 2 } })];
+  assert(unranked.status === 400 && unranked.body.code === "REFUSED_WEIGHTS" && unranked.body.problem === "unranked"
+      && capR.status === 400 && capR.body.code === "REFUSED_WEIGHTS" && capR.body.problem === "rule" && same(capR.body.named, ["unblocks_many_at", "cap"])
+      && capM.isError && /^Refused: a weight out of range: cap is below unblocks_many_at/.test(capM.text),
+    `weights with no ranking are refused 400 (unranked); cap below unblocks_many_at 400 by the database's rule, naming both, over both doors (${unranked.status} ${unranked.body.problem} | ${capR.status} ${JSON.stringify(capR.body.named)} | ${capM.text.slice(0, 80)})`);
+
+  // The schema's ranges are effective_priority's, weight by weight: each edge, and a step past it, taken or refused
+  // alike by both. cap and unblocks_many_at are probed with the other at the end that never trips 122's rule between them.
+  const { SPECS } = await import("./core/schemas.ts");
+  const schema = (SPECS.agenda.inputSchema as { weights: z.ZodType }).weights;
+  const probes: [string, unknown][] = [];
+  for (const [name, edges] of Object.entries({ unknown: [0, 10], hop: [0, 10], soon: [0, 10], week: [0, 10], overdue: [0, 10], unblocks_one: [0, 10], unblocks_many: [0, 10],
+    hops: [0, 2], soon_days: [0, 366], week_days: [0, 366], unblocks_many_at: [1, 366], depth: [0, 5], cap: [1, 1000] } as Record<string, [number, number]>)) {
+    const whole = !["unknown", "hop", "soon", "week", "overdue", "unblocks_one", "unblocks_many"].includes(name);
+    for (const v of [edges[0], edges[1], edges[0] - 1, edges[1] + (whole ? 1 : 0.5), ...(whole ? [edges[0] + 0.5] : [edges[1] - 0.25])]) probes.push([name, v]);
+  }
+  probes.push(["count_inferred", true], ["count_inferred", false], ["count_inferred", 1]);
+  const disagree: string[] = [];
+  for (const [name, v] of probes) {
+    const w = { [name]: v, ...(name === "cap" ? { unblocks_many_at: 1 } : name === "unblocks_many_at" ? { cap: 1000 } : {}) };
+    const bySchema = schema.safeParse(w).success;
+    let bySql = true;
+    try { await sql`SELECT count(*) FROM effective_priority('[]'::jsonb, (${JSON.stringify(w)}::text)::jsonb, now())`; } catch { bySql = false; }
+    if (bySchema !== bySql) disagree.push(`${name}=${String(v)} schema ${bySchema} sql ${bySql}`);
+  }
+  assert(probes.length === 68 && disagree.length === 0, `the schema takes and refuses each weight's edges as effective_priority does (${probes.length} probes; ${disagree.join("; ") || "none disagree"})`);
 }
 
 console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_INFER_PRIORITY on, \"Urgent: … by Friday\" is stated High, due Friday, quoting both phrases, at the inferred tier by the capturing key — on the thought, or on each item the capture proposed from it; an operator's Low wins and the inferred statement stays in the history; effective_priority passes it over unless count_inferred; a re-capture makes no call and states nothing again; a capture key's on its own thought (the knob off: test-thoughts [18])");

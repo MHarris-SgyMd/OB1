@@ -1187,20 +1187,23 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
   }
 
-  // SMD-4194: 128's span, the largest effective priority the brain's defaults allow, read as text (numeric).
-  async prioritySpan(): Promise<number> {
-    const [r] = (await this.sql`SELECT ob1_priority_span()::text AS span`) as { span: string }[];
+  // SMD-4194: 128's span, the largest effective priority the brain's defaults allow, read as text (numeric). Under a
+  // call's weights (SMD-4193), 131's: the zero-argument call stays 128's, so a brain before 131 reads it as before.
+  async prioritySpan(weights?: Partial<PriorityWeights>): Promise<number> {
+    const [r] = (weights === undefined
+      ? await this.sql`SELECT ob1_priority_span()::text AS span`
+      : await this.sql`SELECT ob1_priority_span((${JSON.stringify(weights)}::text)::jsonb)::text AS span`) as { span: string }[];
     const span = Number(r?.span);
     if (!Number.isFinite(span) || span <= 0) throw new Error("ob1_priority_span answered no span this server reads");
     return span;
   }
 
-  // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope and the
-  // holder ride as JSON text, cast in SQL.
+  // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope, the
+  // holder and the weights (SMD-4193) ride as JSON text, cast in SQL.
   async agenda(opts: {
     scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string; timeoutMs?: number;
-    order?: AgendaOrder;
+    order?: AgendaOrder; weights?: Partial<PriorityWeights>;
   }): Promise<AgendaResult> {
     const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
     const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
@@ -1208,7 +1211,7 @@ export class SqlStore implements ThoughtStore {
     // the tenth argument, which only 129's agenda takes. One template, the tail a fragment (review pass 2).
     const call = (q: typeof this.sql) => q`
       SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
-                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
+                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, (${opts.weights === undefined ? null : JSON.stringify(opts.weights)}::text)::jsonb,
                     COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean${opts.order === "due" ? q`, 'due'::text` : q``}) AS a` as Promise<{ a: unknown }[]>;
     // The order answered is the one asked (review pass 2): a brain answering another would be labelled with it unseen.
     const asked = opts.order ?? "priority";
