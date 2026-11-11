@@ -46,7 +46,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, readHeartbeats, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -78,7 +78,7 @@ import { newestLive, passDumpFile, run as runSleep, schedulerSession, usText, ve
 import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
-import { linearClient } from "./linear-api.ts";
+import { LinearRateLimited, linearClient } from "./linear-api.ts";
 import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import { setModelCallHook } from "../server-portable/model-call.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
@@ -23508,7 +23508,7 @@ if (want("37")) {
     try {
       tCode = await triggerPasses({
         once: async () => { if (i === 0) { await Bun.sleep(300); midPass = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
-        next: async () => { triggers++; }, stopped: () => i >= codes.length, stamper: tStamper,
+        next: async () => { triggers++; }, stopped: () => i >= codes.length, stamper: tStamper, intervalS: 10,
       });
     } finally {
       console.log = log;
@@ -23549,8 +23549,57 @@ if (want("37")) {
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
     let j = 0;
     console.log = () => {};
-    try { await triggerPasses({ once: async () => (j++, 0), next: async () => {}, stopped: () => j >= 1, stamper: null }); } finally { console.log = log; }
+    try { await triggerPasses({ once: async () => (j++, 0), next: async () => {}, stopped: () => j >= 1, stamper: null, intervalS: 10 }); } finally { console.log = log; }
     assert((await row("heartbeat:board-sync")) === null, "passes with no stamper (a dry run, an audit) write no heartbeat");
+
+    // Linear's rate limit (SMD-4133), on the row: the trigger's real stamper writes the hold beside the failed
+    // pass, brain_info says it in words, a held trigger keeps the row fresh, and the pass after clears it.
+    {
+      const limStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 });
+      const t0 = Date.now();
+      let clock = t0;
+      let n = 0;
+      let passes = 0;
+      let heldRow: Record<string, unknown> | null = null;
+      let heldWords = "";
+      console.log = () => {};
+      console.error = () => {};
+      try {
+        await triggerPasses({
+          once: async () => { passes++; if (passes === 1) throw new LinearRateLimited("Linear returned HTTP 429, rate-limited", t0 + 600_000); return 0; },
+          next: async () => {
+            n++;
+            if (n === 1) {
+              heldRow = await row("heartbeat:board-sync");
+              const beat = (await readHeartbeats(hsql as never)).heartbeats.find((h) => h.worker === "board-sync");
+              heldWords = beat ? heartbeatState(beat) : "no row read";
+            }
+            clock += 300_000;
+          },
+          stopped: () => n >= 3, stamper: limStamper, intervalS: 300, now: () => clock,
+        });
+      } finally {
+        console.log = log;
+        console.error = error;
+      }
+      const after = await row("heartbeat:board-sync");
+      const lim = (heldRow as { limited?: { until?: string; by?: string }; outcome?: string } | null);
+      assert(lim?.outcome === "failed" && lim.limited?.by === "linear" && lim.limited.until === new Date(t0 + 600_000).toISOString() && passes === 2,
+        `a rate-limited pass stamps failed with the hold: until Linear's reset, by its word; the trigger before the reset runs no pass (${JSON.stringify(heldRow)}; ${passes} passes)`);
+      assert(/^alive, its last pass rate-limited by Linear: no pass, and no request, until \S+ \(in \d+ min; the reset time Linear sent\)/.test(heldWords),
+        `brain_info says the hold, not just "failed" (${heldWords})`);
+      assert(after !== null && !("limited" in after) && after.outcome === "stopped", `the pass after the reset clears the hold, and the end keeps none (${JSON.stringify(after)})`);
+      // A row its supervisor ends (SMD-3214) holds nothing: an ended process sends no request to hold.
+      const ender = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 });
+      ender.limited?.({ until: new Date(Date.now() + 600_000).toISOString(), by: "backoff" });
+      await ender.stamp("failed");
+      const before = await row("heartbeat:board-sync");
+      await endRow(hsql as never, { worker: "board-sync", key: "heartbeat:board-sync", since: new Date(Date.now() - 60_000), restart: { in_s: 60, code: 1, tries: 1 } });
+      const ended = await row("heartbeat:board-sync");
+      assert((before as { limited?: { by?: string } } | null)?.limited?.by === "backoff" && ended !== null && !("limited" in ended) && ended.ended === true,
+        `a supervisor's end drops the hold with the waits (${JSON.stringify(before)} → ${JSON.stringify(ended)})`);
+      await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    }
 
     // A tier refresh copies ob1_config whole: its settle step deletes the
     // source's heartbeats, so a canary never reports stable's workers (review pass 1).

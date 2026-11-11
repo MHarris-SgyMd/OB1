@@ -2005,6 +2005,34 @@ scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound route — a router on the proxy (SMD-1846) and a public
 origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
+**What a pass costs, and Linear's rate limit** (SMD-4133). Linear allows one
+user 2,500 requests an hour, and a complexity budget beside it, refilled as the
+hour goes. Every brain, agent runner and tool whose key belongs to that user
+spends the same hour, and a refused request counts too. A quiet pass is one
+request for the initiative plus one per hundred issues on the board; each fifty
+moved tickets add one, and each finding told adds one under the comment key's
+user. Each pass's log line ends
+with its count (`done (… ms, 15 Linear requests)`). Measured 2026-11-11 on a
+board of 1,315 issues, a quiet pass was 15 requests. So, per user, per hour:
+
+| Interval | One brain | Two brains |
+|---|---|---|
+| 300 s (the default) | 12 passes × 15 = 180 | 360 |
+| 120 s | 30 × 15 = 450 | 900 |
+| 30 s | 120 × 15 = 1,800 | 3,600: over the 2,500 |
+
+Two brains at 30 s under one user were what failed every pass on 2026-11-06.
+Keep the sum well under the 2,500, leaving room for the user's own use and
+tools such as the agent runner; or give each brain a Linear user of its own.
+When Linear refuses a request for its limit — HTTP 429, or an answer coded
+`RATELIMITED` — board-sync makes no further request until the time Linear sends
+with it (`X-RateLimit-Requests-Reset`, `X-RateLimit-Complexity-Reset` or
+`Retry-After`; an hour at most). If Linear sends none, it backs off: two
+intervals, then four, doubling up to an hour. The coordinator's triggers run no
+pass meanwhile. Its heartbeat says `rate-limited by Linear … until <time>`, not
+just "failed", and preflight's `workers` row warns with the hold and this sum.
+It passes again on its own; a restart forgets the hold and asks once.
+
 **Telling the board what consolidation found** (SMD-2681). Set
 `LINEAR_COMMENT_API_KEY` in `deploy/.env` — a Linear key of its own that can
 comment, not `LINEAR_API_KEY` — and, under the default egress policy, add

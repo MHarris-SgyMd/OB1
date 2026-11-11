@@ -306,7 +306,19 @@ export interface WorkerHeartbeat {
   holds?: SleepHold[];
   /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width or model name forms no key a row carries (SMD-2679 PR 4b-2, SMD-3486). */
   reembedJob?: string;
+  /**
+   * board-sync held by Linear's rate limit (SMD-4133): no pass, so no request,
+   * until `until` (a UTC instant), by the reset time Linear sent (`linear`) or
+   * a backoff when it sent none (`backoff`). On a live board-sync row alone;
+   * absent while not held, and for the other workers.
+   */
+  limited?: BoardLimited;
 }
+
+/** Why board-sync's hold ends when it does: the reset time Linear sent, or a backoff when it sent none. */
+export const BOARD_LIMIT_BY = ["linear", "backoff"] as const;
+/** board-sync's hold on Linear's rate limit (WorkerHeartbeat.limited), as db/sync-linear.ts writes it. */
+export type BoardLimited = { until: string; by: (typeof BOARD_LIMIT_BY)[number] };
 
 /** What set the scheduler's re-embed pass down for a sleep (WorkerHeartbeat.aside), beside a model switch, which sets it aside. */
 export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "statement", "outage", "failed"] as const;
@@ -900,6 +912,11 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
     const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
     const holds = worker === "sleep" ? parseHolds(v!.holds) : undefined;
+    // board-sync's hold on Linear's rate limit (SMD-4133), on a live row alone and left off when not of the shape.
+    const lim = worker === "board-sync" && live ? (v!.limited as Record<string, unknown> | undefined) : undefined;
+    const limited = lim !== null && typeof lim === "object" && typeof lim.until === "string" && UTC_INSTANT.test(lim.until) && (BOARD_LIMIT_BY as readonly unknown[]).includes(lim.by)
+      ? { until: lim.until, by: lim.by as BoardLimited["by"] }
+      : undefined;
     // Its own re-embed key (SMD-2679 PR 4b-2), a model's own key or left off.
     const reembedJob = worker === "sleep" && typeof v!.reembedJob === "string" && REEMBED_OWN_KEY.test(v!.reembedJob) ? v!.reembedJob : undefined;
     heartbeats.push({
@@ -926,6 +943,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(reembedJob ? { reembedJob } : {}),
       ...(paused ? { paused } : {}),
       ...(holds ? { holds } : {}),
+      ...(limited ? { limited } : {}),
       // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
       ...(worker === "sleep" && v!.resting === true && live ? { resting: true as const } : {}),
     });
@@ -2283,7 +2301,23 @@ export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly Slee
   // review passes 1 and 2).
   const state = h.paused ? `paused by a live call for ${ago(Math.max(0, secondsSince(h, h.paused.since)))}${at === null ? "" : `, waiting for the provider${at}`}`
     : h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
-  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
+  return `${state}${h.limited ? `, ${limitWords(h, h.limited)}` : h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
+}
+
+/** Whose word ends board-sync's hold: Linear's reset time, or the backoff. */
+export const limitByWords = (l: BoardLimited): string => (l.by === "linear" ? "the reset time Linear sent" : "a backoff: Linear sent no reset time");
+
+/**
+ * board-sync's hold on Linear's rate limit in words (SMD-4133): until when,
+ * by whose word, and — by the row's own clock — how long that is from now,
+ * or that it has passed and the next trigger passes.
+ */
+export function limitWords(h: Pick<WorkerHeartbeat, "at" | "ageS">, l: BoardLimited): string {
+  const left = -secondsSince(h, l.until);
+  const by = limitByWords(l);
+  return left > 0
+    ? `its last pass rate-limited by Linear: no pass, and no request, until ${l.until} (in ${ago(left)}; ${by})`
+    : `its last pass rate-limited by Linear until ${l.until} (${by}), which has passed: the next trigger passes`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */

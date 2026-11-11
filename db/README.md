@@ -6461,6 +6461,15 @@ row's `updated_at`, the database's `now()`.
   its start, on the clock again (SMD-3379 PR 1c-1). It keeps
   what the follower wrote last, its `refused` included, and writes a row of
   its own for one that wrote none. The follower's next stamp replaces it.
+- **`limited`:** on board-sync's row, while Linear's rate limit holds its
+  passes (SMD-4133): `until`, the time it makes its next request, and `by`,
+  `linear` when that is the reset time Linear sent with its 429 or
+  `RATELIMITED` answer, `backoff` when Linear sent none (two intervals,
+  doubling, an hour at most). Its outcome is `failed` meanwhile. Each trigger
+  before `until` runs no pass and re-stamps the row, so it stays fresh. The pass
+  after clears it, and so does an end, its supervisor's too. `brain_info` and
+  preflight say "rate-limited by Linear … until", not just "failed";
+  `deploy/README.md`, "What a pass costs", has the sum of requests per hour.
 
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
