@@ -596,6 +596,17 @@ jobs:
         working-directory: evals
         run: bun eval-priority.ts --self-check
 
+      # The inferred-priority measurement's rules (SMD-3670 PR 2): the
+      # registration against its pinned hash (the bar, the conventions, the
+      # population and the draw), a day counted from the capture, the draw's
+      # strata, the blind sheet read back, each half's precision and the
+      # verdict at the bar's edges, the raters' κ, and the committed fixture's
+      # shape (ids and numbers only). No database, no model; the run reads the
+      # dogfood brain by hand.
+      - name: Inferred priority eval rules
+        working-directory: evals
+        run: bun eval-inferred-priority.ts --self-check
+
       # The board replay's rules (SMD-3669 PR 3): an issue rebuilt from
       # Linear's history (state, priority, due date, parent, project, labels,
       # title and relations undone after the moment, every relation-change
