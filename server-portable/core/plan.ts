@@ -200,16 +200,23 @@ export type PlanBoard =
  */
 export const LITTLE_BAR = 0.74;
 export const LITTLE_MEASURED_ON = "qwen3-embedding:4b@1024";
+/**
+ * The hits the bar was measured over: the first 8 in the search's order (plan_context's default limit). A larger limit
+ * reads its first 8, as measured; a smaller one reads what it has. On the 80 measured requests, the best of the first
+ * 1, 3 or 5 hits made the same call as the best of 8 on every one (review pass 1), though an exact-literal hit ranks
+ * first whatever its similarity.
+ */
+export const LITTLE_HITS = 8;
 
 export type PlanGap =
   | { gap: "no_knowledge" }
   | { gap: "all_superseded"; hits: number }
   | { gap: "ingested_only"; hits: number }
   | { gap: "semantic_unavailable"; reason: string }
-  /** The best hit's similarity under LITTLE_BAR, on the embedding it was measured on: the brain may hold little here. */
-  | { gap: "little"; topSimilarity: number; bar: number; embeddingId: string }
-  /** This server's embedding is not the one the bar was measured on: no bar applied, the best similarity said. */
-  | { gap: "little_not_measured"; topSimilarity: number; embeddingId: string; measuredOn: string }
+  /** The best similarity of the first LITTLE_HITS hits under LITTLE_BAR, on the embedding it was measured on: the brain may hold little here. Null: no hit read has a similarity. */
+  | { gap: "little"; topSimilarity: number | null; bar: number; embeddingId: string }
+  /** A note, not a coverage gap: this server's embedding is not the one the bar was measured on, so no bar is applied. */
+  | { gap: "little_not_measured"; topSimilarity: number | null; embeddingId: string; measuredOn: string }
   | { gap: "tickets_missing"; keys: string[]; more?: number }
   | { gap: "tickets_not_read"; count: number }
   | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number }
@@ -282,9 +289,10 @@ const ingested = (h: { metadata?: Record<string, unknown> | null }) => h.metadat
 
 /**
  * The gaps the knowledge section shows: no hit at all, every hit superseded, every hit outside text, no vector, and,
- * given the embedding the search ran on (`<model>@<dim>`), little on this (SMD-4212): the best hit's similarity under
- * LITTLE_BAR, or that no bar is measured for that embedding. A hit with no similarity reads 0, as the measurement read
- * it. No vector (the hits are exact matches, with no similarity), no hit, or no embedding named: no little gap.
+ * given the embedding the search ran on (`<model>@<dim>`), little on this (SMD-4212): the best similarity of the first
+ * LITTLE_HITS hits under LITTLE_BAR, or a note that no bar is measured for that embedding. A hit with no similarity
+ * counts as 0, as the measurement read it, and none having one is said as no similarity. No vector (the hits are exact
+ * matches), no hit, or no embedding named: no little gap.
  */
 export function knowledgeGaps(hits: readonly Pick<SearchHit, "supersededBy" | "metadata" | "similarity">[], vectorFailed: QueryVectorFailed | undefined, embeddingId?: string): PlanGap[] {
   const gaps: PlanGap[] = [];
@@ -295,9 +303,10 @@ export function knowledgeGaps(hits: readonly Pick<SearchHit, "supersededBy" | "m
     if (hits.every(ingested)) gaps.push({ gap: "ingested_only", hits: hits.length });
   }
   if (!vectorFailed && hits.length && embeddingId !== undefined) {
-    const topSimilarity = Math.max(...hits.map((h) => h.similarity ?? 0));
+    const sims = hits.slice(0, LITTLE_HITS).map((h) => h.similarity).filter((s): s is number => typeof s === "number");
+    const topSimilarity = sims.length ? Math.max(...sims) : null;
     if (embeddingId !== LITTLE_MEASURED_ON) gaps.push({ gap: "little_not_measured", topSimilarity, embeddingId, measuredOn: LITTLE_MEASURED_ON });
-    else if (topSimilarity < LITTLE_BAR) gaps.push({ gap: "little", topSimilarity, bar: LITTLE_BAR, embeddingId });
+    else if ((topSimilarity ?? 0) < LITTLE_BAR) gaps.push({ gap: "little", topSimilarity, bar: LITTLE_BAR, embeddingId });
   }
   return gaps;
 }

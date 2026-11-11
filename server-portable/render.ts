@@ -69,7 +69,7 @@ const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** An embedding as `<model>@<dim>` (qwen3-embedding:4b@1024, an OpenAI or Ollama name): no space, so no sentence. */
-const EMBEDDING_ID = /^[A-Za-z0-9][A-Za-z0-9._:\/+-]{0,119}@[0-9]{1,6}$/;
+const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -2497,6 +2497,9 @@ export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => ren
   : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
   : unknownRefusal(r), AS_JSON);
 
+/** A similarity to three places, rounded down, so a value under a bar never prints as the bar (0.7399 is 0.739, not 0.740). */
+const simDown = (x: number): string => (Math.floor(x * 1000) / 1000).toFixed(3);
+
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {
   switch (g.gap) {
@@ -2504,8 +2507,8 @@ const gapWords = (g: PlanGap): string => {
     case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
     case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
-    case "little": return `Little on this: the best hit's similarity is ${g.topSimilarity.toFixed(3)}, under ${g.bar}, where the brain was measured to hold little that bears on a request (SMD-4212, on ${quoted(g.embeddingId, 80)}). A coverage signal, not a verdict: weigh the hits.`;
-    case "little_not_measured": return `Whether the brain has little on this is not measured for this embedding (${quoted(g.embeddingId, 80)}; the bar was measured on ${quoted(g.measuredOn, 80)}): the best hit's similarity is ${g.topSimilarity.toFixed(3)}, on that embedding's own scale.`;
+    case "little": return `Little on this: ${g.topSimilarity === null ? "no hit has a similarity (exact matches alone)" : `the best hit's similarity is ${simDown(g.topSimilarity)}`}, under ${g.bar}, where the brain was measured to hold little that bears on a request (SMD-4212, on ${quoted(g.embeddingId, 80)}). A coverage signal, not a verdict: weigh the hits.`;
+    case "little_not_measured": return `A note, not a gap: whether the brain has little on this is not measured for this embedding (${quoted(g.embeddingId, 80)}; the bar was measured on ${quoted(g.measuredOn, 80)})${g.topSimilarity === null ? "; no hit has a similarity" : `; the best hit's similarity is ${simDown(g.topSimilarity)}, on that embedding's own scale`}.`;
     case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}${g.more ? ` and ${g.more} more` : ""}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
     case "trimmed": return `Cut to keep this reply readable: ${[
