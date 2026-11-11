@@ -10,10 +10,11 @@
 // them out. The jobs and their items are the plugin's own tables.
 //
 // Counted by what the execute did, not by what the dry run decided (SMD-2154):
-// an add whose text was a thought by then, and an append the thought already
-// held, are `existed`, and the six counts sum to the items extracted.
+// an add whose text the brain held by then, and an append the thought already
+// held, are `existed` (nothing written), and the six counts sum to the items
+// extracted.
 
-import { definePlugin, ok, operation, refuse, z, type PluginContext, type PluginSql } from "../../server-portable/plugin-sdk.ts";
+import { definePlugin, ok, operation, refuse, z, type PluginContext, type PluginOutcome, type PluginSql } from "../../server-portable/plugin-sdk.ts";
 
 // ── Bounds ──────────────────────────────────────────────────────────────────
 
@@ -120,13 +121,19 @@ export const escapeDocument = (raw: string) => raw.replace(/<\s*\/\s*document\s*
 /** One chunk as the model reads it. */
 export const wrapped = (chunk: string) => `<document>\n${escapeDocument(chunk)}\n</document>`;
 
+/** Where to cut a string at `n` UTF-16 units without splitting a character: one unit sooner when `n` would part a pair. */
+const cutAt = (s: string, n: number) => (n > 0 && n < s.length && /[\uD800-\uDBFF]/.test(s[n - 1]) ? n - 1 : n);
+
 /**
- * The text cut into chunks of at most LIMITS.chunkWords words and
- * LIMITS.chunkChars characters, at white space (a word longer than a chunk is
- * cut where it must be). A text within both is its own one chunk, as it was.
+ * The text as the model reads it: within LIMITS.chunkWords words and
+ * LIMITS.chunkChars characters, the text itself, its lines and paragraphs as
+ * they are. A longer one in chunks within both, cut at white space and each
+ * chunk's words joined by single spaces, as the old server's were; a word
+ * longer than a chunk is cut where it must be, never inside a character.
  */
 export function chunksOf(input: string): string[] {
   const words = input.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length <= LIMITS.chunkWords && input.length <= LIMITS.chunkChars) return [input];
   const chunks: string[] = [];
   let at: string[] = [];
   let size = 0;
@@ -138,8 +145,9 @@ export function chunksOf(input: string): string[] {
   for (let word of words) {
     while (word.length > LIMITS.chunkChars) {
       flush();
-      chunks.push(word.slice(0, LIMITS.chunkChars));
-      word = word.slice(LIMITS.chunkChars);
+      const n = cutAt(word, LIMITS.chunkChars);
+      chunks.push(word.slice(0, n));
+      word = word.slice(n);
     }
     if (at.length === LIMITS.chunkWords || size + (at.length ? 1 : 0) + word.length > LIMITS.chunkChars) flush();
     size += (at.length ? 1 : 0) + word.length;
@@ -172,9 +180,9 @@ export function clipped(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
   return storable(flat.length <= max ? flat : `${flat.slice(0, max - 3).trimEnd()}...`);
 }
-/** 1 to 5, rounded; 3 for anything that is no number. */
+/** 1 to 5, rounded; 3 for anything that is no number (a blank string among them). */
 export function importanceOf(v: unknown): number {
-  const n = typeof v === "number" || typeof v === "string" ? Number(v) : Number.NaN;
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
   return Number.isFinite(n) ? Math.max(1, Math.min(5, Math.round(n))) : 3;
 }
 /** Lower-case, distinct, at most LIMITS.tags of at most LIMITS.tag characters. */
@@ -183,7 +191,7 @@ export function tagsOf(v: unknown): string[] {
   const out: string[] = [];
   for (const t of v) {
     if (typeof t !== "string") continue;
-    const tag = clipped(t, LIMITS.tag).toLowerCase();
+    const tag = clipped(t.toLowerCase(), LIMITS.tag);
     if (tag && !out.includes(tag)) out.push(tag);
     if (out.length >= LIMITS.tags) break;
   }
@@ -208,12 +216,18 @@ export function thoughtsOf(answer: Record<string, unknown>): Extracted[] | null 
 
 // ── Restricted content ──────────────────────────────────────────────────────
 
-/** The old server's restricted patterns: a text that holds one is refused before any model sees it. */
+/**
+ * The old server's restricted patterns: a text that holds one is refused
+ * before any model sees it. The bank-account pair reads a number and its word
+ * within 200 characters of each other (the old server's read the whole line,
+ * which on a long one took most of a second, the REST core's event loop
+ * held all the while).
+ */
 const RESTRICTED: [RegExp, string][] = [
   [/\b\d{3}-?\d{2}-?\d{4}\b/, "ssn_pattern"],
   [/\b[A-Z]{1,2}\d{6,9}\b/, "passport_pattern"],
-  [/\b\d{8,17}\b.*\b(account|routing|iban)\b/i, "bank_account"],
-  [/\b(account|routing)\b.*\b\d{8,17}\b/i, "bank_account"],
+  [/\b\d{8,17}\b.{0,200}\b(account|routing|iban)\b/i, "bank_account"],
+  [/\b(account|routing)\b.{0,200}\b\d{8,17}\b/i, "bank_account"],
   [/\b(sk-|pk_live_|sk_live_|ghp_|gho_|AKIA)[A-Za-z0-9]{10,}/i, "api_key"],
   [/\bpassword\s*[:=]\s*\S+/i, "password_value"],
   [/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/, "credit_card"],
@@ -326,6 +340,9 @@ async function settle(sql: PluginSql, id: string, status: (typeof STATUSES)[numb
   return asJob(row);
 }
 
+/** What a job or an item records for a fault of the core's or the store's: its words go to the REST core's log, not to a read key. */
+const FAULT = "a fault of the core's or the store's (the REST core's log has it)";
+
 /** The job marked failed, with why; its items, if any, stay as they are. */
 const failJob = (ctx: PluginContext, id: string, why: string, calls: number) =>
   ctx.db.tx((sql) => sql`UPDATE ingestion_jobs SET status = 'failed', error_message = ${why}, model_calls = ${calls}, completed_at = now() WHERE id = ${id}::bigint`);
@@ -342,9 +359,13 @@ export class Unavailable {
 
 /**
  * What to do with one extracted thought: skip it (too weak, said twice in the
- * job, or a thought the brain holds by meaning), add it, or add to the thought
- * it matches. The match is the search's hit of highest cosine similarity at
- * SIMILARITY.match or more; a keyword-only hit has none and is passed over.
+ * job, a thought the brain holds word for word, or one it holds by meaning),
+ * add it, or add to the thought it matches. A hit whose text is the thought's
+ * (up to case and spacing) is a duplicate whatever its similarity: on the
+ * brain's model a query is embedded under an instruction a document is not, so
+ * the same text need not score near 1. Otherwise the match is the hit of
+ * highest cosine similarity at SIMILARITY.match or more; a keyword-only hit has
+ * none and is passed over.
  */
 export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, seen: Set<string>): Promise<Decided> {
   const none = { matched: null, similarity: null, error: null, status: "ready" as const };
@@ -353,13 +374,15 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   const key = sameText(t.content);
   if (seen.has(key)) return { ...t, ...none, action: "skip", reason: "duplicate_within_job" };
   seen.add(key);
-  const found = await ctx.call("search_thoughts", { query: t.content, limit: 5, threshold: SIMILARITY.match });
+  const found = await ctx.call("search_thoughts", { query: t.content, limit: 5 });
   if (!found.ok) {
     if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
     return { ...t, ...none, action: "skip", reason: "search_refused", status: "failed", error: `search_thoughts refused: ${found.refusal.code}` };
   }
   const failed = found.value.vectorFailed;
   if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
+  const same = found.value.hits.find((h) => sameText(h.content) === key);
+  if (same) return { ...t, ...none, matched: same.id, similarity: same.similarity, action: "skip", reason: "exact_duplicate" };
   let top: { id: string; content: string; similarity: number } | null = null;
   for (const h of found.value.hits) {
     if (h.similarity !== null && h.similarity >= SIMILARITY.match && (top === null || h.similarity > top.similarity)) top = { id: h.id, content: h.content, similarity: h.similarity };
@@ -385,16 +408,37 @@ const metadataOf = (job: Job, item: ItemRow) => ({
   ...(job.source_type ? { source_type: job.source_type } : {}),
 });
 
-/** One item carried out: as the dry run decided, counted by what the core answered. */
-async function execute(ctx: PluginContext, job: Job, item: ItemRow): Promise<Done> {
+/**
+ * The thought holding this text word for word (up to case and spacing), or
+ * null: looked for before a capture, since a capture of a text the brain holds
+ * is a re-capture, which merges the capture's metadata into that thought (its
+ * `source` relabelled, the job's keys added). A search that fails finds none,
+ * and the capture goes ahead.
+ */
+async function heldText(ctx: Pick<PluginContext, "call">, content: string): Promise<string | null> {
+  const found = await ctx.call("search_thoughts", { query: content, limit: 5 });
+  if (!found.ok) return null;
+  return found.value.hits.find((h) => sameText(h.content) === sameText(content))?.id ?? null;
+}
+
+/**
+ * One item carried out: as the dry run decided, counted by what was done
+ * (SMD-2154). An add or a revision whose text the brain holds by now (a
+ * capture since the dry run, or another job's) writes nothing: the add is
+ * `existed`, the revision fails. A text captured in the moment between that
+ * look and the capture is a re-capture, told by the capture's `existed`.
+ */
+export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: ItemRow): Promise<Done> {
   const trust = job.trust ? { trust: job.trust } : {};
+  const revisionHeld = (id: string) => failed(`the text is already thought ${id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
   switch (item.action) {
     case "skip":
       return { status: "executed", result: item.matched_thought_id, error: null };
     case "add": {
+      const held = await heldText(ctx, item.content);
+      if (held) return { status: "existed", result: held, error: null };
       const captured = await ctx.call("capture_thought", { content: item.content, source: "smart-ingest", metadata: metadataOf(job, item), ...trust });
       if (!captured.ok) return failed(`capture_thought refused: ${captured.refusal.code}`);
-      // The text was a thought by the execute (a capture since the dry run, or another job's): nothing was added (SMD-2154).
       return { status: captured.value.existed === true ? "existed" : "executed", result: captured.value.id, error: null };
     }
     case "append_evidence": {
@@ -410,38 +454,51 @@ async function execute(ctx: PluginContext, job: Job, item: ItemRow): Promise<Don
     }
     case "create_revision": {
       if (!item.matched_thought_id) return failed("create_revision needs the matched thought");
+      const held = await heldText(ctx, item.content);
+      if (held) return revisionHeld(held);
       const captured = await ctx.call("capture_thought", {
         content: item.content, source: "smart-ingest", supersedes: item.matched_thought_id, metadata: metadataOf(job, item), ...trust,
       });
       if (!captured.ok) return failed(`capture_thought refused: ${captured.refusal.code}`);
       // A re-capture writes no pointer (the thought's provenance stays its own), so the revision was not written.
-      if (captured.value.existed === true) {
-        return failed(`the text is already thought ${captured.value.id}, whose provenance stays its own — the revision of ${item.matched_thought_id} was not written`);
-      }
+      if (captured.value.existed === true) return revisionHeld(captured.value.id);
       return { status: "executed", result: captured.value.id, error: null };
     }
   }
 }
 
-/** Every ready item of an executing job carried out in order, each recorded as it finishes; then the job complete. */
+/**
+ * Every ready item of an executing job carried out in order, each recorded as
+ * it finishes; then the job complete. A fault on one item fails that item, the
+ * rest going on, as the old server's did. A fault outside one (a store that
+ * stops answering) leaves the job a dry run's again, its error saying so, so
+ * execute_job carries out the items still ready; the fault is thrown.
+ */
 async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
-  const items = await ctx.db.tx((sql) => sql<ItemRow>`
-    SELECT id::text AS id, position, content, type, importance, tags, source_snippet, action, reason, status, matched_thought_id::text AS matched_thought_id,
-           similarity_score, result_thought_id::text AS result_thought_id, error_message, executed_at
-      FROM ingestion_items WHERE job_id = ${job.job_id}::bigint AND status = 'ready' ORDER BY position`);
-  for (const item of items) {
-    let done: Done;
-    try {
-      done = await execute(ctx, job, item);
-    } catch (e) {
-      // A fault of the core's or the store's: this item fails with it, the rest go on, as the old server's did.
-      done = failed(e instanceof Error ? e.message : String(e));
+  try {
+    const items = await ctx.db.tx((sql) => sql<ItemRow>`
+      SELECT id::text AS id, position, content, type, importance, tags, source_snippet, action, reason, status, matched_thought_id::text AS matched_thought_id,
+             similarity_score, result_thought_id::text AS result_thought_id, error_message, executed_at
+        FROM ingestion_items WHERE job_id = ${job.job_id}::bigint AND status = 'ready' ORDER BY position`);
+    for (const item of items) {
+      let done: Done;
+      try {
+        done = await execute(ctx, job, item);
+      } catch (e) {
+        console.error(`smart-ingest job ${job.job_id} item ${item.id}: ${e instanceof Error ? e.message : String(e)}`);
+        done = failed(FAULT);
+      }
+      await ctx.db.tx((sql) => sql`
+        UPDATE ingestion_items SET status = ${done.status}, result_thought_id = ${done.result}::uuid, error_message = ${done.error}, executed_at = now()
+         WHERE id = ${item.id}::bigint`);
     }
+    return await ctx.db.tx((sql) => settle(sql, job.job_id, "complete", true));
+  } catch (e) {
     await ctx.db.tx((sql) => sql`
-      UPDATE ingestion_items SET status = ${done.status}, result_thought_id = ${done.result}::uuid, error_message = ${done.error}, executed_at = now()
-       WHERE id = ${item.id}::bigint`);
+      UPDATE ingestion_jobs SET status = 'dry_run_complete', error_message = ${`interrupted by ${FAULT}; execute_job carries out the items still ready`}
+       WHERE id = ${job.job_id}::bigint AND status = 'executing'`).catch(() => {});
+    throw e;
   }
-  return ctx.db.tx((sql) => settle(sql, job.job_id, "complete", true));
 }
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
@@ -455,6 +512,13 @@ const SourceMetadata = z
 /** A label trimmed, or null for none. */
 const label = (max: number) => text(max).transform((s) => s.trim() || null).nullish();
 
+/** Why execute_job will not carry out a job in each status but a dry run's (and a complete one, answered as it stands). */
+const NOT_READY: Partial<Record<(typeof STATUSES)[number], string>> = {
+  extracting: "it is still extracting",
+  executing: "another call is executing it (or a server stopped while it did: send the text again with reprocess)",
+  failed: "it failed (error_message says why): send the text again",
+};
+
 const refused = (status: 422 | 503, code: string, job: string | null, facts: Record<string, unknown>) => refuse(status, code, { ...facts, job_id: job });
 
 export default definePlugin({
@@ -464,7 +528,7 @@ export default definePlugin({
   operations: {
     ingest: operation({
       title: "Ingest a document",
-      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count.`,
+      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess; a failed job answers no one, so the same call after a refusal runs again. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count.`,
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -487,13 +551,17 @@ export default definePlugin({
         const importKey = typeof meta.import_key === "string" && meta.import_key ? meta.import_key : null;
         const base = await sha256(body);
 
-        // One job per text, and per import_key, unless reprocess: the earlier job answers. A reprocess is the text's
-        // next version (-v2, -v3 …), as the old server's. ON CONFLICT: two at once with one text make one job.
+        // One job per text, and per import_key, unless reprocess: the earlier job answers, its versions' included. A failed
+        // job answers no one, so the same call after a 503 runs again. A new job is the text's next version (-v2, -v3 …),
+        // as a reprocess was the old server's. The table is locked for the read and the insert, so two calls at once with
+        // one text or one import_key make one job, and two reprocesses two versions.
         const made = await ctx.db.tx(async (sql) => {
+          await sql`LOCK TABLE ingestion_jobs IN SHARE ROW EXCLUSIVE MODE`;
           if (!req.reprocess) {
             const [earlier] = await sql<{ id: string }>`
               SELECT id::text AS id FROM ingestion_jobs
-               WHERE input_hash = ${base} OR (${importKey}::text IS NOT NULL AND import_key = ${importKey})
+               WHERE status <> 'failed'
+                 AND (input_hash = ${base} OR input_hash LIKE ${`${base}-v%`} OR (${importKey}::text IS NOT NULL AND import_key = ${importKey}))
                ORDER BY created_at DESC, id DESC LIMIT 1`;
             if (earlier) return { kind: "existing" as const, job: (await jobById(sql, earlier.id))! };
           }
@@ -505,12 +573,7 @@ export default definePlugin({
             INSERT INTO ingestion_jobs (input_hash, import_key, source_label, source_type, input_length, dry_run, trust, created_by, source_metadata)
             VALUES (${hash}, ${importKey}, ${req.source_label ?? null}, ${req.source_type ?? null}, ${body.length}, ${req.dry_run}, ${req.trust ?? null},
                     ${ctx.caller.name}, (${JSON.stringify(meta)}::text)::jsonb)
-            ON CONFLICT (input_hash) DO NOTHING
             RETURNING id::text AS id`;
-          if (!row) {
-            const [other] = await sql<{ id: string }>`SELECT id::text AS id FROM ingestion_jobs WHERE input_hash = ${hash}`;
-            return { kind: "existing" as const, job: (await jobById(sql, other.id))! };
-          }
           return { kind: "made" as const, job: (await jobById(sql, row.id))! };
         });
         if (made.kind === "existing") {
@@ -518,62 +581,74 @@ export default definePlugin({
           return ok({ existing: true, job: made.job, message: `${why} as job ${made.job.job_id}; reprocess runs it again` });
         }
         let job = made.job;
-
-        // Extraction: one model call a chunk, within the budget.
-        const started = Date.now();
         let calls = 0;
-        const extracted: Extracted[] = [];
-        for (const chunk of chunksOf(body)) {
-          const elapsed = Date.now() - started;
-          if (elapsed > LIMITS.budgetMs) {
-            await failJob(ctx, job.job_id, `budget reached: ${elapsed} ms of extraction, after ${calls} model calls`, calls);
-            return refused(422, "BUDGET_REACHED", job.job_id, { elapsed_ms: elapsed, budget_ms: LIMITS.budgetMs, model_calls: calls, message: "split the text into smaller documents" });
-          }
-          calls++;
-          const answer = await ctx.model.chat({ system: SYSTEM_PROMPT, user: wrapped(chunk), json: true, temperature: 0.2, max_tokens: 4096 });
-          if (!answer.ok) {
-            const r = answer.refusal;
-            await failJob(ctx, job.job_id, `the model call was refused: ${r.code}`, calls);
-            if (r.code === "PROVIDER_UNAVAILABLE") return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { to: r.to, reason: r.reason });
-            if (r.code === "REFUSED_EGRESS") return refused(422, "EXTRACTION_REFUSED", job.job_id, { refused: r.code, reason: r.reason });
-            return refused(422, "EXTRACTION_FAILED", job.job_id, { refused: r.code, detail: "detail" in r ? r.detail : r.message });
-          }
-          const thoughts = thoughtsOf(answer.value.json ?? {});
-          if (thoughts === null) {
-            await failJob(ctx, job.job_id, "the model's answer holds no thoughts list", calls);
-            return refused(422, "EXTRACTION_FAILED", job.job_id, { detail: "the model's answer holds no thoughts list" });
-          }
-          extracted.push(...thoughts);
+        try {
+          return await run();
+        } catch (e) {
+          // A fault (the core's or the store's) while extracting or deciding: the job failed, with no words of the store's,
+          // then thrown. One while executing has left the job a dry run's again (executeJob), which this leaves as it is.
+          await ctx.db.tx((sql) => sql`
+            UPDATE ingestion_jobs SET status = 'failed', error_message = ${FAULT}, model_calls = ${calls}, completed_at = now()
+             WHERE id = ${job.job_id}::bigint AND status = 'extracting'`).catch(() => {});
+          throw e;
         }
 
-        // The decisions, each against the brain as it is now.
-        const seen = new Set<string>();
-        const decided: Decided[] = [];
-        try {
-          for (const t of extracted) decided.push(await decide(ctx, t, seen));
-        } catch (e) {
-          if (!(e instanceof Unavailable)) throw e;
-          await failJob(ctx, job.job_id, "the search was unavailable while deciding", calls);
-          return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, e.facts);
-        }
-        job = await ctx.db.tx(async (sql) => {
-          for (const [position, d] of decided.entries()) {
-            await sql`
-              INSERT INTO ingestion_items (job_id, position, content, type, importance, tags, source_snippet, action, reason, status, matched_thought_id, similarity_score, error_message)
-              VALUES (${job.job_id}::bigint, ${position}, ${d.content}, ${d.type}, ${d.importance},
-                      (SELECT coalesce(array_agg(t ORDER BY n), '{}') FROM jsonb_array_elements_text((${JSON.stringify(d.tags)}::text)::jsonb) WITH ORDINALITY AS x(t, n)),
-                      ${d.source_snippet}, ${d.action}, ${d.reason}, ${d.status}, ${d.matched}::uuid, ${d.similarity}, ${d.error})`;
+        async function run(): Promise<PluginOutcome<{ existing: boolean; job: Job; message: string }>> {
+          // Extraction: one model call a chunk, within the budget.
+          const started = Date.now();
+          const extracted: Extracted[] = [];
+          for (const chunk of chunksOf(body)) {
+            const elapsed = Date.now() - started;
+            if (elapsed > LIMITS.budgetMs) {
+              await failJob(ctx, job.job_id, `budget reached: ${elapsed} ms of extraction, after ${calls} model calls`, calls);
+              return refused(422, "BUDGET_REACHED", job.job_id, { elapsed_ms: elapsed, budget_ms: LIMITS.budgetMs, model_calls: calls, message: "split the text into smaller documents" });
+            }
+            calls++;
+            const answer = await ctx.model.chat({ system: SYSTEM_PROMPT, user: wrapped(chunk), json: true, temperature: 0.2, max_tokens: 4096 });
+            if (!answer.ok) {
+              const r = answer.refusal;
+              await failJob(ctx, job.job_id, `the model call was refused: ${r.code}`, calls);
+              if (r.code === "PROVIDER_UNAVAILABLE") return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { to: r.to, reason: r.reason });
+              if (r.code === "REFUSED_EGRESS") return refused(422, "EXTRACTION_REFUSED", job.job_id, { refused: r.code, reason: r.reason });
+              return refused(422, "EXTRACTION_FAILED", job.job_id, { refused: r.code, detail: "detail" in r ? r.detail : r.message });
+            }
+            const thoughts = thoughtsOf(answer.value.json ?? {});
+            if (thoughts === null) {
+              await failJob(ctx, job.job_id, "the model's answer holds no thoughts list", calls);
+              return refused(422, "EXTRACTION_FAILED", job.job_id, { detail: "the model's answer holds no thoughts list" });
+            }
+            extracted.push(...thoughts);
           }
-          await sql`UPDATE ingestion_jobs SET model_calls = ${calls} WHERE id = ${job.job_id}::bigint`;
-          // A dry run stops here; an inline run with nothing extracted is complete; else its items are carried out below.
-          const next = req.dry_run ? "dry_run_complete" : decided.length > 0 ? "executing" : "complete";
-          return settle(sql, job.job_id, next, next === "complete");
-        });
-        if (req.dry_run) {
-          return ok({ existing: false, job, message: `Dry run: ${job.extracted_count} extracted. Would add ${job.added_count}, skip ${job.skipped_count}, append ${job.appended_count}, revise ${job.revised_count}.` });
+
+          // The decisions, each against the brain as it is now.
+          const seen = new Set<string>();
+          const decided: Decided[] = [];
+          try {
+            for (const t of extracted) decided.push(await decide(ctx, t, seen));
+          } catch (e) {
+            if (!(e instanceof Unavailable)) throw e;
+            await failJob(ctx, job.job_id, "the search was unavailable while deciding", calls);
+            return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, e.facts);
+          }
+          job = await ctx.db.tx(async (sql) => {
+            for (const [position, d] of decided.entries()) {
+              await sql`
+                INSERT INTO ingestion_items (job_id, position, content, type, importance, tags, source_snippet, action, reason, status, matched_thought_id, similarity_score, error_message)
+                VALUES (${job.job_id}::bigint, ${position}, ${d.content}, ${d.type}, ${d.importance},
+                        (SELECT coalesce(array_agg(t ORDER BY n), '{}') FROM jsonb_array_elements_text((${JSON.stringify(d.tags)}::text)::jsonb) WITH ORDINALITY AS x(t, n)),
+                        ${d.source_snippet}, ${d.action}, ${d.reason}, ${d.status}, ${d.matched}::uuid, ${d.similarity}, ${d.error})`;
+            }
+            await sql`UPDATE ingestion_jobs SET model_calls = ${calls} WHERE id = ${job.job_id}::bigint`;
+            // A dry run stops here; an inline run with nothing extracted is complete; else its items are carried out below.
+            const next = req.dry_run ? "dry_run_complete" : decided.length > 0 ? "executing" : "complete";
+            return settle(sql, job.job_id, next, next === "complete");
+          });
+          if (req.dry_run) {
+            return ok({ existing: false, job, message: `Dry run: ${job.extracted_count} extracted. Would add ${job.added_count}, skip ${job.skipped_count}, append ${job.appended_count}, revise ${job.revised_count}.` });
+          }
+          if (job.status === "executing") job = await executeJob(ctx, job);
+          return ok({ existing: false, job, message: `Ingested: ${job.extracted_count} extracted. Added ${job.added_count}, skipped ${job.skipped_count}, appended ${job.appended_count}, revised ${job.revised_count}, already there ${job.existed_count}, failed ${job.failed_count}.` });
         }
-        if (job.status === "executing") job = await executeJob(ctx, job);
-        return ok({ existing: false, job, message: `Ingested: ${job.extracted_count} extracted. Added ${job.added_count}, skipped ${job.skipped_count}, appended ${job.appended_count}, revised ${job.revised_count}, already there ${job.existed_count}, failed ${job.failed_count}.` });
       },
     }),
     execute_job: operation({
@@ -586,17 +661,18 @@ export default definePlugin({
       input: { job_id: JobId },
       output: { already: z.boolean(), job: Job },
       async handler(ctx, { job_id }) {
-        // dry_run_complete → executing, once: a second call at once finds it executing and is refused.
+        // dry_run_complete → executing, once: a second call at once waits on the first's row, then finds it executing.
         const claimed = await ctx.db.tx(async (sql) => {
-          const before = await jobById(sql, job_id);
-          if (!before) return { kind: "missing" as const };
-          const [row] = await sql<{ id: string }>`UPDATE ingestion_jobs SET status = 'executing' WHERE id = ${job_id}::bigint AND status = 'dry_run_complete' RETURNING id::text AS id`;
-          return row ? { kind: "claimed" as const, job: { ...before, status: "executing" as const } } : { kind: "unclaimed" as const, job: before };
+          const [row] = await sql<{ id: string }>`
+            UPDATE ingestion_jobs SET status = 'executing', error_message = NULL WHERE id = ${job_id}::bigint AND status = 'dry_run_complete' RETURNING id::text AS id`;
+          const now = await jobById(sql, job_id);
+          if (!now) return { kind: "missing" as const };
+          return { kind: row ? ("claimed" as const) : ("unclaimed" as const), job: now };
         });
         if (claimed.kind === "missing") return refuse(404, "NO_SUCH_JOB", { job_id });
         if (claimed.kind === "unclaimed") {
           if (claimed.job.status === "complete") return ok({ already: true, job: claimed.job });
-          return refuse(409, "JOB_NOT_READY", { job_id, job_status: claimed.job.status, message: "only a dry run's job (dry_run_complete) is executed" });
+          return refuse(409, "JOB_NOT_READY", { job_id, job_status: claimed.job.status, message: NOT_READY[claimed.job.status] ?? "only a dry run's job (dry_run_complete) is executed" });
         }
         return ok({ already: false, job: await executeJob(ctx, claimed.job) });
       },

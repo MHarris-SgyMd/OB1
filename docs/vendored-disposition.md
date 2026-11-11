@@ -96,7 +96,7 @@ exactly one disposition.
   / `readwise` / `x-twitter`).
 - **rebuild-tickets linked (kept + tracked):** ~~`enhanced-mcp` → SMD-1525 + SMD-1798~~ (retired, SMD-1931);
   `schemas/typed-reasoning-edges` → SMD-1253; ~~`schemas/wiki-pages` → SMD-949~~ (rebuilt in core as migration 064 and retired, SMD-1812);
-  `schemas/smart-ingest` → SMD-1253.
+  ~~`schemas/smart-ingest` → SMD-1253~~ (the smart-ingest plugin's tables, SMD-2690).
 - **SMD-1798 portability (runtime supabase-js), kept:** `agent-memory-api` (a plugin since SMD-2690), ~~`enhanced-mcp`~~,
   ~~`open-brain-rest`~~, ~~`rest-api`~~ (the three retired, SMD-1931), ~~`ob-graph`~~, ~~`repo-learning-coach`~~, `schema-aware-routing`,
   ~~`work-operating-model-activation`~~ (the three retired, SMD-2920 and SMD-2923), ~~`x-twitter-import`~~ (holds no client since

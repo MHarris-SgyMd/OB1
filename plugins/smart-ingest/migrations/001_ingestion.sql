@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS ingestion_items (
   source_snippet      text        NOT NULL DEFAULT '',
   action              text        NOT NULL CHECK (action IN ('add', 'skip', 'append_evidence', 'create_revision')),
   reason              text        NOT NULL,
-  -- ready: decided, not yet executed; executed: done; existed: an add whose text was already a thought, or an
-  -- append the thought already held, so nothing was written; failed: error_message says why.
+  -- ready: decided, not yet executed; executed: done; existed: an add whose text the brain already held, or an
+  -- append the thought already held, so nothing was added; failed: error_message says why.
   status              text        NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'executed', 'existed', 'failed')),
   matched_thought_id  uuid,
   similarity_score    real,
