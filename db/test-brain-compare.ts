@@ -107,6 +107,7 @@ function baseInfo(over: Partial<BrainInfo> & { thoughts?: number; highestMigrati
       proposals: null,
       relations: null,
       threads: null,
+      priorityWeights: null,
       findings: null,
       hnsw: [],
       unread: {},
