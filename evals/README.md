@@ -4460,10 +4460,12 @@ query's words and vector, the store, and `callTool`, a search tool called over M
 `callTool`), and so does a read that isn't a search (SMD-3669's agenda). `--seeded` runs every measured read a second
 time with each gold replaced by the items outside it and each item's facts moved to the next item. A read whose answer
 moves consults the answer, and fails the run. The ceiling, which reads the gold, is that check's control. A second
-pass that errors is reported as an error, not as reading the answer. A read that copies the answer when its module
+pass that errors is reported as an error, not as reading the answer, and fails the run, since the check never ran
+for that read (SMD-4192). A read that copies the answer when its module
 loads is the reviewer's to catch. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
 verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
-the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same
+the bar says, and the run lists the error; its verdict doesn't fail the run, but a read that errors on every prompt
+does, since nothing was measured (SMD-4192). The gold ceiling runs through the same
 path on every run, so the path is exercised whatever the measured reads do.
 
 **The agenda read** (SMD-3669, `priority.ts`'s `AGENDA_READ`) is the first measured read. The agenda takes no query,
@@ -4799,6 +4801,67 @@ The program's output, verbatim:
 * **The 11-02 board replay** (below) puts SMD-2908 3rd of 314, from 6th.
 * So the defaults stay 0 for search, and the agenda's order is level first. Level first moves which prompts each read
   wins rather than how many: no single order of the items reaches 5 of 7, as SMD-4177 set out.
+
+**The agenda takes the question, 2026-11-10** (SMD-4192). No single order reaches 5 of 7, so the maintainer chose
+that the agenda takes the question, from the ticket's four options: the bar stays as registered, and the client
+chooses the order. The rule was pre-registered on the ticket before any build or run.
+* **The agenda's order.** Migration 129 adds `order`, either `priority` (the default, unchanged) or `due`. `due` lists
+  the items with a due time first, soonest first, so the longest overdue leads. The undated follow by priority, and a
+  tie on the due time goes to the higher priority. The order is applied before the limit. After the run, review pass 3
+  amended it, the maintainer's choice: a stated None (level 0) counts as undated, as it takes no urgency. No seeded
+  item is level 0 with a due date, so the measurement below holds under the amended rule.
+* **The read**, `agenda_question` (`priority.ts`'s `AGENDA_QUESTION_READ`), lists the agenda's own items, not
+  search's ten hits reordered. Each ticket becomes its head thought (068's `ob1_ticket_head`), and each open item the
+  thought it was read from. It uses the agenda read's flags at the cap of 100.
+* **The chooser.** The eval has no client model to choose the order, so a keyword rule stands in (`DUE_WORDS`): a
+  query naming due, a deadline, overdue, soon, today, tomorrow or this week gets `due`; any other gets `priority`.
+  It reads the query's words alone, and misses phrasings a model would read as about time, such as "next week",
+  "this month", "upcoming" or "expiring" (review pass 1); a wider rule would be a new read.
+* **Disclosed before the run.** The read was designed with every read's per-prompt results in view, and the rule was
+  written with the seven queries in front of it. The ticket predicted top-1 on `next-ticket`, `highest-value`,
+  `matters-most`, `blocking` and `due-soon`, and losses on `this-week` (the gutters before the bill) and `promised`.
+
+Registration `acb196be7ec50868`, unchanged; main f684a696 with the branch's migration 129. The program's output,
+verbatim (the new read's rows; the other reads' rows are as recorded above):
+
+```
+next-ticket     agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 0.949]
+highest-value   agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 0.949]
+this-week       agenda_question gutters, bill, commitment, renewal, zq-urgent, passport, zq-high, documentary, cat, zq-medium  [top-1 no, top-3 yes, tau 0.600]
+due-soon        agenda_question gutters, bill, commitment, renewal, zq-urgent, passport, zq-high, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 1.000]
+matters-most    agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau 0.333]
+promised        agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 no, top-3 no, tau –]
+blocking        agenda_question zq-urgent, passport, zq-high, gutters, bill, commitment, renewal, documentary, cat, zq-medium  [top-1 yes, top-3 yes, tau –]
+```
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| agenda | 0.429 | 0.429 | 0.525 | 0.222 / 0.345 / -0.001 | 0.220 / 0.347 / 0.000 |
+| priority_weight | 0.143 | 0.571 | 0.414 | 0.085 / 0.310 / -0.002 | 0.085 / 0.312 / 0.000 |
+| agenda_question | 0.714 | 0.857 | 0.766 | 0.285 / 0.509 / -0.001 | 0.285 / 0.511 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+**The verdict: `agenda_question` clears the bar,** the first read to. Top-1 on 5 of 7 (at least 5 needed), mean tau
+0.766 (0.502 needed), and `highest-value` and `due-soon` kept in the top 3. The answer-moved check passed: with the
+gold and the facts moved, its hits stayed the same.
+* **What a pass shows.** The due order and the agenda's own list fit these seven prompts, as the ticket predicted
+  before the run. It doesn't show that a keyword rule chooses well for other questions: it was written with these
+  queries in view. In use the calling model chooses the order, and nothing here measures that choice.
+* **What it still misses.** `this-week` leads with the overdue gutters where the gold has the bill due tomorrow;
+  `promised` leads with the Urgent ticket where the gold has the commitment, which no order of priority or due time
+  puts first.
+* **The agenda read** (search's hits reordered) and `priority_weight` are unchanged, and their verdicts stand.
+* **Two runs before this one measured nothing,** each from a defect in the eval's plumbing, not the read's rule:
+  * the first handed the read the seeding's SQL client, already closed: "Connection closed" on every prompt;
+  * the second bound its keys as a JS array, which Bun sends to `::text[]` as one comma-joined string: "malformed
+    array literal" on every prompt.
+
+  Each scored the read 0 of 7 with every prompt an error. The run now fails when a measured read errors on every
+  prompt, as the second did. The plumbing was mended and checked on its own against a scratch database, with no
+  eval, before this run. The rule and the read's procedure did not change between the three runs.
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
@@ -8398,6 +8461,54 @@ The consent-page mutants above hold its pages too.
 **Beside it.** `eval-utilization.ts` now reads a logged `plan_context` call as a search (`SEARCH_KINDS`), so live use of the tool has SMD-1719's rate too. `export-queries.ts` attributes over the same rows, so the report and the fixture still agree, and labels no query from a `plan_context` request, which is no search the replay can run. test-schema [39] holds every kind `query_log` allows to the search kinds, or to the kinds named as not searches. Neither reader runs in CI, so it also holds both readers' search-row selects to `SEARCH_KINDS_LITERAL` by their source. A `plan_context` row carries no token estimate in the report: the tool cuts each hit to a budget, so the stored text's length says nothing about what it returned.
 
 The table's utilization is the rate over the rows `query_log` would hold for the runs: a search row per call of `search`, `search_thoughts`, `search_thoughts_keyword` or `plan_context` that the server logs (not one with `min_trust`, or a priority-ranked `search_thoughts`; no B planner passed either), with the results it returned; a fetch as an opened action; each credited cite as a cite row. Review pass 1 corrected it: the first report fed every ID a reply printed as a result, and every call as a search, and read 29.6% of 439 for A and 13.7% of 365 for B. The verdict, which counts relevant cites, did not change.
+
+## Where does "the brain has little on this" begin? (SMD-4212 PR 1)
+
+`plan_context`'s knowledge section is a search of the request, and a search keeps its nearest matches whatever their similarity. A request the brain knows nothing about still gets its eight hits, and no gap says so. SMD-4212 asks for a `little` gap at a measured bar. It should be a coverage signal, not a verdict, and the client still judges. `eval-little.ts` measures where that bar is. The maintainer chose its shape on 2026-11-10, and SMD-4212's comment aac12cda preregistered it before any measured run (hash `703eb62defe1`).
+
+**How it ran.**
+- **The requests: 80 in all.**
+  - 30 Backlog tickets of the brain's own projects, all held by the brain;
+  - 30 Backlog tickets of SMD's other projects (the client app and the rest), which this brain holds no ticket of;
+  - each kind drawn by a seeded hash from tickets filed 2026-09-01 to 11-09;
+  - 20 of those tickets (10 of each kind) rewritten without their key by a paraphraser who saw only the titles. The harness checked each: no key, at most 25 words, no six words in a row from the title.
+- **The hits: 8 per request,** from `plan_context`'s own search (hybrid, `prefer_current` on, threshold 0, recency 0, no filter). It was called through `search_thoughts` with the same arguments, because the rehearsal found `plan_context`'s 8 s embedding window missed on every call while the canary's sleep held the model server.
+- **The truth:** two blind raters, one on Opus and one on Sonnet, labelled all 640 hits relevant or not, under rules adapted from SMD-2684 PR 2's (`RATER_RULES`): the same categories, worded for any request rather than a ticket's planning, with one added edge case (a request about a product the rows never mention gets 0 on every row). A request has **little** when at most 1 of its hits is relevant by both.
+- **The candidates:**
+  - `top(t)`: the best hit's similarity below t;
+  - `count(f)`: at most 1 hit at similarity f or more;
+  - `literal`: no hit matched an exact literal of the request;
+  - t and f from 0.30 to 0.80 in steps of 0.02: 53 rules.
+- **Choosing and confirming:** half the requests (dev, half of each kind) chose the rule with the highest balanced accuracy. The other half (test) confirmed it against the bar: balanced accuracy ≥ 0.75 and precision of `little` ≥ 0.75, with κ ≥ 0.6.
+
+**Result: the bar is met by `top(0.74)`.** The brain has little on a request when no hit reaches a similarity of 0.74 (qwen3-embedding:4b@1024).
+
+| | Balanced accuracy | Precision of `little` | Little said right / wrong | Not little said right / wrong |
+|---|---|---|---|---|
+| Dev (40 requests) | 0.876 | 0.909 | 20 / 2 | 15 / 3 |
+| **Test (40 requests)** | **0.885** | **0.789** | 15 / 4 | 20 / 1 |
+
+- **Agreement:** κ 0.789 over 640 hits.
+- **Little, by kind of request:** brain tickets 3 of 30; other-project tickets 25 of 30; paraphrases 11 of 20. The brain does hold something on a few of SMD's other projects: SMD-1888 had 5 relevant hits, SMD-2580, 1589, 3390 and 3752 had 2 each.
+- **The four false `little` calls on test** are those last four: other-project tickets where the brain holds exactly 2 relevant rows, one over the line. Each top similarity was below 0.74 (0.58 to 0.72).
+- **The one miss on test** is SMD-2380: a brain ticket whose best hit is 0.93 (its own record), with only 1 hit relevant by both raters. A ticket the brain holds only as its board record reads as covered by similarity alone.
+- **Neighbouring thresholds on test:** `top(0.70)` and `top(0.72)` score 0.906 balanced and 0.833 precision; `top(0.76)` scores 0.844 and 0.714. So the bar sits on a plateau, not on a knife's edge, and dev chose the higher end of it.
+- **`literal` was never in contention.** No paraphrase of a brain ticket matches an identifier, and several other-project requests match one (`bin/dev`-style tokens), so "no literal" calls known paraphrases little and misses unknown tickets.
+
+**What it means for PR 2.** `plan_context` can raise a `little` gap when its best hit's similarity is below 0.74. The gap should give the value it read and the bar, and only on a brain whose embedding is qwen3-embedding:4b@1024. On another model the bar wasn't measured, and the gap should say so rather than guess. A ticket held only as its board record still reads as covered, and that's a limit of similarity: the gap can't see it.
+
+**Caveats.**
+- **The raters** are both Claude models. κ 0.79 says the rules held between them, not that a person would agree.
+- **The definition of little** ("at most 1 relevant hit of 8") decides the gold. A stricter one (no relevant hit) would move the bar.
+- **Similarity is the embedding's own scale.** A different model, or the same model at another dimension, needs its own measurement.
+- **The brain:** the canary, at one moment. The requests are tickets and one paraphraser's rewrites, not real session openers.
+- **Paraphrases and their tickets share a split only by chance.** The split halves each kind of request separately, so 11 of the 20 paraphrases sit in the other half from their source ticket. Test is then not fully independent of the choice made on dev. Without those 11, the test half is 36 requests and the bar is still met: balanced accuracy 0.871, precision 0.778.
+- **The sheets were numbered by kind** (brain tickets 1–30, other projects 31–60, paraphrases 61–80), and the raters weren't told the scheme. The batches mixed the kinds, and the harness now numbers sheets in a hashed order.
+- **The run wrote to the brain.** Each search, the warm-up and any retry are a `query_log` row on the canary, as a `plan_context` call would be.
+
+**Reproduce.**
+- `--draw` rebuilds the request file from the same Linear listings and held keys. It holds board titles, so it stays out of the repo, as do the runs, the rows, the sheets and the labels.
+- `bun eval-little.ts --self-check` holds the rules on hand-known answers, in CI.
 
 ## Related
 

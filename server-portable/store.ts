@@ -289,6 +289,13 @@ export type ThoughtRecord = {
   metadata: Record<string, unknown>;
   created_at: string | null;
   updated_at?: string | null;
+  /**
+   * The stored metadata's JSON type (jsonb_typeof; null for SQL NULL), where
+   * the store read it: `metadata` above is `{}` for a SQL NULL and a JSON null
+   * alike, so a writer that must not merge into either reads this
+   * (append_thought_evidence, SMD-2690 PR 3b review pass 1).
+   */
+  metadataType?: string | null;
 };
 
 export type ThoughtListItem = {
@@ -378,6 +385,7 @@ export function normaliseThoughtRecord(r: Record<string, unknown>): ThoughtRecor
   return {
     ...normaliseListItem(r),
     updated_at: isoTimestampOrNull(r.updated_at),
+    ...(Object.hasOwn(r, "metadata_type") ? { metadataType: r.metadata_type === null ? null : String(r.metadata_type) } : {}),
   };
 }
 
@@ -1494,6 +1502,32 @@ export type EffectivePriority = {
 };
 
 /**
+ * set_priority_weights' answer (132). `changed` false: the weights given were those standing, and nothing was written.
+ * `weights` is the setting now (null: none, the built-in weights stand), `previous` the one it replaced. Refused:
+ * NOT_OPERATOR (not a key the registry classifies operator by its agent id; `kind` what it is), BAD_WEIGHTS (`message`
+ * in effective_priority's words).
+ */
+export type SetWeightsResult =
+  | { ok: true; changed: boolean; weights: Partial<PriorityWeights> | null; previous: Partial<PriorityWeights> | null; setAt: string | null; setBy: string | null }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "BAD_WEIGHTS"; message: string };
+
+const weightsOrNull = (v: unknown): Partial<PriorityWeights> | null =>
+  v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Partial<PriorityWeights>) : null;
+
+/** set_priority_weights' jsonb (132) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseSetWeights(r: unknown): SetWeightsResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  if (o?.ok === true && typeof o.changed === "boolean") {
+    return { ok: true, changed: o.changed, weights: weightsOrNull(o.weights), previous: weightsOrNull(o.previous), setAt: isoTimestampOrNull(o.set_at), setBy: word(o.set_by) };
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
+  if (o?.ok === false && o.error === "BAD_WEIGHTS" && typeof o.message === "string") return { ok: false, error: "BAD_WEIGHTS", message: o.message };
+  throw new Error(`set_priority_weights answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
  * is the database's, which quotes the argument it could not read, cut. Any other
@@ -1593,6 +1627,9 @@ export function normaliseEffectivePriority(r: unknown, what: string): EffectiveP
 
 /** A live or lapsed claim an agenda item names (115): the holder's key name, the piece, and when its lease ends or ended. */
 export type AgendaClaim = { holder: string; piece: string | null; label: string | null; at: string };
+/** The agenda's orders (migration 129, SMD-4192). */
+export const AGENDA_ORDERS = ["priority", "due"] as const;
+export type AgendaOrder = (typeof AGENDA_ORDERS)[number];
 /**
  * One agenda item (migrations 123 and 124, SMD-3669, SMD-4162): a ticket or an open item, its place, what it is, and
  * 122's terms behind its place. `status` is a ticket's Linear status (`statusType` its type: triage, backlog,
@@ -1645,6 +1682,8 @@ export type AgendaResult = {
    * Null without keys, and from a brain before 126.
    */
   keyed: { others: AgendaOther[]; waiting: AgendaWaiting[]; missing: string[] } | null;
+  /** The order applied (129): `priority` from a brain before 129, which has no other. */
+  order: AgendaOrder;
   now: string;
 };
 /** A named ticket the agenda does not rank (126): settled, or a status type the brain does not know. */
@@ -1670,7 +1709,8 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
   const num = (v: unknown): number => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
   if (!o || !Array.isArray(o.items) || !Number.isInteger(num(o.total)) || !Number.isInteger(num(o.unknown)) || !lo
       || ![lo.blocked, lo.claimed, lo.started, lo.waiting].every((n) => Number.isInteger(num(n))) || (typeof o.now !== "string" && !(o.now instanceof Date)) || typeof o.claims_read !== "boolean"
-      || (o.claims_live !== null && !Number.isInteger(num(o.claims_live)))) {
+      || (o.claims_live !== null && !Number.isInteger(num(o.claims_live)))
+      || (o.order !== undefined && !(AGENDA_ORDERS as readonly unknown[]).includes(o.order))) {
     throw new Error(`${what} answered no agenda this server reads`);
   }
   const bs = o.board_sync !== null && typeof o.board_sync === "object" ? (o.board_sync as Record<string, unknown>) : null;
@@ -1703,6 +1743,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
     claimsRead: o.claims_read as boolean,
     claimsLive: o.claims_live === null ? null : num(o.claims_live),
     keyed,
+    order: (o.order as AgendaOrder | undefined) ?? "priority",
     now: isoTimestamp(o.now as string | Date),
   };
 }
@@ -2486,9 +2527,17 @@ export interface ThoughtStore {
   /**
    * The largest effective priority the brain's default weights allow (migration 128's ob1_priority_span, SMD-4194):
    * a critical level plus the largest urgency and unblocks terms. Search's priority_weight divides by it. A database
-   * before 128 throws.
+   * before 128 throws. `weights` (SMD-4193): the span under them laid over the defaults (migration 131's
+   * ob1_priority_span(jsonb), which checks them as 122 does and refuses a bad one 22023); a database before 131 throws.
    */
-  prioritySpan(): Promise<number>;
+  prioritySpan(weights?: Partial<PriorityWeights>): Promise<number>;
+  /**
+   * The operator sets the weights every read takes as its defaults (migration 132's set_priority_weights, SMD-4193
+   * PR 2): overrides by name over the built-in weights; null or {} clears them. The function decides who may — a key
+   * the registry classifies operator, by its agent id — and checks the weights in effective_priority's words. A
+   * database before 132 throws.
+   */
+  setPriorityWeights(opts: { weights: Partial<PriorityWeights> | null; actor?: Actor }): Promise<SetWeightsResult>;
   /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
@@ -2501,6 +2550,14 @@ export interface ThoughtStore {
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean;
     /** Also list started tickets (124); absent is false: started work is left out, and counted. */
     includeStarted?: boolean; now?: string;
+    /**
+     * The order (129, SMD-4192): `priority`, the default, by effective priority; `due`, the dated items first, soonest
+     * first (the longest overdue leads), then the undated by effective priority, a stated None among them. Applied
+     * before `limit`. `due` needs migration 129; `priority` reads any brain from 123.
+     */
+    order?: AgendaOrder;
+    /** The call's own weights (SMD-4193), overriding the defaults by name: 123's agenda takes them and checks them as 122 does, refusing a bad one 22023. */
+    weights?: Partial<PriorityWeights>;
     /** A ceiling on the call's statement, in ms (plan_context's deadline, SMD-2684); a stricter role or database setting is kept. Past it the call throws 57014. */
     timeoutMs?: number;
   }): Promise<AgendaResult>;
@@ -2835,7 +2892,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };
 

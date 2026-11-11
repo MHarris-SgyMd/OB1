@@ -2639,13 +2639,18 @@ export const ROLE_GRANTS = Object.freeze({
   // group grants otherwise: assert_priority checks an entity exists. (A
   // thought and a ticket's head are the capture group's.) SELECT on
   // open_items and open_item_events since 117: assert_priority checks an
-  // open item exists, and whether a capture-only key opened it. Soft: a role
+  // open item exists, and whether a capture-only key opened it. Since 132
+  // (SMD-4193 PR 2), the operator's weights: every effective priority reads
+  // the standing row of priority_weight_settings, and set_priority_weights
+  // ends it and writes the next (INSERT and UPDATE; its trigger refuses a
+  // DELETE, and the function admits an operator key alone). Soft: a role
   // without the group is refused the priority calls, naming the table, and
   // nothing else.
   priority: Object.freeze([
     Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "116" }),
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
     Object.freeze({ table: "priority_sources",    privileges: Object.freeze(["SELECT"]), since: "116" }),
+    Object.freeze({ table: "priority_weight_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "132" }),
     Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
     Object.freeze({ table: "open_items",          privileges: Object.freeze(["SELECT"]), since: "117" }),
     Object.freeze({ table: "open_item_events",    privileges: Object.freeze(["SELECT"]), since: "117" }),

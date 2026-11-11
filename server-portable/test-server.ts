@@ -123,8 +123,22 @@ const server = Bun.serve({ ...worker, port: 0, hostname: "127.0.0.1" });
 const PORT = server.port ?? 0;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+/**
+ * The last migration defining the brain's built-in priority weights, and the function that holds their literal:
+ * ob1_priority_builtin since 132 (SMD-4193 PR 2), ob1_priority_defaults from 128 until then.
+ */
+function builtinDefiner(files: string[], read: (f: string) => string): { file: string; fn: string } | undefined {
+  const defines = (f: string, fn: string) => new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(`, "m").test(read(f));
+  const fn = files.some((f) => defines(f, "ob1_priority_builtin")) ? "ob1_priority_builtin" : "ob1_priority_defaults";
+  const file = files.filter((f) => defines(f, fn)).at(-1);
+  return file ? { file, fn } : undefined;
+}
+/** That function's jsonb literal, or undefined when it holds none (a function of another shape fails its row, not the suite). */
+const builtinLiteral = (text: string, fn: string): string | undefined =>
+  new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)\\s+RETURNS jsonb\\s+LANGUAGE sql[\\s\\S]*?'(\\{[^']*\\})'::jsonb`, "m").exec(text)?.[1];
+
 /** Every response the server sends, success or refusal, carries the permissive CORS header. */
-const corsOk = (r: Response) => r.headers.get("access-control-allow-origin") === "*";
+const corsOk =(r: Response) => r.headers.get("access-control-allow-origin") === "*";
 
 /** WebStandardStreamableHTTPServerTransport answers with raw JSON or an SSE frame. */
 async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
@@ -5118,6 +5132,99 @@ console.log("\n[23] reset_capture_stamp's reply says the ways on by the trust th
     "…and neither the key's name nor its kind is in the refusal's structured content");
 }
 
+console.log("\n[23b] append_thought_evidence's reply: the entry added or found, the list's length, the thought as the caller named it, and each refusal by what holds the list (SMD-2690 PR 3b)");
+{
+  const ID = "00000000-0000-4000-8000-0000000027a6";
+  const { renderAppendThoughtEvidence } = await import("./render.ts");
+  const said = (o: unknown) => renderAppendThoughtEvidence(o as never);
+  const added = said({ ok: true, value: { id: ID, action: "appended", evidenceCount: 1, updatedAt: "2026-11-10T09:00:00.000Z" } });
+  const KEY = "11111111-1111-4111-8111-111111111111";
+  const byKey = said({ ok: true, value: { id: ID, byClientKey: KEY, action: "appended", evidenceCount: 3 } });
+  const found = said({ ok: true, value: { id: ID, action: "already_exists", evidenceCount: 2 } });
+  assert(added.content[0].text === `Appended the evidence to ${ID}: it holds 1 evidence entry.` && byKey.content[0].text.includes(`(client_key ${KEY}): it holds 3 evidence entries.`)
+      && found.content[0].text.startsWith(`${ID} already holds that evidence (the same source label and excerpt): nothing written. It holds 2`)
+      && JSON.stringify(added.structuredContent) === JSON.stringify({ id: ID, action: "appended", evidenceCount: 1, updatedAt: "2026-11-10T09:00:00.000Z", text: added.content[0].text }),
+    `the entry added or found, its count in the singular or plural, a client_key named, the value's fields (${added.content[0].text} | ${found.content[0].text})`);
+  assert(JSON.stringify(byKey.structuredContent) === JSON.stringify({ id: ID, byClientKey: KEY, action: "appended", evidenceCount: 3, text: byKey.content[0].text }),
+    `…and the MCP reply's values carry the client_key that named the thought, as the REST answer does (${JSON.stringify(byKey.structuredContent)})`);
+  const refusal = (r: Record<string, unknown>) => said({ ok: false, refusal: { retryable: false, ...r } }).content[0].text;
+  const full = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "full", count: 100 });
+  const notList = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "not_list" });
+  const notObject = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "metadata_not_object" });
+  const unstamped = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "unstamped" });
+  const busyReply = said({ ok: false, refusal: { code: "THOUGHT_EVIDENCE_BUSY", retryable: true, id: ID } });
+  const busy = busyReply.content[0].text;
+  const gone = refusal({ code: "NOT_FOUND", id: ID });
+  assert(/already holds 100 evidence entries, the most a thought keeps \(100\)/.test(full) && /metadata\.evidence is not a list/.test(notList) && /metadata is not an object/.test(notObject)
+      && /has neither an updated_at nor a created_at .* An update_thought that changes it stamps it; then append again\./.test(unstamped)
+      && /^Not yet: .* was edited by another write each of the 10 times the append read it\. Retry in a moment: an entry already added is not added twice\./.test(busy) && !/if_unchanged_since/.test(busy)
+      && (busyReply.structuredContent as { retryable?: unknown }).retryable === true
+      && /^No thought with id /.test(gone),
+    `each refusal said by what holds the list; a busy thought as other writers', retryable, never the caller's if_unchanged_since (${busy})`);
+
+  // The retry (review pass 1), against a store that answers STALE_READ a set number of times: an append
+  // lands on its tenth read and no later, and waits, at random but longer each time, between reads.
+  const { createCore } = await import("./core/index.ts");
+  const { EVIDENCE_LIMITS } = await import("./core/refusal.ts");
+  const staleFor = (n: number, landed: Record<string, unknown> = { updatedAt: "2026-11-10T09:00:02.000Z" }, typed = true) => {
+    let reads = 0, writes = 0;
+    const store = {
+      thoughtsNamed: async () => new Map(),
+      getThought: async () => { reads++; return { id: ID, content: "c", metadata: {}, ...(typed ? { metadataType: "object" } : {}), created_at: "2026-11-10T09:00:00.000Z", updated_at: "2026-11-10T09:00:00.000Z" }; },
+      updateThought: async () => (++writes <= n ? { ok: false, error: "STALE_READ", currentUpdatedAt: "2026-11-10T09:00:01.000Z" } : { ok: true, id: ID, ...landed }),
+    };
+    const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+    return { core, reads: () => reads };
+  };
+  const writer = { name: "writer", scope: "write" } as never;
+  const input = { id: ID, source_label: "L", excerpt: "E" };
+  const lands = staleFor(EVIDENCE_LIMITS.tries - 1);
+  const landed = await lands.core.appendThoughtEvidence(writer, input);
+  const never = staleFor(Infinity);
+  const started = performance.now();
+  const refusedAt = await never.core.appendThoughtEvidence(writer, input);
+  const waited = performance.now() - started;
+  assert(EVIDENCE_LIMITS.tries === 10 && landed.ok && landed.value.action === "appended" && lands.reads() === 10
+      && !refusedAt.ok && refusedAt.refusal.code === "THOUGHT_EVIDENCE_BUSY" && refusedAt.refusal.retryable === true && never.reads() === 10 && waited > 20,
+    `an append stale nine times lands on its tenth read; stale every time, it is refused busy, retryable, after ten, having waited between reads (${lands.reads()} reads, ${never.reads()} reads, ${Math.round(waited)} ms)`);
+  // A store that reads no type, and an update that merged nothing (a SQL NULL set under the read): refused, not "appended" (review pass 2).
+  const dropped = await staleFor(0, { patchDropped: true }, false).core.appendThoughtEvidence(writer, input);
+  assert(!dropped.ok && dropped.refusal.code === "REFUSED_THOUGHT_EVIDENCE" && dropped.refusal.problem === "metadata_not_object",
+    `an update that dropped the patch is refused as metadata that is no object (${JSON.stringify(dropped)})`);
+
+  // Review pass 3: what PR 4's caller reads off the answer, against a store holding a given list and answering a given update.
+  const { evidenceIdentity } = await import("./core/writes.ts");
+  const { REFUSAL_STATUS } = await import("./rest/routes.ts");
+  const holding = (evidence: unknown[], update: Record<string, unknown> = { ok: true, id: ID, updatedAt: "2026-11-10T09:00:02.000Z" }) => {
+    const store = {
+      thoughtsNamed: async () => new Map(),
+      getThought: async () => ({ id: ID, content: "c", metadata: { evidence }, metadataType: "object", created_at: "2026-11-10T09:00:00.000Z", updated_at: "2026-11-10T09:00:01.000Z" }),
+      updateThought: async () => update,
+    };
+    return createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+  };
+  const mine = { _identity: evidenceIdentity("L", "E", ID) };
+  // A retry whose entry was the hundredth finds it, not a full list: the dedup reads before the cap.
+  const retried = await holding([...Array.from({ length: 99 }, (_, i) => ({ _identity: `x${i}` })), mine]).appendThoughtEvidence(writer, input);
+  // A throw is caught into a refusal, so it fails this row and not the suite.
+  const thrown = (e: unknown) => ({ ok: false as const, refusal: { code: `THROWN: ${String(e)}` } }) as never;
+  // A raw writer's null entry in the list is passed over, not a fault.
+  const pastNull = await holding([null, mine]).appendThoughtEvidence(writer, input).catch(thrown);
+  // The stamps a caller passes on: the write's when it appended, the row's when it found the entry.
+  const appendedStamp = await holding([]).appendThoughtEvidence(writer, input);
+  // Deleted between the read and the write: NOT_FOUND, not a fault.
+  const goneUnder = await holding([], { ok: false, error: "NOT_FOUND" }).appendThoughtEvidence(writer, input).catch(thrown);
+  // A raw writer's longer list is said at its own count.
+  const over = refusal({ code: "REFUSED_THOUGHT_EVIDENCE", id: ID, problem: "full", count: 150 });
+  assert(retried.ok && retried.value.action === "already_exists" && retried.value.evidenceCount === 100 && retried.value.updatedAt === "2026-11-10T09:00:01.000Z"
+      && pastNull.ok && pastNull.value.action === "already_exists"
+      && appendedStamp.ok && appendedStamp.value.action === "appended" && appendedStamp.value.updatedAt === "2026-11-10T09:00:02.000Z"
+      && !goneUnder.ok && goneUnder.refusal.code === "NOT_FOUND"
+      && /already holds 150 evidence entries, the most a thought keeps \(100\)/.test(over)
+      && REFUSAL_STATUS.THOUGHT_EVIDENCE_BUSY === 503 && REFUSAL_STATUS.REFUSED_THOUGHT_EVIDENCE === 409,
+    `a retried hundredth entry found, not full; a null entry passed over; each answer's stamp; deleted under the read NOT_FOUND; a longer list at its count; busy 503 and the list's refusals 409 over REST (${JSON.stringify([retried, pastNull.ok, appendedStamp, goneUnder.ok ? "ok" : goneUnder.refusal.code])})`);
+}
+
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
 {
   const { keptStampKeys } = await import("./core/writes.ts");
@@ -7023,12 +7130,57 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     };
     await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
-      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true, include_started: true } as never);
+      { project: "P", limit: 7, include_blocked: true, include_claimed: false, include_proposed: true, include_started: true, order: "due" } as never);
     const a = asked as Record<string, unknown> | null;
     assert(a?.includeBlocked === true && a?.includeClaimed === false && a?.includeProposed === true && a?.includeStarted === true && a?.limit === 7 && JSON.stringify(a?.scope) === '{"project":"P"}'
+           && a?.order === "due" && (logged[0]?.[1] as Record<string, unknown> | undefined)?.order === "due"
            && logged.length === 1 && logged[0][2] === 7 && JSON.stringify(logged[0][3]) === '[{"kind":"ticket","key":"SMD-1","effective":4}]'
            && (logged[0][1] as Record<string, unknown>).include_blocked === true && (logged[0][1] as Record<string, unknown>).include_started === true,
       `each flag reaches its own argument, and one log row carries the scope, the limit and the items (${JSON.stringify(a)}; ${JSON.stringify(logged)})`);
+  }
+  // 129 (SMD-4192): the order. The store's reader takes an answer without one as priority (a brain before 129), reads
+  // due, and refuses any other; the text says which order it lists in; a due read on a brain before 129 is told so.
+  {
+    const { normaliseAgenda } = await import("./store.ts");
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const answer = (order?: unknown) => ({
+      items: [], total: 0, unknown: 0, left_out: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, board_sync: null, claims_read: true, claims_live: 0,
+      now: "2027-01-01T00:00:00Z", ...(order === undefined ? {} : { order }) });
+    const item = { rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", status_type: "unstarted", owner: null, effective: 2,
+                   level: 2, inherited_from: null, due_at: null, due_from: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 2 }], winner: null,
+                   claimed: null, lapsed_claim: null, blockers: [] };
+    let bad = "";
+    try { normaliseAgenda(answer("soonest"), "agenda"); } catch (e) { bad = (e as Error).message; }
+    const saidDue = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [item], total: 1 }, "agenda") } as never));
+    const saidPriority = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer(), items: [item], total: 1 }, "agenda") } as never));
+    // A due time past the week takes no urgency term: the line says it (review pass 1).
+    const saidFar = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, due_at: "2027-02-01T00:00:00Z" }], total: 1 }, "agenda") } as never));
+    // A level 0's past date, never overdue in 122's terms, said past against the answer's clock (review pass 3).
+    const saidPast = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, level: 0, effective: 0, due_at: "2026-12-01T00:00:00Z" }], total: 1 }, "agenda") } as never));
+    const pre129 = "function agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text) does not exist";
+    // A due read on a brain before 129 is refused ORDER_UNAVAILABLE, said in words; a priority read meeting the same
+    // error, or a due read meeting another missing function, stays a fault (review pass 2).
+    const failing = (message: string) => ({ store: async () => ({ agenda: async () => { throw Object.assign(new Error(message), { errno: "42883" }); } }), logAgenda: async () => {} });
+    const P0 = { name: "k", scope: "read", agentId: undefined } as never;
+    const asking = (order: string) => ({ limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false, order }) as never;
+    // Caught, so a mapping that is lost fails this row, not the suite.
+    const refusedDue = await agendaRead(failing(pre129) as never, P0, asking("due")).catch((e: Error) => ({ ok: true as const, value: null, thrown: e.message }));
+    const faults = await Promise.all([agendaRead(failing(pre129) as never, P0, asking("priority")), agendaRead(failing("function effective_priority(jsonb, jsonb, timestamp with time zone) does not exist") as never, P0, asking("due"))]
+      .map((p) => p.then(() => "answered", (e: Error) => e.message)));
+    const localized = await agendaRead(failing("la función agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text) no existe") as never,
+      { name: "k", scope: "read", agentId: undefined } as never, ({ limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false, order: "due" }) as never)
+      .then((o) => (o.ok ? "answered" : o.refusal.code), (e: Error) => `threw ${e.message}`);
+    const saidRefused = refusedDue.ok ? `not refused: ${(refusedDue as { thrown?: string }).thrown ?? "answered"}` : text(say.renderAgenda(refusedDue as never));
+    const saidBoth = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [{ ...item, due_at: "2027-02-01T00:00:00Z" }, { ...item, key: "SMD-8", rank: 2 }], total: 2 }, "agenda") } as never));
+    const saidNone = text(say.renderAgenda({ ok: true, value: normaliseAgenda({ ...answer("due"), items: [item], total: 1 }, "agenda") } as never));
+    assert(normaliseAgenda(answer(), "agenda").order === "priority" && normaliseAgenda(answer("due"), "agenda").order === "due" && /no agenda this server reads/.test(bad)
+        && /^1 of 1 item, none due, most pressing first:/.test(saidDue) && /^1 of 1 item, most pressing first:/.test(saidPriority)
+        && !refusedDue.ok && (refusedDue as { refusal: { code: string } }).refusal.code === "ORDER_UNAVAILABLE" && /^Refused: order due needs migration 129/.test(saidRefused)
+        && faults[0] === pre129 && /effective_priority/.test(faults[1])
+        && /^2 of 2 items, soonest due first, the undated after:/.test(saidBoth) && /^1 of 1 item, none due, most pressing first:/.test(saidNone)
+        && /\[due by the end of 2027-01-31 \(UTC\)\]/.test(saidFar) && !/\[due /.test(saidPriority)
+        && /\[was due by the end of 2026-11-30 \(UTC\)\]/.test(saidPast) && localized === "ORDER_UNAVAILABLE",
+      `an answer without an order reads as priority, due as due, any other refused; the text says the order; a due read on a brain before 129 names the migration (${bad} | ${saidDue.split("\n")[0]} | ${saidRefused} | ${faults.join(" / ")})`);
   }
   // 124 (SMD-4162): a ticket's status said beside its key, the started tickets left out counted, and a brain recording
   // no live claim said so; with claims unread, that line and not this one. The store's reader refuses an answer
@@ -7094,19 +7246,19 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   const { rankByPriority, prioritiesOf, readPriorities, priorityWindow } = await import("./core/reads.ts");
   // The brain's scale, ob1_priority_span() under 127's defaults (migration 128, SMD-4194; test-schema [115] holds it).
   const SPAN = 5.8;
-  // The copies that remain follow the defaults (review pass 2): the last migration defining ob1_priority_defaults, its
-  // span by ob1_priority_span's rule, against this suite's SPAN and the search tool's description.
+  // The copies that remain follow the defaults (review pass 2): the last migration defining the built-in weights
+  // (builtinDefiner), its span by ob1_priority_span's rule, against this suite's SPAN and the search tool's description.
   {
     const { readdirSync, readFileSync } = await import("node:fs");
     const migDir = new URL("../db/migrations/", import.meta.url);
-    const definer = readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f) && /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(/m.test(readFileSync(new URL(f, migDir), "utf8"))).sort().at(-1);
+    const definer = builtinDefiner(readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort(), (f) => readFileSync(new URL(f, migDir), "utf8"));
     // A defaults function of another shape fails this row, not the suite (review pass 4).
-    const literal = definer ? /^CREATE OR REPLACE FUNCTION ob1_priority_defaults\(\)[\s\S]*?'(\{[^']*\})'::jsonb/m.exec(readFileSync(new URL(definer, migDir), "utf8"))?.[1] : undefined;
+    const literal = definer ? builtinLiteral(readFileSync(new URL(definer.file, migDir), "utf8"), definer.fn) : undefined;
     let span = NaN;
     try { const d = JSON.parse(literal ?? "") as Record<string, number>; span = Math.round((Math.max(5, d.unknown) + Math.max(d.soon, d.week, d.overdue) + Math.max(d.unblocks_one, d.unblocks_many)) * 1000) / 1000; } catch { span = NaN; }
     const described = readFileSync(new URL("./core/schemas.ts", import.meta.url), "utf8");
     assert(span === SPAN && described.includes(`(ob1_priority_span, ${SPAN})`),
-      `the span ${definer ?? "no migration"}'s defaults allow is this suite's ${SPAN}, and the search description says it (${literal === undefined ? "its defaults read as no jsonb literal: teach this row their shape" : span})`);
+      `the span ${definer?.file ?? "no migration"}'s built-in weights allow is this suite's ${SPAN}, and the search description says it (${literal === undefined ? "its defaults read as no jsonb literal: teach this row their shape" : span})`);
   }
   const { priorityNote } = await import("./render.ts");
   const rows = [{ id: "a", score: 1.0 }, { id: "b", score: 0.9 }, { id: "c", score: 0.8 }, { id: "d", score: 0.7 }];
@@ -7199,14 +7351,126 @@ console.log("\n[36] priority_weight and min_priority in the core and the words (
   assert(re === "Current first (prefer_current): 7 of the top 40 matches are settled, superseded or about finished tickets, their score ×0.25 before the priority ranking below orders them; 12 carry a lifecycle." && !/holding the query's literal|are demoted ones/.test(re ?? ""),
     `re-ranked, the current-first note says what the demotion did and not where the rows sit (${re})`);
   // The header note.
-  const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6 });
-  const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5 });
-  const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0 });
+  const ranked = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6, weights: null, span: 5.8 });
+  const floored = priorityNote({ weight: 0, min: 3, window: 40, read: 40, kept: 2, known: 5, weights: null, span: null });
+  const capped = priorityNote({ weight: 1, min: 4, window: 100, read: 100, kept: 0, known: 0, weights: null, span: 5.8 });
   assert(priorityNote(null) === null && priorityNote(undefined) === null
       && ranked === "Ranked by priority (priority_weight 0.5): the top 23 matches ordered by (1 − 0.5) × relevance + 0.5 × each one's own effective priority (a ticket's row reads as its ticket); 6 of them carry a known priority."
       && floored === "Read the top 40 matches for their priority; 5 of them carry a known priority; kept 2 at high (3) or above (min_priority, a known priority alone). A match past the top 40 was not read — raise limit to read further."
       && capped!.endsWith("kept 0 at urgent (4) or above (min_priority, a known priority alone). A match past the top 100 was not read — the window is capped at 100."),
     `the note: the blend and the known count; a floor's level and what it kept; a full window says a match past it was not read, and whether a larger limit reads further (${ranked} | ${floored} | ${capped})`);
+}
+
+console.log("\n[36c] A read's own priority weights in the core and the words (SMD-4193): the input's names those of the brain's defaults; the query string's weights[name]=value read by each weight's type, the document's deepObject; the database's refusal of them mapped to REFUSED_WEIGHTS naming the weight, any other fault left one; the agenda passing them, logging and echoing them, the text saying them; search refusing them without a ranking before it reads, reading its window, labels and span under them, and its note saying them; a brain before 131 named by the hint");
+{
+  const { PRIORITY_WEIGHT_NAMES, SPECS } = await import("./core/schemas.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const { weightsRefused } = await import("./core/weights.ts");
+  const { inputFromQuery } = await import("./rest/app.ts");
+  const { openApiDocument } = await import("./rest/openapi.ts");
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { z } = await import("zod");
+  // The names: the last migration defining the built-in weights (builtinDefiner), its literal's keys, every one and no other.
+  const migDir = new URL("../db/migrations/", import.meta.url);
+  const definer = builtinDefiner(readdirSync(migDir).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort(), (f) => readFileSync(new URL(f, migDir), "utf8"));
+  const literal = definer ? builtinLiteral(readFileSync(new URL(definer.file, migDir), "utf8"), definer.fn) : undefined;
+  let names: string[] = [];
+  try { names = Object.keys(JSON.parse(literal ?? "") as object).sort(); } catch { names = []; }
+  assert(names.length === 14 && JSON.stringify([...PRIORITY_WEIGHT_NAMES].sort()) === JSON.stringify(names),
+    `the input's weights are ${definer?.file ?? "no migration"}'s built-in weights' names, every one and no other (${names.join(", ")} | ${PRIORITY_WEIGHT_NAMES.join(", ")})`);
+
+  // The query string: each weight its own parameter, read by its type; the bare field, a repeat, or a value of the wrong
+  // type refused, by the reader or by the schema naming the weight.
+  const agendaIn = z.object(SPECS.agenda.inputSchema).strict();
+  const viaQuery = (q: string) => {
+    const r = inputFromQuery("agenda", new URLSearchParams(q));
+    if ("problem" in r) return `problem: ${r.problem}`;
+    const p = agendaIn.safeParse(r.input);
+    return p.success ? JSON.stringify(p.data.weights ?? null) : p.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  };
+  const reads = ["weights[overdue]=3&weights[count_inferred]=true&weights[hops]=1", "weights=3", "weights[overdue]=3&weights[overdue]=4", "weights[overdu]=3", "weights[overdue]=11", "weights[hops]=1.5", "weights[count_inferred]=yes", "limit=5"].map(viaQuery);
+  assert(reads[0] === '{"hops":1,"overdue":3,"count_inferred":true}' && /^problem: weights is an object: give each of its fields as its own parameter, weights\[name\]=value$/.test(reads[1])
+      && /^problem: weights\[overdue\] is given more than once$/.test(reads[2]) && /^weights: .*overdu/.test(reads[3]) && /^weights\.overdue: /.test(reads[4])
+      && /^weights\.hops: /.test(reads[5]) && /^weights\.count_inferred: /.test(reads[6]) && reads[7] === "null",
+    `weights[name]=value read by each weight's type; the bare field, a repeat refused by the reader; an unknown name, a value out of range, a fraction for a whole number, a word for a boolean refused by the schema, naming the weight; none given, none read (${reads.join(" | ")})`);
+  const doc = openApiDocument() as { paths: Record<string, Record<string, { parameters?: { name: string; style?: string; explode?: boolean; schema?: { type?: string } }[] }>> };
+  const wp = doc.paths["/v1/agenda"]?.get?.parameters?.find((p) => p.name === "weights");
+  const lp = doc.paths["/v1/agenda"]?.get?.parameters?.find((p) => p.name === "limit");
+  assert(wp?.style === "deepObject" && wp.explode === true && wp.schema?.type === "object" && lp !== undefined && lp.style === undefined,
+    `the document gives the agenda's weights as a deepObject query parameter, which openapi-fetch sends as weights[name]=value; a plain field keeps the default style (${JSON.stringify(wp)?.slice(0, 120)})`);
+
+  // The database's refusal: 22023 in 122's words, the weights it names from the known names alone.
+  const raise = (message: string, errno = "22023") => Object.assign(new Error(message), { errno });
+  const W = { cap: 2 };
+  const capped = weightsRefused(raise("a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached"), W);
+  const ranged = weightsRefused(raise("a weight out of range: hops, overdue (count_inferred a boolean; hops a whole number 0 to 2, depth 0 to 5, cap 1 to 1000, soon_days, week_days and unblocks_many_at whole numbers to 366; every other a number 0 to 10)"), W);
+  const unknown = weightsRefused(raise("not a weight: overdu (the weights are cap, count_inferred, depth, hop, hops, overdue, soon, soon_days, unblocks_many, unblocks_many_at, unblocks_one, unknown, week, week_days)"), W);
+  const others = [weightsRefused(raise("an agenda's keys scope is 1 to 500 ticket keys, such as SMD-1234"), W), weightsRefused(raise("a weight out of range: cap is below unblocks_many_at", "42883"), W), weightsRefused(raise("a weight out of range: cap is below unblocks_many_at"), undefined)];
+  assert(capped?.code === "REFUSED_WEIGHTS" && capped.problem === "rule" && JSON.stringify(capped.named) === '["unblocks_many_at","cap"]'
+      && JSON.stringify(ranged?.named) === '["hops","overdue"]' && JSON.stringify(unknown?.named) === "[]" && /^not a weight: overdu/.test(unknown?.message ?? "")
+      && others.every((o) => o === null),
+    `122's refusal maps to REFUSED_WEIGHTS, naming the weights it names (the database's words in the message); another 22023, another code, or a read given no weights is no weights refusal (${JSON.stringify(capped?.named)} ${JSON.stringify(ranged?.named)} ${JSON.stringify(unknown?.named)} | ${others.join(",")})`);
+
+  // The agenda: the weights reach the store and the log, the answer echoes them (null without), the text says them, and
+  // the store's 22023 is REFUSED_WEIGHTS, said in the database's words.
+  {
+    const { agenda: agendaRead } = await import("./core/agenda.ts");
+    const asked: Record<string, unknown>[] = [];
+    const logged: unknown[][] = [];
+    const value = { items: [{ rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", statusType: "unstarted", effective: 5, level: 2, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 3, overdue: true, unblocks: 0, terms: [{ term: "level", value: 2, detail: {} }, { term: "overdue", value: 3, detail: {} }], winner: null, passedOver: [], claimed: [], lapsedClaim: [], blockers: [] }],
+                    total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 1, now: "2027-01-01T00:00:00.000Z", order: "priority" };
+    const ctx = (fail?: Error) => ({
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked.push(o); if (fail) throw fail; return value; } }),
+      logAgenda: async (...a: unknown[]) => { logged.push(a); },
+    });
+    const P = { name: "k", scope: "read", agentId: "a1" } as never;
+    const base = { limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false, order: "priority" };
+    const weighed = await agendaRead(ctx() as never, P, { ...base, weights: { overdue: 3 } } as never);
+    const plain = await agendaRead(ctx() as never, P, base as never);
+    const refused = await agendaRead(ctx(raise("a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached")) as never, P, { ...base, weights: { cap: 2 } } as never)
+      .catch((e: Error) => ({ ok: true as const, value: null, thrown: e.message }));
+    const fault = await agendaRead(ctx(raise("a weight out of range: cap is below unblocks_many_at")) as never, P, base as never).then(() => "answered", (e: Error) => e.message);
+    const saidWeighed = weighed.ok ? text(say.renderAgenda(weighed as never)) : "";
+    const saidPlain = plain.ok ? text(say.renderAgenda(plain as never)) : "";
+    const saidRefused = refused.ok ? `not refused: ${(refused as { thrown?: string }).thrown ?? "answered"}` : text(say.renderAgenda(refused as never));
+    assert(JSON.stringify(asked[0]?.weights) === '{"overdue":3}' && !("weights" in (asked[1] ?? {})) && JSON.stringify((logged[0]?.[1] as Record<string, unknown> | undefined)?.weights) === '{"overdue":3}'
+        && !("weights" in ((logged[1]?.[1] as Record<string, unknown> | undefined) ?? {}))
+        && weighed.ok && JSON.stringify((weighed.value as { weights: unknown }).weights) === '{"overdue":3}' && plain.ok && (plain.value as { weights: unknown }).weights === null
+        && /\nUnder this call's weights, overdue 3 \(the rest the brain's defaults\): a term may cross a level\.\n/.test(saidWeighed) && !/Under this call's weights/.test(saidPlain)
+        && !refused.ok && /^Refused: a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached$/.test(saidRefused)
+        && /cap is below/.test(fault),
+      `the agenda passes the weights to the store and the log and echoes them, null without; the text says them; 122's refusal is REFUSED_WEIGHTS in its words, and the same error without weights stays a fault (${JSON.stringify(asked.map((a) => a.weights ?? null))} | ${saidWeighed.split("\n").find((l: string) => l.startsWith("Under")) ?? "no line"} | ${saidRefused})`);
+  }
+
+  // Search: weights with no ranking refused before anything is read; with one, the window read, the labels and the span
+  // take them; the database's refusal from either read is REFUSED_WEIGHTS; the note says them and the scale.
+  {
+    const { searchThoughts, readPriorities, priorityOf } = await import("./core/reads.ts");
+    let touched = 0;
+    const untouched = { store: async () => { touched++; return {}; } } as never;
+    const unranked = await searchThoughts(untouched, { name: "k", scope: "read" } as never, { query: "q", limit: 10, threshold: 0.3, recency_weight: 0, prefer_current: false, priority_weight: 0, weights: { overdue: 3 } } as never)
+      .catch((e: Error) => ({ ok: true as const, value: null, thrown: e.message }));
+    const saidUnranked = unranked.ok ? `not refused: ${(unranked as { thrown?: string }).thrown ?? "answered"}` : text(say.renderSearchThoughts(unranked as never, false));
+    assert(!unranked.ok && (unranked as { refusal: { code: string; problem: string } }).refusal.problem === "unranked" && touched === 0
+        && /^Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither/.test(saidUnranked),
+      `weights with neither priority_weight above 0 nor min_priority are refused, before the store is touched, said in words (${saidUnranked})`);
+    const calls: { items: number; opts: unknown }[] = [];
+    const store = { effectivePriority: async (items: unknown[], opts?: unknown) => { calls.push({ items: items.length, opts: opts ?? null }); return []; } };
+    await readPriorities(store as never, [{ id: "t1", content: "x" }], { tickets: false, weights: { overdue: 3 } });
+    await readPriorities(store as never, [{ id: "t2", content: "x" }], { tickets: false });
+    await priorityOf(store as never, [{ id: "t3", content: "on SMD-5" }], new Map(), { soon: 2 });
+    assert(JSON.stringify(calls.map((c) => c.opts)) === '[{"weights":{"overdue":3}},null,{"weights":{"soon":2}}]',
+      `the window read and the label read pass the call's weights to the store, and a read without them calls it as before (${JSON.stringify(calls)})`);
+    const { priorityNote, priorityHint } = await import("./render.ts");
+    const noted = priorityNote({ weight: 0.5, min: null, window: 40, read: 23, kept: 10, known: 6, weights: { overdue: 3, soon: 2 }, span: 8 });
+    const floorOnly = priorityNote({ weight: 0, min: 3, window: 40, read: 12, kept: 2, known: 5, weights: { overdue: 3 }, span: null });
+    assert(noted?.endsWith(" Under this call's weights, overdue 3, soon 2 (the rest the brain's defaults), the blend's scale 8; a term may cross a level.") === true
+        && floorOnly?.endsWith(" Under this call's weights, overdue 3 (the rest the brain's defaults); a term may cross a level.") === true,
+      `the note says the call's weights and, when a weight blended, the scale divided by (${noted} | ${floorOnly})`);
+    assert(/migration 131/.test(priorityHint("function ob1_priority_span(jsonb) does not exist")) && /migration 128/.test(priorityHint("function ob1_priority_span() does not exist")),
+      "a brain before 131 is named for a weighted blend's missing span; one before 128 still for the plain span");
+  }
 }
 
 console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2): one read for the page, a row's own thought and the tickets it is filed under or names (the first 50); only a known priority labelled, itself first then the most pressing, ten named and the rest counted; a ticket's own row once, as its ticket; the read's reach of 1000 counted, not exceeded; a failed read null and said; the line, the field and the titles");
@@ -7358,9 +7622,108 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
     `a note's level from its open item is known, the item named in the value, the line and the title, a None from it said as stated; a due time alone from an item is no label (${noteHit.content[0].text.match(/Priority: .*/)?.[0]} | ${noteTitle.map((r) => r.title).join(" | ")})`);
 }
 
+console.log("\n[36d] The operator's priority weights in the core and the words (SMD-4193 PR 2, migration 132): set_priority_weights passing the weights and the caller's key to the store, {} as null; its answer and its refusals (not an operator, bad weights) said; the store's reading of 132's envelope; a stored setting the database refuses left a fault, its hint saying how to mend it; brain_info's row for each state of the setting");
+{
+  const { setPriorityWeights, weightsRefused } = await import("./core/weights.ts");
+  const { normaliseSetWeights } = await import("./store.ts");
+  const { weightSettingValue, priorityWeightsLine } = await import("./brain-info.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ setPriorityWeights: async (o: Record<string, unknown>) => { asked.push(o); return normaliseSetWeights(answer); } }) });
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  // 132's envelopes, as the scratch brain answered them.
+  const setA = { ok: true, changed: true, weights: { overdue: 3, unblocks_many: 1 }, previous: null, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key" };
+  const sameA = { ok: true, changed: false, weights: { overdue: 3, unblocks_many: 1 }, previous: { overdue: 3, unblocks_many: 1 }, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key" };
+  const clearA = { ok: true, changed: true, weights: null, previous: { soon: 2 }, set_at: null, set_by: null };
+  const agentA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may set the priority weights; op-key is agent" };
+  const nullA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: null, message: "only an operator key, named by its agent id, may set the priority weights; op-key is named by its name alone" };
+  const badA = { ok: false, error: "BAD_WEIGHTS", message: "a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached" };
+  const set = await setPriorityWeights(core(setA) as never, P, { weights: { overdue: 3, unblocks_many: 1 } } as never);
+  const cleared = await setPriorityWeights(core(clearA) as never, P, { weights: {} } as never);
+  const same = await setPriorityWeights(core(sameA) as never, P, { weights: { overdue: 3, unblocks_many: 1 } } as never);
+  const agent = await setPriorityWeights(core(agentA) as never, P, { weights: { overdue: 3 } } as never);
+  const unclassified = await setPriorityWeights(core(nullA) as never, P, { weights: { overdue: 3 } } as never);
+  const bad = await setPriorityWeights(core(badA) as never, P, { weights: { cap: 2 } } as never);
+  const sent = asked.map((o) => JSON.stringify(o.weights));
+  const actor = asked[0]?.actor as Record<string, unknown> | undefined;
+  assert(sent[0] === '{"overdue":3,"unblocks_many":1}' && sent[1] === "null" && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test",
+    `the weights reach the store as given, {} as null (a clear), with the caller's key, its agent id and the door as the actor (${sent.join(" | ")}; ${JSON.stringify(actor)})`);
+  assert(set.ok && set.value.changed && set.value.setAt === "2026-11-11T03:30:44.937Z" && set.value.setBy === "op-key" && set.value.previous === null && set.value.caller === "op-key"
+      && cleared.ok && cleared.value.weights === null && JSON.stringify(cleared.value.previous) === '{"soon":2}' && same.ok && same.value.changed === false
+      && !agent.ok && agent.refusal.code === "REFUSED_NOT_OPERATOR" && agent.refusal.kind === "agent" && agent.refusal.key === "op-key"
+      && !unclassified.ok && unclassified.refusal.code === "REFUSED_NOT_OPERATOR" && unclassified.refusal.kind === null
+      && !bad.ok && bad.refusal.code === "REFUSED_WEIGHTS" && bad.refusal.problem === "rule" && JSON.stringify(bad.refusal.named) === '["unblocks_many_at","cap"]',
+    `132's answers: set, cleared and unchanged as values; not an operator as REFUSED_NOT_OPERATOR with the key's kind; bad weights as REFUSED_WEIGHTS naming them (${JSON.stringify([set, cleared, same].map((o) => o.ok && o.value.changed))} ${JSON.stringify([agent, unclassified, bad].map((o) => !o.ok && o.refusal.code))})`);
+  // An envelope 132 does not answer is a fault, never a value (an unknown error, no changed flag, a BAD_WEIGHTS without words).
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true }, { ok: false, error: "BAD_WEIGHTS" }, null].map((a) => { try { normaliseSetWeights(a); return "read"; } catch { return "threw"; } });
+  assert(strays.every((s) => s === "threw"), `an envelope set_priority_weights does not answer throws (${strays.join(",")})`);
+  // No agent id (review pass 1): the registry away is said as set_priority says it, retryable; a principal with none
+  // by design is named so. Neither reaches the store, nor is told to classify a key that may be the operator's.
+  const before = asked.length;
+  const away = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { weights: { overdue: 3 } } as never);
+  const stuck = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { weights: { overdue: 3 } } as never);
+  const none = await setPriorityWeights(core(setA) as never, { name: "op-key", scope: "write" } as never, { weights: { overdue: 3 } } as never);
+  const awayText = text(say.renderSetPriorityWeights(away)), stuckText = text(say.renderSetPriorityWeights(stuck)), noneText = text(say.renderSetPriorityWeights(none));
+  assert(asked.length === before && !away.ok && away.refusal.code === "PRIORITY_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "PRIORITY_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR"
+      && awayText === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && /until an operator acts/.test(stuckText) && /reached the brain with none; call with the operator's own key\.$/.test(noneText) && !/set_agent_kind/.test(awayText + stuckText + noneText),
+    `with no agent id nothing reaches the store: the registry away PRIORITY_UNATTRIBUTED (retryable, or not when an operator must act), a principal with none named so, and no line to classify the key (${awayText} | ${noneText})`);
+
+  const words = [set, cleared, same, agent, unclassified, bad].map((o) => text(say.renderSetPriorityWeights(o)));
+  assert(words[0] === "Set the operator's priority weights: every read now takes overdue 3, unblocks_many 1, the rest built in as its defaults, and a call's own weights still override them by name. Before: the built-in weights. A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it."
+      && words[1] === "Cleared the operator's priority weights: every read now takes the built-in weights as its defaults, and a call's own weights still override them by name. Before: soon 2, the rest built in."
+      && words[2] === "Unchanged: every read already takes overdue 3, unblocks_many 1, the rest built in as its defaults (set 2026-11-11T03:30:44.937Z by op-key). Nothing was written."
+      && words[3] === "Refused: only a key the operator classified `operator` may set the priority weights. This key, op-key, is classified agent: use the operator's own key — classifying this one operator would raise the trust of everything it writes."
+      && words[4].startsWith("Refused: only a key the operator classified `operator` may set the priority weights. This key, op-key, is unclassified. If it is the operator's own, classify it: SELECT set_agent_kind('op-key', 'operator')")
+      && words[5] === "Refused: a weight out of range: cap is below unblocks_many_at, so the larger unblocks term could never be reached",
+    `the words: what every read takes now and took before, a clear, nothing written; the refusals naming the key's kind and its fix, and the weights in the database's words (${words.join(" | ")})`);
+  const sv = say.renderSetPriorityWeights(set).structuredContent;
+  assert(sv.changed === true && JSON.stringify(sv.weights) === '{"overdue":3,"unblocks_many":1}' && sv.previous === null && sv.setAt === "2026-11-11T03:30:44.937Z" && sv.setBy === "op-key",
+    `the value carries the weights now and before, when and by which key (${JSON.stringify(sv)})`);
+
+  // A stored setting the database refuses (132's 22000) is the brain's fault, never the caller's REFUSED_WEIGHTS; the
+  // hint says how to mend it, for the agenda and a ranked search alike. A brain before 132 is named for the write.
+  const stored = "the operator's priority weights (set 2026-11-11T03:30:44Z by op-key) are refused, so no effective priority is read: a weight out of range: soon (count_inferred a boolean; hops a whole number 0 to 2, depth 0 to 5, cap 1 to 1000, soon_days, week_days and unblocks_many_at whole numbers to 366; every other a number 0 to 10)";
+  const asFault = weightsRefused(Object.assign(new Error(stored), { errno: "22000" }), { overdue: 3 });
+  const hint = say.weightSettingHint(stored);
+  const failedAgenda = text(say.failed(Object.assign(new Error(stored), { errno: "22000" }), { hint: say.weightSettingHint }));
+  assert(asFault === null && /set_priority_weights \(REST POST \/v1\/priority-weights\); brain_info shows the setting$/.test(hint) && say.priorityHint(stored) === hint
+      && say.weightSettingHint("a weight out of range: soon") === "" && failedAgenda.startsWith("Error: the operator's priority weights (set ") && failedAgenda.endsWith(hint)
+      && /migration 132/.test(say.setWeightsHint("function set_priority_weights(jsonb, jsonb) does not exist")) && say.setWeightsHint("connection refused") === ""
+      && /from priority_weight_settings \(migration 132\), and the server's role needs the priority group's grants/.test(say.priorityHint("permission denied for table priority_weight_settings")),
+    `a refused stored setting stays a fault, its hint naming the write that mends it (the agenda's and a ranked search's); a brain before 132 or a role without the grant is named (${hint} | ${failedAgenda.slice(0, 80)})`);
+
+  // brain_info: the row for each state of the setting, and the reading of 132's jsonb.
+  const standing = weightSettingValue({ weights: { overdue: 3 }, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key", refused: null });
+  const refusedS = weightSettingValue({ weights: { soon: 20 }, set_at: "2026-11-11T03:30:44.937044+00:00", set_by: "op-key", refused: "a weight out of range: soon (…)" });
+  const unreadW = { reason: "refused", message: "permission denied for table priority_weight_settings" } as never;
+  const lines = [
+    priorityWeightsLine({ priorityWeights: null, unread: {} }),
+    priorityWeightsLine({ priorityWeights: null, unread: { priorityWeights: unreadW } }),
+    priorityWeightsLine({ priorityWeights: { standing: weightSettingValue(null) }, unread: {} }),
+    priorityWeightsLine({ priorityWeights: { standing }, unread: {} }),
+    priorityWeightsLine({ priorityWeights: { standing: refusedS }, unread: {} }),
+  ];
+  const badRead = [{ weights: "x" }, { weights: [1] }, [], 3].map((r) => { try { weightSettingValue(r); return "read"; } catch { return "threw"; } });
+  // A raw write's values and name are unbounded: the row cuts each, as the set reply cuts the name (review pass 2).
+  const longLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: "y".repeat(500) }, set_at: "2026-11-11T03:30:44Z", set_by: "k".repeat(200), refused: "r".repeat(1000) }) }, unread: {} });
+  assert(longLine.length < 700 && longLine.includes(`soon "${"y".repeat(38)}…`) && longLine.includes(` by ${"k".repeat(79)}…)`) && longLine.includes(`${"r".repeat(299)}…. An operator key`),
+    `brain_info's row cuts a stored value to 40 characters, the setter's name to 80 and the refusal to 300 (${longLine.length} characters)`);
+  // A refused setting holding what no weight may (a null, a string) is read and said, never left unread (review pass 1).
+  const oddLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: null, week: "x" }, set_at: "2026-11-11T03:30:44Z", set_by: "op-key", refused: "a weight out of range: soon, week (…)" }) }, unread: {} });
+  assert(lines[0] === "built in (no operator's setting before migration 132)" && /^\? \(priority_weight_settings /.test(lines[1]) && lines[2] === "built in (no operator's setting)"
+      && lines[3] === "the operator's: overdue 3, the rest built in (set 2026-11-11T03:30:44.937Z by op-key)"
+      && lines[4] === "the operator's, REFUSED, so every ranked priority read fails: soon 20 (set 2026-11-11T03:30:44.937Z by op-key): a weight out of range: soon (…). An operator key sets them again, or clears them with {}, through set_priority_weights"
+      && badRead.every((r) => r === "threw") && oddLine.startsWith(`the operator's, REFUSED, so every ranked priority read fails: soon null, week "x" (set 2026-11-11T03:30:44.000Z by op-key)`),
+    `brain_info's Priority weights row: before 132, unread, built in, the operator's, the operator's refused, a refused one holding a null and a string; a read answering no setting throws (${lines.join(" | ")} | ${oddLine.slice(0, 90)} | ${badRead.join(",")})`);
+}
+
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
-  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT } = await import("./core/plan.ts");
+  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");
   const say = await import("./render.ts");
   const text = (r: { content: { text: string }[] }) => r.content[0].text;
   // Keys: the filed key first, then the text's, in hit order, once each; only 068's form (no SMD-0, no lower case).
@@ -7508,6 +7871,60 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && bad?.ok === true && JSON.stringify(badLog?.items) === "[]" && JSON.stringify(badLog?.filter) === '{"board":"failed"}'
         && e !== null && JSON.stringify(e.gaps.map((x) => x.gap)) === '["no_knowledge"]' && e.board.available && JSON.stringify(logged[0]?.items) === "[]",
       `the read: the limit to the search, the deadline's remainder (${askedTimeout} ms) to the board; the log's ids and scores in the hits' order, the board's tickets in its order, a board not read logged with no items and its reason; no hit, the no_knowledge gap (${JSON.stringify(goodLog)?.slice(0, 160)} | ${JSON.stringify(badLog?.filter)})`);
+
+    // SMD-4212 PR 2: little on this, read from the embedding this server searches with. Under LITTLE_BAR on the embedding
+    // it was measured on, the gap with the best similarity and the bar; at the bar, none; no similarity at all, said as
+    // none; another embedding, the bar said not measured, nothing found; no vector, none.
+    const runWith = async (embeddingModel: string, sims: (number | null)[], vectorFailed?: object, embeddingDim = 1024) => {
+      const found = sims.map((sim, i) => ({ ...hit(i ? B : A, 0.5, "about SMD-21"), similarity: sim }));
+      const ctx = { env: () => ({}), embedConfig: () => ({ embeddingModel, embeddingDim }), store: async () => ({ agenda: async () => ({ ...board2, items: [], total: 0 }) }), logPlanContext: async () => {} };
+      const search = async () => ({ rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })), ...(vectorFailed ? { vectorFailed } : {}) });
+      const r = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, search: search as never });
+      return r.ok ? r.value : null;
+    };
+    const littleOf = (v: Awaited<ReturnType<typeof runWith>>) => JSON.stringify(v?.gaps.filter((g) => g.gap.startsWith("little")) ?? null);
+    const low = await runWith("qwen3-embedding:4b", [0.61, 0.5]);
+    const justUnder = await runWith("qwen3-embedding:4b", [0.7399, 0.2]);
+    const atBar = await runWith("qwen3-embedding:4b", [0.74, 0.2]);
+    const noSim = await runWith("qwen3-embedding:4b", [null, null]);
+    const other = await runWith("nomic-embed-text", [0.9]);
+    // Review pass 1: the best is read over the hits, not the first (an exact-literal hit ranks first whatever its
+    // similarity); over the first LITTLE_HITS alone, as measured; another width of the same model is another scale; no
+    // similarity at all is said as none.
+    const bestNotFirst = await runWith("qwen3-embedding:4b", [0.5, 0.8]);
+    const pastEight = await runWith("qwen3-embedding:4b", [0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.95]);
+    const otherWidth = await runWith("qwen3-embedding:4b", [0.9], undefined, 2048);
+    const noVector = await runWith("qwen3-embedding:4b", [null], { reason: "deadline", matched: "literals" });
+    assert(LITTLE_BAR === 0.74 && LITTLE_MEASURED_ON === "qwen3-embedding:4b@1024"
+        && littleOf(low) === '[{"gap":"little","topSimilarity":0.61,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(justUnder) === '[{"gap":"little","topSimilarity":0.7399,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(atBar) === "[]" && littleOf(noSim) === '[{"gap":"little","topSimilarity":null,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(bestNotFirst) === "[]" && littleOf(pastEight) === '[{"gap":"little","topSimilarity":0.6,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(otherWidth) === '[{"gap":"little_not_measured","topSimilarity":0.9,"embeddingId":"qwen3-embedding:4b@2048","measuredOn":"qwen3-embedding:4b@1024"}]'
+        && littleOf(other) === '[{"gap":"little_not_measured","topSimilarity":0.9,"embeddingId":"nomic-embed-text@1024","measuredOn":"qwen3-embedding:4b@1024"}]'
+        && littleOf(noVector) === "[]" && littleOf(v) === "[]",
+      `little on this: under the bar on its embedding a gap with the best similarity, at the bar none, no similarity said as none, another embedding not measured, no vector or no embedding named none (${littleOf(low)} | ${littleOf(atBar)} | ${littleOf(other)} | ${littleOf(noVector)})`);
+    assert(JSON.stringify(knowledgeGaps([], undefined, LITTLE_MEASURED_ON).map((g) => g.gap)) === '["no_knowledge"]'
+        && JSON.stringify(knowledgeGaps([{ supersededBy: null, metadata: { trust: "agent" }, similarity: 0.1 }] as never, undefined).map((g) => g.gap)) === "[]",
+      "no hit is no_knowledge alone, and no embedding named is no little gap");
+    const justReply = text(say.renderPlanContext({ ok: true, value: justUnder! } as never));
+    const noSimReply = text(say.renderPlanContext({ ok: true, value: noSim! } as never));
+    assert(/the best hit's similarity is 0\.739, under 0\.74/.test(justReply) && /Little on this: no hit has a similarity \(exact matches alone\), under 0\.74/.test(noSimReply),
+      `a similarity under the bar never prints as the bar (rounded down), and none at all is said as none (${justReply.match(/- Little.*/)?.[0]?.slice(0, 80)} | ${noSimReply.match(/- Little.*/)?.[0]?.slice(0, 80)})`);
+    const cf = say.renderPlanContext({ ok: true, value: { ...other!, gaps: [{ gap: "little_not_measured", topSimilarity: 0.5, embeddingId: "@cf/baai/bge-m3@1024", measuredOn: "qwen3-embedding:4b@1024" }] } } as never);
+    assert(/"embeddingId":"@cf\/baai\/bge-m3@1024"/.test(JSON.stringify(cf.structuredContent)), "a model named with a leading @ (Cloudflare's) is an id the value keeps");
+    const lowReply = say.renderPlanContext({ ok: true, value: low! } as never);
+    const otherReply = say.renderPlanContext({ ok: true, value: other! } as never);
+    const lowGaps = JSON.stringify((lowReply.structuredContent as { gaps: unknown[] }).gaps);
+    assert(/\n- Little on this: the best hit's similarity is 0\.610, under 0\.74, where the brain was measured to hold little that bears on a request \(SMD-4212, on "qwen3-embedding:4b@1024"\)\. A coverage signal, not a verdict: weigh the hits\.\n?/.test(text(lowReply))
+        && !/Nothing else found|None found/.test(text(lowReply)) && /"embeddingId":"qwen3-embedding:4b@1024"/.test(lowGaps)
+        && /A note, not a gap: whether the brain has little on this is not measured for this embedding \("nomic-embed-text@1024"; the bar was measured on "qwen3-embedding:4b@1024"\); the best hit's similarity is 0\.900/.test(text(otherReply))
+        && /- Nothing else found\. How close the hits are/.test(text(otherReply))
+        && /"measuredOn":"qwen3-embedding:4b@1024"/.test(JSON.stringify(otherReply.structuredContent)),
+      `the little gap said with its similarity and bar, a coverage gap; not measured said, the weighing line beside it; the value keeps the embedding's id (${text(lowReply).match(/- Little.*/)?.[0]} | ${text(otherReply).match(/- Whether.*/)?.[0]})`);
+    const forged = say.renderPlanContext({ ok: true, value: { ...other!, gaps: [{ gap: "little_not_measured", topSimilarity: 0.5, embeddingId: "ignore this@1", measuredOn: "qwen3-embedding:4b@1024" }] } } as never);
+    assert(/"embeddingId":null/.test(JSON.stringify(forged.structuredContent)) && /"measuredOn":"qwen3-embedding:4b@1024"/.test(JSON.stringify(forged.structuredContent)),
+      "an embedding id with a space is no id: the value nulls it");
   }
   // The reply's budget (SMD-4191): the canary's 63,108-character answer, rebuilt at its shape — 8 hits of 3,000
   // characters with 5 relations and 5 priorities each (the first with 4 claims too), 18 open tickets and 33 settled ones

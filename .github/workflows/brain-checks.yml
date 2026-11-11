@@ -609,6 +609,15 @@ jobs:
         working-directory: evals
         run: bun eval-plan-context.ts --self-check
 
+      # Where "the brain has little on this" begins (SMD-4212 PR 1): the draw
+      # of the two kinds of ticket and the paraphrases' checks, a reply's hits
+      # and literal matches read, each candidate signal at its threshold, the
+      # dev/test split, the choice and the bar at their edges, and the blind
+      # sheets. No brain, no model; the run itself is by hand.
+      - name: Little-on-this eval rules
+        working-directory: evals
+        run: bun eval-little.ts --self-check
+
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
       # - the brain-key rule (write refused, the declared scope held, a key

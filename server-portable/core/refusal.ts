@@ -52,8 +52,11 @@ export type Refusal =
   | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[] } // statements in other thoughts rest on it (042)
   | { code: "REFUSED"; retryable: false; error: string }              // a refusal the store named that this server does not know
   // reset_capture_stamp (086, SMD-2744).
-  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is), or is capture-only
+  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null; unidentified?: true } // the key is not one the registry classifies operator (kind: what it is), or is capture-only; unidentified: it reached the server with no agent id, so it has no registry kind (set_priority_weights, SMD-4193 PR 2)
   | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
+  // append_thought_evidence (SMD-2690 PR 3b): the thought's own evidence list will not take an entry.
+  | { code: "REFUSED_THOUGHT_EVIDENCE"; retryable: false; id: string; problem: EvidenceProblem; count?: number } // full: it holds EVIDENCE_LIMITS.entries or more (count); not_list: its metadata.evidence is no list; metadata_not_object: its metadata is no object; unstamped: it has neither updated_at nor created_at, so no edit of it can be checked against another
+  | { code: "THOUGHT_EVIDENCE_BUSY"; retryable: true; id: string } // other writes moved the thought under each of the append's EVIDENCE_LIMITS.tries reads: the same call can land a moment later
   // Work claims (115, SMD-3598): claim_work, renew_claim, release_claim. Never a token: 115 returns one only to the
   // caller who claimed, in the value, and no refusal carries one.
   | { code: "WORK_CLAIMED"; retryable: false; ticket: string; piece: string | null; heldBy: HeldClaim[] } // live claims cover the work: another key's, the same key's without its token, or the caller's own on overlapping work
@@ -88,6 +91,12 @@ export type Refusal =
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
   // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
   | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
+  | { code: "ORDER_UNAVAILABLE"; retryable: false } // order due on a brain before migration 129 (SMD-4192), whose agenda has the priority order alone
+  // A read's own priority weights (SMD-4193): the agenda's and search_thoughts'. `rule`: the database refused them by
+  // 122's rule (SQLSTATE 22023; the schema refuses a name or a range first, so in practice cap below
+  // unblocks_many_at), message its words, naming the weight; `unranked`: search_thoughts given weights with neither
+  // priority_weight above 0 nor min_priority, so nothing would read them. `named`: the weights the refusal names.
+  | { code: "REFUSED_WEIGHTS"; retryable: false; problem: "rule" | "unranked"; message: string; named: string[] }
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
   | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
@@ -108,6 +117,17 @@ export type Refusal =
 export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string; ownKey: boolean };
 /** What a decision does not take (SMD-3338), as the CLI refuses it: a direction or force on a reject, or a note beginning with the pass's own marker (067). */
 export type ReviewArgumentProblem = "direction_on_reject" | "force_on_reject" | "note_marker";
+
+/** Why a thought's evidence list will not take an entry (SMD-2690 PR 3b). */
+export type EvidenceProblem = "full" | "not_list" | "metadata_not_object" | "unstamped";
+/**
+ * append_thought_evidence's bounds (SMD-2690 PR 3b), beside the refusal that
+ * names the list's: a label, a source and an excerpt as smart-ingest's
+ * vendored append took them, held, and a list a thought's metadata carries in
+ * every read; `tries`, how often an append reads the thought before it answers
+ * that the thought is busy.
+ */
+export const EVIDENCE_LIMITS = { label: 200, excerpt: 2_000, source: 200, entries: 100, tries: 10 } as const;
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";
@@ -172,6 +192,8 @@ const FACTS: Facts = {
   // env's, not a token, and the kind is the registry's word about the key.
   REFUSED_NOT_OPERATOR: none,
   REFUSED_NOT_CAPTURE_STAMP: none,
+  REFUSED_THOUGHT_EVIDENCE: (r) => ({ problem: r.problem, ...(r.count !== undefined ? { count: r.count } : {}) }),
+  THOUGHT_EVIDENCE_BUSY: none,
   // The claims in the way, as values a client acts on: ids, holders (a key's name, the env's), kinds and times — the
   // piece rides the text, being another key's words (SMD-3598).
   WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey })) }),
@@ -200,6 +222,9 @@ const FACTS: Facts = {
   PROPOSAL_YOURS: (r) => ({ proposal: r.proposal }),
   CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
   CLAIMS_UNREADABLE: none,
+  ORDER_UNAVAILABLE: none,
+  // The weights it names, from the known names alone: the database's words ride the text.
+  REFUSED_WEIGHTS: (r) => ({ problem: r.problem, named: r.named }),
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),
