@@ -9,8 +9,9 @@
 //   bun deploy/federated/federated.ts --self-check
 //
 // The registry is deploy/federated/federation.local.yaml unless --registry names another (federation.example.yaml
-// says what it holds). It holds each brain's key's hash, never the key, and the broker's container reads it as an
-// unprivileged user: so it must be readable by others (0644), which is refused otherwise rather than changed.
+// says what it holds). It holds each brain's key's hash, never the key, and the broker's container reads it, and
+// broker.ts, as an unprivileged user: so both must be readable by others (0644), refused otherwise rather than changed
+// (a checkout made under umask 077 leaves broker.ts 0600).
 //
 // The shape. A brain's container reaches the broker at the host alias, as it reaches the host's Ollama, and the broker's
 // port is published on the host's loopback. Under podman machine (macOS, rootful) the host alias reaches the host's
@@ -60,7 +61,7 @@ export function mintKey(brain: string, bytes = randomBytes(32)): { key: string; 
 
 /** Why the registry's file can't be read by the broker's unprivileged user, or "". */
 export function modeProblem(mode: number, path: string): string {
-  return (mode & 0o004) ? "" : `${path} is not readable by others (mode ${(mode & 0o777).toString(8)}), and the broker reads it as an unprivileged user: it holds only hashes, so chmod 644 it`;
+  return (mode & 0o004) ? "" : `${path} is not readable by others (mode ${(mode & 0o777).toString(8)}), and the broker's container reads it as an unprivileged user: chmod 644 it (a registry holds only hashes)`;
 }
 
 const sha256 = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
@@ -119,8 +120,7 @@ async function main(cmd: string, args: string[]) {
   const { registry, problems } = parseRegistry(text);
   if (!registry) { console.error(`${o.registry}:\n${problems.map((p) => `  ${p}`).join("\n")}`); process.exit(2); }
   const refusals: string[] = [];
-  const mode = modeProblem(statSync(o.registry).mode, o.registry);
-  if (mode) refusals.push(mode);
+  for (const path of [o.registry, BROKER]) { const mode = modeProblem(statSync(path).mode, path); if (mode) refusals.push(mode); }
   const facts = factsOf(o.runtime);
   if (typeof facts === "string") refusals.push(facts);
   else { const m = measured(facts); if (!m.ok) refusals.push(m.why); else console.log(`federated: ${m.why}`); }

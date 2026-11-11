@@ -382,9 +382,10 @@ free:
 - **A live call** is granted at once, always.
 - **A background call** is granted in turn across the brains, within the room
   the live calls leave. Each server keeps `reserve` slots per model that
-  background never takes.
+  background never takes, though background always keeps at least one.
 - **A brain alone** may use every background slot. Two backlogged brains
-  split them.
+  split them: the turn goes to the waiting brain holding fewer, so each holds
+  half whatever its calls' lengths.
 
 **No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
 and fall back to the brain's own share while it is down.
@@ -408,7 +409,9 @@ bun --no-env-file deploy/federated/federated.ts down
   others (`chmod 644`). `federated.ts` refuses it otherwise.
 - **`slots` is the server's parallel setting.** For Ollama this is
   `OLLAMA_NUM_PARALLEL`, which applies per model, so the broker counts each
-  model on the server apart. `reserve` (1 unless set) is kept for live calls.
+  model on the server apart. `reserve` (1 unless set) is kept for live calls,
+  but background keeps at least one slot, so with `slots: 1` background and
+  live share it.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1`. A call to any other base isn't
   brokered.
