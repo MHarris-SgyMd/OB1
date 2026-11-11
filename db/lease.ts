@@ -716,7 +716,7 @@ export async function setFront(sql: SQL, job: string, workerId: string, id: stri
   const rows = (await sql`
     UPDATE thought_work_claims c
        SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0),
-           -- The oldest pending row by the claim's own index, and the oldest claimed by the status index: one min over
+           -- The oldest pending row by the claim's own index, and the oldest claimed by the workers' index: one min over
            -- both statuses reads every pending row, ~200 ms at 1.5M pending (review pass 2, run-it).
            enqueued_at = LEAST(c.enqueued_at, now(), LEAST(
              (SELECT o.enqueued_at FROM thought_work_claims o WHERE o.work_type = ${job} AND o.status = 'pending' ORDER BY o.enqueued_at LIMIT 1),

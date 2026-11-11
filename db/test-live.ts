@@ -44,7 +44,7 @@ import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
-import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
+import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH, setFront } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
@@ -6081,9 +6081,32 @@ if (want("10")) {
       return { ids, lines, code, tookMs, claims: await Promise.all(ids.map(claimOf)) };
     };
     /** The alone lines' counts, in order: "1,2" for a suspect failed at its third outage alone. */
-    const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
-    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3\), and the follower waits/;
+    const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3 before it is recorded failed\), and the follower waits/;
     try {
+      // setFront's date (review pass 3, mutants: the now() cap, the oldest pending row): a claim handed back lands just
+      // before the oldest row pending, its attempt refunded — and, the pool dated ahead (the sleep scheduler's
+      // stoppedLast), at now(), not past it.
+      {
+        const front = [await seed("Fay's front note one."), await seed("Fay's front note two."), await seed("Fay's front note three.")];
+        const claimFront = async (ownAt: string) => sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'front-row', claimed_at = now(),
+            ttl_expires_at = now() + interval '1 minute', attempt_count = 1, enqueued_at = now() + ${ownAt}::interval WHERE thought_id = ${front[0]}::uuid AND work_type = ${KEY}`;
+        const dateRest = async (a: string, b: string) => {
+          await sql`UPDATE thought_work_claims SET enqueued_at = now() + ${a}::interval WHERE thought_id = ${front[1]}::uuid AND work_type = ${KEY}`;
+          await sql`UPDATE thought_work_claims SET enqueued_at = now() + ${b}::interval WHERE thought_id = ${front[2]}::uuid AND work_type = ${KEY}`;
+        };
+        await dateRest("-2 hours", "-1 hour");
+        await claimFront("0 seconds");
+        const backBehind = await setFront(sql, KEY, "front-row", front[0]);
+        const [behind] = (await sql`SELECT status, attempt_count, enqueued_at < now() - interval '2 hours' AS first FROM thought_work_claims WHERE thought_id = ${front[0]}::uuid AND work_type = ${KEY}`) as { status: string; attempt_count: number; first: boolean }[];
+        await dateRest("1 hour", "2 hours");
+        await claimFront("3 hours");
+        const backAhead = await setFront(sql, KEY, "front-row", front[0]);
+        const [ahead] = (await sql`SELECT enqueued_at <= now() AS capped, enqueued_at > now() - interval '1 minute' AS recent FROM thought_work_claims WHERE thought_id = ${front[0]}::uuid AND work_type = ${KEY}`) as { capped: boolean; recent: boolean }[];
+        for (const id of front) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+        assert(backBehind && behind?.status === "pending" && behind.attempt_count === 0 && behind.first && backAhead && ahead?.capped && ahead.recent,
+          `setFront hands a claim back pending, its attempt refunded, just before the oldest row pending — and, the pool dated ahead, at now(), not past it (${JSON.stringify(behind)}; ${JSON.stringify(ahead)})`);
+      }
       inFlightMs = 1000;
       crashProbes = 1;
       crashMarker = "crash-poison";
@@ -6104,9 +6127,13 @@ if (want("10")) {
         const failedAt = r.lines.findIndex((l) => /provider error again with this thought alone in flight at 3 outages/.test(l));
         const innocentLast = Math.max(...callOrder.map((t, i) => (t.includes("Xavi migrated") ? i : -1)), -1) > callOrder.lastIndexOf("crash");
         const innocentAlone = !innocentLast || (failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}retrying the last outage's 1 suspect thought\(s\) one at a time/.test(l)));
-        assert(innocentAlone && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonClaim.last_error ?? "")
+        // Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (review pass 3, mutant).
+        const waitsAfter = failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}the provider is not answering \(/.test(l));
+        // Each hand-back refunds the attempt its claim took: one each at the end (review pass 3, mutant).
+        const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array(r.ids, "TEXT")}::uuid[]) AND work_type = ${KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
+        assert(innocentAlone && waitsAfter && attempts.join(",") === "1,1" && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonClaim.last_error ?? "")
             && innocentClaim?.status === "succeeded" && (await extractedNow(innocentId)) && alone === 2 && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid && r.code === 0,
-          `two extract workers, a poison thought crashing the provider beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent extracted, alone after it when it was retried last (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${crashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried last ${innocentLast}, alone ${innocentAlone}; exit ${r.code})`);
+          `two extract workers, a poison thought crashing the provider beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent extracted, alone after it when it was retried last (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${crashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried last ${innocentLast}, alone ${innocentAlone}; waits after the failure ${waitsAfter}; attempts ${attempts.join(",")}; exit ${r.code})`);
       }
       crashMarker = null;
       crashedBy.length = 0;
@@ -17483,7 +17510,7 @@ if (want("16")) {
      * the olders seeded first and then the newers in order, before it starts; until each newer is finished, the follower
      * ends, or `ms` pass; then stopped. `during` runs beside it, reading its lines.
      */
-    const followOver = async (pairs: [string, string][], ms: number, o: { workers?: number; during?: (lines: string[]) => Promise<void> } = {}) => {
+    const followOver = async (pairs: [string, string][], ms: number, o: { workers?: number; follow?: number; during?: (lines: string[]) => Promise<void> } = {}) => {
       const tags = pairs.map(() => `isolate-${axis}`);
       const axes = pairs.map(() => axis++);
       for (let i = 0; i < pairs.length; i++) created.push(await seed(pairs[i][0], axes[i], 3, [tags[i] + `-${i}`]));
@@ -17493,21 +17520,23 @@ if (want("16")) {
       const lines: string[] = [];
       const ac = new AbortController();
       let code = -1;
-      const running = runConsolidate({ url: URL_!, env, workers: o.workers ?? 2, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      const startedAt = Date.now();
+      const running = runConsolidate({ url: URL_!, env, workers: o.workers ?? 2, follow: o.follow ?? 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
         .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      let tookMs = -1;
       try {
         const beside = o.during?.(lines);
-        await pollUntil(async () => code !== -1 || (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms);
+        if (await pollUntil(async () => code !== -1 || (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms)) tookMs = Date.now() - startedAt;
         await beside;
       } finally {
         ac.abort();
         await running;
       }
-      return { ids, lines, code, claims: await Promise.all(ids.map(claimOf)) };
+      return { ids, lines, code, tookMs, claims: await Promise.all(ids.map(claimOf)) };
     };
-    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3\), and the follower waits/;
+    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3 before it is recorded failed\), and the follower waits/;
     /** The alone lines' counts, in order (review pass 1, as [10]'s). */
-    const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
     try {
       judgeInFlightMs = 1000;
       judgeCrashProbes = 1;
@@ -17527,9 +17556,12 @@ if (want("16")) {
         const failedAt = r.lines.findIndex((l) => /provider error again with this thought alone in flight at 3 outages/.test(l));
         const innocentLast = Math.max(...judgeCallOrder.map((t, i) => (t.includes("The backup roster names the daily owner now") ? i : -1)), -1) > judgeCallOrder.lastIndexOf("crash");
         const innocentAlone = !innocentLast || (failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}retrying the last outage's 1 suspect thought\(s\) one at a time/.test(l)));
-        assert(innocentAlone && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: .*500/.test(poisonClaim.last_error ?? "")
+        // The follower waits for the judge after the failure, and each hand-back refunds the claim's attempt (review pass 3, as [10]'s).
+        const waitsAfter = failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}the provider is not answering \(/.test(l));
+        const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array(r.ids, "TEXT")}::uuid[]) AND work_type = ${KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
+        assert(innocentAlone && waitsAfter && attempts.join(",") === "1,1" && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: .*500/.test(poisonClaim.last_error ?? "")
             && innocentClaim?.status === "succeeded" && alone === 2 && judgeCrashedBy.length === 4 && judgeCrashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid && r.code === 0,
-          `two consolidate workers, a poison pair crashing the judge beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent judged, alone after it when it was retried last (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${judgeCrashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried last ${innocentLast}, alone ${innocentAlone}; exit ${r.code})`);
+          `two consolidate workers, a poison pair crashing the judge beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent judged, alone after it when it was retried last (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${judgeCrashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried last ${innocentLast}, alone ${innocentAlone}; waits after the failure ${waitsAfter}; attempts ${attempts.join(",")}; exit ${r.code})`);
       }
       judgeCrashMarker = null;
       judgeCrashedBy.length = 0;
@@ -17537,10 +17569,11 @@ if (want("16")) {
       judgePeakAfterCrashes = 0;
       // Four more pairs behind the two, which the pass after the isolated one takes with both workers (review pass 1, as [10]'s).
       const behind: [string, string][] = [1, 2, 3, 4].map((i) => [`The rota table ${i} names the weekly lead.`, `The rota table ${i} names the daily lead now.`]);
-      const r = await followOver([["The pager table names the weekly lead.", "The pager table names the daily lead now."], ["The runbook table names the weekly lead.", "The runbook table names the daily lead now."], ...behind], 90_000);
+      // Polled every 30 s: the passes after each wait and after the isolated pass run at once (pollNow; review pass 3, mutant).
+      const r = await followOver([["The pager table names the weekly lead.", "The pager table names the daily lead now."], ["The runbook table names the weekly lead.", "The runbook table names the daily lead now."], ...behind], 90_000, { follow: 30 });
       const alone = r.lines.filter((l) => aloneLine.test(l)).length;
-      assert(r.claims.every((c) => c?.status === "succeeded") && judgeCrashCycles === 0 && judgeCrashedBy.length === 3 && alone === 2 && judgePeakAfterCrashes === 2 && r.code === 0,
-        `a judge crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six judged, the pass after the isolated one with both workers at once (SMD-2641; ${r.claims.map((c) => c?.status).join(", ")}; ${judgeCrashedBy.length} crash(es), ${judgeCrashCycles} left; ${alone} alone line(s); ${judgePeakAfterCrashes} call(s) in flight at most; exit ${r.code})`);
+      assert(r.claims.every((c) => c?.status === "succeeded") && judgeCrashCycles === 0 && judgeCrashedBy.length === 3 && alone === 2 && judgePeakAfterCrashes === 2 && r.tookMs >= 0 && r.tookMs < 40_000 && r.code === 0,
+        `a judge crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six judged, the pass after the isolated one with both workers at once (SMD-2641; ${r.claims.map((c) => c?.status).join(", ")}; ${judgeCrashedBy.length} crash(es), ${judgeCrashCycles} left; ${alone} alone line(s); ${judgePeakAfterCrashes} call(s) in flight at most; polled every 30 s, all six within ${r.tookMs} ms; exit ${r.code})`);
 
       // A suspect retried alone meeting the judge's 429s past the pauses is not blamed; one whose blame probe is refused
       // stops the follower, exit 2, nothing failed (review pass 1, as [10]'s).

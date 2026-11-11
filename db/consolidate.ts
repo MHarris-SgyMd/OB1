@@ -2219,6 +2219,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               if (stopping || outage.reason === null || !streakSuspect) return;
               outage.begin(outage.reason, b.thought_id);
               await backFirst(b.thought_id);
+              err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded (review pass 3)`);
             };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
@@ -2323,7 +2324,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   if ((blamed ?? outage.begin(msg, streakSuspect ? b.thought_id : undefined)) === "outage") {
                     providerStops++;
                     halt.abort();
-                    const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES})` : "";
+                    const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES} before it is recorded failed)` : "";
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
                     // A suspect goes back at the pool's front, for the isolated pass to claim first (review pass 1).
                     if (streakSuspect) await backFirst(b.thought_id);
@@ -2331,11 +2332,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   }
                   // Isolated, `begin` never says "thought": only the blame says whose.
                   if (blamed !== "alone") {
-                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg}` };
+                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg} (--retry-failed revisits it)` };
                   } else {
                     // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
                     // this worker stops after recording it.
-                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg}` };
+                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)` };
                     outage.begin(msg);
                     providerStops++;
                     halt.abort();
