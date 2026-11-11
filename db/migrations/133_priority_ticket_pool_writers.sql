@@ -22,22 +22,28 @@
 --   rows (ob1_ticket_rows), whether the ticket or a row is named; any other
 --   item is a pool of one. ob1_priority_pool_items(kind, key) lists its
 --   items.
---   * ob1_priority_lock(kind, key): the lock of the item's subject (122's
---     ob1_priority_subject), so a write on a ticket and one on its row take
---     one lock, before either reads. For any item that is no ticket's row the
---     lock is 116's, the same key.
+--   * ob1_priority_lock_key(kind, key): the pool's key, its subject's
+--     (122's ob1_priority_subject) as 'kind:key'; a thought key that is no
+--     uuid, as only a raw write leaves, its own (review pass 2: the rebuild
+--     repairs raw writes, and ob1_priority_subject casts a thought's key).
+--   * ob1_priority_lock(kind, key): the lock of that key, so a write on a
+--     ticket and one on its row take one lock, before either reads. For any
+--     item that is no ticket's row the lock is 116's, the same key.
 --   * assert_priority (117's, as it was but for the pool): the maker's open
 --     statements across the pool close as replaced by the new one, wherever
 --     they stand. The same statement again is `unchanged` only when the
 --     maker's one open statement in the pool is on the item named and says
 --     the same; the same words on another item of the pool move it there.
---     `replaced` is the newest it closed.
+--     `replaced` is the newest it closed. A due reference into the item's own
+--     pool is refused as one naming the item itself (review pass 2: the read
+--     followed it back to the same statement and found no due time).
 --   * clear_priority: closes the maker's open statements across the pool.
 --     `assertion` is the newest it closed.
---   * ob1_priority_winner(kind, key): over the pool, each maker's newest
---     alone (as 122's read takes them), then 116's rule (the lowest tier,
---     then the later written). Both writers' replies, priority_of and the
---     server's priority record name it. Tier 4 is in it, as in 116's.
+--   * ob1_priority_winner(kind, key): 122's ob1_priority_counted with tier
+--     4 counted, the one copy of the rule (review pass 2): over the pool,
+--     each maker's newest alone, then 116's rule (the lowest tier, then the
+--     later written). Both writers' replies, priority_of and the server's
+--     priority record name it.
 --   * ob1_priority_project(kind, key): one item's projection row, as 116
 --     made it. priority_current stays keyed by the exact (kind, key), and
 --     its drift check with it: each writer re-projects every item whose
@@ -47,11 +53,10 @@
 --     in the order of their locks' keys, each item's subject first (review
 --     pass 1: by item, a row of ZZZ-1 sorted before ticket BBB-1 and took
 --     ZZZ-1's lock first, so two rebuilds could deadlock).
---   * priority_of: each item's open statements across its pool, read once:
---     each maker's newest first, in the rule's order, so the first is the
---     winner ob1_priority_winner names and its level the item's; a maker's
---     older ones after them (review pass 1: 116's "the winner its first"
---     held).
+--   * priority_of: each item's open statements across its pool, the winner
+--     ob1_priority_winner names first and the rest in the rule's order, its
+--     level the item's (review pass 1: 116's "the winner its first" held,
+--     where a maker's older statement could have sorted ahead).
 --   * priority_history: every statement across the pool, closed ones
 --     included, in the order written. Each statement names its own item.
 --   * ON UPGRADE: where one maker already holds two or more open statements
@@ -68,7 +73,9 @@
 --   the pool with both standing: the read takes the maker's newest, and the
 --   maker's next write closes both. So does a write racing that recording:
 --   its lock is the subject read before the row is committed (review pass
---   1). 116's one-open index stays per exact
+--   1), and so does a writer still running 116's body while this file
+--   applies, its statement committed after the upgrade's closing read
+--   (review pass 2). 116's one-open index stays per exact
 --   item: membership is a read of thought_sources and thoughts, which no
 --   index can hold.
 --
@@ -88,7 +95,7 @@
 --   so two rebuilds take them in one order and cannot deadlock either.
 --
 -- SAFETY
---   One new function; eight replaced with their signatures (ob1_priority_lock
+--   Two new functions; eight replaced with their signatures (ob1_priority_lock
 --   now PL/pgSQL); no table changed. Rows change only by closing the windows
 --   of statements their own maker had already replaced. MINOR under FORK.md's
 --   version rules. test-schema [120], test-upgrade [20bx].
@@ -107,7 +114,13 @@
 DO $qc$
 DECLARE
   v_need text[][] := ARRAY[
+    ARRAY['ob1_work_claim_text(text, integer, text)', '115 (ob1_work_claim_text)'],
     ARRAY['ob1_priority_item(text, text)', '116 (ob1_priority_item)'],
+    ARRAY['ob1_priority_item_exists(text, text)', '116 (ob1_priority_item_exists)'],
+    ARRAY['ob1_priority_isolation(text)', '116 (ob1_priority_isolation)'],
+    ARRAY['ob1_priority_tier(boolean, boolean, text)', '116 (ob1_priority_tier)'],
+    ARRAY['ob1_priority_json(priority_assertions)', '116 (ob1_priority_json)'],
+    ARRAY['ob1_priority_projection_drift()', '116 (ob1_priority_projection_drift)'],
     ARRAY['ob1_priority_is_maker(priority_assertions, text, uuid)', '116 (ob1_priority_is_maker)'],
     ARRAY['ob1_priority_actor(jsonb, text)', '116 (ob1_priority_actor)'],
     ARRAY['ob1_item_lock(uuid)', '117 (ob1_item_lock)'],
@@ -129,6 +142,12 @@ BEGIN
         ERRCODE = 'invalid_schema_definition';
     END IF;
   END LOOP;
+  IF to_regclass('thought_sources') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 133 needs 053 (thought_sources); this schema lacks it',
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
 END
 $qc$;
 
@@ -168,42 +187,60 @@ COMMENT ON FUNCTION ob1_priority_pool_items(text, text) IS
   'The items whose statements are one normalised item''s: for a ticket or a ticket''s own row, the ticket and every row of it (122''s ob1_ticket_rows); for any other item, itself. What priority_history reads. Migration 133 / SMD-4127.';
 
 -- ---------------------------------------------------------------------------
--- ob1_priority_lock — the pool's lock
+-- ob1_priority_lock_key / ob1_priority_lock — the pool's key and its lock
 -- ---------------------------------------------------------------------------
--- The subject's key, 116's hash of it: a ticket's row locks as its ticket, so
--- a writer naming either waits on one naming the other. Any other item's lock
+-- The subject's 'kind:key': a ticket's row is its ticket's. A thought key
+-- that is no uuid is no ticket's row (122's ob1_ticket_row_of takes a uuid):
+-- only a raw write leaves one, and the rebuild that repairs it must not
+-- raise on it (review pass 2).
+CREATE OR REPLACE FUNCTION ob1_priority_lock_key(p_kind text, p_key text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  s record;
+BEGIN
+  IF p_kind = 'thought' AND p_key !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    RETURN p_kind || ':' || p_key;
+  END IF;
+  s := ob1_priority_subject(p_kind, p_key);
+  RETURN s.kind || ':' || s.key;
+END;
+$$;
+COMMENT ON FUNCTION ob1_priority_lock_key(text, text) IS
+  'One item''s pool, as the key its lock takes: its subject''s ''kind:key'' (122''s ob1_priority_subject: a ticket''s own row is its ticket); a thought key that is no uuid, which only a raw write leaves, its own. Two items are one item to the writers when their keys are equal. Migration 133 / SMD-4127.';
+
+-- 116's hash of the pool's key: a ticket's row locks as its ticket, so a
+-- writer naming either waits on one naming the other. Any other item's lock
 -- is the one 116 took.
 CREATE OR REPLACE FUNCTION ob1_priority_lock(p_kind text, p_key text)
 RETURNS void
 LANGUAGE plpgsql
 AS $$
-DECLARE
-  s record;
 BEGIN
-  s := ob1_priority_subject(p_kind, p_key);
-  PERFORM pg_advisory_xact_lock(hashtextextended('ob1:priority:' || s.kind || ':' || s.key, 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended('ob1:priority:' || ob1_priority_lock_key(p_kind, p_key), 0));
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_lock(text, text) IS
-  'Takes the transaction advisory lock on one item''s assertions — its pool''s: a ticket''s own row locks as its ticket (122''s ob1_priority_subject), so the writers on a ticket and on its rows take one lock before they read. Any other item''s lock is 116''s. Migration 116 / SMD-3663; the pool''s, migration 133 / SMD-4127.';
+  'Takes the transaction advisory lock on one item''s assertions — its pool''s (ob1_priority_lock_key): a ticket''s own row locks as its ticket, so the writers on a ticket and on its rows take one lock before they read. Any other item''s lock is 116''s. Migration 116 / SMD-3663; the pool''s, migration 133 / SMD-4127.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_priority_winner — the pool's winner
 -- ---------------------------------------------------------------------------
--- Each maker's newest across the pool alone, as 122's ob1_priority_counted
--- takes them, then 116's rule: the lowest tier, then the later written. Tier
--- 4 is in it, as in 116's. NULL when none is open.
+-- 122's ob1_priority_counted with tier 4 counted, as 116's winner counted
+-- it: each maker's newest across the pool alone, then the lowest tier, then
+-- the later written. The rule's one copy (review pass 2). NULL when none is
+-- open.
 CREATE OR REPLACE FUNCTION ob1_priority_winner(p_kind text, p_key text)
 RETURNS priority_assertions
 LANGUAGE sql
 STABLE
 AS $$
-  SELECT o.* FROM (SELECT DISTINCT ON (p.maker_key) p.* FROM ob1_priority_open(p_kind, p_key) p ORDER BY p.maker_key, p.seq DESC) o
-   ORDER BY o.tier, o.seq DESC
-   LIMIT 1
+  SELECT * FROM ob1_priority_counted(p_kind, p_key, true)
 $$;
 COMMENT ON FUNCTION ob1_priority_winner(text, text) IS
-  'The winning open assertion on one normalised item (decision 4) — over its pool, a ticket and its own rows as one (122''s ob1_priority_open), each maker''s newest alone: the lowest tier, then the newest within it, the later written (seq). Tier 4 included. NULL when none is open. Migration 116 / SMD-3663; over the pool, migration 133 / SMD-4127.';
+  'The winning open assertion on one normalised item (decision 4): 122''s ob1_priority_counted with tier 4 counted — over its pool, a ticket and its own rows as one, each maker''s newest alone: the lowest tier, then the newest within it, the later written (seq). NULL when none is open. Migration 116 / SMD-3663; over the pool, migration 133 / SMD-4127.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_priority_project — one exact item's projection row
@@ -263,8 +300,7 @@ BEGIN
   -- one order for every rebuild, and a writer holds one pool's lock alone.
   FOR r IN SELECT d.item_kind, d.item_key
              FROM (SELECT DISTINCT x.item_kind, x.item_key FROM ob1_priority_projection_drift() x) d
-             CROSS JOIN LATERAL ob1_priority_subject(d.item_kind, d.item_key) s
-            ORDER BY s.kind, s.key, d.item_kind, d.item_key LOOP
+            ORDER BY ob1_priority_lock_key(d.item_kind, d.item_key), d.item_kind, d.item_key LOOP
     PERFORM ob1_priority_lock(r.item_kind, r.item_key);
     -- Counted only if still wrong under the lock: a writer may have fixed it
     -- since the drift was read (116's review pass 4).
@@ -396,6 +432,14 @@ BEGIN
       'message', format('the due reference names no %s %s in this brain', CASE WHEN v_ref_kind = 'item' THEN 'open item' ELSE v_ref_kind END, v_ref_key),
       'assertion', NULL, 'replaced', NULL, 'winner', NULL);
   END IF;
+  -- Nor its own pool: a ticket and its own rows are one item, and the read
+  -- would follow the reference back to this statement (review pass 2). Asked
+  -- here, past the capture rule, as membership is the brain's to say.
+  IF v_ref_kind IS NOT NULL AND ob1_priority_lock_key(v_ref_kind, v_ref_key) = ob1_priority_lock_key(v_item.kind, v_item.key) THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'an item''s due reference may not name itself: a ticket and its own rows are one item',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
 
   -- The maker's open statements across the pool: one, but two where one was
   -- made by name before the key had an id and one after, or where a thought
@@ -524,20 +568,20 @@ BEGIN
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS e(v, ord)
       CROSS JOIN LATERAL ob1_priority_item(e.v->>'kind', e.v->>'key') AS n
      ORDER BY n.kind, n.key, e.ord)
-  -- One read of each pool: each maker's newest first, in the rule's order
-  -- (ob1_priority_winner's), so the first is the winner and its level the
-  -- item's, as 116 answered; a maker's older statements after them.
-  SELECT q.kind, q.key, (l.list->0->>'level')::smallint, l.list->0, l.list
+  -- One statement, so one snapshot: the pool's winner (ob1_priority_winner,
+  -- the rule's one copy) first, as 116 answered, then the rest of its open
+  -- statements in the rule's order; the level the winner's.
+  SELECT q.kind, q.key, w.level, CASE WHEN w.id IS NOT NULL THEN ob1_priority_json(w) END, l.list
     FROM asked q
+    CROSS JOIN LATERAL ob1_priority_winner(q.kind, q.key) AS w
     CROSS JOIN LATERAL (
-      SELECT COALESCE(jsonb_agg(ob1_priority_json(o.a) ORDER BY o.newest DESC, (o.a).tier, (o.a).seq DESC), '[]'::jsonb) AS list
-        FROM (SELECT p AS a, p.seq = max(p.seq) OVER (PARTITION BY p.maker_key) AS newest
-                FROM ob1_priority_open(q.kind, q.key) p) o) AS l
+      SELECT COALESCE(jsonb_agg(ob1_priority_json(a) ORDER BY a.id IS NOT DISTINCT FROM w.id DESC, a.tier, a.seq DESC), '[]'::jsonb) AS list
+        FROM ob1_priority_open(q.kind, q.key) a) AS l
    ORDER BY q.ord;
 END;
 $$;
 COMMENT ON FUNCTION priority_of(jsonb) IS
-  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: its kind and key normalised, the winning level, the winner (ob1_priority_winner''s rule: over the item''s pool, a ticket and its own rows as one, each maker''s newest alone), and every open assertion across the pool — each maker''s newest first, in the rule''s order (tier, then the later written), the winner its first; a maker''s older ones after. An item nobody stated a priority on has a NULL level and winner: unknown, not low (decision 3). One statement, so a reply never contradicts itself. Raises on a malformed item. Migration 116 / SMD-3663; over the pool, migration 133 / SMD-4127.';
+  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: its kind and key normalised, the winning level, the winner (ob1_priority_winner''s rule: over the item''s pool, a ticket and its own rows as one, each maker''s newest alone), and every open assertion across the pool, the winner first, then the rest in the rule''s order (tier, then the later written). An item nobody stated a priority on has a NULL level and winner: unknown, not low (decision 3). One statement, so a reply never contradicts itself. Raises on a malformed item. Migration 116 / SMD-3663; over the pool, migration 133 / SMD-4127.';
 
 CREATE OR REPLACE FUNCTION priority_history(p_kind text, p_key text)
 RETURNS jsonb

@@ -3379,7 +3379,7 @@ else {
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
       assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
         `…and without SELECT on the operator's weights, the priority row says every ranked priority read fails (${rowOf(noWeights.out, "priority").trim().slice(-260)})`);
-      assert(/thought_sources SELECT[^:]*: [^;]*; set_priority, clear_priority and priority_history on a thought or a ticket, and agenda, fail naming thought_sources \(migration 133\);.* plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noSources.out, "priority").trim()),
+      assert(/thought_sources SELECT[^:]*: [^;]*; set_priority, clear_priority and priority_history on a thought or a ticket, agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources \(migration 133\);.* plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noSources.out, "priority").trim()),
         `…and without SELECT on thought_sources, the priority row says every priority call on a thought or a ticket fails, in a clause of its own (${rowOf(noSources.out, "priority").trim().slice(-260)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms

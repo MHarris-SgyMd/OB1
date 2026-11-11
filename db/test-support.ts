@@ -428,6 +428,7 @@ const FUNCTIONS = [
   "ob1_priority_winner(text, text)",
   "ob1_priority_project(text, text)",
   "ob1_priority_pool_items(text, text)",
+  "ob1_priority_lock_key(text, text)",
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row
   // type of 117's go with its table's CASCADE, and are named anyway).

@@ -256,7 +256,7 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
     clauses.push(`${failing} naming the table${agenda ? ", and so does agenda (SMD-3669)" : ""}`);
   }
   if (sources.length) {
-    clauses.push("set_priority, clear_priority and priority_history on a thought or a ticket, and agenda, fail naming thought_sources (migration 133)");
+    clauses.push("set_priority, clear_priority and priority_history on a thought or a ticket, agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources (migration 133)");
   }
   if (weights.length) {
     clauses.push(weights.includes("priority_weight_settings SELECT")

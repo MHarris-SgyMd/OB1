@@ -19424,10 +19424,10 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
   // The shape: the new function STABLE and commented; the replaced ones say 133; the lock PL/pgSQL.
   const fns = (await db.query<{ n: string; v: string; l: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, l.lanname AS l, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
-      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_pool_items', 'ob1_priority_lock', 'ob1_priority_winner', 'ob1_priority_project', 'ob1_rebuild_priority_projection', 'assert_priority', 'clear_priority', 'priority_of', 'priority_history', 'ob1_priority_counted') ORDER BY 1`)).rows;
-  assert(fns.length === 10 && fns.every((f) => /[Mm]igration 133 \/ SMD-4127/.test(f.c ?? "")) && fns.find((f) => f.n === "ob1_priority_pool_items")?.v === "s"
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_pool_items', 'ob1_priority_lock_key', 'ob1_priority_lock', 'ob1_priority_winner', 'ob1_priority_project', 'ob1_rebuild_priority_projection', 'assert_priority', 'clear_priority', 'priority_of', 'priority_history', 'ob1_priority_counted') ORDER BY 1`)).rows;
+  assert(fns.length === 11 && fns.every((f) => /[Mm]igration 133 \/ SMD-4127/.test(f.c ?? "")) && fns.find((f) => f.n === "ob1_priority_pool_items")?.v === "s" && fns.find((f) => f.n === "ob1_priority_lock_key")?.v === "s"
          && fns.find((f) => f.n === "ob1_priority_lock")?.l === "plpgsql",
-    `ten functions name 133: one new (STABLE), eight replaced, and ob1_priority_counted's comment; the lock now PL/pgSQL (${fns.map((f) => `${f.n}:${f.v}:${f.l}`).join(", ")})`);
+    `eleven functions name 133: two new (STABLE), eight replaced, and ob1_priority_counted's comment; the lock now PL/pgSQL (${fns.map((f) => `${f.n}:${f.v}:${f.l}`).join(", ")})`);
 
   const rowA = await ticket("SMD-9985");
   const rowB = await ticket("SMD-9986");
@@ -19495,6 +19495,30 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
   assert(JSON.stringify(spread) === JSON.stringify(["ticket:[120] op:2", "thought:[120] op:3", "thought:[120] op:2", "thought:[120] op:4"])
          && (await history("thought", loneA)).length === 1,
     `another ticket's statements are its own pool (its ticket's closed by its row's); two notes that are no ticket's rows keep one each; a note's history is its own (${JSON.stringify(spread)})`);
+
+  // A due reference into the item's own pool is a reference to itself (review pass 2): the ticket from its row, the row
+  // from its ticket, refused alike; another ticket's row is another item.
+  const refAns = (kind: string, key: string, ref: [string, string]) =>
+    ans(`SELECT assert_priority($1, $2, 3, NULL, NULL, $3, $4, NULL, false, $5::jsonb) AS r`, [kind, key, ref[0], ref[1], JSON.stringify(OP)]);
+  const selfRefs = [await refAns(...T, R), await refAns(...R, T), await refAns(...T, ["thought", rowB])];
+  assert(selfRefs[0].code === "22023" && /^raised: an item's due reference may not name itself: a ticket and its own rows are one item/.test(selfRefs[0].outcome)
+         && selfRefs[1].code === "22023" && selfRefs[2].outcome === "asserted",
+    `a ticket's due reference to its own row, and its row's to the ticket, refused as naming itself; one to another ticket's row taken (${selfRefs.map((r) => r.code ?? r.outcome).join(", ")})`);
+  await put(...T, 2, OP);
+
+  // The winner counts an inferred statement, as 116's did: ob1_priority_counted with tier 4 counted.
+  const inferredOn = await thoughtAs("[120] a note only an inference speaks for");
+  const inferredPut = await ans(`SELECT assert_priority('thought', $1, 3, NULL, NULL, NULL, NULL, NULL, true, $2::jsonb) AS r`, [inferredOn, JSON.stringify(BOT)]);
+  const inferredOf = await of("thought", inferredOn);
+  assert(inferredPut.winner?.tier_name === "inferred" && inferredOf.level === 3 && inferredOf.winner?.tier_name === "inferred",
+    `an inferred statement alone is the winner the writers and priority_of name, tier 4 counted as in 116 (${inferredOf.level}, ${inferredOf.winner?.tier_name})`);
+
+  // The rebuild repairs a raw write whose thought key is no uuid (review pass 2): its lock is its own key, not a cast.
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_source, tier, asserted_at) VALUES ('thought', 'not-a-uuid', 2, '[120] raw', false, 4, now())`);
+  let rebuiltRaw = "";
+  try { rebuiltRaw = JSON.stringify((await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`)).rows[0]); } catch (e) { rebuiltRaw = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(rebuiltRaw === '{"written":1,"deleted":0}' && await drift() === 0 && JSON.stringify(await current("thought", "not-a-uuid")) === JSON.stringify({ level: 2, open_count: 1 }),
+    `the rebuild repairs a raw statement on a thought key that is no uuid, raising nothing (${rebuiltRaw})`);
 
   // A thought that becomes a ticket's row after both were made joins the pool with both standing (not changed by 133): the
   // winner takes the maker's newest alone, as the read does, though its older one was made at a lower tier before the
