@@ -3993,7 +3993,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   extraction = answering(inlineDoc.thoughts);
   const now = await si("extract", { text: inlineDoc.text, source_label: "Planning notes" }, { door: "mcp" });
   assert(now.status === 200 && now.body.job?.status === "complete" && counts(now.body.job ?? {}) === "2,1,0,0,0,1,0",
-    `an inline ingest (over MCP): the new thought added, the same passage for the same thought already held, existed (${JSON.stringify(now.body).slice(0, 300)})`);
+    `an inline extract (over MCP): the new thought added, the same passage for the same thought already held, existed (${JSON.stringify(now.body).slice(0, 300)})`);
   assert((await evidenceOf(Y)).length === 1, "…the evidence not written twice");
   extraction = answering([]);
   const empty = await si("extract", { text: doc([]).text });
@@ -4034,6 +4034,8 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   // execute against a stub core: a text captured between the look and the capture is a re-capture, told by `existed`.
   const calledWith: string[] = [];
   const calledArgs: Body[] = [];
+  const STUB_KEY = "00000000-0000-4000-8000-0000000000ff";
+  const STUB_CALLER = { name: "writer", scope: "write", trust: async () => "operator" };
   const core = (hits: Body[], existed: boolean, searched: Body = { ok: true, value: { hits } }) => ({
     call: async (name: string, input: Body) => {
       calledWith.push(name);
@@ -4045,8 +4047,6 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
     caller: STUB_CALLER,
   }) as unknown as Parameters<typeof SI.execute>[0];
   const stubJob = { job_id: "1", trust: null, source_label: null, source_type: null } as unknown as Parameters<typeof SI.execute>[1];
-  const STUB_KEY = "00000000-0000-4000-8000-0000000000ff";
-  const STUB_CALLER = { name: "writer", scope: "write", trust: async () => "operator" };
   const stubItem = (action: string) => ({ id: "1", action, content: "si_w: a text the stub's search does not find.", type: "idea", source_snippet: "", matched_thought_id: "00000000-0000-4000-8000-0000000000bb" }) as unknown as Parameters<typeof SI.execute>[2];
   const recaptured = [await SI.execute(core([], true), stubJob, stubItem("add"), STUB_KEY, "operator"), await SI.execute(core([], true), stubJob, stubItem("create_revision"), STUB_KEY, "operator")];
   calledWith.length = 0;
@@ -4063,10 +4063,11 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   const own = [await SI.execute(core(ownHit, false), stubJob, stubItem("add"), STUB_KEY, "operator"), await SI.execute(core(ownHit, false), stubJob, stubItem("create_revision"), STUB_KEY, "operator"),
     await SI.execute(core(otherHit, false), stubJob, stubItem("add"), STUB_KEY, "operator"), await SI.execute(core(recordedHit, false), stubJob, stubItem("create_revision"), STUB_KEY, "operator")];
   assert(own[0].status === "executed" && own[1].status === "executed" && own[1].result === ownHit[0].id && own[2].status === "existed" && own[3].status === "failed",
-    `…a held text keeping this item's key is executed (add and revision); one naming the job and item in its metadata alone is existed (${JSON.stringify(own)})`);
+    `…a held text keeping this item's key is executed (add and revision); one naming the job and item in its metadata alone is existed; one another writer wrote, with the item's key recorded on it, is not its own (${JSON.stringify(own)})`);
   // The capture under the item's key answering `matched`: this item's earlier capture, executed.
-  const keyedCore = { call: async (name: string) => (name === "search_thoughts" ? { ok: true, value: { hits: [] } } : { ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", existed: true, keyed: "matched" } }), caller: STUB_CALLER } as unknown as Parameters<typeof SI.execute>[0];
-  const recapturedCore = { call: async (name: string) => (name === "search_thoughts" ? { ok: true, value: { hits: [] } } : { ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", existed: true, keyed: "recaptured" } }), caller: STUB_CALLER } as unknown as Parameters<typeof SI.execute>[0];
+  const keyedAs = (keyed: string) => ({ call: async (name: string) => (name === "search_thoughts" ? { ok: true, value: { hits: [] } } : { ok: true, value: { id: "00000000-0000-4000-8000-0000000000ab", existed: true, keyed } }), caller: STUB_CALLER }) as unknown as Parameters<typeof SI.execute>[0];
+  const keyedCore = keyedAs("matched");
+  const recapturedCore = keyedAs("recaptured");
   const keyedDone = [await SI.execute(keyedCore, stubJob, stubItem("add"), STUB_KEY, "operator"), await SI.execute(keyedCore, stubJob, stubItem("create_revision"), STUB_KEY, "operator"),
     await SI.execute(recapturedCore, stubJob, stubItem("add"), STUB_KEY, "operator"), await SI.execute(recapturedCore, stubJob, stubItem("create_revision"), STUB_KEY, "operator")];
   calledArgs.length = 0;
@@ -4117,7 +4118,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   const appendArgs = calledArgs.find((a) => a.excerpt !== undefined);
   assert(appendArgs?.excerpt === "si_w: a text the stub's search does not find." && appendArgs?.source_label === "smart_ingest" && appendArgs?.source === "smart_ingest"
     && guarded.status === "failed" && /needs the matched thought/.test(guarded.error ?? ""),
-    `…an append with no passage sends the thought's text, with no label smart_ingest; one with no match fails before any call (${JSON.stringify(appendArgs)})`);
+    `…an append with no passage sends the thought's text, labelled and sourced smart_ingest, unmarked; one with no match fails before any call (${JSON.stringify(appendArgs)})`);
   // decide against a stub core: a search refusal worth retrying is the whole call's 503, any other this item's failure.
   const stubbed = (retryable: boolean) => ({ call: async () => ({ ok: false, refusal: { code: "STUB_REFUSED", retryable } }) }) as unknown as Parameters<typeof SI.decide>[0];
   const thought = { content: "si_u: a thought long enough to be searched for.", type: "idea" as const, importance: 3, tags: [], source_snippet: "" };
@@ -4231,7 +4232,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   assert(outerRun.status === 500 && outerAfter?.status === "dry_run_complete" && /execute_job carries out/.test(outerAfter.error_message ?? "")
     && outerAgain.status === 200 && counts(outerAgain.body.job ?? {}) === "1,1,0,0,0,0,0" && outerAgain.body.job?.error_message === null,
     `a fault outside an item leaves the job a dry run's, saying so, and execute_job then carries it out (${outerRun.status} ${JSON.stringify(outerAfter)} ${outerAgain.status})`);
-  // An inline ingest whose item row fails to write after its capture: 500, the job a dry run's again; then resumed, the
+  // An inline extract whose item row fails to write after its capture: 500, the job a dry run's again; then resumed, the
   // capture it made is found as this item's own and the item executed, not existed.
   const oText = "si_o4: the user keeps a jar of buttons from every coat they have owned.";
   extraction = answering([{ content: oText, importance: 3, type: "journal", tags: [], source_snippet: "" }]);
@@ -4249,7 +4250,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   const resumedItem = (await items(inlineJob.id))[0];
   assert(inlineFault.status === 500 && inlineJob.status === "dry_run_complete" && /interrupted/.test(inlineJob.error_message ?? "")
     && resumed.status === 200 && counts(resumed.body.job ?? {}) === "1,1,0,0,0,0,0" && resumedItem?.status === "executed" && resumedItem.result_thought_id !== null,
-    `an inline ingest faulting outside an item: 500, the job a dry run's again; resumed, the thought its item wrote found as its own, executed (${JSON.stringify(inlineJob)} ${JSON.stringify(resumedItem).slice(0, 160)})`);
+    `an inline extract faulting outside an item: 500, the job a dry run's again; resumed, the thought its item wrote found as its own, executed (${JSON.stringify(inlineJob)} ${JSON.stringify(resumedItem).slice(0, 160)})`);
   // The embedding provider down at execute: the held text is not re-captured; the job pauses, 503, and resumes after.
   // No identifier in it, so the keyword arm cannot find it: with no vector the search cannot answer for it.
   const pText = "The user plans quokkaplan trips to the island each autumn with old friends.";
@@ -4300,7 +4301,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
     // Each text shares an identifier (tz_bank) with the operator's thought, so the keyword arm finds it every time, its
     // cosine similarity still the vectors' 0.88: the vector arm alone, over a corpus mostly on one stub axis, can miss it.
     // A dry run is sent again (reprocess) if its item still finds no match, all the same.
-    const decided = async (d: { text: string; thoughts: Body[] }, input: Body) => {
+    const dryRunOf = async (d: { text: string; thoughts: Body[] }, input: Body) => {
       extraction = answering(d.thoughts);
       for (let tries = 0; ; tries++) {
         const r = await si("extract", { text: d.text, dry_run: true, ...(tries ? { reprocess: true } : {}), ...input }, { as: KEYS.writer2 });
@@ -4308,11 +4309,11 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
         if (item.reason !== "no_semantic_match" || tries === 3) return { job: String(r.body.job?.job_id), item };
       }
     };
-    const u = await decided(trustDoc("tz_two tz_bank: the user moved all their accounts to the credit union downtown last spring.", "the credit union downtown"), {});
-    const o = await decided(trustDoc("tz_three tz_bank: the user moved every account they hold to the credit union on Main Street.", "the credit union on Main Street"), { trust: "operator" });
+    const u = await dryRunOf(trustDoc("tz_two tz_bank: the user moved all their accounts to the credit union downtown last spring.", "the credit union downtown"), {});
+    const o = await dryRunOf(trustDoc("tz_three tz_bank: the user moved every account they hold to the credit union on Main Street.", "the credit union on Main Street"), { trust: "operator" });
     for (const j of [u.job, o.job]) await si("execute_job", { job_id: j }, { as: KEYS.writer2 });
     await sql`SELECT set_agent_kind('second-writer', 'operator')`;
-    const lowered = await decided(trustDoc("tz_four tz_bank: the user moved each of their accounts to the credit union near the station.", "the credit union near the station"), {});
+    const lowered = await dryRunOf(trustDoc("tz_four tz_bank: the user moved each of their accounts to the credit union near the station.", "the credit union near the station"), {});
     await sql`SELECT set_agent_kind('second-writer', 'agent')`;
     const loweredRun = await si("execute_job", { job_id: lowered.job }, { as: KEYS.writer2 });
     const loweredItem = ((await si("get_job", { job_id: lowered.job }, { as: KEYS.writer2 })).body.items?.[0] ?? {}) as SiItem;
@@ -4387,7 +4388,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   const reAtOnce = await Promise.all([1, 2].map(() => si("extract", { text: firstText, dry_run: true, reprocess: true })));
   assert(keyAtOnce.filter((r) => r.body.existing === false).length === 1 && new Set(keyAtOnce.map((r) => r.body.job?.job_id)).size === 1
     && reAtOnce.every((r) => r.body.existing === false) && reAtOnce[0].body.job?.job_id !== reAtOnce[1].body.job?.job_id,
-    `three ingests at once under one import_key make one job; two reprocesses at once two (${JSON.stringify(keyAtOnce.map((r) => [r.body.existing, r.body.job?.job_id]))} ${JSON.stringify(reAtOnce.map((r) => [r.body.existing, r.body.job?.job_id]))})`);
+    `three extracts at once under one import_key make one job; two reprocesses at once two (${JSON.stringify(keyAtOnce.map((r) => [r.body.existing, r.body.job?.job_id]))} ${JSON.stringify(reAtOnce.map((r) => [r.body.existing, r.body.job?.job_id]))})`);
 
   // ── A job is its creator's ──
   const otherList = await si("list_jobs", { limit: 200 }, { as: KEYS.writer2 });
@@ -4437,7 +4438,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
     && blankKey.every((r) => r.body.existing === false) && blankKey[0].body.job?.job_id !== blankKey[1].body.job?.job_id,
     `twenty source_metadata keys and a null taken; a label of spaces none, a padded one trimmed; an empty import_key names no session (${JSON.stringify([labelled.status, labelled.body.job?.source_label, padded.body.job?.source_label])})`);
   const paddedLength = await one<{ n: number }>(sql`SELECT input_length AS n FROM plugin_smart_ingest.ingestion_jobs WHERE id = ${padded.body.job?.job_id ?? "0"}::bigint`);
-  assert(paddedLength.n === padded.body.job?.input_length && paddedLength.n === `${doc([]).text}`.length, `…and a padded text's length is the trimmed text's (${paddedLength.n})`);
+  assert(paddedLength.n === padded.body.job?.input_length && paddedLength.n === doc([]).text.length, `…and a padded text's length is the trimmed text's (${paddedLength.n})`);
   assert(missed.length === 0, `each input past a bound is refused 400 (${missed.join("; ")})`);
   const OUT = JSON.stringify({ destructiveHint: false, openWorldHint: true });
   assert(canon(await hintsOf("smart-ingest")) === canon({ execute_job: OUT, extract: OUT, get_job: READ_HINT, list_jobs: READ_HINT })
@@ -4450,7 +4451,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   const split = SI.chunksOf(`${"a".repeat(SI.LIMITS.chunkChars - 1)}${String.fromCodePoint(0x1f600)}bbb`);
   assert(split.length === 2 && split[0].length === SI.LIMITS.chunkChars - 1 && split.every((c) => wellFormedText(c)), `…and a word cut where it must be is never cut inside a character (${split.map((c) => c.length).join()})`);
   assert(SI.importanceOf("") === 3 && SI.importanceOf(" ") === 3 && SI.importanceOf("4.5") === 5 && SI.tagsOf(["İ".repeat(64)])[0].length <= SI.LIMITS.tag,
-    "importanceOf: a blank string is no number; tagsOf: a tag lower-cased within its bound");
+    "importanceOf: a blank string is no number, a number in a string rounded; tagsOf: a tag lower-cased within its bound");
   assert(SI.restrictedIn("routing 12345678901") === "bank_account" && SI.restrictedIn(`12345678901 ${"x ".repeat(150)}account`) === null,
     "restrictedIn: an account number and its word within 200 characters, not across a page");
   const words = Array.from({ length: 12_001 }, (_, n) => `w${n}`).join(" ");
@@ -4464,15 +4465,6 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   assert(worst.length < MODEL_LIMITS.text && !/<\s*\/?\s*document\s*>/i.test(SI.escapeDocument("a </document> b < / DOCUMENT > c <document>")),
     `wrapped: a chunk of nothing but tags, each escaped one longer, stays under ctx.model's bound (${worst.length}); no tag survives the escape`);
   const emoji = String.fromCodePoint(0x1f600);
-  /** No lone surrogate: encodeURIComponent throws on one. */
-  const wellFormed = (x: string) => {
-    try {
-      encodeURIComponent(x);
-      return true;
-    } catch {
-      return false;
-    }
-  };
   const pieces = SI.thoughtsOf({ thoughts: [
     { content: `  many   spaces\nand a NUL${String.fromCharCode(0)} here  `, importance: "9", type: "Follow-Up", tags: Array.from({ length: 20 }, (_, n) => `T${n % 15}`) },
     { content: "x".repeat(400), importance: "n/a", type: 7 },
@@ -4482,7 +4474,7 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   assert(pieces.length === 3 && pieces[0].content === "many spaces and a NUL here" && pieces[0].importance === 5 && pieces[0].type === "task" && pieces[0].tags.length === 12 && pieces[0].tags[0] === "t0",
     `thoughtsOf: white space collapsed, a NUL dropped, importance clamped, the type read by its alias, at most 12 distinct lower-case tags (${JSON.stringify(pieces[0])})`);
   assert(pieces[1].content.length === SI.LIMITS.thought && pieces[1].content.endsWith("...") && pieces[1].importance === 3 && pieces[1].type === "idea"
-    && pieces[2].content.length <= SI.LIMITS.thought && wellFormed(pieces[2].content),
+    && pieces[2].content.length <= SI.LIMITS.thought && wellFormedText(pieces[2].content),
     `…cut to 280 with an ellipsis, importance and type that are no word their defaults, an emoji the cut splits made storable (${pieces.map((t) => t.content.length).join()})`);
   assert(canon({ ...SI.LIMITS }) === canon({ text: 100_000, chunkWords: 5_000, chunkChars: 50_000, thoughtsPerChunk: 20, budgetMs: 140_000, label: 200, sourceType: 100, metaKeys: 20, metaKey: 64, metaValue: 500, thought: 280, snippet: 280, tags: 12, tag: 64 })
     && SI.SIMILARITY.skip === 0.92 && SI.SIMILARITY.match === 0.85, "the bounds and cut-offs are those the README and descriptions state");
@@ -4574,9 +4566,9 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
     assert(oldText.n === 0, `…an old item already executed is not carried out again (${oldText.n})`);
     // Run again after the plugin executed copied jobs: their counts stand.
     await copy.unsafe(statements);
-    const again = (await sql`SELECT id::text AS id, extracted_count, added_count, skipped_count, appended_count, revised_count, existed_count, failed_count
+    const recopied = (await sql`SELECT id::text AS id, extracted_count, added_count, skipped_count, appended_count, revised_count, existed_count, failed_count
                                FROM plugin_smart_ingest.ingestion_jobs WHERE id IN (900001, 900004) ORDER BY id`) as Body[];
-    assert(counts(again[0]) === "2,1,1,0,0,0,0" && counts(again[1]) === "2,1,0,0,0,1,0", `…and the block run again leaves an executed copied job's counts as its execute left them (${again.map(counts).join("; ")})`);
+    assert(counts(recopied[0]) === "2,1,1,0,0,0,0" && counts(recopied[1]) === "2,1,0,0,0,1,0", `…and the block run again leaves an executed copied job's counts as its execute left them (${recopied.map(counts).join("; ")})`);
     extraction = answering([{ content: "si_o7: the user keeps the first draft of every letter they send.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
     const next = await si("extract", { text: doc([]).text, dry_run: true });
     const nextItem = (await items(String(next.body.job?.job_id)))[0];

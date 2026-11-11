@@ -45,7 +45,7 @@ export type PluginOutcome<T> = { ok: true; value: T } | { ok: false; refusal: Pl
 /** A core operation's input, as its caller writes it: before the schema fills defaults. */
 export type CoreInput<K extends ToolName> = z.input<z.ZodObject<(typeof SPECS)[K]["inputSchema"]>>;
 
-/** The trust words, lowest first (migration 073's ladder). */
+/** The trust words, lowest first (046's ladder, ob1_trust_ceiling's). */
 export type Trust = "ingested" | "agent" | "operator";
 
 /**

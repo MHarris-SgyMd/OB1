@@ -1,5 +1,5 @@
 -- Smart ingest's jobs and their items (SMD-2690): one job per document sent to
--- ingest, and one item per thought the model extracted from it, with what the
+-- extract, and one item per thought the model extracted from it, with what the
 -- dry run decided for it and what its execute did. Ported from
 -- schemas/smart-ingest's public tables, which the plugin does not adopt (the
 -- README's copy block moves an old brain's rows). The thoughts themselves are

@@ -26,6 +26,8 @@ import { definePlugin, ok, operation, refuse, z, type PluginContext, type Plugin
  * one chunk may yield, and the extraction's wall-clock budget. The text's bound
  * keeps an extraction to at most a dozen chunks, so the old call cap
  * (SMART_INGEST_MAX_CALLS, 10,000) and chunk cap (10) never bind and are gone.
+ * The rest bound the inputs (a label, a source type, source_metadata's keys and
+ * values) and each extracted thought (its text, passage and tags).
  */
 export const LIMITS = {
   text: 100_000,
@@ -45,11 +47,11 @@ export const LIMITS = {
 } as const;
 
 /**
- * The similarity cut-offs, on search_thoughts' cosine similarity: above SKIP a
- * thought is a duplicate; from MATCH to SKIP it adds to the thought it matches,
- * as evidence when that one is as long, as a revision when it is longer. Tuned
- * upstream for text-embedding-3-small; uncalibrated for the brain's own model
- * (README, "Deduplication"; measuring them is SMD-4216).
+ * The similarity cut-offs, on search_thoughts' cosine similarity: above `skip`
+ * a thought is a duplicate; from `match` to `skip` it adds to the thought it
+ * matches, as evidence when that one is as long, as a revision when it is
+ * longer. Tuned upstream for text-embedding-3-small; uncalibrated for the
+ * brain's own model (README, "Deduplication"; measuring them is SMD-4216).
  */
 export const SIMILARITY = { skip: 0.92, match: 0.85 } as const;
 /**
@@ -246,7 +248,7 @@ async function sha256(s: string): Promise<string> {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-/** The key a thought's text is told apart by within a job: lower-cased, its white space collapsed. */
+/** The key two texts are told apart by (said twice in a job, held word for word, quoted by the chunk): lower-cased, its white space collapsed. */
 const sameText = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
 
 // ── The tables ──────────────────────────────────────────────────────────────
@@ -279,7 +281,7 @@ const Job = z.object({
   completed_at: z.string().nullable(),
 });
 type Job = z.output<typeof Job>;
-/** A job's row as jobById and settle read it, its id as text. */
+/** A job's row as jobById, settle and list_jobs read it, its id as text. */
 type JobRow = Omit<Job, "created_at" | "completed_at"> & { created_at: Date; completed_at: Date | null };
 
 /** An item as get_job answers it. */
@@ -351,7 +353,7 @@ async function settle(sql: PluginSql, id: string, status: (typeof STATUSES)[numb
 /** What a job or an item records for a fault of the core's or the store's: its words go to the REST core's log, not to a read key. */
 const FAULT = "a fault of the core's or the store's (the REST core's log has it)";
 
-/** The job marked failed, with why; its items, if any, stay as they are. */
+/** The job marked failed, with why: while extracting or deciding, before it has items. */
 const failJob = (ctx: PluginContext, id: string, why: string, calls: number) =>
   ctx.db.tx((sql) => sql`UPDATE ingestion_jobs SET status = 'failed', error_message = ${why}, model_calls = ${calls}, completed_at = now() WHERE id = ${id}::bigint`);
 
@@ -360,12 +362,12 @@ const failJob = (ctx: PluginContext, id: string, why: string, calls: number) =>
 /** A decided item, before it is stored. */
 type Decided = Extracted & { action: (typeof ACTIONS)[number]; reason: string; status: "ready" | "failed"; matched: string | null; similarity: number | null; error: string | null };
 
-/** A core refusal while deciding or extracting that says a moment later may do: the whole request is the plugin's 503. */
+/** A core refusal that says a moment later may do, or a search whose vector was not made, while deciding or executing: the whole request is the plugin's 503. */
 export class Unavailable {
   constructor(readonly facts: Record<string, unknown>) {}
 }
 
-/** The trust words, lowest first (migration 073's ladder). */
+/** The trust words, lowest first (046's ladder, ob1_trust_ceiling's). */
 const TRUST_RANK: Record<string, number> = { ingested: 0, agent: 1, operator: 2 };
 /** The evidence entry's `source` when a lower-trust job's passage is appended to a higher-trust thought: a reader sees whose it is. */
 export const LOWER_TRUST_SOURCE = "smart_ingest, below this thought's trust";
@@ -383,12 +385,12 @@ const below = (mine: string | null, theirs: unknown) =>
  * highest cosine similarity at SIMILARITY.match or more; a keyword-only hit has
  * none and is passed over. A match above the job's captures' trust is never
  * superseded (the maintainer's calls, 2026-11-11): the passage is evidence for
- * it instead, whichever is longer (`lower_trust_than_match`). `trust` is what
+ * it instead, whichever is longer (`lower_trust_than_match`). `mine` is what
  * the job's captures are stamped with (ctx.caller.trust: the declaration
  * capped at the key's kind), so neither declaring none nor declaring more than
  * the key holds gets past it. Weighed again at the execute, as trusts move.
  */
-export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, seen: Set<string>, trust: string | null): Promise<Decided> {
+export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, seen: Set<string>, mine: string | null): Promise<Decided> {
   const none = { matched: null, similarity: null, error: null, status: "ready" as const };
   if (t.content.length < MIN_THOUGHT_LENGTH) return { ...t, ...none, action: "skip", reason: "quality_gate_short_content" };
   if (t.importance < MIN_IMPORTANCE) return { ...t, ...none, action: "skip", reason: "quality_gate_low_importance" };
@@ -402,16 +404,16 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   }
   const same = found.value.hits.find((h) => sameText(h.content) === key);
   if (same) return { ...t, ...none, matched: same.id, similarity: same.similarity, action: "skip", reason: "exact_duplicate" };
-  const failed = found.value.vectorFailed;
-  if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
+  const down = found.value.vectorFailed;
+  if (down) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: down.reason, base: down.base });
   let top: { id: string; content: string; similarity: number; trust: unknown } | null = null;
   for (const h of found.value.hits) {
-    if (h.similarity !== null && h.similarity >= SIMILARITY.match && (top === null || h.similarity > top.similarity)) top = { id: h.id, content: h.content, similarity: h.similarity, trust: (h.metadata as Record<string, unknown> | null)?.trust };
+    if (h.similarity !== null && h.similarity >= SIMILARITY.match && (top === null || h.similarity > top.similarity)) top = { id: h.id, content: h.content, similarity: h.similarity, trust: h.metadata?.trust };
   }
   if (top === null) return { ...t, ...none, action: "add", reason: "no_semantic_match" };
   const at = { ...none, matched: top.id, similarity: top.similarity };
   if (top.similarity > SIMILARITY.skip) return { ...t, ...at, action: "skip", reason: "semantic_duplicate" };
-  if (below(trust, top.trust)) return { ...t, ...at, action: "append_evidence", reason: "lower_trust_than_match" };
+  if (below(mine, top.trust)) return { ...t, ...at, action: "append_evidence", reason: "lower_trust_than_match" };
   if (top.content.length >= t.content.length) return { ...t, ...at, action: "append_evidence", reason: "existing_is_richer" };
   return { ...t, ...at, action: "create_revision", reason: "new_has_more_info" };
 }
@@ -419,6 +421,11 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
 /** What one item's execute did: its status, the thought it wrote or matched, why it failed, and (a revision weighed down) what it was done as. */
 type Done = { status: "executed" | "existed" | "failed"; result: string | null; error: string | null; as?: { action: "append_evidence"; reason: "lower_trust_than_match" } };
 const failed = (error: string): Done => ({ status: "failed", result: null, error });
+/** A core refusal that says a moment later may do pauses the job (Unavailable); any other fails the item. */
+const refusedBy = (name: string, r: { code: string; retryable: boolean }): Done => {
+  if (r.retryable) throw new Unavailable({ refused: r.code });
+  return failed(`${name} refused: ${r.code}`);
+};
 
 /** The thought's metadata: the job and item it came from, and what the caller called its source. At most five of capture's eight keys. */
 const metadataOf = (job: Job, item: ItemRow) => ({
@@ -460,30 +467,12 @@ async function heldText(ctx: Pick<PluginContext, "call">, item: ItemRow, key: st
   const hit = found.value.hits.find((h) => sameText(h.content) === sameText(item.content));
   // Own only if it keeps the item's key and this caller's key wrote its text: a re-capture of another's text (its look
   // missed, a fault after) records the key on that thought but leaves its writer, whose text it stays.
-  const m = (hit?.metadata ?? {}) as Record<string, unknown>;
-  if (hit) return { id: hit.id, own: m.client_key === key && m.actor_name === caller };
-  const failed = found.value.vectorFailed;
-  if (failed) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: failed.reason, base: failed.base });
+  if (hit) return { id: hit.id, own: hit.metadata?.client_key === key && hit.metadata?.actor_name === caller };
+  const down = found.value.vectorFailed;
+  if (down) throw new Unavailable({ message: "the brain's embedding provider did not answer", reason: down.reason, base: down.base });
   return null;
 }
 
-/** A core refusal that says a moment later may do pauses the job (Unavailable); any other fails the item. */
-const refusedBy = (name: string, r: { code: string; retryable: boolean }): Done => {
-  if (r.retryable) throw new Unavailable({ refused: r.code });
-  return failed(`${name} refused: ${r.code}`);
-};
-
-/**
- * One item carried out: as the dry run decided, counted by what was done
- * (SMD-2154). An add or a revision whose text the brain holds by now (a
- * capture since the dry run, or another job's) writes nothing: the add is
- * `existed`, the revision fails; one this item wrote itself, before a fault,
- * is `executed`. A held text the look does not find (captured in the moment
- * between the look and the capture, past the search's first SEARCH_HITS, or
- * one the key cannot read) is a re-capture, told by the capture's `existed`,
- * and merged into as any capture of known text is. A refusal the core says is
- * worth retrying throws Unavailable: the job pauses, its item still ready.
- */
 /**
  * Whether the matched thought is now above the job's captures' trust: read at
  * the execute, since its trust, or the key's kind, may have moved since the dry
@@ -500,6 +489,17 @@ async function aboveNow(ctx: Pick<PluginContext, "call">, id: string, mine: stri
   return below(mine, got.value.metadata?.trust);
 }
 
+/**
+ * One item carried out: as the dry run decided, counted by what was done
+ * (SMD-2154). An add or a revision whose text the brain holds by now (a
+ * capture since the dry run, or another job's) writes nothing: the add is
+ * `existed`, the revision fails; one this item wrote itself, before a fault,
+ * is `executed`. A held text the look does not find (captured in the moment
+ * between the look and the capture, past the search's first SEARCH_HITS, or
+ * one the key cannot read) is a re-capture, told by the capture's `existed`,
+ * and merged into as any capture of known text is. A refusal the core says is
+ * worth retrying throws Unavailable: the job pauses, its item still ready.
+ */
 export async function execute(ctx: Pick<PluginContext, "call" | "caller">, job: Job, item: ItemRow, key: string, mine: string | null): Promise<Done> {
   const trust = job.trust ? { trust: job.trust } : {};
   const appendTo = async (id: string, marked: boolean): Promise<Done> => {
@@ -599,7 +599,7 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
-const JobId = z.string().regex(/^[1-9][0-9]{0,17}$/, "a job id: a whole number from 1").describe("The job's id, as ingest answered it");
+const JobId = z.string().regex(/^[1-9][0-9]{0,17}$/, "a job id: a whole number from 1").describe("The job's id, as extract answered it");
 const Meta = z.union([text(LIMITS.metaValue), z.number(), z.boolean(), z.null()]);
 const SourceMetadata = z
   .record(text(LIMITS.metaKey), Meta)
@@ -633,7 +633,7 @@ export default definePlugin({
   operations: {
     extract: operation({
       title: "Extract a document's thoughts",
-      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess; a failed job answers no one, so the same call after a refusal runs again. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer (while executing, the job paused for execute_job), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. RESTRICTED_CONTENT (422) refuses a text holding what looks like a key, a card or account number or a national id (the old server's patterns, read loosely). A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest; it also answers a write the core says to retry (a thought kept busy). import_key counts as text alone.`,
+      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess (import_key counts as text alone); a failed job answers no one, so the same call after a refusal runs again. RESTRICTED_CONTENT (422) refuses, before any model sees it, a text holding what looks like a national id, a card or account number, a key or a password (the old server's patterns, read loosely). Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, or the core says a write may land a moment later (a thought kept busy), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest.`,
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -750,9 +750,9 @@ export default definePlugin({
           // The decisions, each against the brain as it is now, weighed at the trust the job's captures get.
           const seen = new Set<string>();
           const decided: Decided[] = [];
-          const effective = await ctx.caller.trust(req.trust ?? null);
+          const mine = await ctx.caller.trust(req.trust ?? null);
           try {
-            for (const t of extracted) decided.push(await decide(ctx, t, seen, effective));
+            for (const t of extracted) decided.push(await decide(ctx, t, seen, mine));
           } catch (e) {
             if (!(e instanceof Unavailable)) throw e;
             await failJob(ctx, job.job_id, "the search was unavailable while deciding", calls);
@@ -820,7 +820,7 @@ export default definePlugin({
     }),
     list_jobs: operation({
       title: "Smart-ingest jobs",
-      description: "This key's jobs (a read key, which makes none, has none), newest first, at most 200 (no cursor: status narrows), each with its status and counts: what was extracted, added, skipped, appended, revised, already there (existed) and failed. status narrows to one status (dry_run_complete: dry runs, and paused jobs, waiting for execute_job; failed: with why). truncated says there are more than limit. get_job reads one job's items.",
+      description: "This key's jobs (a read key, which makes none, has none), newest first, at most 200 (no cursor), each with its status and counts: what was extracted, added, skipped, appended, revised, already there (existed) and failed. status narrows to one status (dry_run_complete: dry runs, and paused jobs, waiting for execute_job; failed: with why). truncated says there are more than limit. get_job reads one job's items.",
       scope: "read",
       annotations: { openWorldHint: false },
       method: "GET",
