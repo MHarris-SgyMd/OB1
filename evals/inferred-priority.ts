@@ -194,7 +194,7 @@ export function kappa(a: readonly string[], b: readonly string[]): number | null
   return pe === 1 ? null : (po - pe) / (1 - pe);
 }
 
-/** A label's category for κ: its first level after the ceiling (or "-"), and whether it states a due day. */
+/** A label's categories for κ: its lowest level after the ceiling (or "-"), and whether it states a due day at all. */
 export const levelCategory = (l: Label): string => (l.levels.length === 0 ? "-" : String(Math.min(Math.min(...l.levels), CEILING)));
 export const dueCategory = (l: Label): string => (l.dues.length === 0 ? "-" : "due");
 
@@ -228,9 +228,9 @@ export function renderSheet(items: readonly { id: string; at: Date; text: string
 }
 
 /**
- * A filled sheet read back: each item's id and label, its due days counted from its capture day (also returned, for
- * the caller to tie to the run). Refuses a sheet with
- * a blank or unreadable answer, a repeated id, or an item missing its fields, naming each.
+ * A filled sheet read back: each item's id and label, its due days counted from its capture day, and that day, for the
+ * caller to tie to the run. Refuses, naming each, an item with a blank or unreadable answer, a field given twice, no
+ * captured line, or no text marker before the next item, and an id listed twice.
  */
 export function parseSheet(text: string): { labels: Map<string, Label>; days: Map<string, string>; problems: string[] } {
   const labels = new Map<string, Label>(), days = new Map<string, string>(), problems: string[] = [];

@@ -25,11 +25,12 @@
  *
  *   bun eval-inferred-priority.ts --draw <run.jsonl> --sheet <sheet.md> (--texts <texts.jsonl> | with DATABASE_URL)
  *       The sample (DRAW: 60 calls and 60 others), shuffled, as a labelling sheet: each text and its capture day,
- *       never the model's call. Outside the repo too. Copy it once per rater.
+ *       never the model's call. Outside any repo too. Copy it once per rater.
  *
  *   bun eval-inferred-priority.ts --freeze <run.jsonl> <gold-sheet.md> <second-sheet.md> --note "<who labelled, when>"
  *       The filled sheets and the run → fixtures/inferred-priority.json (ids and numbers only). Refuses a sheet with
- *       a blank or unreadable answer, or one that is not the draw.
+ *       a blank or unreadable answer, one that is not the draw, or a captured day that is not the run's, and refuses
+ *       everything at a registration other than the pinned one.
  *
  *   bun eval-inferred-priority.ts
  *       The report from the fixture: each half's precision, per writer, High where none was read, the misses, the
@@ -157,7 +158,7 @@ async function texts(): Promise<Text[]> {
   if (!url) throw new Error("give --texts <texts.jsonl> or DATABASE_URL");
   const sql = new SQL({ url, max: 1, connection: { default_transaction_read_only: "on" } });
   try {
-    return ((await sql.unsafe(CAPTURES_SQL)) as { json_build_object: string }[]).map((r) => JSON.parse(Object.values(r)[0] as string) as Text);
+    return ((await sql.unsafe(CAPTURES_SQL)) as { json_build_object: string }[]).map((r) => JSON.parse(r.json_build_object) as Text);
   } finally {
     await sql.close();
   }
