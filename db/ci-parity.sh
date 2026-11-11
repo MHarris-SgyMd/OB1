@@ -287,6 +287,9 @@ free_rows() {
   nodb .                 deploy/forwarder.ts --self-check
   nodb .                 deploy/instance.ts --self-check
   nodb .                 deploy/edge/edge.ts --self-check
+  nodb .                 deploy/federated/broker.ts --self-check
+  nodb .                 deploy/federated/federated.ts --self-check
+  nodb .                 deploy/federated/test-broker.ts
   nodb .                 scripts/ci-step-times.ts --self-check
   nodb .                 scripts/suite-sections.ts --self-check
   nodb .                 scripts/agent-runner/dry-run.ts --self-check

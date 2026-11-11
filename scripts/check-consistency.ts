@@ -7264,7 +7264,7 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
  * Fork Checks run, as Brain Checks was named, before this). A disabled healthcheck (`disable: true`, or a test of
  * `NONE`) has nothing to probe and is passed over.
  */
-const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml"];
+const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml", "deploy/federated/compose.yaml"];
 /** A compose duration (`1m30s`, `10s`, `500ms`) in milliseconds; NaN where it is not one. */
 function composeDurationMs(v: unknown): number {
   const parts = typeof v === "string" ? [...v.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s|us|ns)/g)] : [];
