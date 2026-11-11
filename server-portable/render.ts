@@ -27,7 +27,7 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, NO_AGENT_ID, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
@@ -1970,7 +1970,7 @@ export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>)
     const before = v.previous ? `${weightsText(v.previous)}, the rest built in` : "the built-in weights";
     return `${v.weights ? "Set" : "Cleared"} the operator's priority weights: every read now takes ${now} as its defaults, and a call's own weights still override them by name. Before: ${before}.`
       + (v.weights ? " A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it." : "");
-  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.kind === NO_AGENT_ID
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
       ? `Refused: only a key the operator classified \`operator\` may set the priority weights, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
     : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
     : r.code === "PRIORITY_UNATTRIBUTED"
@@ -1989,7 +1989,7 @@ export const setWeightsHint = (msg: string): string =>
     : "";
 
 /**
- * The fault every priority read gives while the operator's stored weights are refused (migration 132): a later
+ * The fault every ranked priority read gives while the operator's stored weights are refused (migration 132): a later
  * migration narrowed a range under them, or a raw write. The read fails rather than order by weights the operator did
  * not choose; this says how to mend it.
  */
@@ -1997,7 +1997,7 @@ export const weightSettingHint = (msg: string): string =>
   /the operator's priority weights \(set .*\) are refused/.test(msg)
     ? " — an operator key sets them again, or clears them with {}, through set_priority_weights (REST POST /v1/priority-weights); brain_info shows the setting"
     : /permission denied for table priority_weight_settings/i.test(msg)
-    ? " — every priority read takes the operator's weights from priority_weight_settings (migration 132), and the server's role needs the priority group's grants on it (db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    ? " — every effective priority takes the operator's weights from priority_weight_settings (migration 132), and the server's role needs the priority group's grants on it (db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
     : "";
 
 /** reset_capture_stamp's fault: a database before 086 has no such function. */

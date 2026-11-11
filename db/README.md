@@ -2511,7 +2511,7 @@ its weights overrides by name over the brain's built-in weights. The maintainer
 chose (2026-11-11) that an operator key alone sets them, by `set_priority_weights`
 (the MCP tool and `POST /v1/priority-weights`, or the function in psql with the
 operator key's name and agent id as `p_actor`), and that a bad setting is refused
-when written and fails every read if one is stored anyway. 128's constant moves to
+when written and fails every read that would order by it if one is stored anyway. 128's constant moves to
 `ob1_priority_builtin()`, which a retune of the brain's own defaults now replaces;
 `ob1_priority_defaults()` lays the standing setting over it, so `effective_priority`,
 the agenda, search's ranking and both spans take it, and a call's own weights still
@@ -2521,12 +2521,14 @@ probe by probe. A row is history: it changes only to end, once, when the next
 setting or a clear (`{}`) replaces it, and a DELETE or TRUNCATE is refused; a row,
 and its end, name a key the registry classifies operator, by its agent id. A
 stored setting the check refuses (a later migration narrowing a range, a raw write
-with the trigger off) raises 22000 on every read, naming the setting and the weight;
+with the trigger off) raises 22000 on every effective priority, naming the setting and
+the weight: the agenda and a ranked search fail, and a search's priority labels and
+`plan_context`'s board say only that they were not read;
 `priority_weight_setting()` says it without raising, for `brain_info`. Its own
 table rather than an `ob1_config` row: the server's roles hold `SELECT` alone on
-`ob1_config`. The priority group gains `SELECT, INSERT, UPDATE` on the table, so a
-role granted that group before 132 must be granted again (`migrate.ts --grant`)
-or every priority read fails naming it. Needs 008, 046, 061, 116, 128 and 131; a
+`ob1_config`. The priority group gains `SELECT, INSERT, UPDATE` on the table, and
+132 grants them to each role that holds the group's grants on `priority_assertions`
+already, as 020 carries a replaced function's `EXECUTE`. Needs 008, 046, 061, 116, 128 and 131; a
 re-apply keeps the rows. test-schema [119], test-upgrade [20bw].
 
 Migration 131 adds `ob1_priority_span(weights)` (SMD-4193 PR 1): 128's span

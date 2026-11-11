@@ -226,6 +226,41 @@ const { embeddings: embEndpoint, chat: chatEndpoint } = resolveProviderEndpoints
 /** Whether the chat knobs name an endpoint of their own; the report then carries a provider and a credential row for it. */
 const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
 
+
+/**
+ * What a server role without some of the priority group's grants fails, in preflight's priority row (SMD-3664; 117's
+ * open items; 132's operator's weights). A read (priority_history) needs SELECT on the assertions and on what keys an
+ * item (ob1_entities); the writers need every grant (review pass 3: the history was said to fail for a missing write).
+ * 117's open-item reads are asked only of an item of kind item, by set_priority and priority_history alone (SMD-3665
+ * review pass 2): open_items for an item's existence, open_item_events only for whether a capture-only key owns one
+ * (its set_priority) — review pass 5. The agenda (SMD-3669) reads priority_assertions and open_items on every call;
+ * plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure. 132's
+ * setting is read by every ranked priority read (SELECT) and written by set_priority_weights (INSERT, UPDATE), and is
+ * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
+ * review pass 2).
+ */
+function priorityUngrantedWords(ungranted: readonly string[]): string {
+  const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
+  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings "));
+  const clauses: string[] = [];
+  if (rest.length) {
+    const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
+    const eventsOnly = rest.every((g) => g.startsWith("open_item_events "));
+    const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item) fails"
+      : itemOnly ? "set_priority and priority_history on an open item (kind item) fail"
+      : rest.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history fail" : "set_priority and clear_priority fail";
+    const agenda = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT");
+    clauses.push(`${failing} naming the table${agenda ? ", and so does agenda (SMD-3669)" : ""}`);
+  }
+  if (weights.length) {
+    clauses.push(weights.includes("priority_weight_settings SELECT")
+      ? "every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings (migration 132)"
+      : "set_priority_weights fails naming priority_weight_settings (migration 132)");
+  }
+  const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT");
+  return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
+}
+
 /**
  * A loopback or private-network endpoint — Ollama, LM Studio, vLLM on the same
  * host or compose network — needs no credential. Anything reachable over the
@@ -3185,30 +3220,7 @@ if (configFailed) {
             add("priority", "fail", `migration 116's ${pr.missing.join(", ")} missing under 116's signature; set_priority, clear_priority and priority_history call them`,
                 ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
           } else if (pr.ungranted?.length) {
-            // A read (priority_history) needs SELECT on the assertions and on what keys an item (ob1_entities); the
-            // writers need every grant (review pass 3: the history was said to fail for a missing write). 117's
-            // open-item reads are asked only of an item of kind item, by set_priority and priority_history alone
-            // (SMD-3665 review pass 2).
-            // open_items is read for an item's existence (set_priority, priority_history); open_item_events only for
-            // whether a capture-only key owns one (its set_priority) — review pass 5.
-            // 132's operator's weights (SMD-4193 PR 2): every effective priority reads the standing setting (SELECT),
-            // and set_priority_weights writes it (INSERT, UPDATE). Said apart from 116's and 117's.
-            const weights = pr.ungranted.filter((g) => g.startsWith("priority_weight_settings "));
-            const rest = pr.ungranted.filter((g) => !g.startsWith("priority_weight_settings "));
-            const weightsRead = weights.includes("priority_weight_settings SELECT");
-            const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
-            const eventsOnly = rest.every((g) => g.startsWith("open_item_events "));
-            const base = rest.length === 0 ? null
-              : eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
-              : itemOnly ? "set_priority and priority_history on an open item (kind item)"
-              : rest.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
-            const failing = weights.length === 0 ? base! : base === null ? "set_priority_weights" : `${base.replace(/ and (?=[^,]*$)/, ", ")} and set_priority_weights`;
-            // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
-            // alone was left out, and the items row said otherwise); since 132 every priority read reads the setting.
-            // plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure.
-            const also = weightsRead ? ", and so does every priority read — agenda and search_thoughts' priority_weight and min_priority (migration 132); plan_context answers with no board (SMD-2684)"
-              : rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669); plan_context answers with no board (SMD-2684)" : ", and nothing else does";
-            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${also}`,
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${priorityUngrantedWords(pr.ungranted)}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");

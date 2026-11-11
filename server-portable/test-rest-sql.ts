@@ -3018,7 +3018,7 @@ console.log("\n[19c] The operator's priority weights through both doors (SMD-419
   const [brokenR, brokenM, brokenS, brokenInfo] = [await rest("GET", agendaQ), await mcp("agenda", { project: "Agenda rest [17]" }), await mcp("search_thoughts", ask), await mcp("brain_info", {})];
   assert(brokenR.status === 500 && brokenM.isError && /^Error: the operator's priority weights \(set \S+ by writer\) are refused, so no effective priority is read: a weight out of range: soon /.test(brokenM.text)
       && /through set_priority_weights \(REST POST \/v1\/priority-weights\); brain_info shows the setting$/.test(brokenM.text) && brokenS.isError && /brain_info shows the setting$/.test(brokenS.text)
-      && /\nPriority weights: +the operator's, REFUSED, so every priority read fails: soon 20 /.test(brokenInfo.text),
+      && /\nPriority weights: +the operator's, REFUSED, so every ranked priority read fails: soon 20 /.test(brokenInfo.text),
     `a stored setting the database refuses fails the agenda (500 over REST) and a ranked search, each saying the setting and its mend; brain_info says it refused (${brokenR.status} | ${brokenM.text.slice(0, 160)})`);
   const clearR = await rest("POST", "/v1/priority-weights", { weights: {} });
   assert(clearR.status === 200 && clearR.body.changed === true && clearR.body.weights === null && same(clearR.body.previous, { soon: 20 })

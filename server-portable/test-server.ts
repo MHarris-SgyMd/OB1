@@ -7615,12 +7615,16 @@ console.log("\n[36d] The operator's priority weights in the core and the words (
     priorityWeightsLine({ priorityWeights: { standing: refusedS }, unread: {} }),
   ];
   const badRead = [{ weights: "x" }, { weights: [1] }, [], 3].map((r) => { try { weightSettingValue(r); return "read"; } catch { return "threw"; } });
+  // A raw write's values and name are unbounded: the row cuts each, as the set reply cuts the name (review pass 2).
+  const longLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: "y".repeat(500) }, set_at: "2026-11-11T03:30:44Z", set_by: "k".repeat(200), refused: "r".repeat(1000) }) }, unread: {} });
+  assert(longLine.length < 700 && longLine.includes(`soon "${"y".repeat(38)}…`) && longLine.includes(` by ${"k".repeat(79)}…)`) && longLine.includes(`${"r".repeat(299)}…. An operator key`),
+    `brain_info's row cuts a stored value to 40 characters, the setter's name to 80 and the refusal to 300 (${longLine.length} characters)`);
   // A refused setting holding what no weight may (a null, a string) is read and said, never left unread (review pass 1).
   const oddLine = priorityWeightsLine({ priorityWeights: { standing: weightSettingValue({ weights: { soon: null, week: "x" }, set_at: "2026-11-11T03:30:44Z", set_by: "op-key", refused: "a weight out of range: soon, week (…)" }) }, unread: {} });
   assert(lines[0] === "built in (no operator's setting before migration 132)" && /^\? \(priority_weight_settings /.test(lines[1]) && lines[2] === "built in (no operator's setting)"
       && lines[3] === "the operator's: overdue 3, the rest built in (set 2026-11-11T03:30:44.937Z by op-key)"
-      && lines[4] === "the operator's, REFUSED, so every priority read fails: soon 20 (set 2026-11-11T03:30:44.937Z by op-key): a weight out of range: soon (…). An operator key sets them again, or clears them with {}, through set_priority_weights"
-      && badRead.every((r) => r === "threw") && oddLine.startsWith(`the operator's, REFUSED, so every priority read fails: soon null, week "x" (set 2026-11-11T03:30:44.000Z by op-key)`),
+      && lines[4] === "the operator's, REFUSED, so every ranked priority read fails: soon 20 (set 2026-11-11T03:30:44.937Z by op-key): a weight out of range: soon (…). An operator key sets them again, or clears them with {}, through set_priority_weights"
+      && badRead.every((r) => r === "threw") && oddLine.startsWith(`the operator's, REFUSED, so every ranked priority read fails: soon null, week "x" (set 2026-11-11T03:30:44.000Z by op-key)`),
     `brain_info's Priority weights row: before 132, unread, built in, the operator's, the operator's refused, a refused one holding a null and a string; a read answering no setting throws (${lines.join(" | ")} | ${oddLine.slice(0, 90)} | ${badRead.join(",")})`);
 }
 

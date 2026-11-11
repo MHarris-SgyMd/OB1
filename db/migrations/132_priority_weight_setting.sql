@@ -14,7 +14,7 @@
 --   The maintainer chose (2026-11-11) that the setting is set by a SQL
 --   function and by an operation an operator key alone may call, and that a
 --   bad setting is refused when written and, if one is stored anyway, fails
---   every read loudly rather than being skipped.
+--   every read that would order by it loudly rather than being skipped.
 --   * priority_weight_settings: the operator's settings, one row each, a
 --     standing one at most (ended_at NULL). A row is history: it changes only
 --     to end, once, when the next setting or a clear replaces it; a DELETE or
@@ -38,8 +38,10 @@
 --     spans. A stored setting the refusal names (a later migration narrowed a
 --     range, or a raw write with the trigger off) raises data_exception
 --     naming the setting and the weight, so no read orders by weights the
---     operator did not choose; 22000, not 22023, so the server answers it as
---     the brain's fault and never as the caller's bad weight.
+--     operator did not choose: the agenda and a ranked search fail, and a
+--     search's labels and plan_context's board say they were not read (review
+--     pass 2); 22000, not 22023, so the server answers it as the brain's fault
+--     and never as the caller's bad weight.
 --   * set_priority_weights(weights, actor): the operator's write. Only a key
 --     the registry classifies operator, named by its agent id (115's forced
 --     release, SMD-2608's rule: a name alone lends no kind); any other answers
@@ -52,7 +54,9 @@
 -- WHO READS
 --   Every role that reads an effective priority now reads the table: the
 --   `priority` group (db/config.mjs) gains SELECT, INSERT and UPDATE on it,
---   which the server roles that call effective_priority already hold. As for
+--   and this file grants them to each role holding the group's grants on
+--   priority_assertions already, so no role's priority reads fail on the
+--   upgrade (review pass 2). As for
 --   every core table a group writes, a role holding it can still write the
 --   table directly; the trigger holds what a row may be, the setting standing
 --   when written and an operator key's agent id on it and on its end, and the
@@ -247,6 +251,30 @@ CREATE OR REPLACE TRIGGER priority_weight_settings_no_truncate
   BEFORE TRUNCATE ON priority_weight_settings
   FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_weight_settings_guard();
 
+-- The priority group's grant, carried to the roles that hold it already
+-- (review pass 2): every effective priority reads this table from here on, so
+-- a role granted the group before 132 would fail every priority read until
+-- `migrate.ts --grant` ran again. A role holding SELECT on
+-- priority_assertions gets SELECT here, and one holding INSERT there gets
+-- INSERT and UPDATE, as db/config.mjs's group lists them; the owner holds
+-- every privilege already. As 020 carries a replaced function's EXECUTE. A
+-- re-apply grants what is held already, which changes nothing.
+DO $grant$
+DECLARE
+  v_item record;
+BEGIN
+  FOR v_item IN
+    SELECT DISTINCT a.grantee, a.privilege_type
+      FROM pg_class c, aclexplode(c.relacl) AS a
+     WHERE c.oid = 'priority_assertions'::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('SELECT', 'INSERT')
+  LOOP
+    EXECUTE format('GRANT %s ON priority_weight_settings TO %s',
+                   CASE v_item.privilege_type WHEN 'SELECT' THEN 'SELECT' ELSE 'INSERT, UPDATE' END,
+                   CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
+  END LOOP;
+END
+$grant$;
+
 -- ---------------------------------------------------------------------------
 -- ob1_priority_defaults — the built-in weights under the operator's setting
 -- ---------------------------------------------------------------------------
@@ -280,7 +308,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_priority_defaults() IS
-  'effective_priority''s default weights: ob1_priority_builtin() with the operator''s standing setting (priority_weight_settings) laid over them by name; the built-in weights alone when none stands. effective_priority reads them, a call''s own weights overriding them by name, and ob1_priority_span the largest sum they allow. A stored setting ob1_priority_weights_refusal names raises 22000 naming the setting and the weight, so every read fails rather than order by weights the operator did not choose. Migration 128 / SMD-4194; the operator''s setting, migration 132 / SMD-4193.';
+  'effective_priority''s default weights: ob1_priority_builtin() with the operator''s standing setting (priority_weight_settings) laid over them by name; the built-in weights alone when none stands. effective_priority reads them, a call''s own weights overriding them by name, and ob1_priority_span the largest sum they allow. A stored setting ob1_priority_weights_refusal names raises 22000 naming the setting and the weight, so every read that orders by them fails rather than order by weights the operator did not choose. Migration 128 / SMD-4194; the operator''s setting, migration 132 / SMD-4193.';
 
 -- ---------------------------------------------------------------------------
 -- set_priority_weights — the operator's write
@@ -355,4 +383,4 @@ AS $$
    WHERE s.ended_at IS NULL
 $$;
 COMMENT ON FUNCTION priority_weight_setting() IS
-  'The operator''s standing priority weights as {weights, set_at, set_by, refused} — refused naming what is wrong with them in effective_priority''s words, which fails every read, else NULL — or NULL when none stands and the built-in weights are the defaults. Never raises on a bad setting: brain_info reads it to say so. Migration 132 / SMD-4193.';
+  'The operator''s standing priority weights as {weights, set_at, set_by, refused} — refused naming what is wrong with them in effective_priority''s words, which fails every effective priority read, else NULL — or NULL when none stands and the built-in weights are the defaults. Never raises on a bad setting: brain_info reads it to say so. Migration 132 / SMD-4193.';

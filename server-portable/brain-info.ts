@@ -1939,13 +1939,13 @@ export type LedgerStatus = "current" | "behind" | "ahead" | null;
 /**
  * The operator's priority weights (132, SMD-4193 PR 2): overrides by name over the built-in weights, which every read
  * takes as its defaults. `setAt` and `setBy` say when and by which operator key; `refused`, what is wrong with a stored
- * setting in effective_priority's words (every priority read fails while it stands), else null.
+ * setting in effective_priority's words (every ranked priority read fails while it stands), else null.
  */
 export type PriorityWeightSetting = { weights: Record<string, unknown>; setAt: string | null; setBy: string | null; refused: string | null };
 /**
  * priority_weight_setting()'s jsonb → the record's setting; null when none stands. Its weights are kept as stored,
  * whatever they hold: a refused setting (a null, a string, past a range) is the one this row exists to say (review
- * pass 1: a read refusing it left the row unread while every priority read failed). No setting at all throws.
+ * pass 1: a read refusing it left the row unread while every ranked priority read failed). No setting at all throws.
  */
 export function weightSettingValue(r: unknown): PriorityWeightSetting | null {
   if (r === null || r === undefined) return null;
@@ -2371,7 +2371,7 @@ function relationsLine(db: DatabaseSummary): string {
   return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})${apart}`;
 }
 
-/** The operator's priority weights (SMD-4193 PR 2): built in, the operator's, or the operator's refused (every priority read fails). */
+/** The operator's priority weights (SMD-4193 PR 2): built in, the operator's, or the operator's refused (every ranked priority read fails). */
 export function priorityWeightsLine(db: Pick<DatabaseSummary, "priorityWeights" | "unread">): string {
   const w = db.priorityWeights;
   if (w === null) {
@@ -2381,11 +2381,14 @@ export function priorityWeightsLine(db: Pick<DatabaseSummary, "priorityWeights" 
   if (w.standing === null) return "built in (no operator's setting)";
   const s = w.standing;
   // A number or a boolean as written; anything else a stored setting holds as its JSON, so a null or a string shows.
-  const set = Object.entries(s.weights).map(([k, v]) => `${k} ${typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(v)}`).join(", ");
-  const when = `set ${s.setAt ?? "?"}${s.setBy ? ` by ${s.setBy}` : ""}`;
+  // Each cut, and the name and the refusal, as the set reply cuts the name (review pass 2): a raw write is the case
+  // this row exists for, and a raw write's values are unbounded. JSON escapes what a line cannot hold.
+  const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  const set = Object.entries(s.weights).slice(0, 20).map(([k, v]) => `${cut(JSON.stringify(k).slice(1, -1), 40)} ${typeof v === "number" || typeof v === "boolean" ? String(v) : cut(JSON.stringify(v) ?? "?", 40)}`).join(", ");
+  const when = `set ${s.setAt ?? "?"}${s.setBy ? ` by ${cut(JSON.stringify(s.setBy).slice(1, -1), 80)}` : ""}`;
   return s.refused === null
     ? `the operator's: ${set}, the rest built in (${when})`
-    : `the operator's, REFUSED, so every priority read fails: ${set} (${when}): ${s.refused}. An operator key sets them again, or clears them with {}, through set_priority_weights`;
+    : `the operator's, REFUSED, so every ranked priority read fails: ${set} (${when}): ${cut(s.refused, 300)}. An operator key sets them again, or clears them with {}, through set_priority_weights`;
 }
 
 /**

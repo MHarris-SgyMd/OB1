@@ -6034,6 +6034,12 @@ console.log("\n[20bw] Migration 132: onto a populated brain at the file before i
   const set = async (w: string | null) => ((await sql`SELECT set_priority_weights((${w}::text)::jsonb, (${OP}::text)::jsonb) AS r`)[0] as { r: Record<string, unknown> }).r;
   const span = async () => Number((await sql`SELECT ob1_priority_span()::text AS s`)[0].s);
   const before = read(await agenda(null));
+  // Roles granted 116's priority group before 132 (review pass 2): a writer's (SELECT, INSERT, UPDATE on the
+  // assertions), a reader's (SELECT alone), and one holding none of it.
+  for (const r of ["ob1_upgrade_132_writer", "ob1_upgrade_132_reader", "ob1_upgrade_132_none"]) await sql.unsafe(`CREATE ROLE ${r} NOLOGIN`);
+  await sql.unsafe(`GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ob1_upgrade_132_writer; GRANT SELECT ON priority_assertions TO ob1_upgrade_132_reader`);
+  const held = async (role: string) => (await Promise.all(["SELECT", "INSERT", "UPDATE", "DELETE"].map(async (p) =>
+    (await sql`SELECT has_table_privilege(${role}, 'priority_weight_settings', ${p}) AS h`)[0].h ? p : null))).filter(Boolean).join(",");
 
   // Without 131's span of a read's weights: refused by name, nothing made.
   await sql`ALTER FUNCTION ob1_priority_span(jsonb) RENAME TO ob1_priority_span_away`;
@@ -6049,6 +6055,9 @@ console.log("\n[20bw] Migration 132: onto a populated brain at the file before i
   assert(await table() && before === "SMD-9751 3, SMD-9752 2.6" && after === before && span0 === 5.8 && first.ok === true && first.changed === true
          && operator === "SMD-9752 5, SMD-9751 3" && spanW === 9 && overridden === before,
     `applied: with no setting every read as before; the operator's 122's weights put the overdue Medium above the High for every reader and the span at 9; a call's 127 weights read as before (${before} → ${operator} | ${overridden})`);
+  const grants = { writer: await held("ob1_upgrade_132_writer"), reader: await held("ob1_upgrade_132_reader"), none: await held("ob1_upgrade_132_none") };
+  assert(grants.writer === "SELECT,INSERT,UPDATE" && grants.reader === "SELECT" && grants.none === "",
+    `the file grants its table to the roles holding the priority group already: a writer SELECT, INSERT and UPDATE, a reader SELECT, a role without the group nothing, and DELETE to none (${JSON.stringify(grants)})`);
 
   // A re-apply with a setting standing: the rows kept, the same read; then a clear restores the read.
   const rowsBefore = Number((await sql`SELECT count(*)::int AS n FROM priority_weight_settings`)[0].n);
@@ -6057,6 +6066,7 @@ console.log("\n[20bw] Migration 132: onto a populated brain at the file before i
   const cleared = await set("{}");
   assert(reapplied === operator && rowsAfter === rowsBefore && rowsAfter === 1 && cleared.changed === true && read(await agenda(null)) === before && await span() === 5.8,
     `a re-apply is a no-op, the setting standing and its read the same; {} clears it and the read is as before (${reapplied} | ${rowsAfter} rows)`);
+  for (const r of ["ob1_upgrade_132_writer", "ob1_upgrade_132_reader", "ob1_upgrade_132_none"]) await sql.unsafe(`DROP OWNED BY ${r}; DROP ROLE ${r}`);
   await sql.close();
 }
 

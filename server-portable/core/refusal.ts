@@ -10,9 +10,6 @@ import type { ItemProblem } from "../open-items.ts";
 import type { StandingFlag } from "../standing.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
-/** REFUSED_NOT_OPERATOR's kind for a principal that reached the server with no agent id: no registry kind, so no operator (SMD-4193 PR 2). */
-export const NO_AGENT_ID = "no-agent-id";
-
 /**
  * Every refusal an operation returns. The SMD-1978 codes the session hook keys
  * on keep their names; the rest name refusals that carried no code before
@@ -55,7 +52,7 @@ export type Refusal =
   | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[] } // statements in other thoughts rest on it (042)
   | { code: "REFUSED"; retryable: false; error: string }              // a refusal the store named that this server does not know
   // reset_capture_stamp (086, SMD-2744).
-  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is, NO_AGENT_ID when it came with no agent id), or is capture-only
+  | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null; unidentified?: true } // the key is not one the registry classifies operator (kind: what it is), or is capture-only; unidentified: it reached the server with no agent id, so it has no registry kind (set_priority_weights, SMD-4193 PR 2)
   | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
   // Work claims (115, SMD-3598): claim_work, renew_claim, release_claim. Never a token: 115 returns one only to the
   // caller who claimed, in the value, and no refusal carries one.

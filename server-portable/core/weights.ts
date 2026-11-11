@@ -8,7 +8,7 @@
 import type { PriorityWeights } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
-import { NO_AGENT_ID, ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
+import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { PRIORITY_WEIGHT_NAMES, type Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
 import { unattributedAs } from "./caller.ts";
@@ -47,7 +47,7 @@ export async function setPriorityWeights(ctx: Ctx, principal: Principal, { weigh
   // be the operator's already (review pass 1).
   const away = unattributedAs("PRIORITY_UNATTRIBUTED", principal);
   if (away) return away;
-  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: NO_AGENT_ID });
+  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true });
   const result = await (await ctx.store()).setPriorityWeights({ weights: Object.keys(weights).length === 0 ? null : weights, actor: actorOf(ctx, principal) });
   if (!result.ok) {
     if (result.error === "NOT_OPERATOR") return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: result.kind });

@@ -1294,8 +1294,9 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   previous, setAt, setBy, caller}`: `changed` false means the weights given were those
   standing, and nothing was written; a replaced setting stays as history.
   `brain_info`'s `database.priorityWeights` shows the one standing. A stored setting
-  the database refuses fails every priority read (500, its message naming the setting
-  and the weight) until an operator sets it again or clears it.
+  the database refuses fails the agenda and a ranked search (500, its message naming
+  the setting and the weight) until an operator sets it again or clears it; a search's
+  priority labels and `plan_context`'s board say only that they were not read.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while
