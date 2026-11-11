@@ -18826,7 +18826,7 @@ if (want("18")) {
   const schemaFiles = communitySchemaFiles();
   // The recipe schemas (SMD-1810; the extensions' went with SMD-2311), after the community files —
   // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
-  // smart-ingest's and entity-extraction's tables. Same drop in the finally.
+  // entity-extraction's tables. Same drop in the finally.
   const contribFiles = CONTRIB_SCHEMA_FILES;
   const ALL_GROUPS = ["community", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
@@ -18865,14 +18865,14 @@ if (want("18")) {
              `…grants nothing of the community group, and grants the migrations' tables and 118's release (${fnGrants.join(", ") || "no function"})`);
 
       const failed: string[] = [];
-      // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges,
-      // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
+      // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges)
+      // and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
       // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 12 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core, 12 since SMD-2690 made agent-memory a plugin; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 11 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core, 12 since SMD-2690 made agent-memory a plugin, 11 since it made smart-ingest one; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
@@ -18886,7 +18886,7 @@ if (want("18")) {
       const grant = await migrate("--grant", ROLE);
       assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
              `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
-      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
+      assert(/GRANT USAGE, SELECT ON SEQUENCE entities_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
              "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
 
       // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
@@ -18904,7 +18904,7 @@ if (want("18")) {
       for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
       }
-      assert(viewDenied === "", `…and reads the community view, the eight ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
+      assert(viewDenied === "", `…and reads the community view, the seven ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
       const seqDenied: string[] = [];
       for (const s of grantedSequences(["community"])) {
         try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
@@ -21215,7 +21215,7 @@ if (want("26")) {
     }
 
     // The export: every thought, past the first page; the optional tables it
-    // finds; the two smart-ingest tables this database lacks, skipped by name.
+    // finds; the retired smart-ingest schema's two tables, which this database lacks, skipped by name.
     const dates = new Set([new Date().toISOString().slice(0, 10)]);
     const exported = await backup({ SUPABASE_URL: URL_ });
     dates.add(new Date().toISOString().slice(0, 10));
@@ -21230,7 +21230,7 @@ if (want("26")) {
     // The progress line is the one trace of `count: "exact"`: without the count the run writes the same files and
     // summary (review pass 1, cold read — the mutant that dropped it survived every other assertion).
     assert(exported.code === 0 && /thoughts: 1000\/1050 rows/.test(exported.out) && /thoughts: 1050 rows \(/.test(exported.out) && /ingestion_jobs: skipped \(table not present\)/.test(exported.out) && /ingestion_items: skipped \(table not present\)/.test(exported.out) && /Done\. 6\/6 tables exported successfully/.test(exported.out),
-      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages with the exact count on the progress line, the three entity-extraction tables, the two smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
+      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages with the exact count on the progress line, the three entity-extraction tables, the old smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
     assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && ascending(thoughtsOut, (r) => String(r.id)) && ascending(entitiesOut ?? [], (r) => Number(r.id)) && thoughtsOut.every((r) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(String(r.created_at)) && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
       `…the thoughts file holds exactly the table's ${N} ids once each and in id order (a page query without its ORDER BY survived every other assertion on a fresh heap — review pass 3, mutant), timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
     const bkNoUrl = await backup({});

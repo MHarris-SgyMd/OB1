@@ -41,7 +41,7 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/entity-extraction-worker/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. `integrations/test-auth.ts` starts it this way in CI. Whatever calls it on a schedule — cron, a scheduled workflow (the stack's `orchestration` profile runs n8n) — POSTs to its URL with the key (Step 4), and so does the smart-ingest server after a write when its `ENTITY_EXTRACTION_WORKER_URL` names this address (SMD-2110); a caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `OB1_LISTEN_HOST` names one IP address to listen on, every address unset; `127.0.0.1` keeps it to this machine. `integrations/test-auth.ts` starts it this way in CI. Whatever calls it on a schedule — cron, a scheduled workflow (the stack's `orchestration` profile runs n8n) — POSTs to its URL with the key (Step 4), as the smart-ingest server did after a write until SMD-2690 made it a plugin (SMD-2110); a caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Vendored Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 
@@ -163,7 +163,7 @@ the worker runs without `dry_run=true`.
 
 ## How It Connects to Other Components
 
-The Smart Ingest server (`integrations/smart-ingest`) automatically triggers this worker after writing new thoughts. (The Enhanced MCP Server's `graph_search` and `entity_detail` tools, which queried this graph, retired with SMD-1931; a core entity-graph read is SMD-2280's.)
+The Smart Ingest server triggered this worker after writing new thoughts; the [smart-ingest plugin](../../plugins/smart-ingest/) that replaced it (SMD-2690) triggers nothing, so run the worker on a schedule. (The Enhanced MCP Server's `graph_search` and `entity_detail` tools, which queried this graph, retired with SMD-1931; a core entity-graph read is SMD-2280's.)
 
 For guidance on managing tool count and token overhead as you add more integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 

@@ -33,6 +33,8 @@ import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hmacSha256Hex, keepItemPriority, keepRowItem } from "./plugin-sdk.ts";
 import { BODY_MAX, isoTime, LEASE_S, LIMITS } from "../plugins/readwise/index.ts";
 import { coreRefused as amCoreRefused, LIMITS as AM_LIMITS, rankMemory as amRank, unsafeReasons as amUnsafe } from "../plugins/agent-memory/index.ts";
+import * as SI from "../plugins/smart-ingest/index.ts";
+import { MODEL_LIMITS } from "./core/model.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -45,7 +47,7 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 /** The learning path's plugins, the six SMD-2311 ported and any extension since (extensions/_template/AGENT_SPEC.md), and the vendored integrations SMD-2690 ports: each turned on for the migrator here, its section below drives it. */
-const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm", "job-hunt", "readwise", "agent-memory"] as const;
+const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning", "professional-crm", "job-hunt", "readwise", "agent-memory", "smart-ingest"] as const;
 const PLUGIN_PW = "smd2311-plugin-secret";
 
 const { assert, report } = createAssert();
@@ -77,15 +79,32 @@ const STUB_BASE = "https://stub.invalid/v1";
 let embedDown = false;
 /** How long the chat stub waits before it answers, in ms: agent-memory's race widens its window with it. */
 let chatDelayMs = 0;
+/** smart-ingest's vectors: a text holding the token is embedded as the vector (its section sets them). */
+const vectorFor: [string, number[]][] = [];
+/** smart-ingest's extraction, answered by its section: the document the model was sent in, the stub's answer out. */
+let extraction: ((document: string) => Response) | null = null;
+/** Each extraction request the stub answered, as sent. */
+const extractionCalls: Body[] = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
+    const sent = typeof init?.body === "string" ? (JSON.parse(init.body) as Body) : {};
     if (url.endsWith("/embeddings")) {
       if (embedDown) return new Response("down", { status: 503 });
+      // A text holding one of smart-ingest's tokens is embedded as that token says; any other, the first axis.
+      const input = String(sent.input ?? "");
+      const own = vectorFor.find(([token]) => input.includes(token));
+      if (own) return Response.json({ data: [{ embedding: own[1] }] });
       const v = new Array(EMBEDDING_DIM).fill(0);
       v[0] = 1;
       return Response.json({ data: [{ embedding: v }] });
+    }
+    // smart-ingest's extraction (its system prompt names it), answered as its section sets.
+    const system = String((sent.messages as { content?: unknown }[] | undefined)?.[0]?.content ?? "");
+    if (system.includes("extracting durable long-term memories") && extraction) {
+      extractionCalls.push(sent);
+      return extraction(String((sent.messages as { content?: unknown }[])[1]?.content ?? ""));
     }
     if (chatDelayMs > 0) await Bun.sleep(chatDelayMs);
     return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: ["stubbed"], type: "idea" }) } }] });
@@ -3833,6 +3852,324 @@ print(json.dumps(out))
   // Last, so its 50 thoughts (all one vector under the stub) crowd no recall above.
   const fifty = await am("writeback", { ...base, workspace_id: "ws-fifty", memory_payload: { decisions: Array.from({ length: 30 }, (_, i) => `fifty plain decision ${i}.`), lessons: Array.from({ length: 20 }, (_, i) => `fifty plain lesson ${i}.`) } });
   assert(fifty.status === 200 && mems(fifty).length === 50, `a write-back of exactly 50 memories is taken (${fifty.status}, ${mems(fifty).length})`);
+}
+
+// ── plugins/smart-ingest (SMD-2690 PR 4) ─────────────────────────────────────
+
+console.log("\n[smart-ingest] extraction through ctx.model, decisions through search_thoughts, writes through capture_thought and append_thought_evidence, counted by what was done");
+{
+  const si = (key: string, input: Body, opts: { as?: string; door?: "rest" | "mcp" } = {}) => call("smart-ingest", key, input, opts);
+  /** A unit vector on axis i, or c of axis i and the rest on axis j: its cosine with axis i is c. */
+  const axis = (i: number, j?: number, c = 1) => {
+    const v = new Array(EMBEDDING_DIM).fill(0);
+    v[i] = c;
+    if (j !== undefined) v[j] = Math.sqrt(1 - c * c);
+    return v;
+  };
+  /** The model's answer: these thoughts, as the extraction asks for them. */
+  const answering = (thoughts: Body[]) => () => Response.json({ choices: [{ message: { content: JSON.stringify({ thoughts }) } }] });
+  type SiItem = { item_id: string; position: number; content: string; type: string; importance: number; tags: string[]; source_snippet: string; action: string; reason: string;
+    status: string; matched_thought_id: string | null; similarity_score: number | null; result_thought_id: string | null; error_message: string | null };
+  const items = async (job: string) => ((await si("get_job", { job_id: job })).body.items ?? []) as SiItem[];
+  const counts = (j: Body) => [j.extracted_count, j.added_count, j.skipped_count, j.appended_count, j.revised_count, j.existed_count, j.failed_count].join();
+  const capture = async (content: string) => (await rest("POST", "/v1/thoughts", { content }, KEYS.writer)).body.id as string;
+  const ingested = async () => (await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'source' = 'smart-ingest'`)).n;
+  const evidenceOf = async (id: string) => ((await one<{ e: Body[] | null }>(sql`SELECT metadata->'evidence' AS e FROM thoughts WHERE id = ${id}::uuid`)).e ?? []);
+
+  // The brain's thoughts the document's are matched against, each on an axis of its own.
+  vectorFor.push(["si_x", axis(20)], ["si_e", axis(20, 21, 0.95)], ["si_y", axis(22)], ["si_f", axis(22, 23, 0.88)], ["si_z", axis(24)], ["si_g", axis(24, 25, 0.88)],
+    ["si_a", axis(26)], ["si_h", axis(27)], ["si_k", axis(28)], ["si_m", axis(22, 29, 0.88)], ["si_n", axis(30)],
+    // The cases below: si_r before si_q, so a text holding both is si_r's vector; two thoughts above 0.85, at 0.90 and 0.95.
+    ["si_r", axis(32)], ["si_q", axis(31)], ["si_t1", axis(33, 34, 0.9)], ["si_t2", axis(33, 35, 0.95)], ["si_t", axis(33)], ["si_s", axis(24, 36, 0.88)]);
+  const X = await capture("si_x: the user keeps the household ledger in a spreadsheet.");
+  const Y = await capture("si_y: the user decided to move the team's planning to a weekly Monday meeting, with notes kept in the shared drive and a summary sent out by noon.");
+  const Z = await capture("si_z: the user prefers tea.");
+  const doc = (thoughts: Body[]) => ({ thoughts, text: `A document for the stub ${crypto.randomUUID()}.` });
+  const first = doc([
+    { content: "si_a: the user chose Postgres for the household ledger app.", importance: 4, type: "choice", tags: ["DB", "db", "ledger"], source_snippet: "chose Postgres" },
+    { content: "si_b too short", importance: 4, type: "idea", tags: [], source_snippet: "" },
+    { content: "si_c: the user mentioned the weather was fine on Tuesday.", importance: 2, type: "journal", tags: [], source_snippet: "weather" },
+    { content: "  SI_A: THE USER CHOSE   POSTGRES for the household ledger app.", importance: 4, type: "decision", tags: [], source_snippet: "" },
+    { content: "si_e: the user keeps the household ledger in a spreadsheet file.", importance: 3, type: "reference", tags: [], source_snippet: "ledger spreadsheet" },
+    { content: "si_f: the user moved planning to Mondays.", importance: 4, type: "decision", tags: [], source_snippet: "planning moves to Mondays" },
+    { content: "si_g: the user prefers green tea in the morning and black tea after lunch.", importance: 3, type: "preference", tags: ["tea"], source_snippet: "" },
+    { content: "si_h: the user named the ledger app Tally after a family joke.", importance: 3, type: "fact", tags: [], source_snippet: "named it Tally" },
+  ]);
+
+  // ── A dry run: the decisions stored, nothing written ──
+  extraction = answering(first.thoughts);
+  const yBefore = JSON.stringify(await evidenceOf(Y));
+  const dry = await si("ingest", { text: first.text, source_label: "Planning notes", source_type: "meeting_notes", dry_run: true, trust: "ingested", source_metadata: { import_key: "si-session-1", session_id: "s1" } });
+  const job = (dry.body.job ?? {}) as Body;
+  assert(dry.status === 200 && dry.body.existing === false && job.status === "dry_run_complete" && job.dry_run === true && counts(job) === "8,2,4,1,1,0,0" && job.model_calls === 1,
+    `a dry run: eight extracted, two to add, four to skip, one to append, one to revise, nothing yet existed or failed, one model call (${JSON.stringify(dry.body).slice(0, 300)})`);
+  const sentDoc = (extractionCalls.at(-1) ?? {}) as Body;
+  assert(sentDoc.response_format?.type === "json_object" && sentDoc.temperature === 0.2 && String(sentDoc.messages?.[1]?.content).startsWith("<document>\n") && String(sentDoc.messages?.[1]?.content).includes(first.text),
+    "…the model asked for a JSON object, the document wrapped as its user text, the prompt its system text");
+  const decided = await items(job.job_id);
+  assert(decided.map((i) => `${i.action}:${i.reason}`).join() === [
+    "add:no_semantic_match", "skip:quality_gate_short_content", "skip:quality_gate_low_importance", "skip:duplicate_within_job", "skip:semantic_duplicate",
+    "append_evidence:existing_is_richer", "create_revision:new_has_more_info", "add:no_semantic_match"].join() && decided.every((i, n) => i.position === n && i.status === "ready"),
+    `…each decided in order, ready (${decided.map((i) => `${i.action}:${i.reason}`).join(", ")})`);
+  assert(decided[4]?.matched_thought_id === X && Math.abs((decided[4]?.similarity_score ?? 0) - 0.95) < 0.001 && decided[5]?.matched_thought_id === Y && Math.abs((decided[5]?.similarity_score ?? 0) - 0.88) < 0.001
+    && decided[6]?.matched_thought_id === Z && decided[0]?.matched_thought_id === null,
+    `…a match names the thought and its cosine similarity: above 0.92 a duplicate, at 0.88 evidence for the longer, a revision of the shorter (${JSON.stringify(decided.map((i) => [i.matched_thought_id, i.similarity_score]))})`);
+  assert(decided[0]?.type === "decision" && decided[0]?.tags.join() === "db,ledger" && decided[6]?.type === "idea" && decided[7]?.type === "reference" && decided[5]?.source_snippet === "planning moves to Mondays",
+    `…the model's type read as one of the eight (choice → decision, preference → idea, fact → reference), its tags lower-cased and distinct (${JSON.stringify(decided.map((i) => [i.type, i.tags]))})`);
+  assert((await ingested()) === 0 && JSON.stringify(await evidenceOf(Y)) === yBefore, "…and nothing is written to the brain: no thought, no evidence");
+  const stored = await one<{ import_key: string; source_metadata: Body; created_by: string; trust: string; input_length: number }>(sql`SELECT import_key, source_metadata, created_by, trust, input_length FROM plugin_smart_ingest.ingestion_jobs WHERE id = ${job.job_id}::bigint`);
+  assert(stored.import_key === "si-session-1" && stored.source_metadata.session_id === "s1" && stored.created_by === "writer" && stored.trust === "ingested" && stored.input_length === first.text.length,
+    `…the job keeps the caller's source_metadata, import_key, key and trust (${JSON.stringify(stored)})`);
+
+  // ── The execute: counted by what was done (SMD-2154) ──
+  const H = await capture(first.thoughts[7].content as string);
+  const done = await si("execute_job", { job_id: job.job_id });
+  const after = (done.body.job ?? {}) as Body;
+  assert(done.status === 200 && done.body.already === false && after.status === "complete" && counts(after) === "8,1,4,1,1,1,0" && after.completed_at !== null,
+    `execute_job: the add whose text was captured since the dry run is existed, not added; the six counts sum to the eight (${JSON.stringify(done.body).slice(0, 300)})`);
+  const executed = await items(job.job_id);
+  assert(executed.map((i) => i.status).join() === "executed,executed,executed,executed,executed,executed,executed,existed" && executed[7]?.result_thought_id === H && executed[4]?.result_thought_id === X
+    && executed[5]?.result_thought_id === Y && executed[1]?.result_thought_id === null,
+    `…each item recorded: a skip against the thought it matched, the existed add against the thought holding its text (${JSON.stringify(executed.map((i) => [i.status, i.result_thought_id]))})`);
+  const added = await one<{ meta: Body; actor: string; trust: string | null } | undefined>(sql`
+    SELECT t.metadata AS meta, (SELECT a.trust FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.seq LIMIT 1) AS trust,
+           (SELECT a.actor_name FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.seq LIMIT 1) AS actor
+      FROM thoughts t WHERE t.id = ${executed[0]?.result_thought_id ?? NO_ROW}::uuid`);
+  assert(added?.meta.source === "smart-ingest" && added.meta.smart_ingest_job === Number(job.job_id) && added.meta.smart_ingest_item === Number(executed[0]?.item_id)
+    && added.meta.extraction_type === "decision" && added.meta.source_label === "Planning notes" && added.meta.source_type === "meeting_notes" && added.actor === "writer" && added.trust === "ingested",
+    `…an add captured through the core: source smart-ingest, the job and item, the type and labels, the caller's key on its audit row, the declared trust (${JSON.stringify(added).slice(0, 300)})`);
+  const evidence = await evidenceOf(Y);
+  assert(evidence.length === 1 && evidence[0].source_label === "Planning notes" && evidence[0].excerpt === "planning moves to Mondays" && evidence[0].source === "smart_ingest",
+    `…an append written as evidence on the matched thought, the job's label and the passage (${JSON.stringify(evidence)})`);
+  const revision = await one<{ supersedes: string | null; content: string } | undefined>(sql`SELECT supersedes::text AS supersedes, content FROM thoughts WHERE id = ${executed[6]?.result_thought_id ?? NO_ROW}::uuid`);
+  assert(revision?.supersedes === Z && revision.content === first.thoughts[6].content, `…a revision captured as superseding the thought it matched (${JSON.stringify(revision)})`);
+  const again = await si("execute_job", { job_id: job.job_id });
+  assert(again.status === 200 && again.body.already === true && counts(again.body.job) === "8,1,4,1,1,1,0", "execute_job on a complete job answers it as it stands, already, and does nothing");
+
+  // ── The same text, the same import_key, reprocess ──
+  const same = await si("ingest", { text: first.text, dry_run: true });
+  assert(same.status === 200 && same.body.existing === true && same.body.job?.job_id === job.job_id && extractionCalls.length === 1,
+    `the same text again answers its job, existing, and calls no model (${JSON.stringify(same.body).slice(0, 160)})`);
+  const keyed = await si("ingest", { text: `${first.text} With a word more.`, dry_run: true, source_metadata: { import_key: "si-session-1" } });
+  assert(keyed.status === 200 && keyed.body.existing === true && keyed.body.job?.job_id === job.job_id, "…and so does another text with the same import_key");
+  const re = await si("ingest", { text: first.text, dry_run: true, reprocess: true });
+  const re3 = await si("ingest", { text: first.text, dry_run: true, reprocess: true });
+  const hashes = (await sql`SELECT input_hash FROM plugin_smart_ingest.ingestion_jobs WHERE id IN (${job.job_id}::bigint, ${re.body.job?.job_id ?? "0"}::bigint, ${re3.body.job?.job_id ?? "0"}::bigint) ORDER BY id`) as { input_hash: string }[];
+  assert(re.status === 200 && re.body.existing === false && re.body.job?.job_id !== job.job_id && hashes.map((h) => h.input_hash.replace(hashes[0].input_hash, "")).join() === ",-v2,-v3" && extractionCalls.length === 3,
+    `…reprocess extracts it again as a new job, the text's second version, then its third (${JSON.stringify(hashes)})`);
+
+  // ── Inline: carried out at once; evidence already held is existed ──
+  extraction = answering([
+    { content: "si_k: the user walks the dog at six every morning before work.", importance: 3, type: "journal", tags: [], source_snippet: "dog at six" },
+    { content: "si_m: the user moved planning to Mondays.", importance: 4, type: "decision", tags: [], source_snippet: "planning moves to Mondays" },
+  ]);
+  const now = await si("ingest", { text: doc([]).text, source_label: "Planning notes" }, { door: "mcp" });
+  assert(now.status === 200 && now.body.job?.status === "complete" && counts(now.body.job ?? {}) === "2,1,0,0,0,1,0",
+    `an inline ingest (over MCP): the new thought added, the same passage for the same thought already held, existed (${JSON.stringify(now.body).slice(0, 300)})`);
+  assert((await evidenceOf(Y)).length === 1, "…the evidence not written twice");
+  extraction = answering([]);
+  const empty = await si("ingest", { text: doc([]).text });
+  assert(empty.status === 200 && empty.body.job?.status === "complete" && counts(empty.body.job ?? {}) === "0,0,0,0,0,0,0", `a text the model finds nothing in: complete, all counts 0 (${JSON.stringify(empty.body.job)})`);
+
+  // ── The match: only a hit at 0.85 or more, and the closest of them ──
+  const Q = await capture("si_q: the user keeps bees on the garage roof.");
+  const T1 = await capture("si_t1: the user runs before work on weekdays.");
+  const T2 = await capture("si_t2: the user runs before work every weekday morning.");
+  extraction = answering([
+    // Named by the keyword arm (its identifier), its vector orthogonal to Q's: a hit with a similarity, below the floor.
+    { content: "si_q si_r: the user sold the beehives in the spring.", importance: 3, type: "journal", tags: [], source_snippet: "" },
+    { content: "si_t: the user runs before work on weekday mornings.", importance: 3, type: "journal", tags: [], source_snippet: "" },
+  ]);
+  const matched = await si("ingest", { text: doc([]).text, dry_run: true });
+  const mi = await items(String(matched.body.job?.job_id));
+  const named = (id: string | null) => (id === Q ? "Q" : id === T1 ? "T1" : id === T2 ? "T2" : id);
+  assert(mi[0]?.action === "add" && mi[0]?.matched_thought_id === null && mi[1]?.action === "skip" && mi[1]?.reason === "semantic_duplicate" && mi[1]?.matched_thought_id === T2,
+    `a hit below 0.85 is no match, though the search returns it; of two above, the closest is the match (${JSON.stringify(mi.map((i) => [i.action, named(i.matched_thought_id), i.similarity_score]))})`);
+  // A revision whose text is captured between the dry run and its execute: failed, its text's thought keeping its own provenance.
+  const sText = "si_s: the user prefers green tea before noon and rooibos in the evening.";
+  extraction = answering([{ content: sText, importance: 3, type: "preference", tags: [], source_snippet: "" }]);
+  const rev = await si("ingest", { text: doc([]).text, dry_run: true });
+  const revId = String(rev.body.job?.job_id);
+  const S = await capture(sText);
+  const revDone = await si("execute_job", { job_id: revId });
+  const ri = await items(revId);
+  const sRow = await one<{ supersedes: string | null }>(sql`SELECT supersedes::text AS supersedes FROM thoughts WHERE id = ${S}::uuid`);
+  assert(ri[0]?.action === "create_revision" && ri[0]?.matched_thought_id === Z && ri[0]?.status === "failed" && /already thought/.test(ri[0]?.error_message ?? "")
+    && counts(revDone.body.job ?? {}) === "1,0,0,0,0,0,1" && sRow.supersedes === null,
+    `a revision whose text was captured meanwhile fails, saying so, counted failed, the captured thought's supersedes unset (${JSON.stringify(ri[0])})`);
+  // decide against a stub core: a search refusal worth retrying is the whole call's 503, any other this item's failure.
+  const stubbed = (retryable: boolean) => ({ call: async () => ({ ok: false, refusal: { code: "STUB_REFUSED", retryable } }) }) as unknown as Parameters<typeof SI.decide>[0];
+  const thought = { content: "si_u: a thought long enough to be searched for.", type: "idea" as const, importance: 3, tags: [], source_snippet: "" };
+  const thrown = await SI.decide(stubbed(true), thought, new Set()).then(() => null, (e: unknown) => e);
+  const final = await SI.decide(stubbed(false), thought, new Set());
+  assert(thrown instanceof SI.Unavailable && thrown.facts.refused === "STUB_REFUSED" && final.status === "failed" && final.action === "skip" && final.reason === "search_refused" && /STUB_REFUSED/.test(final.error ?? ""),
+    `decide: a retryable search refusal throws Unavailable (the call's 503), a final one fails the item alone, naming it (${JSON.stringify(final)})`);
+
+  // ── Refusals ──
+  const jobCount = async () => (await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_smart_ingest.ingestion_jobs`)).n;
+  const [jobsBefore, callsBefore] = [await jobCount(), extractionCalls.length];
+  const restricted = await si("ingest", { text: "Notes. The password: hunter2 for the router." });
+  assert(restricted.status === 422 && restricted.body.code === "RESTRICTED_CONTENT" && restricted.body.pattern === "password_value" && (await jobCount()) === jobsBefore && extractionCalls.length === callsBefore,
+    `a text holding a restricted value: 422 RESTRICTED_CONTENT naming the pattern, no job, no model call (${JSON.stringify(restricted.body)})`);
+  const jobOf = async (b: Body) => one<{ status: string; error_message: string | null } | undefined>(sql`SELECT status, error_message FROM plugin_smart_ingest.ingestion_jobs WHERE id = ${b.job_id ?? "0"}::bigint`);
+  extraction = () => Response.json({ choices: [{ message: { content: "not json at all" } }] });
+  const notJson = await si("ingest", { text: doc([]).text });
+  assert(notJson.status === 422 && notJson.body.code === "EXTRACTION_FAILED" && notJson.body.refused === "NOT_JSON" && (await jobOf(notJson.body))?.status === "failed",
+    `an answer that is no JSON object: 422 EXTRACTION_FAILED, refused NOT_JSON, the job failed (${JSON.stringify(notJson.body)})`);
+  extraction = () => Response.json({ choices: [{ message: { content: JSON.stringify({ memories: [] }) } }] });
+  const noList = await si("ingest", { text: doc([]).text });
+  assert(noList.status === 422 && noList.body.code === "EXTRACTION_FAILED" && /no thoughts list/.test(String(noList.body.detail)) && /no thoughts list/.test((await jobOf(noList.body))?.error_message ?? ""),
+    `an object with no thoughts list: 422 EXTRACTION_FAILED, the job failed with why (${JSON.stringify(noList.body)})`);
+  extraction = () => new Response("down", { status: 503 });
+  const downCall = restCall("smart-ingest", "ingest", { text: doc([]).text });
+  const downRaw = await fetch(`${API}${downCall.path}`, { method: downCall.method, headers: { "x-brain-key": KEYS.writer, "content-type": "application/json" }, body: JSON.stringify(downCall.body) });
+  const down = (await downRaw.json()) as Body;
+  assert(downRaw.status === 503 && down.code === "PROVIDER_UNAVAILABLE" && down.retryable === true && downRaw.headers.get("retry-after") !== null && (await jobOf(down))?.status === "failed",
+    `the model provider down: 503 PROVIDER_UNAVAILABLE, retryable, with Retry-After, the job failed (${JSON.stringify(down)})`);
+  extraction = answering([{ content: "si_k: the user walks the dog at six every evening after work.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  embedDown = true;
+  let searchDown: Called;
+  try {
+    searchDown = await si("ingest", { text: doc([]).text, dry_run: true });
+  } finally {
+    embedDown = false;
+  }
+  assert(searchDown.status === 503 && searchDown.body.code === "PROVIDER_UNAVAILABLE" && (await jobOf(searchDown.body))?.status === "failed",
+    `the embedding provider down while deciding: 503 PROVIDER_UNAVAILABLE, the job failed (${JSON.stringify(searchDown.body)})`);
+  const notReady = await si("execute_job", { job_id: String(searchDown.body.job_id) });
+  const missing = await si("execute_job", { job_id: "999999999" });
+  const missingGet = await si("get_job", { job_id: "999999999" });
+  assert(notReady.status === 409 && notReady.body.code === "JOB_NOT_READY" && notReady.body.job_status === "failed" && missing.status === 404 && missing.body.code === "NO_SUCH_JOB" && missingGet.status === 404,
+    `execute_job: a failed job 409 JOB_NOT_READY naming its status; no such job 404 NO_SUCH_JOB, and get_job too (${notReady.status} ${missing.status} ${missingGet.status})`);
+
+  // Two executes at once: one carries the job out, the other is refused or finds it done.
+  extraction = answering([{ content: "si_n: the user waters the plants every Sunday after breakfast.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  const race = await si("ingest", { text: doc([]).text, dry_run: true });
+  const raced = String(race.body.job?.job_id);
+  const both = await Promise.all([si("execute_job", { job_id: raced }), si("execute_job", { job_id: raced })]);
+  const outcomes = both.map((b) => (b.status === 200 ? (b.body.already ? "already" : "ran") : String(b.body.code))).sort().join();
+  assert(["JOB_NOT_READY,ran", "already,ran"].includes(outcomes) && counts((await si("get_job", { job_id: raced })).body.job ?? {}) === "1,1,0,0,0,0,0",
+    `two executes of one job at once: it is carried out once (${outcomes})`);
+
+  // ── The jobs, listed ──
+  type SiJob = { job_id: string; status: string };
+  const failedJobs = await si("list_jobs", { status: "failed", limit: 2 });
+  const everyJob = await si("list_jobs", { limit: 200 });
+  const fj = (failedJobs.body.jobs ?? []) as SiJob[];
+  assert(failedJobs.status === 200 && fj.length === 2 && failedJobs.body.truncated === true && fj.every((j) => j.status === "failed") && Number(fj[0].job_id) > Number(fj[1].job_id)
+    && ((everyJob.body.jobs ?? []) as SiJob[]).some((j) => j.job_id === job.job_id && j.status === "complete") && everyJob.body.truncated === false,
+    `list_jobs: newest first, one status alone, truncated past the limit; unfiltered, every job (${JSON.stringify(fj)})`);
+
+  // ── Bounds ──
+  const missed = await outOfBounds(si, [
+    ["no text", "ingest", {}],
+    ["blank text", "ingest", { text: " \n\t " }],
+    ["text over the bound", "ingest", { text: "a".repeat(SI.LIMITS.text + 1) }],
+    ["a NUL", "ingest", { text: `a${String.fromCharCode(0)}b` }],
+    ["a lone surrogate", "ingest", { text: `a${String.fromCharCode(0xd800)}b` }],
+    ["a label over 200", "ingest", { text: "x", source_label: "l".repeat(201) }],
+    ["a source type over 100", "ingest", { text: "x", source_type: "t".repeat(101) }],
+    ["source_metadata over 20 keys", "ingest", { text: "x", source_metadata: Object.fromEntries(Array.from({ length: 21 }, (_, n) => [`k${n}`, n])) }],
+    ["a source_metadata value that is an object", "ingest", { text: "x", source_metadata: { a: { b: 1 } } }],
+    ["a trust no word", "ingest", { text: "x", trust: "trusted" }],
+    ["a job id that is no number", "execute_job", { job_id: "one" }],
+    ["a job id of 0", "get_job", { job_id: "0" }],
+    ["a status no word", "list_jobs", { status: "done" }],
+    ["a limit of 0", "list_jobs", { limit: 0 }],
+    ["a limit over 200", "list_jobs", { limit: 201 }],
+  ]);
+  assert(missed.length === 0, `each input past a bound is refused 400 (${missed.join("; ")})`);
+  const OUT = JSON.stringify({ destructiveHint: false, openWorldHint: true });
+  assert(canon(await hintsOf("smart-ingest")) === canon({ execute_job: OUT, get_job: READ_HINT, ingest: OUT, list_jobs: READ_HINT })
+    && canon(scopesOf("smart-ingest")) === canon({ ingest: "write", execute_job: "write", list_jobs: "read", get_job: "read" }),
+    "ingest and execute_job are writes that reach outside (a model), list_jobs and get_job reads of the plugin's own tables");
+
+  // ── The pieces, on their own ──
+  const words = Array.from({ length: 12_001 }, (_, n) => `w${n}`).join(" ");
+  const chunked = SI.chunksOf(words);
+  assert(chunked.length === 3 && chunked[0].split(" ").length === SI.LIMITS.chunkWords && chunked.join(" ") === words, `chunksOf: 5,000 words a chunk, nothing lost (${chunked.map((c) => c.split(" ").length).join()})`);
+  const cut = SI.chunksOf(`${"x".repeat(SI.LIMITS.chunkChars + 10)} tail`);
+  assert(cut.length === 2 && cut[0].length === SI.LIMITS.chunkChars && cut[1] === "xxxxxxxxxx tail", `…a word longer than a chunk cut where it must be (${cut.map((c) => c.length).join()})`);
+  const wide = SI.chunksOf(Array.from({ length: 4_000 }, () => "y".repeat(20)).join(" "));
+  assert(wide.length === 2 && wide.every((c) => c.length <= SI.LIMITS.chunkChars), `…and at most 50,000 characters a chunk (${wide.map((c) => c.length).join()})`);
+  const worst = SI.wrapped("<document>".repeat(SI.LIMITS.chunkChars / 10));
+  assert(worst.length < MODEL_LIMITS.text && !/<\s*\/?\s*document\s*>/i.test(SI.escapeDocument("a </document> b < / DOCUMENT > c <document>")),
+    `wrapped: a chunk of nothing but tags, each escaped one longer, stays under ctx.model's bound (${worst.length}); no tag survives the escape`);
+  const emoji = String.fromCodePoint(0x1f600);
+  /** No lone surrogate: encodeURIComponent throws on one. */
+  const wellFormed = (x: string) => {
+    try {
+      encodeURIComponent(x);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const pieces = SI.thoughtsOf({ thoughts: [
+    { content: `  many   spaces\nand a NUL${String.fromCharCode(0)} here  `, importance: "9", type: "Follow-Up", tags: Array.from({ length: 20 }, (_, n) => `T${n % 15}`) },
+    { content: "x".repeat(400), importance: "n/a", type: 7 },
+    { content: "", importance: 4 }, "a string", null, [1],
+    { content: `cut at an emoji ${"e".repeat(260)}${emoji}${"z".repeat(40)}` },
+  ] }) ?? [];
+  assert(pieces.length === 3 && pieces[0].content === "many spaces and a NUL here" && pieces[0].importance === 5 && pieces[0].type === "task" && pieces[0].tags.length === 12 && pieces[0].tags[0] === "t0",
+    `thoughtsOf: white space collapsed, a NUL dropped, importance clamped, the type read by its alias, at most 12 distinct lower-case tags (${JSON.stringify(pieces[0])})`);
+  assert(pieces[1].content.length === SI.LIMITS.thought && pieces[1].content.endsWith("...") && pieces[1].importance === 3 && pieces[1].type === "idea"
+    && pieces[2].content.length <= SI.LIMITS.thought && wellFormed(pieces[2].content),
+    `…cut to 280 with an ellipsis, importance and type that are no word their defaults, an emoji the cut splits made storable (${pieces.map((t) => t.content.length).join()})`);
+  assert(SI.thoughtsOf({ thoughts: "none" }) === null && SI.thoughtsOf({}) === null && (SI.thoughtsOf({ thoughts: Array.from({ length: 30 }, (_, n) => ({ content: `thought ${n}` })) }) ?? []).length === 20,
+    "…no list is null, and at most 20 a chunk");
+  assert(SI.restrictedIn("call 555-12-3456") === "ssn_pattern" && SI.restrictedIn("key sk-abcdefghijklmnop") === "api_key" && SI.restrictedIn("card 4111 1111 1111 1111") === "credit_card"
+    && SI.restrictedIn("Met Sarah on Friday about GraphQL.") === null, "restrictedIn: an id, a key or a card number named; plain notes none");
+
+  // ── The README's copy block: the standalone server's jobs become the plugin's ──
+  const readme = readFileSync(join(import.meta.dir, "../plugins/smart-ingest/README.md"), "utf8");
+  const block = /```sql\n(\\set ON_ERROR_STOP on[\s\S]*?)```/.exec(readme)?.[1] ?? "";
+  assert(block.startsWith("\\set ON_ERROR_STOP on\nBEGIN;") && block.trimEnd().endsWith("COMMIT;"), "the README's copy block is one transaction, stopping at the first error");
+  // The old server's tables, as schemas/smart-ingest made them, with a job of each kind it left.
+  await sql.unsafe(`
+    CREATE TABLE public.ingestion_jobs (id bigserial PRIMARY KEY, source_label text, input_hash text NOT NULL UNIQUE, input_length int, status text DEFAULT 'pending',
+      extracted_count int DEFAULT 0, added_count int DEFAULT 0, skipped_count int DEFAULT 0, appended_count int DEFAULT 0, revised_count int DEFAULT 0,
+      error_message text, metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now(), completed_at timestamptz, user_id uuid);
+    CREATE TABLE public.ingestion_items (id bigserial PRIMARY KEY, job_id bigint REFERENCES public.ingestion_jobs(id) ON DELETE CASCADE, extracted_content text NOT NULL,
+      action text NOT NULL DEFAULT 'pending', status text NOT NULL DEFAULT 'pending', reason text, matched_thought_id uuid, similarity_score numeric(5,4),
+      result_thought_id uuid, error_message text, metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now(), user_id uuid);
+    INSERT INTO public.ingestion_jobs (id, source_label, input_hash, input_length, status, metadata) VALUES
+      (900001, 'old dry run', 'oldhash1', 120, 'dry_run_complete', '{"source_type": "journal", "dry_run": true, "skip_classification": false, "trust": "agent", "import_key": "old-session", "source_client": "cli"}'),
+      (900002, NULL, 'oldhash2', NULL, 'pending', '{}'),
+      (900003, 'old done', 'oldhash3', 50, 'complete', '{"trust": "trusted"}');
+    INSERT INTO public.ingestion_items (id, job_id, extracted_content, action, status, reason, metadata) VALUES
+      (800001, 900001, 'si_k: the user sketches before breakfast on weekdays and weekends.', 'add', 'ready', 'no_semantic_match', '{"type": "journal", "importance": 4, "tags": ["art"], "source_snippet": "sketches"}'),
+      (800002, 900001, 'A short one.', 'skip', 'ready', 'quality_gate_short_content', '{"type": "fact", "importance": "high", "tags": "art"}'),
+      (800003, 900003, 'An old failed item.', 'skip', 'failed', 'reconciliation_error: x', '{}'),
+      (800004, 900003, 'An old pending item.', 'pending', 'pending', NULL, '{"importance": 9}');`);
+  const statements = block.replace("\\set ON_ERROR_STOP on\n", "");
+  const copy = new SQL({ url: URL_, max: 1 });
+  try {
+    for (let run = 1; run <= 2; run++) await copy.unsafe(statements);
+    const jobs = (await sql`SELECT id::text AS id, status, dry_run, trust, import_key, source_type, input_length, created_by, source_metadata, extracted_count, added_count, skipped_count,
+                                   appended_count, revised_count, existed_count, failed_count
+                              FROM plugin_smart_ingest.ingestion_jobs WHERE id >= 900000 ORDER BY id`) as Body[];
+    assert(jobs.map((j) => `${j.id}:${j.status}`).join() === "900001:dry_run_complete,900002:failed,900003:complete"
+      && jobs[0].dry_run === true && jobs[0].trust === "agent" && jobs[0].import_key === "old-session" && jobs[0].source_type === "journal" && canon(jobs[0].source_metadata) === canon({ import_key: "old-session", source_client: "cli" })
+      && jobs[1].input_length === 0 && jobs[2].trust === null && jobs.every((j) => j.created_by === "MCP_ACCESS_KEY"),
+      `run twice, it copies each old job once, keeping its id: a status the plugin has no word for as failed, a trust no word as none (${JSON.stringify(jobs).slice(0, 400)})`);
+    const copied = (await sql`SELECT job_id::text AS job, position, type, importance, tags, action, status FROM plugin_smart_ingest.ingestion_items WHERE job_id >= 900000 ORDER BY id`) as Body[];
+    assert(copied.map((i) => `${i.job}/${i.position}:${i.action}:${i.status}:${i.type}:${i.importance}:${(i.tags as string[]).join("+")}`).join() ===
+      "900001/0:add:ready:journal:4:art,900001/1:skip:ready:idea:3:,900003/0:skip:failed:idea:3:,900003/1:skip:ready:idea:3:",
+      `…each item once, in order, a type, importance or tags it cannot read as the defaults, a pending action a skip (${JSON.stringify(copied)})`);
+    assert(counts(jobs[0]) === "2,1,1,0,0,0,0" && counts(jobs[2]) === "2,0,1,0,0,0,1", `…the counts recounted from the copied items (${counts(jobs[0])}; ${counts(jobs[2])})`);
+    const old = await si("execute_job", { job_id: "900001" });
+    assert(old.status === 200 && counts(old.body.job ?? {}) === "2,1,1,0,0,0,0" && (await items("900001"))[0]?.result_thought_id !== null,
+      `…and a copied dry run's job executed by the plugin (${JSON.stringify(old.body.job).slice(0, 200)})`);
+    extraction = answering([]);
+    const next = await si("ingest", { text: doc([]).text, dry_run: true });
+    assert(Number(next.body.job?.job_id) > 900003, `…the plugin's next job numbered after the copied ones (${next.body.job?.job_id})`);
+  } finally {
+    await copy.close();
+    await sql.unsafe("DROP TABLE public.ingestion_items; DROP TABLE public.ingestion_jobs;");
+  }
+  extraction = null;
+  vectorFor.length = 0;
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

@@ -1,13 +1,12 @@
 -- Operational Monitoring and Brain Health Views
 -- Provides SQL views for monitoring source volumes, enrichment gaps,
--- ingestion pipeline health, entity extraction queue, and graph coverage.
+-- entity extraction queue, and graph coverage.
 -- Safe to run multiple times (CREATE OR REPLACE).
 --
 -- Required: Enhanced thoughts schema (schemas/enhanced-thoughts)
--- Optional: Smart ingest schema (schemas/smart-ingest) for the ingestion summary view
 -- Optional: Entity extraction schema (schemas/entity-extraction) for queue and
 --           graph coverage views
--- Views 6-8 are wrapped in `to_regclass` guards, so running this file on a
+-- Views 6-7 are wrapped in `to_regclass` guards, so running this file on a
 -- stock install (only enhanced-thoughts) creates views 1-5 cleanly and emits
 -- a NOTICE for each skipped optional view.
 
@@ -94,35 +93,12 @@ FROM public.thoughts
 GROUP BY 1
 ORDER BY total DESC;
 
--- ============================================================
--- 6. INGESTION JOB SUMMARY (requires smart-ingest schema)
---    Status breakdown of ingestion jobs. Healthy brains should
---    show mostly "complete" with few "failed".
---    Guarded: only installed if public.ingestion_jobs exists.
--- ============================================================
-
-DO $$
-BEGIN
-  IF to_regclass('public.ingestion_jobs') IS NOT NULL THEN
-    EXECUTE $v$
-      CREATE OR REPLACE VIEW public.ops_ingestion_summary AS
-      SELECT
-        status,
-        count(*)::bigint AS job_count,
-        sum(added_count)::bigint AS total_added,
-        sum(skipped_count)::bigint AS total_skipped,
-        max(completed_at) AS last_completed
-      FROM public.ingestion_jobs
-      GROUP BY status
-      ORDER BY job_count DESC
-    $v$;
-  ELSE
-    RAISE NOTICE 'skipping ops_ingestion_summary -- public.ingestion_jobs not found (install schemas/smart-ingest)';
-  END IF;
-END$$;
+-- The ingestion job summary that was view 6 (ops_ingestion_summary, over
+-- schemas/smart-ingest's public.ingestion_jobs) retired with that schema when
+-- smart-ingest became a plugin (SMD-2690); the plugin's get_job reads a job.
 
 -- ============================================================
--- 7. STALLED ENTITY QUEUE (requires entity-extraction schema)
+-- 6. STALLED ENTITY QUEUE (requires entity-extraction schema)
 --    Queue items stuck in "processing" for more than 10 minutes,
 --    or items that have failed repeatedly.
 --    Guarded: only installed if public.entity_extraction_queue exists.
@@ -151,7 +127,7 @@ BEGIN
 END$$;
 
 -- ============================================================
--- 8. GRAPH COVERAGE (requires entity-extraction schema)
+-- 7. GRAPH COVERAGE (requires entity-extraction schema)
 --    How many thoughts have been processed for entity extraction
 --    vs how many are still pending.
 --    Guarded: only installed if public.entity_extraction_queue exists.
@@ -181,7 +157,7 @@ BEGIN
 END$$;
 
 -- ============================================================
--- 9. GRANTS
+-- 8. GRANTS
 -- ============================================================
 -- Daemonic Brain (SMD-1810): upstream's file ended here with `GRANT SELECT … TO
 -- service_role` on the five always-installed views — the three guarded views
@@ -192,7 +168,7 @@ END$$;
 -- for pgrst. Removed, the three EXECUTE strings with them.
 -- Grant the role your server connects as instead — from db/:
 --   bun migrate.ts --url postgres://… --grant <role>
--- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the eight
+-- issues db/config.mjs ROLE_GRANTS' `recipes` group, which covers the seven
 -- ops_* views (SELECT), each issued only once its view exists; a role that
 -- owns the tables needs nothing. Row-level security in Daemonic Brain:
 -- SMD-1716.

@@ -1,0 +1,20 @@
+{
+  "name": "Smart Ingest Plugin",
+  "description": "A document's durable thoughts: extracted by the brain's own model through the egress gate, matched by meaning against the brain's thoughts, and added, skipped, appended as evidence or written as revisions through the core, after a dry run that stores each decision. Ported from the Smart Ingest integration's standalone server and schema (SMD-2690).",
+  "category": "plugins",
+  "author": {
+    "name": "Alan Shurafa",
+    "github": "alanshurafa"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": ["plugin", "ingestion", "extraction", "llm", "deduplication"],
+  "difficulty": "intermediate",
+  "estimated_time": "20 minutes",
+  "created": "2026-11-11",
+  "updated": "2026-11-11"
+}
