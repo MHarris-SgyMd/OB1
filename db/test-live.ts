@@ -5130,7 +5130,7 @@ if (want("10")) {
    * calls so a follower's start costs no counted call.
    */
   let downUntil = 0;
-  let down: "503" | "404" | "408" | "hang" = "503";
+  let down: "503" | "404" | "408" | "500" | "hang" = "503";
   /** A 408's words: a gateway's, which classifyError reads as a deadline and the follower as an answer (SMD-3311 review pass 2). */
   let body408 = "litellm.Timeout: Request timed out.";
   let probes = 0;
@@ -5149,6 +5149,21 @@ if (want("10")) {
   const downPrompts: string[] = [];
   /** While set, every probe hangs (SMD-2636 PR 2, review pass 4). */
   let probeHangs = false;
+  /**
+   * The provider crashing (SMD-2641): a call whose thought holds `crashMarker` — a poison thought — or, while
+   * `crashCycles` is above zero, the next call whatever its thought — a crash on a timer, landing on whatever is in
+   * flight — crashes it: it and every request after it answer 500 until `crashProbes` probes have found it down
+   * (outage.arm). While `inFlightMs` is set every other call it is up for takes that long before it is answered, so
+   * another worker's call is in flight when one crashes, and meets it. `crashedBy` names whose call crashed it, in order.
+   */
+  let crashMarker: string | null = null;
+  let crashCycles = 0;
+  let crashProbes = 1;
+  let inFlightMs = 0;
+  const crashedBy: string[] = [];
+  /** Calls the stub is up for in flight now, and the most at once once the crashes are spent: the isolated pass ended, the next with every worker. */
+  let upCallsNow = 0;
+  let peakAfterCrashes = 0;
   /** While above zero, the next calls answer 400 naming the answer budget, as an endpoint that refuses `max_tokens` does (extract's maxTokensFatal). */
   let refuseBudget = 0;
   /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
@@ -5169,10 +5184,31 @@ if (want("10")) {
       if (isProbe) probesAsked++;
       // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 4).
       if (isProbe && probeHangs) return neverAnswers();
+      // The provider crashing on a poison thought, or on a timer, whatever is in flight (SMD-2641).
+      if (!isProbe && (crashMarker !== null || crashCycles > 0 || inFlightMs > 0)) {
+        const asked = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        if (!outage.down(false) && ((crashMarker !== null && asked.includes(crashMarker)) || crashCycles > 0)) {
+          if (crashCycles > 0) crashCycles--;
+          crashedBy.push(asked);
+          down = "500";
+          outage.arm(crashProbes);
+          // Its own answer a beat late, so the other worker's call is made by then.
+          await Bun.sleep(400);
+          return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
+        }
+        // Only a call the provider is up for is in flight that long: one it is down for answers at once.
+        if (inFlightMs > 0 && !outage.down(false)) {
+          upCallsNow++;
+          if (crashCycles === 0 && crashMarker === null) peakAfterCrashes = Math.max(peakAfterCrashes, upCallsNow);
+          await Bun.sleep(inFlightMs);
+          upCallsNow--;
+        }
+      }
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (!isProbe) downPrompts.push(body.messages?.find((m) => m.role === "user")?.content ?? "");
         if (down === "hang") return neverAnswers();
         if (down === "408") return new Response(JSON.stringify({ error: { message: body408 } }), { status: 408 });
+        if (down === "500") return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
         return down === "404"
           ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
           : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -5731,8 +5767,8 @@ if (want("10")) {
         created.push(poisoned);
         const poisonFailed = await pollUntil(async () => (await claimRow(poisoned))?.status === "failed", 25_000);
         const poisonRow = await claimRow(poisoned);
-        assert(poisonFailed && /^provider error again right after the provider answered a probe, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonRow?.last_error ?? "") && !settled,
-               `a thought that draws the error again right after a probe answered is its own: recorded failed, the follower still running (${poisonRow?.status}: ${poisonRow?.last_error?.slice(0, 120)})`);
+        assert(poisonFailed && /^provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonRow?.last_error ?? "") && !settled,
+               `a thought that draws the error again, retried alone after its outage, with a probe made at once answering, is its own (SMD-2641): recorded failed, the follower still running (${poisonRow?.status}: ${poisonRow?.last_error?.slice(0, 120)})`);
         const failedOthers = (await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed' AND thought_id = ANY(${sql.array([busy, pulled, hung], "TEXT")}::uuid[])`)[0].n;
         assert(failedOthers === 0, `…and none of the outages' thoughts is failed (${failedOthers})`);
       } finally {
@@ -5971,8 +6007,8 @@ if (want("10")) {
       created.push(crasher);
       await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(crasher)) ?? ""), 45_000);
       const crasherRow = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${crasher}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
-      assert(crasherRow?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(crasherRow.last_error ?? ""),
-             `a thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again right after the probe answered, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${callScript.length} scripted left)`);
+      assert(crasherRow?.status === "failed" && /^provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: /.test(crasherRow.last_error ?? ""),
+             `a thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again, retried alone, a probe made at once answering, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${callScript.length} scripted left)`);
     } finally {
       callScript.length = 0;
       answer429 = 0;
@@ -5986,6 +6022,82 @@ if (want("10")) {
       for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
     }
     assert(followCode === 0, `…and the follower exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /refuse|rejected/.test(l)).join(" | ").slice(0, 200)})`);
+  }
+
+  // SMD-2641: with two workers a provider crash's blame was a race — a poison thought crashing the provider made the
+  // innocent thought in flight beside it a suspect too, and both, re-claimed, met its next crash right after a probe
+  // answered and were failed as their own — and a provider crashing on a timer failed whichever suspect it met first.
+  // Now the follower retries an outage's suspects one at a time, one worker, and blames one that errs again alone only
+  // on a probe made at once: no answer, an outage it was alone at, and at the third its own. A poison thought beside an
+  // innocent one, in both orders: the poison failed at its third outage alone, the innocent extracted. A crash at the
+  // next call after each recovery, whatever is in flight, three times, twice on a suspect alone: nothing failed.
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage(1000, 2000);
+    const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+    const created: string[] = [];
+    /** One follower of two workers over `texts`, seeded in order before it starts, until each is finished or `ms` pass; then stopped. */
+    const followOver = async (texts: string[], ms: number) => {
+      const ids: string[] = [];
+      for (const text of texts) ids.push(await seed(text));
+      created.push(...ids);
+      const lines: string[] = [];
+      const ac = new AbortController();
+      let code = -1;
+      const running = runExtract({ url: URL_!, env, workers: 2, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      try {
+        await pollUntil(async () => (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms);
+      } finally {
+        ac.abort();
+        await running;
+      }
+      return { ids, lines, code, claims: await Promise.all(ids.map(claimOf)) };
+    };
+    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3\), and the follower waits/;
+    try {
+      inFlightMs = 1000;
+      crashProbes = 1;
+      crashMarker = "crash-poison";
+      for (const poisonFirst of [true, false]) {
+        crashedBy.length = 0;
+        const poisonText = `Wren's crash-poison note, ${poisonFirst ? "first" : "second"} in the pool, takes the runner down.`;
+        // An answer the stub knows ("migrated"), so its extraction writes mentions.
+        const innocentText = `Xavi migrated the grafana board, ${poisonFirst ? "second" : "first"} in the pool.`;
+        const r = await followOver(poisonFirst ? [poisonText, innocentText] : [innocentText, poisonText], 90_000);
+        const [poisonClaim, innocentClaim] = poisonFirst ? r.claims : [r.claims[1], r.claims[0]];
+        const innocentId = poisonFirst ? r.ids[1] : r.ids[0];
+        const alone = r.lines.filter((l) => aloneLine.test(l)).length;
+        const isolatedSaid = r.lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the pass goes back to 2; one that errs again alone is blamed only on a one-token call made at once$/.test(l));
+        // Poison first, the innocent is still a suspect once the poison is failed, the outage after it keeping it: retried alone.
+        const failedAt = r.lines.findIndex((l) => /provider error again with this thought alone in flight at 3 outages running/.test(l));
+        const innocentAlone = !poisonFirst || (failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}retrying the last outage's 1 suspect thought\(s\) one at a time/.test(l)));
+        assert(innocentAlone && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages running, the one-token call after each unanswered, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonClaim.last_error ?? "")
+            && innocentClaim?.status === "succeeded" && (await extractedNow(innocentId)) && alone === 2 && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid && r.code === 0,
+          `two extract workers, a poison thought crashing the provider beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent extracted${poisonFirst ? ", alone after it" : ""} (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${crashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried alone ${innocentAlone}; exit ${r.code})`);
+      }
+      crashMarker = null;
+      crashedBy.length = 0;
+      crashCycles = 3;
+      peakAfterCrashes = 0;
+      // Four more behind the two, which the pass after the isolated one takes with both workers.
+      const r = await followOver(["Yara's timer note names the pager.", "Zane's timer note names the runbook.", ...[1, 2, 3, 4].map((i) => `Abel's timer note ${i} names the dashboard.`)], 90_000);
+      const alone = r.lines.filter((l) => aloneLine.test(l)).length;
+      assert(r.claims.every((c) => c?.status === "succeeded") && crashCycles === 0 && crashedBy.length === 3 && alone === 2 && r.code === 0,
+        `a provider crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six extracted (SMD-2641; ${r.claims.map((c) => c?.status).join(", ")}; ${crashedBy.length} crash(es), ${crashCycles} left; ${alone} alone line(s); exit ${r.code})`);
+      assert(peakAfterCrashes === 2,
+        `…and once its suspects have settled the isolated pass ends, the next taking the four behind them with both workers at once (${peakAfterCrashes} call(s) in flight at most)`);
+    } finally {
+      crashMarker = null;
+      crashCycles = 0;
+      inFlightMs = 0;
+      crashProbes = 1;
+      down = "503";
+      outage.clear();
+      restoreOutage();
+      restorePauses();
+      for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
   }
 
   // SMD-2636 PR 2: a wait whose probe the provider answers with a refusal — a key revoked while it was away — ends
@@ -15576,7 +15688,7 @@ if (want("16")) {
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let judgeUnavailableMs = 0;
   /** What the judge, and a follower's probe, answer in an outage: a 503, a 408 (SMD-3311), or nothing at all (SMD-2599). */
-  let judgeDown: "503" | "408" | "hang" = "503";
+  let judgeDown: "503" | "408" | "500" | "hang" = "503";
   /** While set, a judge call that arrives while another is in flight answers 429, as a provider's concurrency limit does; the one in flight takes 600 ms (SMD-3311). Probes are exempt. */
   let judgeLimitConcurrent = false;
   let judgeCallsInFlight = 0;
@@ -15603,6 +15715,17 @@ if (want("16")) {
   const judgeProbeScript: number[] = [];
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
+  /**
+   * The judge crashing, as [10]'s stub (SMD-2641): a pair whose newer thought holds `judgeCrashMarker`, or, while
+   * `judgeCrashCycles` is above zero, the next call whatever its pair, crashes it — every request after answering 500
+   * until `judgeCrashProbes` probes have found it down — and while `judgeInFlightMs` is set every other call it is up
+   * for takes that long. `judgeCrashedBy` names whose call crashed it, in order.
+   */
+  let judgeCrashMarker: string | null = null;
+  let judgeCrashCycles = 0;
+  let judgeCrashProbes = 1;
+  let judgeInFlightMs = 0;
+  const judgeCrashedBy: string[] = [];
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
   let judgeProbes = 0;
   /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
@@ -15621,10 +15744,26 @@ if (want("16")) {
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
       // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 4).
       if (isProbe && judgeProbeHangs) return neverAnswers();
+      // The judge crashing on a poison pair, or on a timer, whatever is in flight (SMD-2641).
+      if (!isProbe && (judgeCrashMarker !== null || judgeCrashCycles > 0 || judgeInFlightMs > 0)) {
+        const asked = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        if (!judgeOutage.down(false) && ((judgeCrashMarker !== null && asked.includes(judgeCrashMarker)) || judgeCrashCycles > 0)) {
+          if (judgeCrashCycles > 0) judgeCrashCycles--;
+          judgeCrashedBy.push(asked);
+          judgeDown = "500";
+          judgeOutage.arm(judgeCrashProbes);
+          // Its own answer a beat late, so the other worker's call is made by then.
+          await Bun.sleep(400);
+          return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
+        }
+        // Only a call the judge is up for is in flight that long: one it is down for answers at once.
+        if (judgeInFlightMs > 0 && !judgeOutage.down(false)) await Bun.sleep(judgeInFlightMs);
+      }
       // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599); a call's thoughts are kept, whose call met it (SMD-2636 PR 2, review pass 3).
       if (judgeOutage.down(isProbe)) {
         if (!isProbe) judgeDownPrompts.push((body.messages ?? []).map((m) => m.content).join("\n"));
         if (judgeDown === "hang") return neverAnswers();
+        if (judgeDown === "500") return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
         return judgeDown === "408" ? new Response(JSON.stringify({ error: { message: "litellm.Timeout: Request timed out." } }), { status: 408 }) : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
       // A follower's one-token probe, answered apart: no judge call counted.
@@ -17161,8 +17300,8 @@ if (want("16")) {
       created.push(crasher);
       await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(crasher)) ?? ""), 45_000);
       const crasherRow = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${crasher}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
-      assert(crasherRow?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(crasherRow.last_error ?? ""),
-             `a pair's thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again right after the probe answered, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${judgeCallScript.length} scripted left)`);
+      assert(crasherRow?.status === "failed" && /^provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: /.test(crasherRow.last_error ?? ""),
+             `a pair's thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again, retried alone, a probe made at once answering, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${judgeCallScript.length} scripted left)`);
     } finally {
       judgeCallScript.length = 0;
       judge429 = 0;
@@ -17177,6 +17316,78 @@ if (want("16")) {
       for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
     }
     assert(followCode === 0, `…and the consolidate follower exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
+  }
+
+  // SMD-2641: [10]'s twins for consolidate — two workers, a poison pair crashing the judge beside an innocent one, in
+  // both orders: both thoughts suspects, retried one at a time, the poison failed at its third outage alone, the
+  // innocent judged; a crash at the next call after each recovery, whatever is in flight, three times: nothing failed.
+  {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage(1000, 2000);
+    const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+    const created: string[] = [];
+    let axis = 80;
+    /**
+     * One follower of two workers over pairs, each an older thought and a newer one sharing a subject, the olders seeded
+     * first and then the newers in order, before it starts; until each newer is finished or `ms` pass; then stopped.
+     */
+    const followOver = async (pairs: [string, string][], ms: number) => {
+      const tags = pairs.map(() => `isolate-${axis}`);
+      const axes = pairs.map(() => axis++);
+      for (let i = 0; i < pairs.length; i++) created.push(await seed(pairs[i][0], axes[i], 3, [tags[i] + `-${i}`]));
+      const ids: string[] = [];
+      for (let i = 0; i < pairs.length; i++) ids.push(await seed(pairs[i][1], axes[i], 0, [tags[i] + `-${i}`]));
+      created.push(...ids);
+      const lines: string[] = [];
+      const ac = new AbortController();
+      let code = -1;
+      const running = runConsolidate({ url: URL_!, env, workers: 2, follow: 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      try {
+        await pollUntil(async () => (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms);
+      } finally {
+        ac.abort();
+        await running;
+      }
+      return { ids, lines, code, claims: await Promise.all(ids.map(claimOf)) };
+    };
+    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3\), and the follower waits/;
+    try {
+      judgeInFlightMs = 1000;
+      judgeCrashProbes = 1;
+      judgeCrashMarker = "crash-poison";
+      for (const poisonFirst of [true, false]) {
+        judgeCrashedBy.length = 0;
+        // Words of their own each order: the same text again is the same thought, failed or judged already.
+        const order = poisonFirst ? "first" : "second";
+        const poison: [string, string] = [`The paging roster names the crash-free owner, ${order}.`, `The paging roster names the crash-poison owner now, ${order}.`];
+        const innocent: [string, string] = [`The backup roster names the weekly owner, ${order}.`, `The backup roster names the daily owner now, ${order}.`];
+        const r = await followOver(poisonFirst ? [poison, innocent] : [innocent, poison], 90_000);
+        const [poisonClaim, innocentClaim] = poisonFirst ? r.claims : [r.claims[1], r.claims[0]];
+        const alone = r.lines.filter((l) => aloneLine.test(l)).length;
+        const isolatedSaid = r.lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the pass goes back to 2; one that errs again alone is blamed only on a one-token call made at once$/.test(l));
+        assert(poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages running, the one-token call after each unanswered, so this thought's: .*500/.test(poisonClaim.last_error ?? "")
+            && innocentClaim?.status === "succeeded" && alone === 2 && judgeCrashedBy.length === 4 && judgeCrashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid && r.code === 0,
+          `two consolidate workers, a poison pair crashing the judge beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent judged (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${judgeCrashedBy.length} crash(es); isolation said ${isolatedSaid}; exit ${r.code})`);
+      }
+      judgeCrashMarker = null;
+      judgeCrashedBy.length = 0;
+      judgeCrashCycles = 3;
+      const r = await followOver([["The pager table names the weekly lead.", "The pager table names the daily lead now."], ["The runbook table names the weekly lead.", "The runbook table names the daily lead now."]], 90_000);
+      const alone = r.lines.filter((l) => aloneLine.test(l)).length;
+      assert(r.claims.every((c) => c?.status === "succeeded") && judgeCrashCycles === 0 && judgeCrashedBy.length === 3 && alone === 2 && r.code === 0,
+        `a judge crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: both judged (SMD-2641; ${r.claims.map((c) => c?.status).join(", ")}; ${judgeCrashedBy.length} crash(es), ${judgeCrashCycles} left; ${alone} alone line(s); exit ${r.code})`);
+    } finally {
+      judgeCrashMarker = null;
+      judgeCrashCycles = 0;
+      judgeInFlightMs = 0;
+      judgeCrashProbes = 1;
+      judgeDown = "503";
+      judgeOutage.clear();
+      restoreOutage();
+      restorePauses();
+      for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
   }
 
   // SMD-2636 PR 2: as [10]'s — a wait whose probe the judge answers with a refusal ends the follower, exit 2, its
@@ -28678,11 +28889,11 @@ if (want("38s")) {
     assert(paceCode === 1 && paceDownAt > 0 && paceSpan >= 1500 && paceReads <= 12 && paceSaid && paceOwn >= 1,
       `the sweep set down mid-period leaves the polls at their pace while consolidation judges, its calls their own limit from then on (exit ${paceCode}; ${paceReads} live read(s) in the 1.5 s after the set-down; the period read ${paceSpan} ms past it; said ${paceSaid}; ${paceOwn} of 3 pairs timed out at 1 s)`);
 
-    // A thought whose judge call hangs the provider — the probe after it hanging too — is its own once it does so again
-    // right after the provider answered a probe, beside a sweep asking the judge model as alone: the window that says so
-    // grows with what the longer limit adds (the definitions reviewer's: at the 15 minutes against 1,020 s, scaled here
-    // to 3 s against 3 s, hang after hang was read as an outage each, the thought never failed, the period never
-    // ending; mutant: the window not grown).
+    // A thought whose judge call hangs the provider — the probe after it hanging too — is its own once it has done so
+    // alone at three outages after the first (SMD-2641: retried alone, its probe unanswered each time), beside a sweep
+    // asking the judge model as alone: the window that keeps it a suspect grows with what the longer limit adds (the
+    // definitions reviewer's: at the 15 minutes against 1,020 s, scaled here to 3 s against 3 s, hang after hang was
+    // read as an outage each, the thought never failed, the period never ending; mutant: the window not grown).
     const restoreOutageW = shortenOutage(200);
     const windowWas = SUSPECT_WINDOW.ms;
     await sql`DELETE FROM thoughts`;
@@ -28719,8 +28930,8 @@ if (want("38s")) {
     }
     const hangCode = await bounded(hangRun, acHang);
     const hangError = (await coClaim(hanging))?.last_error ?? "";
-    assert(hangFailed && sw.hangs === 2 && /right after the provider answered a probe/.test(hangError) && hangCode === 0,
-      `a thought hanging the provider beside a sweep asking the judge model is failed as its own at its second hang, the window grown with the limit (failed ${hangFailed}; hangs ${sw.hangs}; ${hangError.slice(0, 120)}; exit ${hangCode})`);
+    assert(hangFailed && sw.hangs === 4 && /^provider error again with this thought alone in flight at 3 outages running, the one-token call after each unanswered/.test(hangError) && hangCode === 0,
+      `a thought hanging the provider beside a sweep asking the judge model is failed as its own at its fourth hang, its third alone, the window grown with the limit (failed ${hangFailed}; hangs ${sw.hangs}; ${hangError.slice(0, 120)}; exit ${hangCode})`);
 
     // A key refusal at a period's start that the hold read after it does not bear out — another pool named as the sweep
     // starts, this stack's named again before the scheduler reads the hold — sets the sweep down `failed`, not `key`,

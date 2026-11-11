@@ -126,11 +126,13 @@
  * answers (worker-bootstrap.ts's waitOutProvider, SMD-2636 PR 2): an outage
  * back soon after the last one's answer, nothing got past the provider since,
  * carries the probe's schedule on; a probe the provider refuses ends the
- * follower, exit 2; an answer polls again at once. A thought that draws the
- * error again right after a probe answered is its own fault, and is recorded
- * failed — unless every error of its streak was the provider holding calls
- * back (a 429, a 503, the model not served), which makes no suspect
- * (SMD-3311). Before it writes anything, the worker key's registration
+ * follower, exit 2; an answer polls again at once. The thoughts in hand at
+ * an outage are its suspects — unless every error of a thought's streak was
+ * the provider holding calls back (a 429, a 503, the model not served), which
+ * makes no suspect (SMD-3311) — and after it they are retried one at a time,
+ * one worker (SMD-2641): one that errs again alone is its own fault, recorded
+ * failed, when a one-token call made at once answers, or at its third outage
+ * alone with none answering. Before it writes anything, the worker key's registration
  * included, a follower probes once. A model the provider does not serve, a
  * key it refuses or a wrong base URL exits 2 there, and an unreachable
  * provider is waited for.
@@ -209,7 +211,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { ALONE_OUTAGES, blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeRefusal, ProviderOutage, regateMessage, EXTRACT_REQUEST_FIELDS, requestShapeRefused, throughOutage, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerFault, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
@@ -670,7 +672,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * answers then is held to the same refusals.
    */
   const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal, model = cfg.metadataModel) => probeChat(cfg.chat, model, ms, wake);
-  const outage = new ProviderOutage();
+  // Isolated (SMD-2641): after an outage its suspects are retried one at a time, and one is blamed only on a probe.
+  const outage = new ProviderOutage(undefined, undefined, true);
   /** The model an outage probes: the metadata model, or the escalation model when its 404 began the outage (review pass 2). */
   let outageModel = cfg.metadataModel;
   /**
@@ -1572,6 +1575,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   function limitReached(): boolean {
     return LIMIT > 0 && taken.size + claiming >= LIMIT;
   }
+  /**
+   * This pass retries the last outage's suspects (SMD-2641, ProviderOutage's `isolating`): one worker, one thought a
+   * claim, the pool's order, and it ends once none is left to retry, the next pass polled at once with every worker.
+   */
+  let isolated = false;
 
   /**
    * The Writer's err for lines written on a timer or an event — the heartbeat's,
@@ -1596,6 +1604,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     });
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
+        // The last outage's suspects all retried (SMD-2641): the isolated pass ends, the next polled at once with every worker.
+        if (isolated && !outage.isolating()) {
+          pollNow = true;
+          return;
+        }
         // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
         // here holding no claim, and a stop while it waits ends it.
         if (ADMIT) {
@@ -1609,7 +1622,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         try {
           const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
           if (room <= 0) return;
-          const want = Math.min(BATCH, room);
+          const want = Math.min(isolated ? 1 : BATCH, room);
           claiming += want;
           try {
             batch = (await sql`
@@ -1619,7 +1632,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           }
           // Tracked under --limit only: a follower without one runs for months (review pass 4).
           if (LIMIT > 0) for (const b of batch) taken.add(b.thought_id);
-          if (batch.length === 0) return;
+          if (batch.length === 0) {
+            // Nothing left to claim while retrying suspects: those left are not in this pool (SMD-2641).
+            if (isolated) outage.unpooled();
+            return;
+          }
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           readAt = performance.now();
@@ -1661,6 +1678,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             const asked = { at: readAt };
             /** Whether any error in this thought's streak could be its own (`fault`'s suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
             let streakSuspect = false;
+            /**
+             * Another worker's outage halted this thought's streak mid-pause (SMD-2641): a suspect of that outage too when
+             * the streak could be its own — a crash meets every call in flight, and which worker's pauses end first, the
+             * outage's, is a race — so it is retried alone after it, not beside the rest. Not on a stopping pass.
+             */
+            const joinHalted = (): void => {
+              if (!stopping && outage.reason !== null && streakSuspect) outage.begin(outage.reason, b.thought_id);
+            };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 // A wait for a slot on the model-call seam is neither the call's
@@ -1770,6 +1795,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 let probeWhy: string | null = null;
                 /** The probe answered: the thought's, and said so, so an operator reads why it failed and that a retry revisits it (review pass 3). */
                 let probeAnswered = false;
+                /** That probe found no answer: a suspect alone is blamed on it, not probed twice (SMD-2641). */
+                let probedOut = false;
                 if (act === "probe") {
                   if (stopping) return;
                   if (outage.reason !== null) act = "outage";
@@ -1779,26 +1806,52 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                     // The refusal is the probe's, said beside the call's (review pass 2).
                     if (p.state === "refused") probeWhy = p.why;
                     probeAnswered = p.state === "up";
+                    probedOut = isOut(p);
                   }
                 }
-                const down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
+                let down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
+                const begins = outage.reason === null;
+                // A suspect retried alone that errs again (SMD-2641): blamed only on a probe made at once, or the one
+                // just made — answered, the provider up while this thought fails, its own; refused, the request's; no
+                // answer, an outage it was alone at, and at the ALONE_OUTAGES-th its own.
+                let blamed: "outage" | "answered" | "alone" | null = null;
+                if (down && !stopping && streakSuspect && outage.blames(b.thought_id)) {
+                  const p = probedOut ? null : await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
+                  if (p?.state === "refused") {
+                    act = "fatal";
+                    probeWhy = p.why;
+                    down = false;
+                  } else if (!stopping) blamed = outage.blame(b.thought_id, msg, p?.state === "up");
+                }
                 if (down) {
                   // On a stopping pass the thought goes back to the pool, as a transient's does.
                   if (stopping) return;
-                  const begins = outage.reason === null;
-                  if (outage.begin(msg, streakSuspect ? b.thought_id : undefined) === "outage") {
+                  if ((blamed ?? outage.begin(msg, streakSuspect ? b.thought_id : undefined)) === "outage") {
                     providerStops++;
                     // The escalation model gone since the start: the outage probes it (review pass 2).
                     if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
                     halt.abort();
-                    err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
+                    const alone = blamed === "outage" ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES})` : "";
+                    err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
                     return;
                   }
-                  // Again, right after the provider answered a probe: this
-                  // thought's own, recorded failed so it is visible rather than
-                  // cycling through the pool for ever.
-                  outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
-                  stopAfter = true;
+                  if (blamed === "answered") {
+                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg}` };
+                  } else if (blamed === "alone") {
+                    // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
+                    // this worker stops after recording it.
+                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages running, the one-token call after each unanswered, so this thought's: ${msg}` };
+                    outage.begin(msg);
+                    providerStops++;
+                    halt.abort();
+                    stopAfter = true;
+                  } else {
+                    // Again, right after the provider answered a probe: this
+                    // thought's own, recorded failed so it is visible rather than
+                    // cycling through the pool for ever.
+                    outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
+                    stopAfter = true;
+                  }
                 } else if (act === "thought") {
                   outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
                 } else if (act === "fatal") {
@@ -1816,7 +1869,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // A transient error on a stopping pass, or one another worker's
                   // outage has halted: neither called again nor recorded failed —
                   // the thought goes back to the pool with the leases the finally
-                  // returns (SMD-2401, SMD-2599).
+                  // returns (SMD-2401, SMD-2599); one whose streak could be its own
+                  // joins the outage as its suspect (SMD-2641).
+                  joinHalted();
                   return;
                 } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
@@ -1829,7 +1884,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // The pause was the provider's: the thought's clock starts again (review pass 3).
                   const paused = inHand.get(workerId);
                   if (paused) paused.since = Date.now();
-                  if (stopping || outage.reason !== null) return;
+                  if (stopping || outage.reason !== null) {
+                    joinHalted();
+                    return;
+                  }
                 } else {
                   // Still failing after the pauses. This row is recorded failed
                   // with the error — if the provider is down it is one row per
@@ -2174,15 +2232,23 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (added > 0 || !FOLLOW) out(`  pool: ${added} thought(s) added`);
     total += before.pending + before.claimed;
     lastPassIdle = before.pending + before.claimed === 0;
+    // The last outage's suspects, while any is left to retry (SMD-2641): one worker, one thought a claim; none in the
+    // pool, none is left to retry.
+    isolated = !!FOLLOW && outage.isolating();
+    if (isolated && lastPassIdle) {
+      outage.unpooled();
+      isolated = false;
+    }
     if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) {
       printCounts(before, "before");
     }
+    if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the pass goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a one-token call made at once`);
     // A worker that throws — a Writer that throws, a follower's database error
     // that ends it (SMD-2636 PR 4) — stops the rest after the thought in hand, and
     // the pass rejects with its error once they have stopped, not while they
     // still hold rows and the client (review pass 1).
-    const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
+    const ends = await Promise.allSettled(Array.from({ length: isolated ? 1 : WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
       passEnds.abort();
       throw e;
