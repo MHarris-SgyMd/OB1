@@ -7807,7 +7807,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 113's close or 111's door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111 and 113, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 130's set close or set door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111 and 113, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
   // The garbage-judge alarm's window is the pool's, kept across runs (PR 5b): the many empty answers of the cases
@@ -8710,7 +8710,7 @@ if (want("10h")) {
         try {
           // A rejection read as the run's result, so an error escaping the sweep fails this case rather than the suite.
           const refusedWrite = await sweep({ model: false, switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
-          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subjects\)/.test(refusedWrite.stderr),
+          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subjects\): record_thought_subjects needs INSERT and UPDATE on thought_facets/.test(refusedWrite.stderr),
             `a write the role is refused ends the sweep, exit 2, naming the grants (exit ${refusedWrite.code}: ${refusedWrite.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         } finally {
           await sql.unsafe("GRANT EXECUTE ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) TO PUBLIC");
@@ -8720,7 +8720,7 @@ if (want("10h")) {
         await sql.unsafe("REVOKE EXECUTE ON FUNCTION close_thought_subjects(uuid, uuid[], text) FROM PUBLIC");
         try {
           const refusedClose = await sweep({ switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
-          assert(refusedClose.code === 2 && /This role cannot close a thought's subject \(permission denied for function close_thought_subjects\)/.test(refusedClose.stderr),
+          assert(refusedClose.code === 2 && /This role cannot close a thought's subject \(permission denied for function close_thought_subjects\): close_thought_subjects needs UPDATE on thought_facets/.test(refusedClose.stderr),
             `a close the role is refused ends the sweep, exit 2 (exit ${refusedClose.code}: ${refusedClose.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         } finally {
           await sql.unsafe("GRANT EXECUTE ON FUNCTION close_thought_subjects(uuid, uuid[], text) TO PUBLIC");
@@ -8881,7 +8881,7 @@ if (want("10h")) {
     asked = ownCalls;
     const refusedKey = await sweep({}, { ...env, OB1_JUDGE_MODEL: `stub-judge-${"l".repeat(200)}` });
     assert(refusedKey.code === 1 && /record_thought_subjects refused the key/.test(refusedKey.stderr)
-        && tally(refusedKey) === "0 subject(s) recorded; 1 keys refused — among them, 1 with an out-of-date subject still standing" && ownCalls === asked + 1 && (await claimOf(pr))?.status === "failed",
+        && tally(refusedKey) === "0 subject(s) recorded; 1 keys refused — among them, 1 with an out-of-date subject still standing" && ownCalls === asked + 1 && (await claimOf(pr))?.status === "failed" && (await claimOf(pr))?.last_error?.startsWith("record_thought_subjects refused the key: ") === true,
       `a key the door refuses fails the claim, said, exit 1, the out-of-date subject counted standing (exit ${refusedKey.code}: ${tally(refusedKey)})`);
     // An answer naming nothing about a text that moved while the model answered closes nothing: the close reads the
     // fingerprint the sweep read (a close reading the text now closed the out-of-date subject on an answer about a text
@@ -8936,7 +8936,7 @@ if (want("10h")) {
     // Bounded, so a sweep that asks the thought again stops at three, not at the alarm, which this section runs off.
     const setSwept = await sweep({ limit: 3 });
     assert(/would: of 1 thought\(s\), record none by the rules; ask stub-judge about 1 \(1 with an out-of-date subject\)\./.test(setDry.stdout)
-        && setSwept.code === 0 && tally(setSwept) === "0 subject(s) recorded; 1 the model named nothing for (1 out-of-date subject(s) closed)"
+        && setSwept.code === 0 && tally(setSwept) === "0 subject(s) recorded; 1 the model named nothing for (2 out-of-date subject(s) closed)"
         && (await standingOf(fresh)) === undefined && ownCalls === asked + 1 && (await claimOf(fresh))?.status === "succeeded",
       `a thought holding an out-of-date set the model names nothing for: counted once by a dry run, asked once, its whole set closed and its claim finished (exit ${setSwept.code}, ${ownCalls - asked} asked: ${tally(setSwept)}; dry: ${setDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 120)})`);
     // The thought left as a passing run leaves it, whatever this run did: a set still standing, or its claim pending,
@@ -8944,6 +8944,48 @@ if (want("10h")) {
     await sql`SELECT record_thought_subjects(${fresh}::uuid, NULL, NULL, 'subject:stub-judge@p1', NULL, NULL, NULL)`;
     await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
                 WHERE thought_id = ${fresh}::uuid AND work_type = ${POOL} AND status <> 'succeeded'`;
+    // A set narrowed: a model's set {pr:727, a phrase} under the current question, at a text since edited; asked again,
+    // the model names PR 727 alone, so the door keeps pr:727 and closes the phrase (`closed`), counted a replacement and
+    // no new key (review pass 1: no case reached the arm, and a narrowed set was counted with a new key).
+    const narrow = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${"[10h] a merged pull request 727, reviewed before its notes"}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
+    await sql`SELECT record_thought_subjects(${narrow}::uuid, ARRAY['pr:727', 'phrase:a review before its notes'], 'model', 'subject:stub-judge@p2r', NULL,
+      (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${narrow}::uuid), NULL)`;
+    await sql`SELECT update_thought(${narrow}::uuid, ${"[10h] a merged pull request 727, reviewed, its notes since"})`;
+    asked = ownCalls;
+    const narrowed = await sweep({ limit: 3 });
+    const narrowLeft = ((await subjects()).filter((x) => x.thought === narrow && x.standing)).map((x) => x.key).join(",");
+    assert(narrowed.code === 0 && tally(narrowed) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (0 with a new key)"
+        && narrowLeft === "pr:727" && ownCalls === asked + 1,
+      `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
+    await sql`DELETE FROM thoughts WHERE id = ${narrow}::uuid`;
+    // The pass's rule narrowing a set its rule found: counted recorded (review pass 1, mutant: a `closed` answer went
+    // uncounted). The pass's backlog drained first.
+    await extractRun();
+    const passSet = await seed(summary("SMD-91", "start smd-91"));
+    const [{ pf }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS pf FROM thoughts WHERE id = ${passSet}::uuid`) as { pf: string }[];
+    await sql`SELECT record_thought_subjects(${passSet}::uuid, ARRAY['ticket:SMD-91', 'phrase:a second subject'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${pf}, NULL)`;
+    const passNarrow = await extractRun();
+    const passLeft = (await subjects()).filter((x) => x.thought === passSet && x.standing).map((x) => x.key);
+    assert(passNarrow.code === 0 && /; recorded 1 thought\(s\)' own subject by its ticket\n/.test(passNarrow.stdout) && JSON.stringify(passLeft) === JSON.stringify(["ticket:SMD-91"]),
+      `the pass's rule narrowing a set is counted recorded (exit ${passNarrow.code}; ${/; recorded[^\n]*/.exec(passNarrow.stdout)?.[0] ?? "no recorded line"}; left ${passLeft.join(",")})`);
+    await sql`DELETE FROM thoughts WHERE id = ${passSet}::uuid`;
+    // A rule's set at the text read, holding the rule's key and another: the rules agree only with their one key, so it
+    // is narrowed to it, a replacement and no new key, a dry run counting alike (review pass 1, mutants: a set compared
+    // as a subset, or its first key alone, was taken as current).
+    const ruleSet = await seed(summary("SMD-92", "start smd-92"));
+    const [{ rf }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS rf FROM thoughts WHERE id = ${ruleSet}::uuid`) as { rf: string }[];
+    await sql`SELECT record_thought_subjects(${ruleSet}::uuid, ARRAY['ticket:SMD-92', 'version:v9.9.9'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${rf}, NULL)`;
+    await sql`SELECT requeue_thought_work(${POOL}, ${ruleSet}::uuid)`;
+    const ruleSetDry = await sweep({ dryRun: true });
+    asked = ownCalls;
+    const ruleSetSwept = await sweep({ limit: 3 });
+    const ruleSetLeft = (await subjects()).filter((x) => x.thought === ruleSet && x.standing).map((x) => x.key);
+    const ruleSetWould = ruleSetDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
+    assert(/^would: of 1 thought\(s\), record 1 by its session header's ticket \(1 in place of a standing subject, 0 with a new key\)/.test(ruleSetWould)
+        && ruleSetSwept.code === 0 && tally(ruleSetSwept) === "1 subject(s) recorded (1 by the session header's ticket), 1 in place of a standing one (0 with a new key)"
+        && JSON.stringify(ruleSetLeft) === JSON.stringify(["ticket:SMD-92"]) && ownCalls === asked,
+      `a rule's set holding the rule's key and another is narrowed to the rule's key, a replacement and no new key, a dry run alike (exit ${ruleSetSwept.code}: ${tally(ruleSetSwept)}; left ${ruleSetLeft.join(",")}; dry: ${ruleSetWould.slice(0, 160)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${ruleSet}::uuid`;
     // An unread answer about a text edited while the model answered: its failed claim is no longer this run's when
     // released — the edit pooled it again — so it is said, and the run, taking it again and finishing it, exits 0
     // (review pass 2: it counted as this run's failure, for --retry-failed).

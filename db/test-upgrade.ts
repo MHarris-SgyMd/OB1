@@ -5953,7 +5953,7 @@ console.log("\n[20bu] Migration 131: refused by name without 122 or 130; onto a 
 
   const servedAfter = await serves(session), filedAfter = await serves(filed);
   assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before
-         && servedBefore.split(",").length === 1 && servedAfter === "ticket:SMD-3420,ticket:SMD-3422" && filedAfter === "ticket:SMD-3421",
+         && /^ticket:SMD-342[02]$/.test(servedBefore) && servedAfter === "ticket:SMD-3420,ticket:SMD-3422" && filedAfter === "ticket:SMD-3421",
     `the file moves nothing it finds; before it the set's thought served one of its tickets (${servedBefore}), after it both (${servedAfter}), the filed one its ticket alone (${filedAfter})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 });
   assert((await serves(session)) === servedAfter && (await facets()) === facetsBefore, "a re-apply is a no-op");

@@ -19095,6 +19095,21 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   const none = await serves(phrased);
   assert(two === "ticket:SMD-91701,ticket:SMD-91702" && alone === "ticket:SMD-91709" && none === "",
     `a thought serves each ticket of its set, in key order, a phrase none; a filed ticket alone; no ticket subject, nothing (${two} | ${alone} | ${none || "none"})`);
+  // A set grown out of key order — the greater key first, the lesser written beside it later — then narrowed: the
+  // closed ticket serves nothing. And keys that are no ticket 122 serves: a phrase shaped like an id, a ticket key
+  // 122's pattern refuses (number 0). STABLE as 122's (review pass 1's mutants: each filter and arm otherwise unheld).
+  const grown = await thought("a set grown and narrowed");
+  await sets(grown, ["ticket:SMD-91702"]);
+  await sets(grown, ["ticket:SMD-91701", "ticket:SMD-91702"]);
+  const grownServes = await serves(grown);
+  await sets(grown, ["ticket:SMD-91702"]);
+  const narrowedServes = await serves(grown);
+  const odd = await thought("keys that are no ticket's");
+  await sets(odd, ["phrase:ab-12", "ticket:SMD-0"]);
+  const oddServes = await serves(odd);
+  const volatility = (await one<{ v: string }>(`SELECT provolatile AS v FROM pg_proc WHERE oid = 'ob1_item_serves(text, text)'::regprocedure`)).v;
+  assert(grownServes === "ticket:SMD-91701,ticket:SMD-91702" && narrowedServes === "ticket:SMD-91702" && oddServes === "" && volatility === "s",
+    `a set written out of key order serves in key order; a ticket closed from it serves nothing; a phrase shaped like an id and a ticket key 122 refuses serve nothing; STABLE as 122's (${grownServes} | ${narrowedServes} | ${oddServes || "none"} | ${volatility})`);
 
   // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
   // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
@@ -19124,6 +19139,26 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   const parentArm = (await q<{ key: string }>(`SELECT key FROM ob1_item_serves('ticket', 'SMD-91799')`)).length;
   const itemArm = (await q<{ key: string }>(`SELECT key FROM ob1_item_serves('item', '00000000-0000-4000-8000-000000009170')`)).length;
   assert(parentArm === 0 && itemArm === 0, `a ticket with no parent link and an item that does not exist serve nothing, as under 122 (${parentArm}, ${itemArm})`);
+  // …and each arm's rows: a child with a link to its parent and one to itself serves its parent alone, upper case; an
+  // item with no origin thought serves nothing, one with an origin its thought.
+  let child = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
+    child = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
+      ["[117] SMD-91703", JSON.stringify({ source: "linear", issue: "SMD-91703", status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+  });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-91703', '[117] SMD-91703', 'text/markdown')`, [child]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [child, JSON.stringify([{ relation: "child_of", target: "smd-91701" }, { relation: "child_of", target: "smd-91703" }])]);
+  const parentRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91703')`)).map((r) => `${r.kind}:${r.key}`).join(",");
+  const [noOrigin, withOrigin] = ["00000000-0000-4000-8000-000000009171", "00000000-0000-4000-8000-000000009172"];
+  await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq, origin_thought_id) VALUES ($1::uuid, 'open', '[117] no origin', now(), now(), 'raw-writer', now(), 0, NULL), ($2::uuid, 'open', '[117] an origin', now(), now(), 'raw-writer', now(), 0, $3::uuid)`, [noOrigin, withOrigin, session]);
+  const itemRows = [
+    (await q<{ kind: string; key: string | null }>(`SELECT kind, key FROM ob1_item_serves('item', $1)`, [noOrigin])).map((r) => `${r.kind}:${r.key}`).join(","),
+    (await q<{ kind: string; key: string | null }>(`SELECT kind, key FROM ob1_item_serves('item', $1)`, [withOrigin])).map((r) => `${r.kind}:${r.key}`).join(","),
+  ];
+  await db.query(`DELETE FROM open_items WHERE item_id IN ($1::uuid, $2::uuid)`, [noOrigin, withOrigin]);
+  assert(parentRows === "ticket:SMD-91701" && itemRows[0] === "" && itemRows[1] === `thought:${session}`,
+    `a child serves its parent alone, upper case, not itself; an item with no origin nothing, one with an origin its thought, as under 122 (${parentRows} | ${itemRows.map((r) => r || "none").join(" | ")})`);
 
   // Re-applied, 131 changes nothing.
   await reapply(file.slice(0, 4));

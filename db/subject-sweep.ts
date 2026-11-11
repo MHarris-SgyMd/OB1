@@ -590,7 +590,9 @@ const PAGE = 100;
  * A thought the sweep takes: its text and the fingerprint read, the ticket it is filed under, its standing subjects'
  * facets and keys (by key; null when none stands) and their way and pass when they stand (at another text, or out of
  * date), and whether they are current at this text. Since 130 a thought's subjects are a set, one way's and one pass's
- * as every writer writes them (SMD-3306 PR 7a-3b-1); a raw writer's mix reads as the least way and pass by name.
+ * as every writer writes them (SMD-3306 PR 7a-3b-1); a raw writer's mix reads as the least way and pass by name, and
+ * counts as current while any of its subjects is, so an out-of-date member a raw write left beside a current one stands
+ * (as before 130: no door writes such a mix).
  */
 type Candidate = {
   id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string; filed: string | null;
@@ -2162,7 +2164,8 @@ async function sweep(
         n[found.by]++;
         if (row.standing_keys !== null) {
           n.replaced++;
-          if (!sameKeys([found.key], row.standing_keys)) n.newKey++;
+          // A key the set did not hold (review pass 1: a set narrowed to one of its keys was counted a new key).
+          if (!(row.standing_keys ?? []).includes(found.key)) n.newKey++;
         }
       }
       return { release: "none" };
@@ -2350,7 +2353,7 @@ async function sweep(
         // back during the call, an edit made while the other was named left this run's claim, which finished at the old
         // text).
         if (hardStop.signal.aborted) return false;
-        type Close = { action: string; stale?: boolean; moved?: boolean };
+        type Close = { action: string; stale?: boolean; moved?: boolean; ids?: string[] };
         let fin: string | { c: Close | null; stale: boolean; gone: boolean; written: boolean; held: boolean; judged: boolean; alarm: { code: number; line: string } | null };
         tripping = null;
         try {
@@ -2430,7 +2433,8 @@ async function sweep(
           if (!fin.held) n.lost++;
           if (fin.written) n.rewritten++;
           else {
-            if (fin.c?.action === "closed") n.closed++;
+            // Each subject of the set closed, the tally's words (review pass 1: a set counted as one).
+            if (fin.c?.action === "closed") n.closed += fin.c.ids?.length ?? 1;
             n.named++;
           }
         }
@@ -2486,8 +2490,8 @@ async function sweep(
       if (w.action !== "added") {
         n.replaced++;
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
-        // reader wants.
-        if (!sameKeys([key], row.standing_keys)) n.newKey++;
+        // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key).
+        if (!(row.standing_keys ?? []).includes(key)) n.newKey++;
       }
     }
     return { release: "succeeded" };
