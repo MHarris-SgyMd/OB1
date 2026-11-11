@@ -47,10 +47,11 @@
  * that host on the box so the gate does not apply to it.
  *
  * ── What matters first (SMD-4112) ───────────────────────────────────────────
- * The picks are ranked by each thought's effective priority (`docs/priority.md`
- * decision 8), read once for the window, and each one's prompt row says why it
- * matters. A brain before migration 122, or a read that fails, leaves the
- * order by day and writer alone, and the run says so.
+ * Each thought's effective priority (`docs/priority.md` decision 8) is read for
+ * the window, and each day and writer's share is taken what matters most first
+ * (pickForDigest); each pick's prompt row says why it matters. A brain before
+ * migration 122, or a read that fails, leaves the share by recency alone, and
+ * the run says so.
  *
  * ── Sensitivity, fail-closed ────────────────────────────────────────────────
  * `sensitivity_tier` is an optional TEXT column. Rows tagged `restricted`
@@ -67,6 +68,8 @@ import { providerCall, providerEndpoint, refuseRedirect, resolveEmbedConfig, bas
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { mayLeaveBox, flagOn, type EgressSubject, type EgressUnit } from "../server-portable/egress.ts";
 import { egressDescription, egressRefusal, workerIdentity, classifyError, TRANSIENT_PAUSES_MS } from "./worker-bootstrap.ts";
+import { normaliseEffectivePriority, type EffectivePriority } from "../server-portable/store.ts";
+import { dueText, LEVEL_WORDS } from "../server-portable/render.ts";
 import fs from "node:fs";
 import path from "node:path";
 import type { SQL } from "bun";
@@ -77,11 +80,14 @@ import type { SQL } from "bun";
 // share of the window. Bigger = more context, more tokens.
 const SYNTHESIZE_INPUT_CAP = 80;
 
-// The most effective_priority reads in one call (122's limit): the rows read per
-// run, so every candidate's priority is read at once (SMD-4112). A busy window
-// keeps its earlier turns (readThoughts).
+// The most rows read per run. Every one's priority is read before the turns are
+// numbered (SMD-4112), so this is the window the ranking sees: a week is about
+// 550 on the canary and 900 over 14 days (2026-11-11). Past it, readThoughts
+// keeps each group's newest, so a cut drops the latest turns, never a day or a
+// writer.
+const FETCH_HARD_CAP = 5000;
+// The most effective_priority reads in one call (122's limit): the window is read in chunks of it.
 const PRIORITY_READ_MAX = 1000;
-const FETCH_HARD_CAP = PRIORITY_READ_MAX;
 
 // Telegram text messages cap at 4096 chars; split below this.
 const TELEGRAM_CHUNK_LIMIT = 3800;
@@ -121,42 +127,46 @@ export type DigestThought = {
   metadata: Record<string, unknown> | null;
   /**
    * The row's place in its day and writer's queue, 1 for the newest: readThoughts
-   * numbers each (day, `metadata.actor_name`) group newest first.
+   * numbers each (day, `metadata.actor_name`) group newest first. pickForDigest
+   * numbers them again, what matters most first, once priorities are read.
    */
   turn?: number;
+  /** The row's (day, writer) group, as readThoughts names it; absent, the row's turn stands. */
+  group?: string;
   /** The row's effective priority (readPriorities); absent when it was not read. */
   priority?: DigestPriority;
 };
 
-/** One term behind an effective priority, as effective_priority names it (migration 122). */
-export type DigestTerm = { term: string; value: number; detail: Record<string, unknown> };
-/** What the digest reads of a thought's effective priority: the order, the terms behind it, and whether it is settled. */
-export type DigestPriority = { effective: number; settled: boolean; terms: DigestTerm[] };
+/** What the digest reads of a thought's effective priority (the store's, SMD-3667): the order, the terms behind it, and whether it is settled. */
+export type DigestPriority = Pick<EffectivePriority, "effective" | "settled" | "terms">;
 
 type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
 
 // ── Ranking (pure) ────────────────────────────────────────────────────────
 
 /**
- * The thoughts the digest reads, at most `cap`, the most pressing first: by
- * effective priority (`docs/priority.md` decision 8, SMD-4112), the read's own
- * order, the operator's weights among it. Among equals the window is spread
- * over its days and writers, a turn at a time: the newest of every (day,
- * writer) group, then the second of each, and so on, newest first within a
- * turn. So a quiet day keeps its share beside a busy one, and a key that
- * floods the window gets one row per day per turn, as every other writer does.
- * Stable takes about 60 thoughts a day (2026-11-02): the newest 80 alone would
- * be a day and a half of a "weekly" digest. The pick is then said most pressing
- * first, newest first among equals. With no priority read, or none stated
- * (every row unknown's 2), that is the turns and the newest first alone, the
- * order before SMD-4112.
+ * The thoughts the digest reads, at most `cap`, spread over the window's days
+ * and writers a turn at a time: the first of every (day, writer) group, then
+ * the second of each, and so on. So a quiet day keeps its share beside a busy
+ * one, and a key that floods the window gets one row per day per turn, as
+ * every other writer does. Stable takes about 60 thoughts a day (2026-11-02):
+ * the newest 80 alone would be a day and a half of a "weekly" digest.
+ *
+ * Within each group the rows go what matters most first, by effective priority
+ * (`docs/priority.md` decision 8, SMD-4112), then newest first; within a turn,
+ * too. So a group's Urgent ticket is its first turn, and a key that states
+ * Urgent on all of its own captures still gets one row per day per turn (the
+ * maintainer, 2026-11-11: priority within each share, not over it). The pick
+ * is then said what matters most first, newest first among equals. With no
+ * priority read, or none stated (every row unknown's 2), that is the turns by
+ * recency and the newest first, the order before SMD-4112. A row with no
+ * `group` keeps the turn readThoughts gave it.
  *
  * `importance` takes no part. It is retired (SMD-3661, decision 8): any key
  * could set it on its own rows, so ten captures carrying a high value ranked
- * every other key's thought out (SMD-2653). A priority is a statement decision
- * 4's tiers rank, made by a key the registry classifies and kept in its
- * history. Times compare as instants: a row from the database carries a Date,
- * whose string leads with its weekday. An unreadable time sorts last.
+ * every other key's thought out (SMD-2653). Times compare as instants: a row
+ * from the database carries a Date, whose string leads with its weekday. An
+ * unreadable time sorts last.
  */
 export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_CAP): DigestThought[] {
   const at = (t: DigestThought) => {
@@ -164,29 +174,36 @@ export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_
     return Number.isFinite(ms) ? ms : -Infinity;
   };
   const newestFirst = (a: DigestThought, b: DigestThought) => (at(a) === at(b) ? 0 : at(a) < at(b) ? 1 : -1);
-  const turn = (t: DigestThought) => t.turn ?? 1;
   const effective = (t: DigestThought) => t.priority?.effective ?? 0;
-  const pressing = (a: DigestThought, b: DigestThought) => effective(b) - effective(a);
+  const mattersMost = (a: DigestThought, b: DigestThought) => effective(b) - effective(a);
+  // Each group's rows numbered again, what matters most first, then newest (then by id, as readThoughts breaks a tie).
+  const turns = new Map<DigestThought, number>();
+  const groups = new Map<string, DigestThought[]>();
+  for (const t of thoughts) {
+    if (t.group === undefined) continue;
+    const g = groups.get(t.group);
+    if (g) g.push(t);
+    else groups.set(t.group, [t]);
+  }
+  for (const g of groups.values()) {
+    g.sort((a, b) => mattersMost(a, b) || newestFirst(a, b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).forEach((t, i) => turns.set(t, i + 1));
+  }
+  const turn = (t: DigestThought) => turns.get(t) ?? t.turn ?? 1;
   return [...thoughts]
-    .sort((a, b) => pressing(a, b) || turn(a) - turn(b) || newestFirst(a, b))
+    .sort((a, b) => turn(a) - turn(b) || mattersMost(a, b) || newestFirst(a, b))
     .slice(0, cap)
-    .sort((a, b) => pressing(a, b) || newestFirst(a, b));
+    .sort((a, b) => mattersMost(a, b) || newestFirst(a, b));
 }
 
-const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const levelWord = (n: unknown) => LEVEL_WORDS[Number(n)] ?? `level ${Number(n)}`;
-/** A due time as a person reads it: a date alone is stored as the next day's start in UTC (SMD-3778), said as its own day. */
-const dueWords = (iso: unknown) => {
-  const ms = typeof iso === "string" ? Date.parse(iso) : NaN;
-  if (!Number.isFinite(ms)) return "?";
-  return ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : new Date(ms).toISOString();
-};
+const dueWords = (iso: unknown) => (typeof iso === "string" && Number.isFinite(Date.parse(iso)) ? dueText(iso) : "?");
 
 /**
  * Why a pick matters, in words, beside it in the prompt (SMD-4112): its level and where it came from (stated, from
  * its open items, or inherited from the ticket or item it serves), then its due time or overdue, what it unblocks, and
- * whether it is settled, as effective_priority's terms say them. Null when the read knows nothing of it (unknown's
- * level and no other term), so a row with no priority carries no field.
+ * whether it is settled, as effective_priority's terms say them; the level's words and a due time's are the MCP
+ * replies' (render.ts). Null when the read knows nothing of it beyond unknown's level, settled or not: settled is
+ * said beside a known priority, so a brain with none stated gets the prompt it got before.
  */
 export function priorityReason(p: DigestPriority | undefined): string | null {
   if (!p) return null;
@@ -247,7 +264,7 @@ export function buildUserPrompt(thoughts: DigestThought[], startDate: Date, endD
     };
   });
   const source = rows.some((r) => "priority" in r)
-    ? `Source: ${rows.length} thoughts, the most pressing first (a row's priority says why it matters), then a share of each day and writer in the window.`
+    ? `Source: ${rows.length} thoughts, a share of each day and writer in the window, what matters most taken first from each, listed what matters most first (a row's priority says why, and whether it is settled).`
     : `Source: ${rows.length} thoughts, a share of each day and writer in the window.`;
   return (
     `Weekly digest for ${fmt(startDate)} – ${fmt(endDate)}.\n` +
@@ -324,10 +341,12 @@ export async function readThoughts(
     params.push(sql.array(excluded, "TEXT"));
   }
 
+  // `group` names the row's (day, writer), for pickForDigest to number again once priorities are read (SMD-4112).
   const rows = (await sql.unsafe(
-    `SELECT ${selectCols.join(", ")}, turn FROM (
+    `SELECT ${selectCols.join(", ")}, turn, "group" FROM (
        SELECT ${selectCols.join(", ")},
-              (row_number() OVER (PARTITION BY created_at::date, metadata->>'actor_name' ORDER BY created_at DESC, id))::int AS turn
+              (row_number() OVER (PARTITION BY created_at::date, metadata->>'actor_name' ORDER BY created_at DESC, id))::int AS turn,
+              jsonb_build_array(created_at::date, metadata->>'actor_name')::text AS "group"
          FROM thoughts WHERE ${where}) w
       ORDER BY turn, created_at DESC LIMIT ${FETCH_HARD_CAP}`,
     params,
@@ -336,42 +355,37 @@ export async function readThoughts(
 }
 
 /**
- * The window's effective priorities, in one call of effective_priority (SMD-4112): each thought by its id, a ticket's
- * own row read as its ticket, under the brain's weights (the operator's setting over the built-in ones, since 132).
- * `why` instead when they cannot be read, and the digest keeps the order before SMD-4112: a brain before migration
- * 122 (no read), or a read that fails — a server role without the priority group's grants, or an operator's setting
- * the brain refuses (132's 22000), the database's words kept. A digest still goes out; the run says why it is
- * unranked.
+ * The window's effective priorities (SMD-4112): each thought by its id, a ticket's own row read as its ticket, under
+ * the brain's weights (the operator's setting over the built-in ones, since 132), in calls of effective_priority's
+ * 1,000, each row read as the store reads it (normaliseEffectivePriority). `why` instead when they cannot be read, and
+ * the digest keeps the order before SMD-4112: a brain before migration 122 (no read), or a read that fails — a server
+ * role without the priority group's grants, an operator's setting the brain refuses (132's 22000), a row the store
+ * cannot read — the database's words kept. A digest still goes out; the run says why it is unranked.
  */
 export async function readPriorities(
   sql: SQL,
   ids: string[],
 ): Promise<{ read: Map<string, DigestPriority> } | { read: null; why: string; failed: boolean }> {
-  const [probe] = await sql`SELECT to_regprocedure('public.effective_priority(jsonb,jsonb,timestamptz)') IS NOT NULL AS has`;
-  if (!probe?.has) return { read: null, why: "the brain is before migration 122, which adds effective_priority", failed: false };
-  const read = new Map<string, DigestPriority>();
-  if (ids.length === 0) return { read };
-  if (ids.length > PRIORITY_READ_MAX) throw new Error(`readPriorities reads at most ${PRIORITY_READ_MAX} thoughts at once; ${ids.length} were given`);
-  const items = JSON.stringify(ids.map((key) => ({ kind: "thought", key })));
-  let rows: { item_key: string; effective: number; settled: boolean; terms: unknown }[];
   try {
-    // Named columns, never `*` (SMD-3302); the effective priority as a float, which Postgres' numeric would be text.
-    rows = await sql`SELECT item_key, effective::float8 AS effective, settled, terms
-                       FROM effective_priority((${items}::text)::jsonb, NULL::jsonb, now())`;
+    const [probe] = await sql`SELECT to_regprocedure('public.effective_priority(jsonb,jsonb,timestamptz)') IS NOT NULL AS has`;
+    if (!probe?.has) return { read: null, why: "the brain is before migration 122, which adds effective_priority", failed: false };
+    const read = new Map<string, DigestPriority>();
+    for (let i = 0; i < ids.length; i += PRIORITY_READ_MAX) {
+      const items = JSON.stringify(ids.slice(i, i + PRIORITY_READ_MAX).map((key) => ({ kind: "thought", key })));
+      // The store's columns, named, never `*` (SMD-3302).
+      const rows = await sql`
+        SELECT item_kind, item_key, effective, level, inherited_from, due_at, due_from, urgency, overdue, unblocks, settled,
+               not_before, waiting, terms, winner, passed_over
+          FROM effective_priority((${items}::text)::jsonb, NULL::jsonb, now())` as unknown[];
+      for (const r of rows) {
+        const p = normaliseEffectivePriority(r, "effective_priority");
+        read.set(p.item.key, { effective: p.effective, settled: p.settled, terms: p.terms });
+      }
+    }
+    return { read };
   } catch (e) {
     return { read: null, why: oneLine(String((e as Error)?.message ?? e)), failed: true };
   }
-  for (const r of rows) {
-    const raw = typeof r.terms === "string" ? JSON.parse(r.terms) : r.terms;
-    // The read's terms are flat (its term, value and what it read beside them): the rest is the term's detail, as the
-    // store reads them (normaliseEffectivePriority).
-    const terms = (Array.isArray(raw) ? raw : []).map((t: Record<string, unknown>) => {
-      const { term, value, ...detail } = t ?? {};
-      return { term: String(term), value: Number(value), detail };
-    });
-    read.set(String(r.item_key), { effective: Number(r.effective), settled: r.settled === true, terms });
-  }
-  return { read };
 }
 
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 500);
@@ -544,7 +558,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   }
   const pool = pickForDigest(read.rows);
   const known = pool.filter((t) => priorityReason(t.priority) !== null).length;
-  console.log(`  picked ${pool.length} thought(s)${priorities.read === null ? "" : `, the most pressing first (${known} with a known priority)`}, then across the window's days and writers`);
+  console.log(`  picked ${pool.length} thought(s) across the window's days and writers${priorities.read === null ? "" : `, what matters most first in each (${known} with a known priority)`}`);
 
   const endDate = new Date();
   const startDate = new Date(Date.now() - args.windowDays * 86_400_000);

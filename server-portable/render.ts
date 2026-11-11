@@ -2337,7 +2337,8 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 // Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
 // null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
 
-const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
+/** The scale's words, 0 to 5; exported with dueText so the weekly digest says a priority as these replies do (SMD-4112). */
+export const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
 /**
@@ -2345,7 +2346,7 @@ const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level}
  * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
  * and any other as the instant itself.
  */
-const dueText = (iso: string) => {
+export const dueText = (iso: string) => {
   const ms = Date.parse(iso);
   return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
 };

@@ -23269,6 +23269,12 @@ if (want("36")) {
   await wsql`SELECT assert_priority('ticket', 'SMD-90361', 4, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'Urgent on the board', false, ${op}::jsonb)`;
   await wsql`SELECT assert_priority('thought', ${prio.overdue.id}, 2, now() - interval '1 day', NULL::timestamptz, NULL::text, NULL::text, 'due yesterday', false, ${op}::jsonb)`;
   for (const r of [prio.low1, prio.low2]) await wsql`SELECT assert_priority('thought', ${r.id}, 1, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'can wait', false, ${op}::jsonb)`;
+  // SMD-2653's shape with priority: Urgent stated on every row of the burst. Taken a turn at a time, what matters most
+  // first within each day and writer's share (the maintainer, 2026-11-11), it still holds one row per turn, so every
+  // planted row stays in the prompt; ranked over the shares it would take all 80.
+  const burstIds = (await wsql`SELECT id::text AS id FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' AND content LIKE 'zqflood %— one key''s burst before the run'`).map((r: { id: string }) => r.id);
+  for (const id of burstIds) await wsql`SELECT assert_priority('thought', ${id}, 4, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'everything is urgent', false, ${op}::jsonb)`;
+  assert(burstIds.length === 100, `Urgent is stated on the burst's 100 rows (${burstIds.length})`);
 
   // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
   // /bot<token>/sendMessage counts the Telegram sends (tgReqs) and keeps the
@@ -23325,9 +23331,10 @@ if (want("36")) {
       `under the default deny the digest is synthesized but not sent — the stub gets zero Telegram requests and the refusal names the rule (${tgReqs} send(s), ${chatReqs} synthesis; ${denied.err.trim().split("\n").pop()})`);
     const burst = (chatPrompt.match(/zqflood \d+/g) ?? []).length;
     assert(planted.every((r) => chatPrompt.includes(r.content)) && chatPrompt.includes(floodEarlier) && burst > 0 && !/"importance"\s*:/.test(chatPrompt),
-      `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
+      `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, each stated Urgent (SMD-4112), that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
     // SMD-4112: the Urgent ticket's row, then the overdue item, lead; every unknown row after them, and the newer Low ones after
-    // those, or left out; each of the two says why it matters.
+    // those, or left out; each of the two says why it matters. Each is the first turn of its day's share, what matters most
+    // first in it (the maintainer, 2026-11-11).
     const place = (s: string) => chatPrompt.indexOf(s);
     const [u, o] = [place(prio.urgent.content), place(prio.overdue.content)];
     const unknownAt = [...planted.map((r) => r.content), floodEarlier].map(place);
@@ -23335,7 +23342,7 @@ if (want("36")) {
     assert(u >= 0 && o > u && unknownAt.every((i) => i > o) && lowAt.every((i) => i === -1 || unknownAt.every((j) => i > j))
       && chatPrompt.includes('"priority":"urgent, stated"') && /"priority":"medium, stated; overdue, due \d{4}-/.test(chatPrompt)
       // Earlier sections' statements may rank rows of theirs in the window too: at least these two are known.
-      && Number((denied.out.match(/the most pressing first \((\d+) with a known priority\)/) ?? [])[1]) >= 2,
+      && Number((denied.out.match(/what matters most first in each \((\d+) with a known priority\)/) ?? [])[1]) >= 2,
       `the picks lead with the Urgent ticket's row and the overdue item, before newer unknown rows and the newer Low ones (${lowAt.filter((i) => i >= 0).length} of 2 Low in the prompt), each saying why: urgent at ${u}, overdue at ${o}, the first unknown at ${Math.min(...unknownAt)}; ${(denied.out.match(/picked .*/) ?? [""])[0]}; ${(chatPrompt.match(/"priority":"[^"]*"/g) ?? []).join(", ")}`);
 
     tgReqs = 0; chatReqs = 0;
@@ -23372,6 +23379,9 @@ if (want("36")) {
     }
   } finally {
     stub.stop(true);
+    // The statements cleared before their thoughts go, so no later section reads them open (review pass 1).
+    await wsql`SELECT clear_priority('ticket', 'SMD-90361', ${op}::jsonb)`;
+    for (const id of [prio.overdue.id, prio.low1.id, prio.low2.id, ...burstIds]) await wsql`SELECT clear_priority('thought', ${id}, ${op}::jsonb)`;
     await wsql`DELETE FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' OR id = ANY(${wsql.array([...earlier, ...Object.values(prio)].map((r) => r.id), "UUID")})`;
     await wsql.close();
   }
