@@ -71,9 +71,10 @@ async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
   return true;
 }
 
-async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>): Promise<void> {
+async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>, orphanMs = 0): Promise<void> {
   const lines: string[] = [];
-  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l) });
+  // A closed socket's grants given back at once unless a row asks otherwise: [14] reads the keeping itself.
+  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), orphanMs });
   try { await fn(b, lines); } finally { await b.stop(); }
 }
 
@@ -604,6 +605,58 @@ await withBroker(registry(), async (b) => {
   ok(answers.every((a) => !/ 500 /.test(a)), "a Host header no URL reads is no 500", answers);
   ok((await fetch(`http://127.0.0.1:${b.port}/health`)).ok, "and the broker answers on");
 });
+
+section("[14] a closed socket's grants kept for the brain's return; a brain back with calls running starts level");
+await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s, "g1", "background"); ask(s, "g2", "background");
+  await s.next("go", "g2");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await s.close();
+  await sleep(200);
+  ok(!c.seen("go", "c1") && pool(b).background === 2, "a closed socket's grants stay counted: the other brain's ask still waits", pool(b));
+  ok(lines.some((l) => /keeping 2 grants 0.4 s for its return/.test(l)), "and the close says so", lines);
+  const s2 = await connect(b, KEYS.stable);
+  s2.send({ op: "held", id: "g1", base: BASE, model: "qwen3:8b", cls: "background" });
+  s2.send({ op: "held", id: "g2", base: BASE, model: "qwen3:8b", cls: "background" });
+  ok(!!(await s2.next("go", "g2")) && pool(b).background === 2, "the brain's held on its next socket takes them back, counted once, not twice", pool(b));
+  await sleep(600);
+  ok(!c.seen("go", "c1"), "taken back, they outlive the keeping");
+  done(s2, "g1");
+  ok(!!(await c.next("go", "c1")), "and are given back at their done");
+  await s2.close(); await c.close();
+}, 400);
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s, "g", "background"); await s.next("go", "g");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await s.close();
+  ok(!(await c.next("go", "c1", 200)), "a brain that does not come back keeps its grant counted for the keeping");
+  ok(!!(await c.next("go", "c1", 2000)), "then gives it back");
+  await c.close();
+}, 400);
+
+{
+  // On a clock the test moves: canary alone at work for ten minutes; stable, partitioned meanwhile, comes back with a
+  // call running (held) and asks — it starts level with canary, not at its old, lower score, so the two alternate.
+  let t = 1_000_000;
+  const b = startBroker(registry({ slots: 2, reserve: 0 }), { port: 0, log: () => {}, now: () => t, orphanMs: 0 });
+  try {
+    const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+    ask(c, "c0", "background"); await c.next("go", "c0");
+    for (let i = 1; i <= 10; i++) { ask(c, `c${i}`, "background"); await c.next("go", `c${i}`); t += 60_000; done(c, `c${i - 1}`); }
+    s.send({ op: "held", id: "h", base: BASE, model: "qwen3:8b", cls: "background" }); await s.next("go", "h");
+    ask(s, "s1", "background"); ask(s, "s2", "background"); ask(c, "c11", "background");
+    await c.next("queued", "c11");
+    t += 60_000; done(c, "c10");
+    const first = await until(() => s.seen("go", "s1") || c.seen("go", "c11"));
+    t += 60_000; done(s, "h");
+    await until(() => [s.seen("go", "s1"), s.seen("go", "s2"), c.seen("go", "c11")].filter(Boolean).length >= 2);
+    ok(first && !(s.seen("go", "s1") && s.seen("go", "s2") && !c.seen("go", "c11")), "stable back with a held call does not take both turns ahead of canary: it started level", { s1: s.seen("go", "s1"), s2: s.seen("go", "s2"), c11: c.seen("go", "c11") });
+    await s.close(); await c.close();
+  } finally { await b.stop(); }
+}
 
 section("[13] the base is the brain's, read the same way");
 for (const base of ["http://Host.Containers.Internal:11434/v1/", "https://openrouter.ai/api/v1", "http://u:p@h:1/v1//", "not a url/", "http://[::1]:11434/v1"]) {

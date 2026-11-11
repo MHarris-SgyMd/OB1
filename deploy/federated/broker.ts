@@ -43,7 +43,9 @@
 // A model is a name the brain uses the same way each call: unnamed is one model, `?`; a server with `per_model: false`
 // (a decide tier serving one call at a time) is one pool whatever the model. A closed socket — closed, silent past
 // idle_s (pings unanswered), or not reading its frames (1 MiB backed up in the broker, past the kernel's buffers) —
-// gives back every grant it held and withdraws every ask it had waiting: a brain asks those again on its next socket.
+// withdraws every ask it had waiting, and keeps its grants counted ORPHAN_MS (5 s): a brain back within it takes each
+// again with `held`, same id, counted once (PR 3b-1's relay re-registers its running calls so); after it, they are
+// given back. A brain asks its asks again on its next socket.
 // GET /health answers `ok`, with no key and no figures.
 //
 // The rule, per (server, model) — Ollama's parallel setting is per model — with `slots` the server's setting:
@@ -54,7 +56,7 @@
 //                fewer than `slots`: a live call in flight, any brain's, takes background's room.
 //   whose turn   the waiting brain that has had the least background slot time there — remembered with a half-life of
 //                USE_HALF_LIFE_S (300 s), its grants' running time added, and a brain coming to a pool where others
-//                are at work starting level with the least of them — ties going round from the brain served last: two
+//                are at work — asking, or back with calls running (`held`) — starting level with the least of them — ties going round from the brain served last: two
 //                backlogged brains split the slot time whatever the room, about half each for calls well under the
 //                half-life (a call is never cut short: one of 71 s beside 50 ms calls has 0.54, of 300 s 0.64); a
 //                grant taken back at lease_s is charged all of it; a brain with one call at a time has less than
@@ -84,6 +86,14 @@ export const MAX_SLOTS = 16;
 export const MAX_WAITING = 1024;
 /** The most asks and grants one socket may hold at all, live included: a bound on a socket's memory. */
 export const MAX_HELD = 4096;
+/**
+ * How long a closed socket's grants stay counted, for the brain to take back with `held` on its next socket (SMD-3379
+ * PR 3b-1, review pass 2: given back at the close, they were handed to another brain while the calls ran on, and the
+ * brain's `held` a moment later put the server over its slots for as long as they ran). A brain that does not come back
+ * frees them after this.
+ */
+export const ORPHAN_MS = 5000;
+
 /** A brain's background slot time is remembered with this half-life, so the turn evens slot time over the last
  *  minutes: longer than most calls, since a call is never cut short (review pass 3: at 60 s, a brain of 71 s calls had
  *  0.59 of the slot time beside one of 50 ms calls, of 300 s calls 0.74; at 300 s, 0.54 and 0.64). */
@@ -224,7 +234,7 @@ export type Snapshot = Record<string, { live: number; background: number; waitin
 export type Broker = { port: number; stop(): Promise<void>; snapshot(): Snapshot };
 
 /** Starts serving the registry's brains. `port` 0 takes a free one (a test's). */
-export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number } = {}): Broker {
+export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number; orphanMs?: number } = {}): Broker {
   const log = opts.log ?? ((line: string) => console.log(`slots: ${line}`));
   /** The broker's clock, in ms: performance.now() unless a test hands it one it moves itself. */
   const clock = opts.now ?? (() => performance.now());
@@ -235,6 +245,9 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const serverOf = new Map<string, ModelServer>();
   for (const s of reg.servers) for (const b of s.bases) serverOf.set(b, s);
   let nextConn = 1;
+  const orphanMs = opts.orphanMs ?? ORPHAN_MS;
+  /** A closed socket's grants, by brain and id, kept counted until the brain takes them back or ORPHAN_MS passes. */
+  const orphans = new Map<string, { g: Grant; timer: ReturnType<typeof setTimeout> }>();
   /** This start's id, in each hello: a brain that sees it change knows the broker restarted, not only its own socket. */
   const boot = crypto.randomUUID();
 
@@ -276,6 +289,20 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   };
   /** Whether a brain has anything in the pool: an ask waiting or a background grant running. */
   const active = (p: Pool, b: number) => { if (p.queues[b].size) return true; for (const g of p.bg) if (g.conn.brainAt === b) return true; return false; };
+  /**
+   * A brain coming to a pool where others are at work starts level with the least of them, not at nothing (review pass
+   * 3: else it held every slot for a half-life); with no brain at work, every brain starts level again, as a pool pruned
+   * would (review pass 4). Done as a brain asks, or comes back with calls running (`held`), with nothing there yet.
+   */
+  const level = (p: Pool, b: number) => {
+    if (active(p, b)) return;
+    const t = clock();
+    const score = scores(p, t);
+    let floor = Infinity;
+    for (let i = 0; i < score.length; i++) if (i !== b && active(p, i)) floor = Math.min(floor, score[i]);
+    if (floor === Infinity) p.used.fill(0);
+    else if (p.used[b] < floor) p.used[b] = floor;
+  };
   /** Decays the pool's remembered slot time to now. */
   const decay = (p: Pool, now: number) => {
     const f = 0.5 ** ((now - p.usedAt) / (USE_HALF_LIFE_S * 1000));
@@ -364,21 +391,29 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     // A `held` outside the warm-up — a brain back after its socket dropped, its calls still running — is counted as
     // it is: those calls run whether counted or not. Said once a socket, since it can take background past its room.
     if (m.op === "held" && !warming() && !conn.heldLate) { conn.heldLate = true; log(`brain ${conn.brain.name} (socket ${conn.id}) re-registers held slots outside the warm-up: counted, past the room if need be`); }
-    if (m.op === "held" || cls === "live") { grant(conn, id, p, cls === "live"); return; }
+    if (m.op === "held") {
+      // Its own grant back, kept since its socket closed: taken up again, not counted twice.
+      const okey = `${conn.brainAt}\n${id}`;
+      const o = orphans.get(okey);
+      if (o && o.g.pool === p && o.g.live === (cls === "live")) {
+        clearTimeout(o.timer);
+        orphans.delete(okey);
+        o.g.conn = conn;
+        conn.held.set(id, o.g);
+        conn.sent({ op: "go", id });
+        return;
+      }
+      // A brain back with calls running starts level, as one asking does (review pass 2: its held calls made it look
+      // at work, so its old score from before a partition shut the other brain out for 48 s).
+      if (cls === "background") level(p, conn.brainAt);
+      grant(conn, id, p, cls === "live");
+      return;
+    }
+    if (cls === "live") { grant(conn, id, p, true); return; }
     // A brain coming to a pool where others are at work starts level with the least of them, not at nothing: else it
     // would hold every background slot until its time caught up with theirs, a half-life of the others waiting (review
     // pass 3: brain A backlogged ten minutes had none of the slots for the minute after B arrived, and waited 62 s).
-    if (!active(p, conn.brainAt)) {
-      const t = clock();
-      const score = scores(p, t);
-      let floor = Infinity;
-      for (let i = 0; i < score.length; i++) if (i !== conn.brainAt && active(p, i)) floor = Math.min(floor, score[i]);
-      // With no brain at work here, every brain starts level again, as a pool pruned would: a live call keeping the
-      // pool must not keep a brain's old debt over a newcomer who started at nothing (review pass 4: a brain alone ten
-      // minutes, gone 10 s and back, had no slot for 235 s because one live call kept the pool).
-      if (floor === Infinity) p.used.fill(0);
-      else if (p.used[conn.brainAt] < floor) p.used[conn.brainAt] = floor;
-    }
+    level(p, conn.brainAt);
     const a: Ask = { kind: "ask", conn, id, pool: p, first: m.first === true, maxWaitMs: maxWait * 1000, at: clock() - waited * 1000 };
     p.queues[conn.brainAt].add(a);
     conn.waiting++;
@@ -434,8 +469,15 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         const all = [...conn.held.values()];
         const asks = all.filter((x) => x.kind === "ask"), grants = all.filter((x) => x.kind === "grant");
         for (const x of asks) release(x);
-        for (const x of grants) release(x);
-        log(`brain ${conn.brain.name} disconnected (socket ${conn.id})${all.length ? `, giving back ${grants.length} grant${grants.length === 1 ? "" : "s"} and withdrawing ${asks.length} ask${asks.length === 1 ? "" : "s"}` : ""}`);
+        // Its grants kept counted a while, for the brain's next socket to take back (`held`, same id), else given back.
+        for (const x of grants) {
+          if (orphanMs <= 0 || x.kind !== "grant") { release(x); continue; }
+          const okey = `${conn.brainAt}\n${x.id}`;
+          const old = orphans.get(okey);
+          if (old) { clearTimeout(old.timer); release(old.g); }
+          orphans.set(okey, { g: x, timer: setTimeout(() => { if (orphans.get(okey)?.g === x) { orphans.delete(okey); release(x); } }, orphanMs) });
+        }
+        log(`brain ${conn.brain.name} disconnected (socket ${conn.id})${all.length ? `, withdrawing ${asks.length} ask${asks.length === 1 ? "" : "s"}${grants.length ? ` and ${orphanMs > 0 ? "keeping" : "giving back"} ${grants.length} grant${grants.length === 1 ? "" : "s"}${orphanMs > 0 ? ` ${orphanMs / 1000} s for its return` : ""}` : ""}` : ""}`);
       },
     },
   });
@@ -457,7 +499,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
 
   return {
     port: server.port ?? 0,
-    async stop() { clearInterval(sweep); if (warm) clearTimeout(warm); await server.stop(true); },
+    async stop() { clearInterval(sweep); if (warm) clearTimeout(warm); for (const o of orphans.values()) clearTimeout(o.timer); orphans.clear(); await server.stop(true); },
     snapshot() {
       const out: Snapshot = {};
       for (const p of pools.values()) {

@@ -404,6 +404,156 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await relay.stop();
 });
 
+section("[9] live calls counted whatever the broker's state; dials that hang; a broker back in 2 s");
+{
+  const reg = registry({ slots: 1 });
+  let b = startBroker(reg, { port: 0, log: () => {} });
+  const port0 = b.port;
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 }, graceMs: 300 });
+  await upOf(relay);
+  const port = relay.port("probe");
+  const got: { slot: string; id: string }[] = [];
+  port.attach((m) => got.push(m));
+  await b.stop();
+  await until(() => relay.state().broker === "down");
+  await sleep(500);
+  port.onMessage({ slot: "ask", id: "lv", base: BASE, model: "m", cls: "live" });
+  ok(!got.some((m) => m.id === "lv" && m.slot === "own") && relay.state().own === 1, "a live call past the grace is kept as running, not answered own and forgotten", { got, s: relay.state() });
+  b = startBroker(reg, { port: port0, log: () => {} });
+  try {
+    await upOf(relay);
+    ok(await until(() => pool(b).live === 1), "and counted live at the broker once it is back", b.snapshot());
+    port.onMessage({ slot: "done", id: "lv" });
+    ok(await until(() => pool(b).live === 0), "its done lands", b.snapshot());
+    // Behind the cap: the broker's max_waiting asks waiting, then a live call — asked past the cap at once.
+    for (let i = 0; i < 1025; i++) port.onMessage({ slot: "ask", id: `bg${i}`, base: BASE, model: "m", cls: "background" });
+    await until(() => relay.state().parked >= 1);
+    port.onMessage({ slot: "ask", id: "lv2", base: BASE, model: "m", cls: "live" });
+    ok(await until(() => pool(b).live === 1), "a live call behind the relay's cap is counted at once, not parked behind background asks", { snap: b.snapshot(), s: relay.state() });
+    port.detach();
+  } finally { await relay.stop(); await b.stop(); }
+}
+
+{
+  // A peer that takes the TCP connection and never answers: the dial is dropped at the hello's bound and said.
+  const silent = Bun.listen({ port: 0, socket: { data() {} }, hostname: "127.0.0.1" });
+  const logs: string[] = [];
+  const relay = startRelay({ url: `ws://127.0.0.1:${silent.port}/v1/slots`, key: KEYS.stable, log: (l) => logs.push(l), reconnectMs: { first: 50, max: 200 }, helloMs: 400 });
+  ok(await until(() => logs.some((l) => /no hello from the broker within 0.4 s of dialling/.test(l)), 3000), "a dial that never completes is dropped at the hello's bound, and said", logs);
+  await relay.stop();
+  silent.stop(true);
+  const http = Bun.serve({ port: 0, fetch: () => new Response("hi"), hostname: "127.0.0.1" });
+  const httpLogs: string[] = [];
+  const r2 = startRelay({ url: `ws://127.0.0.1:${http.port}/v1/slots`, key: KEYS.stable, log: (l) => httpLogs.push(l), reconnectMs: { first: 50, max: 200 } });
+  ok(await until(() => httpLogs.some((l) => /no WebSocket there \(HTTP 200\)/.test(l)), 3000), "a plain HTTP server is named as no WebSocket, not an outage", httpLogs);
+  await r2.stop();
+  await http.stop(true);
+}
+
+{
+  // Gone 2 s, under the 3 s grace: the relay finds it again inside the grace, and its waiting ask never takes its own share.
+  const reg = registry({ slots: 1 });
+  let b = startBroker(reg, { port: 0, log: () => {} });
+  const port0 = b.port;
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {} });
+  await upOf(relay);
+  const port = relay.port("probe");
+  const got: { slot: string; id: string }[] = [];
+  port.attach((m) => got.push(m));
+  port.onMessage({ slot: "ask", id: "h", base: BASE, model: "m", cls: "background" });
+  await until(() => got.some((m) => m.slot === "go" && m.id === "h"));
+  port.onMessage({ slot: "ask", id: "w", base: BASE, model: "m", cls: "background" });
+  await until(() => got.some((m) => m.slot === "queued" && m.id === "w"));
+  await b.stop();
+  await sleep(2000);
+  b = startBroker(reg, { port: port0, log: () => {} });
+  try {
+    await sleep(1500);
+    ok(!got.some((m) => m.slot === "own"), "a broker gone 2 s is found again within the 3 s grace: no ask takes its own share", got);
+    ok(pool(b).background === 1 && pool(b).waiting.stable === 1, "the grant re-registered and the ask asked again", b.snapshot());
+    port.detach();
+  } finally { await relay.stop(); await b.stop(); }
+}
+
+{
+  // The link cut under a running call (a TCP proxy between relay and broker): the broker keeps the grant, the relay's
+  // held on its next socket takes it back, and the other brain's ask is never handed the slot meanwhile.
+  await withBroker(registry({ slots: 1 }), async (b) => {
+    const pairs: { a: { end(): void }; z: { end(): void } }[] = [];
+    // Each client's far side and what it sent before that side was open, by the client's socket.
+    const sides = new Map<unknown, { peer?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] }>();
+    const proxy = Bun.listen({
+      port: 0,
+      socket: {
+        open(cli) {
+          const side: { peer?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] } = { buf: [] };
+          sides.set(cli, side);
+          void Bun.connect({ hostname: "127.0.0.1", port: b.port, socket: {
+            open(srv) { side.peer = srv; for (const d of side.buf) srv.write(d); pairs.push({ a: cli, z: srv }); },
+            data(_srv, d) { cli.write(d); },
+            close() { cli.end(); },
+          } });
+        },
+        data(cli, d) { const side = sides.get(cli); if (side?.peer) side.peer.write(d); else side?.buf.push(new Uint8Array(d)); },
+        close(cli) { sides.get(cli)?.peer?.end(); sides.delete(cli); },
+      },
+      hostname: "127.0.0.1",
+    });
+    const relay = startRelay({ url: `ws://127.0.0.1:${proxy.port}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+    const other = relayTo(b, KEYS.canary);
+    try {
+      await upOf(relay); await upOf(other);
+      const a = await startPass(relay.port("sleep"));
+      const c = await startPass(other.port("sleep"));
+      a.cmd({ cmd: "call", id: "run" }); await a.wait("run", "run");
+      c.cmd({ cmd: "call", id: "wait" }); await c.wait("waiting", "wait");
+      for (const p of pairs.splice(0)) { p.a.end(); p.z.end(); }
+      await until(() => relay.state().broker === "down", 2000);
+      ok(await upOf(relay), "the relay is back through the proxy");
+      await sleep(300);
+      ok(!c.saw("run", "wait") && pool(b).background === 1, "the other brain is never handed the slot the call still holds: the broker kept it, the held took it back", b.snapshot());
+      a.cmd({ cmd: "end", id: "run" });
+      ok(await c.wait("run", "wait"), "and it goes on at the call's done");
+      c.cmd({ cmd: "end", id: "wait" });
+      await kill(a); await kill(c);
+    } finally { await relay.stop(); await other.stop(); proxy.stop(true); }
+  });
+}
+
+{
+  // A live ask caught mid-ask by a loss (a broker that says hello and never answers it): kept as running, for `held`
+  // on the next socket, not parked and answered own.
+  const port0 = 18_800 + Math.floor(Math.random() * 150);
+  const mute = Bun.serve({ port: port0, fetch: (req, srv) => srv.upgrade(req) ? undefined : new Response(null, { status: 400 }), websocket: { open(ws) { ws.send(JSON.stringify({ op: "hello", boot: "mute", idle_s: 30, max_waiting: 1024 })); }, message() {} }, hostname: "127.0.0.1" });
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 }, graceMs: 300 });
+  await upOf(relay);
+  const port = relay.port("probe");
+  port.attach(() => {});
+  port.onMessage({ slot: "ask", id: "lv", base: BASE, model: "m", cls: "live" });
+  await sleep(50);
+  await mute.stop(true);
+  await until(() => relay.state().broker === "down");
+  await sleep(600);
+  const b = startBroker(registry({ slots: 1 }), { port: port0, log: () => {} });
+  try {
+    await upOf(relay);
+    ok(await until(() => pool(b).live === 1), "a live ask caught mid-ask by a loss is counted once a broker is back", { snap: b.snapshot(), s: relay.state() });
+    port.detach();
+  } finally { await relay.stop(); await b.stop(); }
+}
+
+{
+  // A refused key met only after an outage was said: named all the same.
+  const port0 = 18_950 + Math.floor(Math.random() * 40);
+  const logs: string[] = [];
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: "slot_not-a-brain", log: (l) => logs.push(l), reconnectMs: { first: 50, max: 200 } });
+  await until(() => logs.some((l) => /did not answer/.test(l)), 3000);
+  const b = startBroker(registry({ slots: 1 }), { port: port0, log: () => {} });
+  try {
+    ok(await until(() => logs.some((l) => /refused this brain's key \(401\)/.test(l)), 5000), "a key refused only after an outage was said is named all the same", logs);
+  } finally { await relay.stop(); await b.stop(); }
+}
+
 rmSync(DIR, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

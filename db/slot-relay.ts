@@ -39,8 +39,12 @@
 export const RECONNECT_MS = { first: 500, max: 2000 } as const;
 /** How long asks parked by a lost socket wait for the next before they take their children's own shares. */
 export const GRACE_MS = 3000;
-/** How long an open socket may go without the broker's hello. */
+/** How long a socket may go, from its dial, without the broker's hello. */
 export const HELLO_MS = 5000;
+/** The reconnect's pace within the grace: a broker back within it is found before the grace ends (review pass 2). */
+export const GRACE_RETRY_MS = 250;
+/** The longest the relay waits on a silent socket, whatever the broker's idle_s (review pass 2: idle_s 30 made 33 s). */
+export const SILENCE_MS = 10_000;
 
 /** What a child sends. */
 export type ChildFrame =
@@ -116,6 +120,15 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   /** No broker since this long ago (performance.now), or null while one answers: past GRACE_MS, asks take their own shares. */
   let downAt: number | null = performance.now();
   let maxWaiting = 1024;
+  /** Its ids' prefix, this process's own: a restarted coordinator never takes back another's kept grants by id. */
+  const nonce = crypto.randomUUID().slice(0, 8);
+  /** The current socket's timers, cleared at its end or at stop. */
+  let quietNow: () => void = () => {};
+  /** When the loss line was last said, and how many losses since went unsaid (a link flapping every few seconds). */
+  let lostSaidAt = -Infinity;
+  let lostUnsaid = 0;
+  /** The kind of loss last said (its words, numbers aside): another kind is said at once. */
+  let lostKind = "";
   let atBroker = 0;
   let next = 0;
   let saidDown = false;
@@ -149,6 +162,8 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       if (e.kind === "parked") askOf(relayId, e);
     }
   };
+  /** Past the grace with no broker: asks take their own shares at once (the grace's timer, not the clock, decides). */
+  const pastGrace = () => !open && grace === null;
   /** The grace over: every ask still parked takes its child's own share. */
   const graceOver = () => {
     grace = null;
@@ -171,7 +186,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     for (const [relayId, e] of entries) if (e.kind === "grant" || e.kind === "own") { e.on = epoch; sock.send(JSON.stringify({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls })); held++; }
     const parked = [...entries.values()].filter((e) => e.kind === "parked").length;
     feed();
-    log(`slot relay: the broker answers${restarted ? " (restarted)" : ""}${held ? `; ${held} call${held === 1 ? "" : "s"} still running re-registered` : ""}${parked ? `; ${parked} waiting asked again` : ""}`);
+    if (epoch === 1 || restarted || performance.now() - lostSaidAt >= 60_000 || lostUnsaid === 0) log(`slot relay: the broker answers${restarted ? " (restarted)" : ""}${held ? `; ${held} call${held === 1 ? "" : "s"} still running re-registered` : ""}${parked ? `; ${parked} waiting asked again` : ""}`);
   };
   /** The socket gone (closed, or dropped here): asks parked, running calls kept for `held`, a reconnect scheduled. */
   const lost = (sock: WebSocket, why: string) => {
@@ -180,17 +195,33 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     const was = open;
     open = false;
     atBroker = 0;
-    for (const e of entries.values()) if (e.kind === "ask") e.kind = "parked";
+    // A live call is running already (it never waits): kept for `held`, as an own call is; a background ask parks.
+    for (const e of entries.values()) if (e.kind === "ask") e.kind = e.cls === "live" ? "own" : "parked";
     if (downAt === null) downAt = performance.now();
     if (!grace) grace = setTimeout(graceOver, Math.max(0, graceMs - (performance.now() - downAt)));
     if (stopped) return;
     since = Date.now();
-    if (!saidDown) { saidDown = true; log(`slot relay: ${was ? "the broker's socket was lost" : "the broker did not answer"} (${why}) — asks wait ${graceMs / 1000} s for it, then take the passes' own shares (PR 2's semaphore), each counted there once it is back; trying again every ${backoff.max / 1000} s at most`); }
-    retry = setTimeout(() => { retry = null; connect(); }, wait);
-    wait = Math.min(wait * 2, backoff.max);
+    if (!saidDown) {
+      saidDown = true;
+      // At most once a minute, with the count unsaid since: a link flapping every few seconds is one line a minute.
+      const kind = `${was}:${why.replace(/[0-9]+/g, "")}`;
+      if (kind !== lostKind || performance.now() - lostSaidAt >= 60_000) {
+        lostKind = kind;
+        log(`slot relay: ${was ? "the broker's socket was lost" : "the broker did not answer"} (${why})${lostUnsaid ? ` — and ${lostUnsaid} loss${lostUnsaid === 1 ? "" : "es"} since the last said` : ""} — asks wait ${graceMs / 1000} s for it, then take the passes' own shares (PR 2's semaphore), each counted there once it is back; trying again every ${backoff.max / 1000} s at most`);
+        lostSaidAt = performance.now();
+        lostUnsaid = 0;
+      } else lostUnsaid++;
+    }
+    // Within the grace, quickly: a broker back in it is found before its asks take their own shares.
+    const inGrace = downAt !== null && performance.now() - downAt < graceMs;
+    retry = setTimeout(() => { retry = null; connect(); }, inGrace ? Math.min(GRACE_RETRY_MS, wait) : wait);
+    if (!inGrace) wait = Math.min(wait * 2, backoff.max);
   };
   const drop = (sock: WebSocket, why: string) => {
-    try { (sock as unknown as { terminate?: () => void }).terminate?.() ?? sock.close(); } catch { /* gone already */ }
+    try {
+      const t = (sock as unknown as { terminate?: () => void }).terminate;
+      if (typeof t === "function") t.call(sock); else sock.close();
+    } catch { /* gone already */ }
     lost(sock, why);
   };
   /** Why a socket that never opened was refused: a 401 is the key, named; anything else an outage. */
@@ -198,7 +229,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     try {
       const r = await fetch(opts.url.replace(/^ws/, "http"), { headers: { "x-brain-key": opts.key }, redirect: "error", signal: AbortSignal.timeout(2000) });
       if (r.status === 401) return "the broker refused this brain's key (401): check OB1_SLOT_BROKER_KEY against the registry's hash";
-      return `HTTP ${r.status}`;
+      return r.status === 426 ? "an upgrade refused (426)" : `no WebSocket there (HTTP ${r.status}) — is OB1_SLOT_BROKER_URL the broker's /v1/slots?`;
     } catch (e) { return `no answer: ${(e as Error).message}`; }
   };
 
@@ -216,19 +247,19 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     let opened = false;
     let heard = performance.now();
     let ping: ReturnType<typeof setInterval> | null = null;
-    let hello: ReturnType<typeof setTimeout> | null = null;
-    const quiet = () => { if (ping) clearInterval(ping); if (hello) clearTimeout(hello); };
-    sock.onopen = () => {
-      opened = true;
-      hello = setTimeout(() => { quiet(); once("hello", `slot relay: the broker's socket opened but no hello came in ${helloMs / 1000} s — is OB1_SLOT_BROKER_URL the broker's /v1/slots?`); drop(sock, "no hello"); }, helloMs);
-    };
+    // From the dial, not the open: a peer that takes the connection and never answers holds a socket connecting for
+    // good (review pass 2: 40 s and more on Bun 1.4.3, the relay down meanwhile, saying nothing).
+    let hello: ReturnType<typeof setTimeout> | null = setTimeout(() => { quiet(); once("hello", `slot relay: no hello from the broker within ${helloMs / 1000} s of dialling — is OB1_SLOT_BROKER_URL the broker's /v1/slots, and the broker up?`); drop(sock, "no hello"); }, helloMs);
+    const quiet = () => { if (ping) clearInterval(ping); if (hello) clearTimeout(hello); ping = null; hello = null; };
+    quietNow = quiet;
+    sock.onopen = () => { opened = true; };
     sock.onmessage = (ev) => {
       heard = performance.now();
       let m: { op?: string; id?: string | null; boot?: string; why?: string; idle_s?: number; max_waiting?: number };
       try { m = JSON.parse(String(ev.data)); } catch { return; }
       if (m.op === "hello") {
         if (hello) { clearTimeout(hello); hello = null; }
-        const idleMs = (typeof m.idle_s === "number" && m.idle_s > 0 ? m.idle_s : 30) * 1000;
+        const idleMs = Math.min(SILENCE_MS, (typeof m.idle_s === "number" && m.idle_s > 0 ? m.idle_s : 30) * 1000);
         ping = setInterval(() => {
           if (performance.now() - heard > idleMs) { quiet(); drop(sock, `silent for ${Math.round(idleMs / 1000)} s`); return; }
           try { sock.send(JSON.stringify({ op: "ping", id: "ping" })); } catch { /* close follows */ }
@@ -244,11 +275,12 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
         return;
       }
       if (m.op === "queued") { if (e.kind === "ask") tell(e, "queued"); return; }
-      if (m.op === "lapsed") { forget(m.id); if (e.kind === "grant") tell(e, "lapsed"); return; }
+      if (m.op === "lapsed") { forget(m.id); if (e.kind === "grant") tell(e, "lapsed"); feed(); return; }
       if (m.op === "no") {
         if (e.kind === "ask" && m.why === "limit") {
           // Never its own share for the broker's limit: it waits here, asked again as those ahead resolve.
           atBroker--; e.kind = "parked"; maxWaiting = Math.max(1, atBroker);
+          tell(e, "queued");
           return;
         }
         if (e.kind === "ask") {
@@ -266,8 +298,11 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       quiet();
       if (ws !== sock) return;
       if (opened) { lost(sock, `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`); return; }
-      // Never opened: name a refused key rather than an outage — said once a down spell, as any reason is.
-      void whyRefused().then((why) => lost(sock, why));
+      // Never opened: why, asked of the URL over plain HTTP; a refused key said on its own, whenever it is first met.
+      void whyRefused().then((why) => {
+        if (/\(401\)/.test(why)) once("401", `slot relay: ${why}`);
+        lost(sock, why);
+      });
     };
     sock.onerror = () => { /* onclose follows, and says it */ };
   };
@@ -300,7 +335,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
             return;
           }
           if (mine.has(f.id)) { if (f.slot === "ask") send?.({ slot: "own", id: f.id }); return; }
-          const relayId = `${child}:${++next}`;
+          const relayId = `${nonce}:${child}:${++next}`;
           const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now(), on: -1 };
           if (f.slot === "running") {
             e.kind = "own";
@@ -309,8 +344,16 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
             if (open) { e.on = epoch; toBroker({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls }); }
             return;
           }
+          // A live call runs at once whatever is said (it never waits): asked past any cap with a broker, else kept as
+          // running, for `held` on the next socket (review pass 2: past the grace, or behind the cap, it went uncounted).
+          if (f.cls === "live") {
+            entries.set(relayId, e);
+            mine.set(f.id, relayId);
+            if (open) askOf(relayId, e); else e.kind = "own";
+            return;
+          }
           // No broker past the grace: its own share at once.
-          if (!open && downAt !== null && performance.now() - downAt >= graceMs) { send?.({ slot: "own", id: f.id }); return; }
+          if (pastGrace()) { send?.({ slot: "own", id: f.id }); return; }
           entries.set(relayId, e);
           mine.set(f.id, relayId);
           if (open && atBroker < maxWaiting) askOf(relayId, e);
@@ -340,6 +383,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       stopped = true;
       if (retry) clearTimeout(retry);
       if (grace) clearTimeout(grace);
+      quietNow();
       const sock = ws;
       ws = null;
       open = false;
