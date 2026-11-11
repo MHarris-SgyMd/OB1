@@ -4928,6 +4928,37 @@ bun eval-inferred-priority.ts                  # the report and the verdict, fro
 The run file holds the model's phrases and the sheet the text, so both are refused inside the repo; the fixture holds
 ids and numbers only.
 
+### Results, 2026-11-11: the bar fails, so `count_inferred` stays off
+
+The run read stable's 1,394 current captures with qwen2.5:7b (prompt v1). The model read something from 186 (13%).
+The operator labelled the 120 drawn texts blind.
+
+| condition | measured | bar |
+| --- | --- | --- |
+| level calls the operator reads | 0.188 (9 of 48) | ≥ 0.80 |
+| due calls the operator reads | 0.500 (8 of 16) | ≥ 0.90 |
+| level calls High where none is read | 0.188 (9 of 48) | < 0.05 |
+| misses among the others (no bar) | level 1 of 60, due 1 of 60 | — |
+
+* **Every level read came from a ticket export.** Its "Priority:" header was read as the ticket's own stated level.
+  These are 9 texts written through the claude-code key, and the model read all 9 right. On the 38 level calls over
+  session-hook summaries it read none right: 24 Medium, 8 High and 6 Low where the operator read no level. Its phrase
+  was a ticket quoted with its label in 10, a bare level word in 10, and another phrase (a rule under discussion, a
+  sentence) in 18.
+* **The raters split on those exports.** κ on level is 0.173: the second rater read the same header as a citation
+  (convention 2). κ on due is 0.829.
+* **Four of the 8 due reads match one day in a list.** The operator listed 4 to 11 days on texts quoting a board's due
+  dates (convention 8: any listed day counts). Reading those lists as none gives 3 of 16.
+* **It fails under every reading.** With the second rater's labels as the gold: level 0.021, due 0.313, High on none
+  0.229.
+* **Stated levels are rare in this population.** Among the 60 others, the operator read a level in 1 and a due day in 1.
+  Of the model's 54 reads on session-hook summaries (38 levels and 16 due days), the operator agrees with 8, all of
+  them due days.
+
+The labels were returned as a list and written into a copy of the sheet by script, then frozen.
+`fixtures/inferred-priority.json` records the run's calls, both raters' labels, the population's counts and the
+registration's hash.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
