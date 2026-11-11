@@ -54,8 +54,9 @@
 //                are at work starting level with the least of them — ties going round from the brain served last: two
 //                backlogged brains split the slot time whatever the room, about half each for calls well under the
 //                half-life (a call is never cut short: one of 71 s beside 50 ms calls has 0.54, of 300 s 0.64); a
-//                grant taken back at lease_s is charged all of it; within a brain, the
-//                first ask its brain put first (`first`, 2c-2's consolidation) or that has waited its `max_wait_s` (60
+//                grant taken back at lease_s is charged all of it; a brain with one call at a time has less than
+//                half beside a backlog, since a slot it frees goes on before its next ask comes (0.33 of a room of 2);
+//                with no brain at work in a pool, all start level again; within a brain, the first ask its brain put first (`first`, 2c-2's consolidation) or that has waited its `max_wait_s` (60
 //                unset), else its oldest — 2c-2's turn, held here brain-wide.
 // The trust (SMD-3268, no implicit trust): a key per brain, the registry holding only its hash; a brain sees its own
 // grants and asks, and `hello` names no other brain. A brain can call every call live, or say every call was held:
@@ -114,6 +115,9 @@ export function normalisedBase(base: string): string {
   }
 }
 
+/** Whether a name is one the registry takes for a server or a brain: a host label, and no word YAML reads as a boolean or a null. */
+export const isName = (name: string): boolean => NAME.test(name) && !YAML_WORDS.has(name);
+
 /** A key's hash as the registry holds it: sha256, hex, as the brain's own keys are (server-portable/auth.ts's hashKey). */
 export const hashKey = (raw: string): string => createHash("sha256").update(raw, "utf8").digest("hex");
 
@@ -140,7 +144,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
   if (!isMapping(doc.servers) || Object.keys(doc.servers).length === 0) problems.push("servers: name at least one model server the brains share");
   else for (const [name, raw] of Object.entries(doc.servers)) {
     const at = `servers.${name}`;
-    if (!NAME.test(name) || YAML_WORDS.has(name)) { problems.push(`${at}: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null`); continue; }
+    if (!isName(name)) { problems.push(`${at}: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null`); continue; }
     if (!isMapping(raw)) { problems.push(`${at}: not a mapping`); continue; }
     for (const k of Object.keys(raw)) if (!["bases", "slots", "reserve", "per_model"].includes(k)) problems.push(`${at}.${k}: not a key of a server (bases, slots, reserve, per_model)`);
     const bases: string[] = [];
@@ -168,7 +172,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
   if (!isMapping(doc.brains) || Object.keys(doc.brains).length === 0) problems.push("brains: name at least one brain, with its key's hash");
   else for (const [name, raw] of Object.entries(doc.brains)) {
     const at = `brains.${name}`;
-    if (!NAME.test(name) || YAML_WORDS.has(name)) { problems.push(`${at}: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null`); continue; }
+    if (!isName(name)) { problems.push(`${at}: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null`); continue; }
     if (!isMapping(raw)) { problems.push(`${at}: not a mapping`); continue; }
     for (const k of Object.keys(raw)) if (k !== "key") problems.push(`${at}.${k}: not a key of a brain (key)`);
     const key = raw.key;
@@ -192,12 +196,14 @@ export function brainOf(brains: Brain[], key: string | null): Brain | null {
   return found;
 }
 
-type Conn = { id: number; brain: Brain; brainAt: number; closed: boolean; heldLate: boolean; waiting: number; sent: (m: object) => void; held: Map<string, Ask | Grant> };
+type Conn = { id: number; brain: Brain; brainAt: number; heldLate: boolean; waiting: number; sent: (m: object) => void; held: Map<string, Ask | Grant> };
 type Ask = { kind: "ask"; conn: Conn; id: string; pool: Pool; first: boolean; maxWaitMs: number; at: number };
 type Grant = { kind: "grant"; conn: Conn; id: string; pool: Pool; live: boolean; at: number };
 type Pool = {
-  key: string; server: ModelServer; model: string;
+  key: string; server: ModelServer;
   live: Set<Grant>; bg: Set<Grant>;
+  /** Each brain's live grants here, by its index: counted as they come and go, not by a walk of `live`. */
+  liveBy: number[];
   /** Each brain's asks waiting, by its index in the registry, in the order asked (a Set: a withdrawal is O(1)). */
   queues: Set<Ask>[];
   /** Each brain's background slot time here, ms, decayed (USE_HALF_LIFE_S) as of `usedAt`: with its grants running, whose turn it is. */
@@ -235,7 +241,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const model = server.perModel ? asked : "*";
     const key = `${server.name}/${model}`;
     let p = pools.get(key);
-    if (!p) { p = { key, server, model, live: new Set(), bg: new Set(), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 }; pools.set(key, p); }
+    if (!p) { p = { key, server, live: new Set(), bg: new Set(), liveBy: reg.brains.map(() => 0), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 }; pools.set(key, p); }
     return p;
   };
   const prune = (p: Pool) => { if (p.live.size === 0 && p.bg.size === 0 && p.queues.every((q) => q.size === 0)) pools.delete(p.key); };
@@ -252,8 +258,8 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const watch = (p: Pool, by?: Conn) => {
     if (p.live.size + p.bg.size > p.server.slots) sayOnce(p.server.name, () => `${p.key}: ${p.live.size} live and ${p.bg.size} background calls run on ${p.server.slots} slots — the server queues the rest`);
     if (!by) return;
-    let mine = 0;
-    for (const g of p.live) if (g.conn.brainAt === by.brainAt) mine++;
+    // Counted, not walked: a walk of `live` each grant made 64k live calls cost 6 s, every brain waiting (review pass 4).
+    const mine = p.liveBy[by.brainAt];
     if (mine > p.server.slots) sayOnce(`${p.server.name}\n${by.brainAt}`, () => `${p.key}: brain ${by.brain.name} has ${mine} live calls running, past the server's ${p.server.slots} slots`);
   };
   /** Each brain's score in the pool at `t`: its remembered slot time, decayed to `t`, and its running grants' time. */
@@ -274,7 +280,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
 
   const grant = (conn: Conn, id: string, p: Pool, live: boolean) => {
     const g: Grant = { kind: "grant", conn, id, pool: p, live, at: clock() };
-    (live ? p.live : p.bg).add(g);
+    if (live) { p.live.add(g); p.liveBy[conn.brainAt]++; } else p.bg.add(g);
     conn.held.set(id, g);
     conn.sent({ op: "go", id });
     watch(p, live ? conn : undefined);
@@ -284,8 +290,8 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
    * Hands the pool's free background room out while any brain has an ask waiting: to the waiting brain that has had the
    * least background slot time here — its remembered time, decayed, and its grants' running time — ties going round
    * from the brain served last, so two backlogged brains split the slot time whatever the room, about half each for
-   * calls well under the half-life (review pass 1: by turns, a brain of 1–5 ms calls had 6% beside one of 40–50 ms; review pass 2:
-   * by grants held, the same 6% wherever the room is one slot); and within it, its first ask put first or past its
+   * calls well under the half-life (review pass 1: by turns, a brain of 5 ms calls had 6% beside one of 60 ms; review pass 2:
+   * by grants held, 8% wherever the room is one slot); and within it, its first ask put first or past its
    * max_wait_s, else its oldest.
    */
   const pump = (p: Pool) => {
@@ -320,7 +326,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const release = (x: Ask | Grant) => {
     if (x.conn.held.get(x.id) === x) x.conn.held.delete(x.id);
     if (x.kind === "ask") { if (x.pool.queues[x.conn.brainAt].delete(x)) x.conn.waiting--; prune(x.pool); return; }
-    if (x.live) { if (!x.pool.live.delete(x)) return; } else {
+    if (x.live) { if (!x.pool.live.delete(x)) return; x.pool.liveBy[x.conn.brainAt]--; } else {
       if (!x.pool.bg.delete(x)) return;
       const now = clock();
       decay(x.pool, now);
@@ -360,7 +366,11 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       const score = scores(p, t);
       let floor = Infinity;
       for (let i = 0; i < score.length; i++) if (i !== conn.brainAt && active(p, i)) floor = Math.min(floor, score[i]);
-      if (floor !== Infinity && p.used[conn.brainAt] < floor) p.used[conn.brainAt] = floor;
+      // With no brain at work here, every brain starts level again, as a pool pruned would: a live call keeping the
+      // pool must not keep a brain's old debt over a newcomer who started at nothing (review pass 4: a brain alone ten
+      // minutes, gone 10 s and back, had no slot for 235 s because one live call kept the pool).
+      if (floor === Infinity) p.used.fill(0);
+      else if (p.used[conn.brainAt] < floor) p.used[conn.brainAt] = floor;
     }
     const a: Ask = { kind: "ask", conn, id, pool: p, first: m.first === true, maxWaitMs: maxWait * 1000, at: clock() - waited * 1000 };
     p.queues[conn.brainAt].add(a);
@@ -384,7 +394,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       if (!brain) return new Response("no brain has that key\n", { status: 401 });
       const brainAt = reg.brains.indexOf(brain);
       if (sockets[brainAt] >= MAX_SOCKETS) return new Response(`brain ${brain.name} has ${MAX_SOCKETS} sockets open already\n`, { status: 429 });
-      const conn: Conn = { id: nextConn++, brain, brainAt, closed: false, heldLate: false, waiting: 0, sent: () => {}, held: new Map() };
+      const conn: Conn = { id: nextConn++, brain, brainAt, heldLate: false, waiting: 0, sent: () => {}, held: new Map() };
       if (srv.upgrade(req, { data: conn })) return undefined;
       return new Response("a WebSocket upgrade, please\n", { status: 426 });
     },
@@ -410,7 +420,6 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       },
       close(ws: ServerWebSocket<Conn>) {
         const conn = ws.data;
-        conn.closed = true;
         conn.sent = () => {};
         sockets[conn.brainAt]--;
         // Its asks first, then its grants: a grant given back first would be handed to the closing socket's own next

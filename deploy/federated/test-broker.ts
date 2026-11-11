@@ -113,7 +113,7 @@ await withBroker(registry({ slots: 3, reserve: 1 }), async (b, lines) => {
   ask(c, "l2", "live"); ask(c, "l3", "live"); ask(c, "l4", "live");
   ok(!!(await c.next("go", "l4")), "and a live call past every slot is granted at once too");
   ok(pool(b).live === 4 && pool(b).background === 2, "the counts: 4 live, 2 background", pool(b));
-  ok(lines.some((l) => /4 live and 2 background calls run on 3 slots/.test(l) || /live and 2 background calls run on 3 slots/.test(l)), "over the slots is logged", lines);
+  ok(lines.some((l) => /live and 2 background calls run on 3 slots/.test(l)), "over the slots is logged", lines);
   ok(lines.some((l) => /brain canary has 4 live calls running, past the server's 3 slots/.test(l)), "one brain's live calls past the slots are logged by name", lines);
   done(s, "b1");
   await sleep(50);
@@ -246,6 +246,26 @@ await withBroker(registry({ slots: 3, reserve: 0 }), async (b) => {
     ok(!!(await c.next("go", "b1")), "canary, arriving, has the next slot");
     t += 60_000; done(c, "b1");
     ok(!!(await s.next("go", "a11")) && !c.seen("go", "b2"), "and stable the one after: canary started level, not at nothing (else it would hold the slot a half-life)");
+    await s.close(); await c.close();
+  } finally { await b.stop(); }
+}
+
+{
+  // A live call keeps the pool, and so its remembered slot time, while stable's backlog is gone for a moment; canary
+  // comes in that moment with no one at work, so all start level again — stable back is not shut out by its old debt.
+  let t = 1_000_000;
+  const b = startBroker(registry({ slots: 2, reserve: 0 }), { port: 0, log: () => {}, now: () => t });
+  try {
+    const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+    ask(s, "keep", "live"); await s.next("go", "keep");
+    ask(s, "a0", "background"); await s.next("go", "a0");
+    for (let i = 1; i <= 10; i++) { ask(s, `a${i}`, "background"); await s.next("queued", `a${i}`); t += 60_000; done(s, `a${i - 1}`); await s.next("go", `a${i}`); }
+    t += 60_000; done(s, "a10");
+    await until(() => (b.snapshot()["ollama/qwen3:8b"]?.background ?? 1) === 0);
+    ask(c, "c1", "background"); await c.next("go", "c1");
+    ask(s, "s1", "background"); ask(c, "c2", "background"); await c.next("queued", "c2");
+    t += 60_000; done(c, "c1");
+    ok(!!(await s.next("go", "s1")) && !c.seen("go", "c2"), "a brain back after a moment with nothing in the pool is not held to its old slot time: canary came to a pool no one worked, so all started level");
     await s.close(); await c.close();
   } finally { await b.stop(); }
 }

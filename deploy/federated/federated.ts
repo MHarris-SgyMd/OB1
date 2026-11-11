@@ -5,6 +5,7 @@
 //   bun --no-env-file deploy/federated/federated.ts check [--registry PATH] [--runtime docker|podman]
 //   bun --no-env-file deploy/federated/federated.ts up    [--registry PATH] [--runtime docker|podman]
 //   bun --no-env-file deploy/federated/federated.ts down  [--runtime docker|podman]
+//   bun --no-env-file deploy/federated/federated.ts logs  [--runtime docker|podman]   the broker's log, followed
 //   bun deploy/federated/federated.ts key --brain NAME
 //   bun deploy/federated/federated.ts --self-check
 //
@@ -26,7 +27,7 @@ import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import { factsFrom, type Facts } from "../edge/edge.ts";
 import { bunEnvProblem, listens, PS_ARGS, containersIn, holds, reason, shellQuote } from "../instance.ts";
-import { brainOf, hashKey, KEY_PREFIX, parseRegistry, type Registry } from "./broker.ts";
+import { brainOf, hashKey, isName, KEY_PREFIX, parseRegistry, type Registry } from "./broker.ts";
 
 const HERE = import.meta.dir;
 const COMPOSE = join(HERE, "compose.yaml");
@@ -34,10 +35,9 @@ const BROKER = join(HERE, "broker.ts");
 const PROJECT = "ob1-federated";
 const DEFAULT_REGISTRY = join(HERE, "federation.local.yaml");
 const USAGE = `usage: bun --no-env-file deploy/federated/federated.ts check|up [--registry PATH] [--runtime docker|podman]
-       bun --no-env-file deploy/federated/federated.ts down [--runtime docker|podman]
+       bun --no-env-file deploy/federated/federated.ts down|logs [--runtime docker|podman]
        bun deploy/federated/federated.ts key --brain NAME
        bun deploy/federated/federated.ts --self-check`;
-const NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /** Whether the runtime is one a shape was measured on, and why not when it is not. */
 export function measured(f: Facts): { ok: boolean; why: string } {
@@ -104,15 +104,17 @@ async function healthy(port: number): Promise<boolean> {
 async function main(cmd: string, args: string[]) {
   const o = options(cmd, args);
   if (cmd === "key") {
-    if (!o.brain || !NAME.test(o.brain)) { console.error("key --brain NAME: a name is lower-case letters, digits and hyphens, starting with a letter"); process.exit(2); }
+    if (!o.brain || !isName(o.brain)) { console.error("key --brain NAME: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null (on, yes, null…)"); process.exit(2); }
     const { key, lines } = mintKey(o.brain);
     console.log(`\n  The broker key for brain "${o.brain}" — shown once, not recoverable:\n\n    ${key}\n\n  For that brain's deploy/.env, as OB1_SLOT_BROKER_KEY (its coordinator reads it from SMD-3379 PR 3b; until then\n  nothing does, and a key minted again then serves as well).\n  Under brains: in the registry (its hash, never the key):\n\n${lines}`);
     return;
   }
   const loaded = bunEnvProblem(process.execArgv);
   if (loaded) { console.error(`${loaded}, and deploy/.env holds a brain's secrets. Run it as: bun --no-env-file ${[process.argv[1] ?? "deploy/federated/federated.ts", cmd, ...args].map(shellQuote).join(" ")}`); process.exit(2); }
-  if (cmd === "down") {
-    const r = Bun.spawnSync(composeArgs(o.runtime, ["down", "--remove-orphans"]), { env: composeEnv(process.env, { port: 1 }, BROKER, "down", "down"), stdout: "inherit", stderr: "inherit" });
+  // down and logs read compose.yaml, whose settings are all required: they are given placeholders, which neither
+  // command uses (review pass 4: a bare `compose logs` the operator was told to paste refused on each).
+  if (cmd === "down" || cmd === "logs") {
+    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
     process.exit(r.exitCode === 0 ? 0 : 1);
   }
   if (!existsSync(o.registry)) { console.error(`no registry at ${o.registry} — copy deploy/federated/federation.example.yaml there and name your servers and brains, or give --registry PATH`); process.exit(2); }
@@ -132,7 +134,7 @@ async function main(cmd: string, args: string[]) {
   const summary = `the slot broker: ${registry.brains.map((b) => b.name).join(", ")} on ${registry.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved)`).join(", ")}; brains reach it at http://host.containers.internal:${registry.port}`;
   if (cmd === "check") { console.log(summary); return; }
   const env = composeEnv(process.env, registry, o.registry, sha256(readFileSync(BROKER, "utf8")), sha256(text));
-  const logs = composeArgs(o.runtime, ["logs"]).map(shellQuote).join(" ");
+  const logs = `bun --no-env-file deploy/federated/federated.ts logs${o.runtime === "podman" ? "" : ` --runtime ${o.runtime}`}`;
   const up = Bun.spawnSync(composeArgs(o.runtime, ["up", "-d", "--remove-orphans", "--wait", "--wait-timeout", "60"]), { env, stdout: "inherit", stderr: "inherit" });
   if (up.exitCode !== 0 || !(await healthy(registry.port))) { console.error(`the broker did not come up; its log: ${logs}`); process.exit(1); }
   console.log(summary);
@@ -151,6 +153,7 @@ function selfCheck() {
     ["compose's environment drops the shell's COMPOSE_* and FEDERATED_* and sets the project's own", (() => { const e = composeEnv({ PATH: "/bin", COMPOSE_FILE: "x", FEDERATED_PORT: "1", DOCKER_HOST: "unix:///x" }, { port: 8095 }, "/r.yaml", "b", "r"); return e.PATH === "/bin" && e.DOCKER_HOST === "unix:///x" && !("COMPOSE_FILE" in e) && e.FEDERATED_PORT === "8095" && e.FEDERATED_REGISTRY === "/r.yaml" && e.FEDERATED_BROKER_SHA256 === "b" && e.FEDERATED_REGISTRY_SHA256 === "r"; })()],
     ["a minted key is marked, its lines read as a registry's brain, and the key finds it", minted.key.startsWith(KEY_PREFIX) && minted.key.length === KEY_PREFIX.length + 64 && !!reg && brainOf(reg.brains, minted.key)?.name === "canary" && !minted.lines.includes(minted.key)],
     ["two mints are two keys", mintKey("a").key !== mintKey("a").key],
+    ["key takes the names the registry takes, and refuses the ones it refuses", isName("stable") && isName("canary-2") && ["on", "yes", "null", "Stable", "-x"].every((n) => !isName(n))],
     ["a registry not readable by others is refused, naming chmod 644", /chmod 644/.test(modeProblem(0o100600, "f")) && modeProblem(0o100644, "f") === ""],
     ["the project is ob1-federated, one service", compose.name === PROJECT && Object.keys(compose.services).join() === "slots"],
     ["the broker runs unprivileged, read-only, with no capability", slots.user === "65534:65534" && (slots.cap_drop as string[]).join() === "ALL" && slots.read_only === true && (slots.security_opt as string[]).includes("no-new-privileges:true")],
@@ -166,6 +169,6 @@ function selfCheck() {
 if (import.meta.main) {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === "--self-check") selfCheck();
-  else if (cmd === "check" || cmd === "up" || cmd === "down" || cmd === "key") await main(cmd, rest);
+  else if (cmd === "check" || cmd === "up" || cmd === "down" || cmd === "logs" || cmd === "key") await main(cmd, rest);
   else { console.error(USAGE); process.exit(2); }
 }

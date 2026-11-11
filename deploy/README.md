@@ -409,10 +409,12 @@ bun --no-env-file deploy/federated/federated.ts down
 
 - **The registry holds each brain's key hash, never the key.** The broker
   reads the registry as an unprivileged user, so it must be readable by
-  others (`chmod 644`). `federated.ts` refuses it otherwise.
+  others (`chmod 644`), and so must `broker.ts`. `federated.ts` refuses
+  either otherwise.
 - **`slots` is the server's parallel setting.** For Ollama this is
   `OLLAMA_NUM_PARALLEL`, which applies per model, so the broker counts each
-  model on the server apart. `reserve` (1 unless set) is kept for live calls,
+  model on the server apart (with `per_model: false`, the server's slots are
+  counted together). `reserve` (1 unless set) is kept for live calls,
   but background keeps at least one slot, so with `slots: 1` background and
   live share it. A server whose slots are its own whatever the model, such as
   a decide tier answering one call at a time, takes `per_model: false`.
@@ -432,7 +434,7 @@ bun --no-env-file deploy/federated/federated.ts down
   re-registered within `warm_s`. A brain no longer listed is refused at its
   next connection.
 - **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
-  broker's log (`podman compose -p ob1-federated logs slots`) says each brain's
+  broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says each brain's
   connections, and any server over its slots, at most once a minute.
 
 ## What is reachable from where
