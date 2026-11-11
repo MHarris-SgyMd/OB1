@@ -385,7 +385,10 @@ free:
   background never takes, though background always keeps at least one.
 - **A brain alone** may use every background slot. Two backlogged brains
   split the slot time: the turn goes to the waiting brain that has had less
-  of it lately, so each has about half, whatever its calls' lengths.
+  of it over the last minutes, and a brain arriving starts level with the
+  others. Each has about half for calls well under five minutes. A call is
+  never cut short, so a brain of minute-long calls has a little more (0.54
+  of the time for 71 s calls beside 50 ms ones).
 
 **No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
 and fall back to the brain's own share while it is down.

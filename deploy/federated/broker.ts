@@ -50,8 +50,11 @@
 //   background   granted while background holds fewer than max(1, slots − reserve) and live and background together
 //                fewer than `slots`: a live call in flight, any brain's, takes background's room.
 //   whose turn   the waiting brain that has had the least background slot time there — remembered with a half-life of
-//                USE_HALF_LIFE_S, its grants' running time added — ties going round from the brain served last: two
-//                backlogged brains split the slot time, whatever their calls' lengths and the room; within a brain, the
+//                USE_HALF_LIFE_S (300 s), its grants' running time added, and a brain coming to a pool where others
+//                are at work starting level with the least of them — ties going round from the brain served last: two
+//                backlogged brains split the slot time whatever the room, about half each for calls well under the
+//                half-life (a call is never cut short: one of 71 s beside 50 ms calls has 0.54, of 300 s 0.64); a
+//                grant taken back at lease_s is charged all of it; within a brain, the
 //                first ask its brain put first (`first`, 2c-2's consolidation) or that has waited its `max_wait_s` (60
 //                unset), else its oldest — 2c-2's turn, held here brain-wide.
 // The trust (SMD-3268, no implicit trust): a key per brain, the registry holding only its hash; a brain sees its own
@@ -76,8 +79,10 @@ export const MAX_SLOTS = 16;
 export const MAX_WAITING = 1024;
 /** The most asks and grants one socket may hold at all, live included: a bound on a socket's memory. */
 export const MAX_HELD = 4096;
-/** A brain's background slot time is remembered with this half-life, so the turn evens slot time over the last minutes. */
-export const USE_HALF_LIFE_S = 60;
+/** A brain's background slot time is remembered with this half-life, so the turn evens slot time over the last
+ *  minutes: longer than most calls, since a call is never cut short (review pass 3: at 60 s, a brain of 71 s calls had
+ *  0.59 of the slot time beside one of 50 ms calls, of 300 s calls 0.74; at 300 s, 0.54 and 0.64). */
+export const USE_HALF_LIFE_S = 300;
 /** The most sockets one brain may hold open at once: 3b's brain holds one, its coordinator's. */
 export const MAX_SOCKETS = 16;
 /** The most a socket may have unread before it is closed. */
@@ -203,14 +208,16 @@ type Pool = {
 };
 
 /** What a test reads of the broker: each pool's counts, and each brain's asks waiting in it. */
-export type Snapshot = Record<string, { live: number; background: number; waiting: Record<string, number> }>;
+export type Snapshot = Record<string, { live: number; background: number; waiting: Record<string, number>; used: Record<string, number> }>;
 
 export type Broker = { port: number; stop(): Promise<void>; snapshot(): Snapshot };
 
 /** Starts serving the registry's brains. `port` 0 takes a free one (a test's). */
-export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void } = {}): Broker {
+export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number } = {}): Broker {
   const log = opts.log ?? ((line: string) => console.log(`slots: ${line}`));
-  const started = performance.now();
+  /** The broker's clock, in ms: performance.now() unless a test hands it one it moves itself. */
+  const clock = opts.now ?? (() => performance.now());
+  const started = clock();
   const warmUntil = started + reg.warmS * 1000;
   const pools = new Map<string, Pool>();
   const sockets = reg.brains.map(() => 0);
@@ -228,12 +235,12 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const model = server.perModel ? asked : "*";
     const key = `${server.name}/${model}`;
     let p = pools.get(key);
-    if (!p) { p = { key, server, model, live: new Set(), bg: new Set(), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: performance.now(), last: -1 }; pools.set(key, p); }
+    if (!p) { p = { key, server, model, live: new Set(), bg: new Set(), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 }; pools.set(key, p); }
     return p;
   };
   const prune = (p: Pool) => { if (p.live.size === 0 && p.bg.size === 0 && p.queues.every((q) => q.size === 0)) pools.delete(p.key); };
   const room = (p: Pool) => p.bg.size < Math.max(1, p.server.slots - p.server.reserve) && p.live.size + p.bg.size < p.server.slots;
-  const warming = () => performance.now() < warmUntil;
+  const warming = () => clock() < warmUntil;
 
   /**
    * The over-capacity line and a brain's over-its-slots-live line, each at most once a minute a server (and brain):
@@ -241,7 +248,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
    * server had each said a thousand times a second). Bounded by the registry's servers and brains.
    */
   const saidAt = new Map<string, number>();
-  const sayOnce = (key: string, line: () => string) => { const now = performance.now(); if (now - (saidAt.get(key) ?? -Infinity) < 60_000) return; saidAt.set(key, now); log(line()); };
+  const sayOnce = (key: string, line: () => string) => { const now = clock(); if (now - (saidAt.get(key) ?? -Infinity) < 60_000) return; saidAt.set(key, now); log(line()); };
   const watch = (p: Pool, by?: Conn) => {
     if (p.live.size + p.bg.size > p.server.slots) sayOnce(p.server.name, () => `${p.key}: ${p.live.size} live and ${p.bg.size} background calls run on ${p.server.slots} slots — the server queues the rest`);
     if (!by) return;
@@ -249,6 +256,15 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     for (const g of p.live) if (g.conn.brainAt === by.brainAt) mine++;
     if (mine > p.server.slots) sayOnce(`${p.server.name}\n${by.brainAt}`, () => `${p.key}: brain ${by.brain.name} has ${mine} live calls running, past the server's ${p.server.slots} slots`);
   };
+  /** Each brain's score in the pool at `t`: its remembered slot time, decayed to `t`, and its running grants' time. */
+  const scores = (p: Pool, t: number) => {
+    decay(p, t);
+    const score = [...p.used];
+    for (const g of p.bg) score[g.conn.brainAt] += t - g.at;
+    return score;
+  };
+  /** Whether a brain has anything in the pool: an ask waiting or a background grant running. */
+  const active = (p: Pool, b: number) => { if (p.queues[b].size) return true; for (const g of p.bg) if (g.conn.brainAt === b) return true; return false; };
   /** Decays the pool's remembered slot time to now. */
   const decay = (p: Pool, now: number) => {
     const f = 0.5 ** ((now - p.usedAt) / (USE_HALF_LIFE_S * 1000));
@@ -257,7 +273,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   };
 
   const grant = (conn: Conn, id: string, p: Pool, live: boolean) => {
-    const g: Grant = { kind: "grant", conn, id, pool: p, live, at: performance.now() };
+    const g: Grant = { kind: "grant", conn, id, pool: p, live, at: clock() };
     (live ? p.live : p.bg).add(g);
     conn.held.set(id, g);
     conn.sent({ op: "go", id });
@@ -267,8 +283,8 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   /**
    * Hands the pool's free background room out while any brain has an ask waiting: to the waiting brain that has had the
    * least background slot time here — its remembered time, decayed, and its grants' running time — ties going round
-   * from the brain served last, so two backlogged brains split the slot time whatever their calls' lengths and
-   * whatever the room (review pass 1: by turns, a brain of 1–5 ms calls had 6% beside one of 40–50 ms; review pass 2:
+   * from the brain served last, so two backlogged brains split the slot time whatever the room, about half each for
+   * calls well under the half-life (review pass 1: by turns, a brain of 1–5 ms calls had 6% beside one of 40–50 ms; review pass 2:
    * by grants held, the same 6% wherever the room is one slot); and within it, its first ask put first or past its
    * max_wait_s, else its oldest.
    */
@@ -276,10 +292,8 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     if (warming()) return;
     const n = p.queues.length;
     while (room(p)) {
-      const now = performance.now();
-      decay(p, now);
-      const score = [...p.used];
-      for (const g of p.bg) score[g.conn.brainAt] += now - g.at;
+      const now = clock();
+      const score = scores(p, now);
       let at = -1;
       for (let i = 1; i <= n; i++) {
         const b = (p.last + i + n) % n;
@@ -308,7 +322,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     if (x.kind === "ask") { if (x.pool.queues[x.conn.brainAt].delete(x)) x.conn.waiting--; prune(x.pool); return; }
     if (x.live) { if (!x.pool.live.delete(x)) return; } else {
       if (!x.pool.bg.delete(x)) return;
-      const now = performance.now();
+      const now = clock();
       decay(x.pool, now);
       x.pool.used[x.conn.brainAt] += now - x.at;
     }
@@ -338,7 +352,17 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     // it is: those calls run whether counted or not. Said once a socket, since it can take background past its room.
     if (m.op === "held" && !warming() && !conn.heldLate) { conn.heldLate = true; log(`brain ${conn.brain.name} (socket ${conn.id}) re-registers held slots outside the warm-up: counted, past the room if need be`); }
     if (m.op === "held" || cls === "live") { grant(conn, id, p, cls === "live"); return; }
-    const a: Ask = { kind: "ask", conn, id, pool: p, first: m.first === true, maxWaitMs: maxWait * 1000, at: performance.now() - waited * 1000 };
+    // A brain coming to a pool where others are at work starts level with the least of them, not at nothing: else it
+    // would hold every background slot until its time caught up with theirs, a half-life of the others waiting (review
+    // pass 3: brain A backlogged ten minutes had none of the slots for the minute after B arrived, and waited 62 s).
+    if (!active(p, conn.brainAt)) {
+      const t = clock();
+      const score = scores(p, t);
+      let floor = Infinity;
+      for (let i = 0; i < score.length; i++) if (i !== conn.brainAt && active(p, i)) floor = Math.min(floor, score[i]);
+      if (floor !== Infinity && p.used[conn.brainAt] < floor) p.used[conn.brainAt] = floor;
+    }
+    const a: Ask = { kind: "ask", conn, id, pool: p, first: m.first === true, maxWaitMs: maxWait * 1000, at: clock() - waited * 1000 };
     p.queues[conn.brainAt].add(a);
     conn.waiting++;
     conn.held.set(id, a);
@@ -378,7 +402,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         sockets[conn.brainAt]++;
         conn.sent = (m) => { ws.send(JSON.stringify(m)); };
         log(`brain ${conn.brain.name} connected (socket ${conn.id})`);
-        conn.sent({ op: "hello", brain: conn.brain.name, boot, lease_s: reg.leaseS, idle_s: reg.idleS, warm_s_left: Math.max(0, Math.ceil(warmUntil - performance.now()) / 1000), max_waiting: MAX_WAITING, max_held: MAX_HELD, max_sockets: MAX_SOCKETS, max_frame: MAX_FRAME, servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve, per_model: s.perModel })) });
+        conn.sent({ op: "hello", brain: conn.brain.name, boot, lease_s: reg.leaseS, idle_s: reg.idleS, warm_s_left: Math.max(0, Math.ceil(warmUntil - clock()) / 1000), max_waiting: MAX_WAITING, max_held: MAX_HELD, max_sockets: MAX_SOCKETS, max_frame: MAX_FRAME, servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve, per_model: s.perModel })) });
       },
       message(ws: ServerWebSocket<Conn>, msg: string | Buffer) {
         if (typeof msg !== "string") { ws.data.sent({ op: "no", id: null, why: "bad" }); return; }
@@ -403,7 +427,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   // The lease's backstop: a grant held past lease_s is taken back, and its socket told.
   const sweepMs = Math.max(250, Math.min(reg.leaseS * 250, 30_000));
   const sweep = setInterval(() => {
-    const now = performance.now();
+    const now = clock();
     for (const p of [...pools.values()]) for (const g of [...p.live, ...p.bg]) {
       if (now - g.at < reg.leaseS * 1000) continue;
       log(`${p.key}: brain ${g.conn.brain.name}'s ${g.live ? "live" : "background"} grant ${g.id} held past ${reg.leaseS} s, taken back`);
@@ -423,7 +447,10 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       for (const p of pools.values()) {
         const waiting: Record<string, number> = {};
         p.queues.forEach((q, i) => { if (q.size) waiting[reg.brains[i].name] = q.size; });
-        out[p.key] = { live: p.live.size, background: p.bg.size, waiting };
+        const used: Record<string, number> = {};
+        decay(p, clock());
+        p.used.forEach((u, i) => { if (u) used[reg.brains[i].name] = Math.round(u); });
+        out[p.key] = { live: p.live.size, background: p.bg.size, waiting, used };
       }
       return out;
     },

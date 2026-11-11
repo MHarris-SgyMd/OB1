@@ -197,13 +197,12 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   await s.close(); await c.close(); await t.close();
 });
 
-await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
-  // A long call still running counts against its brain: canary's b1 has run 300 ms when stable's 200 ms call ends,
-  // so the slot goes to stable, though canary has given none back yet.
+await withBroker(registry({ slots: 3, reserve: 0 }), async (b) => {
+  // Calls still running count against their brain: canary's two have run 200 ms each when stable's one 200 ms call
+  // ends, 400 ms against 200, so the slot goes to stable though canary has given none back yet.
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
-  ask(c, "b1", "background"); await c.next("go", "b1");
-  await sleep(100);
-  ask(s, "a1", "background"); await s.next("go", "a1");
+  ask(c, "b1", "background"); ask(c, "b1b", "background"); ask(s, "a1", "background");
+  await s.next("go", "a1"); await c.next("go", "b1b");
   ask(c, "b2", "background"); ask(s, "a2", "background");
   await s.next("queued", "a2");
   await sleep(200);
@@ -211,6 +210,45 @@ await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
   ok(!!(await s.next("go", "a2")) && !c.seen("go", "b2"), "a brain's calls still running count against its turn: the slot goes to the brain that has had less");
   await s.close(); await c.close();
 });
+
+{
+  // On a clock the test moves: remembered slot time halves each USE_HALF_LIFE_S, and a brain coming to a pool where
+  // another is at work starts level with it rather than at nothing.
+  let t = 1_000_000;
+  const b = startBroker(registry({ slots: 2, reserve: 0 }), { port: 0, log: () => {}, now: () => t });
+  try {
+    const s = await connect(b, KEYS.stable);
+    ask(s, "keep", "live"); await s.next("go", "keep");
+    ask(s, "g", "background"); await s.next("go", "g");
+    t += 10_000; done(s, "g");
+    await until(() => (b.snapshot()["ollama/qwen3:8b"]?.used.stable ?? 0) > 0);
+    const before = b.snapshot()["ollama/qwen3:8b"].used.stable;
+    t += 300_000;
+    const after = b.snapshot()["ollama/qwen3:8b"].used.stable;
+    ok(before === 10_000 && Math.abs(after - 5_000) <= 1, `a brain's slot time is charged as held (${before} ms) and halves in ${300} s (${after} ms)`, [before, after]);
+    t += 300_000;
+    ok(Math.abs(b.snapshot()["ollama/qwen3:8b"].used.stable - 2_500) <= 1, "and halves again", b.snapshot());
+    await s.close();
+  } finally { await b.stop(); }
+}
+
+{
+  let t = 1_000_000;
+  const b = startBroker(registry({ slots: 1, reserve: 0 }), { port: 0, log: () => {}, now: () => t });
+  try {
+    const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+    // stable alone for ten minutes of 60 s calls, one always queued behind the one running.
+    ask(s, "a0", "background"); await s.next("go", "a0");
+    for (let i = 1; i <= 10; i++) { ask(s, `a${i}`, "background"); await s.next("queued", `a${i}`); t += 60_000; done(s, `a${i - 1}`); await s.next("go", `a${i}`); }
+    ask(s, "a11", "background"); await s.next("queued", "a11");
+    ask(c, "b1", "background"); ask(c, "b2", "background"); await c.next("queued", "b2");
+    t += 60_000; done(s, "a10");
+    ok(!!(await c.next("go", "b1")), "canary, arriving, has the next slot");
+    t += 60_000; done(c, "b1");
+    ok(!!(await s.next("go", "a11")) && !c.seen("go", "b2"), "and stable the one after: canary started level, not at nothing (else it would hold the slot a half-life)");
+    await s.close(); await c.close();
+  } finally { await b.stop(); }
+}
 
 section("[4] a brain's own order: first, and aging");
 await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
