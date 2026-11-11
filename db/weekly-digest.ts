@@ -69,7 +69,9 @@ import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { mayLeaveBox, flagOn, type EgressSubject, type EgressUnit } from "../server-portable/egress.ts";
 import { egressDescription, egressRefusal, workerIdentity, classifyError, TRANSIENT_PAUSES_MS } from "./worker-bootstrap.ts";
 import { normaliseEffectivePriority, type EffectivePriority } from "../server-portable/store.ts";
-import { dueText, LEVEL_WORDS } from "../server-portable/render.ts";
+// The scale's own module, not render.ts: the import runner's image copies server-portable/*.ts alone, not core/,
+// which render.ts imports (SMD-4112, the first push's CI).
+import { dueText, LEVEL_WORDS } from "../server-portable/priority-scale.ts";
 import fs from "node:fs";
 import path from "node:path";
 import type { SQL } from "bun";
@@ -211,8 +213,9 @@ const dueWords = (iso: unknown) => (typeof iso === "string" && Number.isFinite(D
  * Why a pick matters, in words, beside it in the prompt (SMD-4112): its level and where it came from (stated, from
  * its open items, or inherited from the ticket or item it serves), then its due time or overdue, what it unblocks, and
  * whether it is settled, as effective_priority's terms say them; the level's words and a due time's are the MCP
- * replies' (render.ts). Null when the read knows nothing of it beyond unknown's level, settled or not: settled is
- * said beside a known priority, so a row with none known carries no field (a closed one still goes after open work).
+ * replies' (priority-scale.ts, which render.ts reads too). Null when the read knows nothing of it beyond unknown's
+ * level, settled or not: settled is said beside a known priority, so a row with none known carries no field (a closed
+ * one still goes after open work).
  */
 export function priorityReason(p: DigestPriority | undefined): string | null {
   if (!p) return null;
