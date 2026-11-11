@@ -31,12 +31,13 @@
  * stack's doors can still deadlock with a batch (120's NOT HERE): Postgres ends one (40P01), and a batch it ends is
  * said and run again, three tries in all.
  *
- * --status reads, writing nothing: the threads (keys held by two thoughts or more), the thoughts in them, the edges
- * standing against those a whole linking leaves (each thread's thoughts less one), and the keys whose standing edges
- * are not the ones their thread wants, compared edge by edge — a thread the upgrade has not linked yet, a gap a delete
- * left (by a role that cannot write a facet, above READ COMMITTED, or beside a held key), or a raw writer's change (a
- * created_at moved, a subject facet deleted alone beside a held key: 120's NOT HERE) — and the keys no thought holds
- * still carrying edges, the first ten of them named, for --key.
+ * --status reads, writing nothing: the threads (keys held by two thoughts or more), the thoughts in them (a thought
+ * with a set of subjects, 130, counted in each of its threads), the edges standing against those a whole linking leaves
+ * (each thread's thoughts less one), and the keys whose standing edges are not the ones their thread wants, compared
+ * edge by edge — a thread the upgrade has not linked yet, a gap a delete left (by a role that cannot write a facet,
+ * above READ COMMITTED, or beside a held key), or a raw writer's change (a created_at moved, a subject facet deleted
+ * alone beside a held key: 120's NOT HERE) — and the keys no thought holds still carrying edges, the first ten of them
+ * named, for --key.
  *
  * ── Exit codes ──────────────────────────────────────────────────────────────
  * 0 done (or --status printed); 1 a failure; 2 usage (a malformed --key among it), no database URL, a brain without

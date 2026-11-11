@@ -11737,6 +11737,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["evals/eval-entities.ts", { name: { why: KEPT.DATA, lines: 3 } }],
   ["evals/eval-extract-windows.ts", { name: { why: KEPT.DATA, lines: 4 } }],
   ["evals/eval-longmemeval.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["evals/eval-plan-context.ts", { name: { why: KEPT.BOARD, lines: 1 } }],
   ["evals/eval-thought-kinds.ts", { name: { why: KEPT.DATA, lines: 2 } }],
   ["evals/eval-transitive-freshness.ts", { fork: { why: KEPT.DATA, lines: 2 }, name: { why: KEPT.DATA, lines: 6 } }],
   ["evals/fixtures/priority-dogfood.json", { name: { why: KEPT.DATA, lines: 4 } }],

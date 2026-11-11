@@ -29,7 +29,7 @@ import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThread
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
-import type { AgendaCode, AgendaResult } from "./core/agenda.ts";
+import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
@@ -371,13 +371,23 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
   );
 }
 
-/** The refusals the search tools share: the gate's, and a filter's (said as the fault it was, `Error:`). */
+/** The refusals the search tools share: the gate's, a filter's (said as the fault it was, `Error:`), and search_thoughts' weights' (SMD-4193). */
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
   if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
+  if (r.code === "REFUSED_WEIGHTS") return weightsRefusal(r);
   return unknownRefusal(r);
 }
+
+/** A read's weights refused (SMD-4193): the database's words, naming the weight, or why nothing would read them. */
+const weightsRefusal = (r: Extract<Refusal, { code: "REFUSED_WEIGHTS" }>): string =>
+  r.problem === "unranked"
+    ? "Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither; add priority_weight above 0 or min_priority, or drop weights"
+    : `Refused: ${oneLine(snipText(r.message, 300))}`;
+
+/** A call's own weights in words (SMD-4193), as given: `overdue 3, soon 2`. */
+export const weightsText = (w: Record<string, unknown>): string => Object.entries(w).map(([k, v]) => `${k} ${String(v)}`).join(", ");
 
 /**
  * The `By:` line under a hit — who wrote its current text, from the two keys
@@ -555,7 +565,9 @@ export function priorityNote(p: PriorityRanking | null | undefined): string | nu
   const floor = p.min === null ? "" : `; kept ${p.kept} at ${levelText(p.min)} or above (min_priority, a known priority alone)`;
   // Not full: the window held every match there was, so nothing past it was missed.
   const past = p.read < p.window ? "" : ` A match past the top ${p.read} was not read${p.window < 100 ? " — raise limit to read further" : " — the window is capped at 100"}.`;
-  return `${ranked}; ${known}${floor}.${past}`;
+  // A call's own weights (SMD-4193): absent from a REST core older than this server, said only when given.
+  const weights = p.weights ? ` Under this call's weights, ${weightsText(p.weights)} (the rest the brain's defaults)${p.span !== null && p.span !== undefined ? `, the blend's scale ${p.span}` : ""}; a term may cross a level.` : "";
+  return `${ranked}; ${known}${floor}.${past}${weights}`;
 }
 
 /**
@@ -585,8 +597,11 @@ export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolea
  * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
  */
 export function priorityHint(msg: string): string {
-  // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span.
-  return /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
+  // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span. Under
+  // a call's own weights (SMD-4193) the scale is 131's ob1_priority_span(jsonb): a brain before 131 lacks that alone.
+  return /ob1_priority_span\(jsonb\)/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — priority_weight under weights reads its scale from ob1_priority_span(jsonb), migration 131 (db/migrations/131_priority_span_weights.sql), which is not applied; search without weights, or with min_priority alone, meanwhile"
+    : /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight reads the brain's scale, ob1_priority_span, migration 128 (db/migrations/128_priority_defaults.sql), which is not applied; search without it meanwhile"
     : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
     ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), which 128 leaves to PUBLIC's EXECUTE: the database's default privileges or a REVOKE took it from the server's role, so grant EXECUTE on both to it (migrate.ts --grant does not); search without them meanwhile"
@@ -2463,13 +2478,16 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   return title ? words : `${words}.`;
 }
 /** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
-function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }): string {
+function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }, now = new Date().toISOString()): string {
   // `more`: what plan_context's budget left out of this line (SMD-4191), said as "and N more"; the agenda's own lines pass none.
   const and = (n: number) => (n > 0 ? ` and ${n} more` : "");
   // A ticket's status is its board's word (124): quoted and cut, as a title is.
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
+    // A due time no urgency term states (past the week, or a level 0): said, so the due order's lead is seen (SMD-4192 review pass 1);
+    // a level 0's past date said past, as 122 never calls it overdue (review pass 3).
+    i.dueAt && !i.overdue && i.urgency === 0 ? `${Date.parse(i.dueAt) <= Date.parse(now) ? "was due" : "due"} ${dueText(i.dueAt)}` : null,
     i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.claimed)}` : null,
     i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
@@ -2483,14 +2501,18 @@ function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; la
  * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
  * read. A title, a holder and a blocker are other keys' words: quoted and cut, never a line of their own.
  */
-export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => render(o, (v) => {
+export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => render(o, (v) => {
   const lines = v.items.length === 0
     ? ["Nothing on the agenda in this scope."]
     : [
-        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, ${v.order !== "due" ? "most pressing first"
+          // The undated named only when the list holds both kinds (review pass 2).
+          : v.items.every((i) => i.dueAt === null) ? "none due, most pressing first" : v.items.some((i) => i.dueAt === null) ? "soonest due first, the undated after" : "soonest due first"}:`,
         // Wrapped: map's index must never reach agendaLine's `more`.
-        ...v.items.map((i) => agendaLine(i)),
+        ...v.items.map((i) => agendaLine(i, undefined, v.now)),
       ];
+  // A call's own weights (SMD-4193), under the list or in place of one: a REST core older than this server sends none.
+  if (v.weights) lines.push(`Under this call's weights, ${weightsText(v.weights)} (the rest the brain's defaults): a term may cross a level.`);
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
@@ -2499,7 +2521,10 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
-}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder"
+  : r.code === "ORDER_UNAVAILABLE" ? "Refused: order due needs migration 129 (db/migrations/129_agenda_order.sql), which this brain lacks; ask with the priority order meanwhile"
+  : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+  : unknownRefusal(r), AS_JSON);
 
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {

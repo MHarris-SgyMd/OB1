@@ -467,9 +467,10 @@ const FUNCTIONS = [
   // 125 (SMD-4149): an item's due time, and a thought's open items, for effective_priority's from_items terms.
   "ob1_priority_due(priority_assertions, text, text, boolean)",
   "ob1_thought_items(uuid, boolean)",
-  // 128 (SMD-4194): effective_priority's default weights, and the largest effective priority they allow.
+  // 128 (SMD-4194): effective_priority's default weights, and the largest effective priority they allow; 131 (SMD-4193) that largest under a read's own weights.
   "ob1_priority_defaults()",
   "ob1_priority_span()",
+  "ob1_priority_span(jsonb)",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",
@@ -486,6 +487,14 @@ const FUNCTIONS = [
   // 124 (SMD-4162): the agenda again, under a ninth argument (123's eight-argument one above, dropped by 124, kept for a
   // schema reset at 123).
   "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean)",
+  // 129 (SMD-4192): the agenda under a tenth argument, its order (124's nine-argument one above, dropped by 129, kept
+  // for a schema reset before 129).
+  "agenda(jsonb, jsonb, integer, boolean, boolean, boolean, jsonb, timestamp with time zone, boolean, text)",
+  // 130 (SMD-3306): a thought's subjects as a set — the set door, the set close and the threads' locks in key order; the
+  // index goes with thought_facets.
+  "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)",
+  "close_thought_subjects(uuid, uuid[], text)",
+  "ob1_thread_lock_keys(text[])",
 ];
 
 /**

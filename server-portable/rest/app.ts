@@ -134,42 +134,63 @@ export function headerKeys(req: Request): string[] {
  */
 export const FORWARDER_HEADER = "x-brain-forwarder";
 
-/** Each field's JSON-schema type, for reading it from a query string: "number", "integer", "boolean", "array", or anything else as text. */
-function queryTypes(shape: Record<string, z.ZodType>): Map<string, string> {
-  const out = new Map<string, string>();
+/**
+ * Each field's JSON-schema type, for reading it from a query string: "number", "integer", "boolean", "array", "object",
+ * or anything else as text; an object's own fields' types beside it (`props`).
+ */
+function queryTypes(shape: Record<string, z.ZodType>): Map<string, { type: string; props: Map<string, string> }> {
+  const out = new Map<string, { type: string; props: Map<string, string> }>();
   for (const [field, schema] of Object.entries(shape)) {
-    const js = z.toJSONSchema(schema as z.ZodType, { io: "input", unrepresentable: "any" }) as { type?: string };
-    out.set(field, js.type ?? "string");
+    const js = z.toJSONSchema(schema as z.ZodType, { io: "input", unrepresentable: "any" }) as { type?: string; properties?: Record<string, { type?: string }> };
+    out.set(field, { type: js.type ?? "string", props: new Map(Object.entries(js.properties ?? {}).map(([k, p]) => [k, p.type ?? "string"])) });
   }
   return out;
+}
+
+/** A number or a boolean read from a query value's text when it is one, by the type its field declares; else the text, for the schema to refuse. */
+function queryValue(type: string | undefined, v: string): unknown {
+  // A number as JavaScript prints one too (`1e-7`, `1e+21`), so a client's String(n) reads back as n.
+  if ((type === "number" || type === "integer") && /^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(v)) return Number(v);
+  if (type === "boolean" && (v === "true" || v === "false")) return v === "true";
+  return v;
 }
 
 /**
  * A query string as a tool's input: a number or a boolean read from its text
  * when it is one (else left as text, for the schema to refuse), an array field
- * from every value it is given, and any other field from one value — given
- * twice, it is refused. The schema then holds the result as it holds a body.
+ * from every value it is given, an object field from one parameter per field
+ * of it, `weights[overdue]=3` (OpenAPI's deepObject style, which openapi-fetch
+ * sends; SMD-4193), and any other field from one value — given twice, it is
+ * refused. The schema then holds the result as it holds a body.
  */
-export function inputFromQuery(name: ToolName, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
+export function inputFromQuery(name: ToolName, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string; path?: string } {
   return inputFromQueryShape(SPECS[name].inputSchema, params);
 }
 
 /** inputFromQuery over an input's shape: a core tool's, or a plugin operation's (SMD-2310). */
-function inputFromQueryShape(shape: Record<string, z.ZodType>, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string } {
+function inputFromQueryShape(shape: Record<string, z.ZodType>, params: URLSearchParams): { input: Record<string, unknown> } | { problem: string; path?: string } {
   const types = queryTypes(shape);
   // No prototype: a `__proto__` key is a key like any other, which the strict
   // schema then refuses, rather than an assignment that drops it unseen.
   const input: Record<string, unknown> = Object.create(null);
   for (const key of new Set(params.keys())) {
     const values = params.getAll(key);
-    const type = types.get(key);
+    // An object field's own field (SMD-4193): `field[name]`, read by the type its schema gives that name; a name it
+    // does not know stays text, for the strict schema to refuse by name.
+    const deep = /^([A-Za-z_][A-Za-z0-9_]*)\[([^[\]]*)\]$/.exec(key);
+    if (deep && types.get(deep[1])?.type === "object") {
+      if (values.length > 1) return { problem: `${labelPart(key)} is given more than once` };
+      const obj = (input[deep[1]] ??= Object.create(null)) as Record<string, unknown>;
+      obj[deep[2]] = queryValue(types.get(deep[1])!.props.get(deep[2]), values[0]);
+      continue;
+    }
+    // A field of another type given an object's form (a client's object, sent as deepObject): refused naming the field.
+    if (deep && types.has(deep[1])) return { problem: `${labelPart(deep[1])} is not an object: give it as one value, ${labelPart(deep[1])}=value`, path: deep[1] };
+    const type = types.get(key)?.type;
     if (type === "array") { input[key] = values; continue; }
+    if (type === "object") return { problem: `${labelPart(key)} is an object: give each of its fields as its own parameter, ${labelPart(key)}[name]=value`, path: key };
     if (values.length > 1) return { problem: `${labelPart(key)} is given more than once` };
-    const v = values[0];
-    // A number as JavaScript prints one too (`1e-7`, `1e+21`), so a client's String(n) reads back as n.
-    if ((type === "number" || type === "integer") && /^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(v)) input[key] = Number(v);
-    else if (type === "boolean" && (v === "true" || v === "false")) input[key] = v === "true";
-    else input[key] = v;
+    input[key] = queryValue(type, values[0]);
   }
   return { input };
 }
@@ -542,7 +563,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       const announced = c.req.method !== "DELETE" && ((length !== undefined && !/^\s*0+\s*$/.test(length)) || c.req.header("transfer-encoding") !== undefined);
       if (announced || (await c.req.text()).trim() !== "") return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${method} reads its input from the query string, not a body` }] });
       const read = inputFromQueryShape(shape, query);
-      if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: read.problem }] });
+      if ("problem" in read) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: read.path ?? "", message: read.problem }] });
       rest = read.input;
     } else {
       if (query.size > 0) return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: `${method} reads its input from a JSON body, not the query string` }] });
