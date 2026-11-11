@@ -75,6 +75,8 @@ export type InputOf<K extends OperationId> = Part<Op<K>["parameters"]["path"]> &
 /** The words of the client's own refusals (refusedHere), after the field they name. */
 const LONE_SURROGATE = "holds a lone surrogate, which a URL cannot carry";
 const OBJECT_IN_QUERY = "is an object, which a query string cannot carry";
+const NESTED_IN_QUERY = "holds a field that is not text, a number or a boolean, which a query string cannot carry";
+const FIELD_NAME_IN_QUERY = "holds a field name a query string cannot carry";
 
 /** The longest delay a timer holds: setTimeout fires at once past it. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -110,20 +112,31 @@ function unfitForPath(value: unknown): string | null {
 
 /**
  * Why a query value cannot ride a URL, or null when it can: text with a lone
- * surrogate, which percent-encoding throws on, and an object, or a list
- * holding one, which a query string has no form for — openapi-fetch's
- * serializer throws on it (review pass 4).
+ * surrogate, which percent-encoding throws on, and an object in a list, which
+ * a query string has no form for — openapi-fetch's serializer throws on it
+ * (review pass 4). An object of one level rides as one parameter a field,
+ * `weights[overdue]=3`: OpenAPI's deepObject, which openapi-fetch sends and
+ * the core reads (SMD-4193). A field of it that is not text, a number or a
+ * boolean, or a field name a URL would split, cannot: openapi-fetch prints it
+ * as `[object Object]`, or a `&` in a name starts another parameter.
  */
 function unfitForQuery(value: unknown): string | null {
   if (Array.isArray(value)) {
-    // A list inside a list is an object here too: one level of list, of text, numbers or booleans, is all a query string carries.
+    // A list or an object inside a list: one level of list, of text, numbers or booleans, is all a query string carries.
     for (const v of value) {
-      const unfit = Array.isArray(v) ? OBJECT_IN_QUERY : unfitForQuery(v);
+      const unfit = v !== null && typeof v === "object" ? OBJECT_IN_QUERY : unfitForQuery(v);
       if (unfit) return unfit;
     }
     return null;
   }
-  if (value !== null && typeof value === "object") return OBJECT_IN_QUERY;
+  if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (!/^[A-Za-z0-9_.-]+$/.test(k)) return FIELD_NAME_IN_QUERY;
+      if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return NESTED_IN_QUERY;
+      if (typeof v === "string" && !encodable(v)) return LONE_SURROGATE;
+    }
+    return null;
+  }
   return typeof value === "string" && !encodable(value) ? LONE_SURROGATE : null;
 }
 

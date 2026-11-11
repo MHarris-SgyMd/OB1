@@ -7264,7 +7264,7 @@ function pathDiffs(got: unknown, want: unknown, path: string, out: string[]) {
  * Fork Checks run, as Brain Checks was named, before this). A disabled healthcheck (`disable: true`, or a test of
  * `NONE`) has nothing to probe and is passed over.
  */
-const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml"];
+const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/edge/compose.yaml", "deploy/federated/compose.yaml"];
 /** A compose duration (`1m30s`, `10s`, `500ms`) in milliseconds; NaN where it is not one. */
 function composeDurationMs(v: unknown): number {
   const parts = typeof v === "string" ? [...v.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s|us|ns)/g)] : [];
@@ -9457,7 +9457,7 @@ function pluginTsProblems(text: string, core: ReadonlySet<string>, opts: { regis
     else if (!opts.testFile && PLUGIN_TEST_FILE.test(spec)) hits.push({ line: lineAt(m.index!), what: `imports the test file ${spec} from code that runs in the server` });
   }
   for (const m of code.matchAll(PLUGIN_GLOBALS)) {
-    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call and its tables through ctx.db, nothing else (a local of that name is renamed)` });
+    hits.push({ line: lineAt(m.index!), what: `uses ${m[0].replace(/\s+/g, "")}: a plugin reaches the brain through ctx.call, its tables through ctx.db and a model through ctx.model.chat, nothing else (a local of that name is renamed)` });
   }
   for (const t of taggedTemplates(commentsGone)) {
     for (const h of pluginSqlProblems(t.body, core, lineAt(t.index))) hits.push(h);
@@ -11737,6 +11737,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["evals/eval-entities.ts", { name: { why: KEPT.DATA, lines: 3 } }],
   ["evals/eval-extract-windows.ts", { name: { why: KEPT.DATA, lines: 4 } }],
   ["evals/eval-longmemeval.ts", { fork: { why: KEPT.SENSE, lines: 1 } }],
+  ["evals/eval-plan-context.ts", { name: { why: KEPT.BOARD, lines: 1 } }],
   ["evals/eval-thought-kinds.ts", { name: { why: KEPT.DATA, lines: 2 } }],
   ["evals/eval-transitive-freshness.ts", { fork: { why: KEPT.DATA, lines: 2 }, name: { why: KEPT.DATA, lines: 6 } }],
   ["evals/fixtures/priority-dogfood.json", { name: { why: KEPT.DATA, lines: 4 } }],
@@ -11819,7 +11820,8 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["schemas/typed-reasoning-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
   ["schemas/typed-reasoning-edges/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["schemas/workflow-status/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
-  ["scripts/agent-runner/README.md", { name: { why: KEPT.BOARD, lines: 1 } }],
+  ["scripts/agent-runner/README.md", { fork: { why: KEPT.SENSE, lines: 4 }, name: { why: KEPT.BOARD, lines: 1 } }],
+  ["scripts/agent-runner/setup.ts", { fork: { why: KEPT.SENSE, lines: 10 } }],
   ["scripts/assemble-release.ts", { fork: [{ why: KEPT.IDENT, lines: 3 }, { why: KEPT.HISTORY, lines: 4 }] }],
   ["scripts/changes-index.ts", { fork: { why: KEPT.HISTORY, lines: 1 } }],
   ["scripts/check-consistency.ts", { fork: { why: KEPT.SELF, lines: 64 }, name: { why: KEPT.SELF, lines: 2 } }],

@@ -370,6 +370,75 @@ there.
 - **Changing the registry:** `up` again. The table's digest is a label on
   the edge's container, so a changed table recreates it.
 
+## The slot broker for the brains on one host
+
+Brains that share a model server, such as stable and a canary on this Mac's
+Ollama, each hold their background calls to a share of its slots
+(`OB1_BACKGROUND_SLOTS`, above). Fixed shares split the slots ahead of time:
+a brain alone can't use another's share, and one brain's sleep doesn't yield
+to another brain's live calls. The federated coordinator's slot broker
+(SMD-3379 PR 3a, `docs/brain-coordinator.md` row 2) shares the slots as they
+free:
+- **A live call** is granted at once, always.
+- **A background call** is granted in turn across the brains, within the room
+  the live calls leave. Each server keeps `reserve` slots per model (or in
+  all, with `per_model: false`) that background never takes, though
+  background always keeps at least one.
+- **A brain alone** may use every background slot. Two backlogged brains
+  split the slot time: the turn goes to the waiting brain that has had less
+  of it over the last minutes, and a brain arriving starts level with the
+  others. Each has about half for calls well under five minutes. A call is
+  never cut short, so a brain of minute-long calls has a little more (0.54
+  of the time for 71 s calls beside 50 ms ones).
+
+**No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
+and fall back to the brain's own share while it is down.
+
+The broker is a compose project of its own, `ob1-federated`
+(`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
+container reaches it at the host alias, as it reaches the host's Ollama, and
+its port is published on the host's loopback alone.
+
+```bash
+cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
+bun deploy/federated/federated.ts key --brain stable    # a key, shown once (for stable's deploy/.env as OB1_SLOT_BROKER_KEY, read from 3b), and its registry line
+# deploy/federated/federation.local.yaml: the shared servers (their bases, slots, reserve), each brain's key hash
+bun --no-env-file deploy/federated/federated.ts check   # the registry, the runtime, the port; starts nothing
+bun --no-env-file deploy/federated/federated.ts up
+bun --no-env-file deploy/federated/federated.ts down
+```
+
+- **The registry holds each brain's key hash, never the key.** The broker
+  reads the registry as an unprivileged user, so it must be readable by
+  others (`chmod 644`), and so must `broker.ts`. `federated.ts` refuses
+  either otherwise.
+- **`slots` is the server's parallel setting.** For Ollama this is
+  `OLLAMA_NUM_PARALLEL`, which applies per model, so the broker counts each
+  model on the server apart. A server whose slots are its own whatever the
+  model, such as a decide tier answering one call at a time, takes
+  `per_model: false`, and its slots are counted together. `reserve` (1 unless
+  set) is kept for live calls, but background keeps at least one slot, so with
+  `slots: 1` background and live share it.
+- **`bases` lists every base URL a brain reaches the server by**, such as
+  `http://host.containers.internal:11434/v1`. A call to any other base isn't
+  brokered.
+- **Only podman machine is measured.** There, a container dials
+  `host.containers.internal:<port>` and the loopback port answers. On Docker
+  Engine on Linux a container reaches the host at the bridge's gateway, which
+  a loopback port doesn't answer, so `federated.ts` refuses it until a shape
+  is measured there.
+- **The broker keeps nothing across a restart.** A brain re-registers the
+  slots it holds when it reconnects. For `warm_s` (10 unless set) after a
+  start, background calls wait while that happens.
+- **A registry change, a brain removed or a key rotated** is an edit and
+  another `up`, which recreates the broker: every brain's slots are dropped and
+  re-registered within `warm_s`. A brain no longer listed is refused at its
+  next connection.
+- **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
+  broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says
+  each brain's connections, and any server over its slots, at most once a
+  minute.
+
 ## What is reachable from where
 
 Compose binds an address-less `"8000:8000"` to `0.0.0.0`, every interface, so the
@@ -2005,6 +2074,37 @@ scheduled form is the one built here; a Linear webhook is exact and immediate
 but needs an inbound route — a router on the proxy (SMD-1846) and a public
 origin a vendor can reach (SMD-2382) — and the handler's shape (signature, replay window, loop guard) is SMD-1862's.
 
+**What a pass costs, and Linear's rate limit** (SMD-4133). Linear allows one
+user 2,500 requests an hour, and a complexity budget beside it, refilled as the
+hour goes. Every brain, agent runner and tool whose key belongs to that user
+spends the same hour, and a refused request counts too. A quiet pass is one
+request for the initiative plus one per hundred issues on the board; each fifty
+moved tickets add one. The findings step below spends its own, under the comment
+key's user and outside the pass's count: each finding read costs two (its two
+tickets), and one told a third (the comment). Each pass's log line ends
+with its count (`done (… ms, 15 Linear requests)`). Measured 2026-11-11 on a
+board of 1,315 issues, a quiet pass was 15 requests. So, per user, per hour:
+
+| Interval | One brain | Two brains |
+|---|---|---|
+| 300 s (the default) | 12 passes × 15 = 180 | 360 |
+| 120 s | 30 × 15 = 450 | 900 |
+| 30 s | 120 × 15 = 1,800 | 3,600: over the 2,500 |
+
+Two brains at 30 s under one user were what failed every pass on 2026-11-06.
+Keep the sum well under the 2,500, leaving room for the user's own use and
+tools such as the agent runner; or give each brain a Linear user of its own.
+When Linear refuses a request for its limit — HTTP 429, or an answer coded
+`RATELIMITED` — board-sync makes no further request until the time Linear sends
+with it (`X-RateLimit-Requests-Reset`, `X-RateLimit-Complexity-Reset` or
+`Retry-After`; an hour at most). If Linear sends none, it backs off: two
+intervals, then four, doubling up to an hour. The coordinator's triggers run no
+pass meanwhile. Its heartbeat says `rate-limited by Linear … until <time>`, not
+just "failed", and preflight's `workers` row warns with the hold, the 2,500 and a
+pointer here. It passes again on its own; a restart forgets the hold and asks
+once. A held pass runs none of its steps, the release of closed tickets' claims
+and the tickets' priorities among them: they wait for the hold, an hour at most.
+
 **Telling the board what consolidation found** (SMD-2681). Set
 `LINEAR_COMMENT_API_KEY` in `deploy/.env` — a Linear key of its own that can
 comment, not `LINEAR_API_KEY` — and, under the default egress policy, add
@@ -2433,6 +2533,14 @@ its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
 (60–86400, unset 60: how long a model call in hand may have run, counted from
 its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
+`OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
+waiting for a share of a model server's slots, consolidation's go first, and
+one queued this long goes first at the next turn — as the call ahead of it
+takes its slot — after older ones that go first; not a timeout. It orders, and
+the share is the same; the order matters once the scheduler's calls queue —
+consolidation's workers two or more past the share hold the other passes to
+about a call a worker a max-wait — and a lower value gives them more turns;
+SMD-3379 PR 2c-2),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep

@@ -507,7 +507,7 @@ function coordinatorUp(pass) {
  * key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
+  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
   if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
@@ -2639,13 +2639,18 @@ export const ROLE_GRANTS = Object.freeze({
   // group grants otherwise: assert_priority checks an entity exists. (A
   // thought and a ticket's head are the capture group's.) SELECT on
   // open_items and open_item_events since 117: assert_priority checks an
-  // open item exists, and whether a capture-only key opened it. Soft: a role
+  // open item exists, and whether a capture-only key opened it. Since 132
+  // (SMD-4193 PR 2), the operator's weights: every effective priority reads
+  // the standing row of priority_weight_settings, and set_priority_weights
+  // ends it and writes the next (INSERT and UPDATE; its trigger refuses a
+  // DELETE, and the function admits an operator key alone). Soft: a role
   // without the group is refused the priority calls, naming the table, and
   // nothing else.
   priority: Object.freeze([
     Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "116" }),
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
     Object.freeze({ table: "priority_sources",    privileges: Object.freeze(["SELECT"]), since: "116" }),
+    Object.freeze({ table: "priority_weight_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "132" }),
     Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
     Object.freeze({ table: "open_items",          privileges: Object.freeze(["SELECT"]), since: "117" }),
     Object.freeze({ table: "open_item_events",    privileges: Object.freeze(["SELECT"]), since: "117" }),

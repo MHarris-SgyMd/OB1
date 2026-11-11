@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and twenty-seven (127) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and thirty-two (132) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2142,9 +2142,9 @@ way did not meet their bars (SMD-3299); SMD-3116 defines evolves as a later
 segment of the same work, which is a property of each thought's own subject, and
 asked of one thought alone the judge model names the ticket blind raters agree
 on for 241 to 242 of the 245 thoughts whose subject is a ticket (versions 2 and
-3 of the test's step 1). A `subject` facet holds
-it, one standing per thought (a partial unique index), with a probe on its key
-for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
+3 of the test's step 1). A `subject` facet holds it, one standing per thought (a
+partial unique index; per thought and key since 130, a set), with a probe on its
+key for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
 `pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>`, one shape
 for the validator and the writer (`subject_key_valid`) — how it was found
 (`metadata`, `first_line` or `model`), the pass's key and `origin: derived`.
@@ -2505,6 +2505,89 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 132 adds the operator's priority weights (SMD-4193 PR 2), which every
+read takes as its defaults: `priority_weight_settings`, one standing row at most,
+its weights overrides by name over the brain's built-in weights. The maintainer
+chose (2026-11-11) that an operator key alone sets them, by `set_priority_weights`
+(the MCP tool and `POST /v1/priority-weights`, or the function in psql with the
+operator key's name and agent id as `p_actor`), and that a bad setting is refused
+when written and fails every read that would order by it if one is stored anyway. 128's constant moves to
+`ob1_priority_builtin()`, which a retune of the brain's own defaults now replaces;
+`ob1_priority_defaults()` lays the standing setting over it, so `effective_priority`,
+the agenda, search's ranking and both spans take it, and a call's own weights still
+override it by name. `ob1_priority_weights_refusal` checks a setting in
+`effective_priority`'s words, by a copy of its rule that test-schema holds to it
+probe by probe. A row is history: it changes only to end, once, when the next
+setting or a clear (`{}`) replaces it, and a DELETE or TRUNCATE is refused; a row,
+and its end, name a key the registry classifies operator, by its agent id. A
+stored setting the check refuses (a later migration narrowing a range, a raw write
+with the trigger off) raises 22000 on every effective priority, naming the setting and
+the weight: the agenda and a ranked search fail, and a search's priority labels and
+`plan_context`'s board say only that they were not read;
+`priority_weight_setting()` says it without raising, for `brain_info`. Its own
+table rather than an `ob1_config` row: the server's roles hold `SELECT` alone on
+`ob1_config`. The priority group gains `SELECT, INSERT, UPDATE` on the table, and
+132 grants them to each role that holds the group's grants on `priority_assertions`
+already, as 020 carries a replaced function's `EXECUTE`. Needs 008, 046, 061, 116, 128 and 131; a
+re-apply keeps the rows. test-schema [119], test-upgrade [20bw].
+
+Migration 131 adds `ob1_priority_span(weights)` (SMD-4193 PR 1): 128's span
+under the defaults with a read's own weights laid over them. A call of the agenda
+or of `search_thoughts` may now pass weights (the maintainer, 2026-11-10), and a
+search ranked by `priority_weight` under them divides by their span, not the
+defaults' 5.8: 9 under 122's weights. The weights are checked by
+`effective_priority` itself, so a bad one is refused 22023 in its words, naming
+it. NULL answers the defaults' span. 128's `ob1_priority_span()` stands
+unchanged, and a brain before 131 refuses only a weighted, blended search.
+`query_log.filter`'s comment names the weights an agenda row logs. Needs 034 and
+128; a re-apply is a no-op. test-schema [118], test-upgrade [20bv].
+
+Migration 130 makes a thought's own subjects a set (SMD-3306 PR 7a-3a): one
+standing `subject` per thought and key, at most three, found one way by one
+pass, so a multi-ticket session stands in each of its tickets' threads (the
+maintainer, 2026-11-05 and 2026-11-09). 111's index on the thought alone gives
+way to one on the thought and its key. `record_thought_subjects(thought, keys,
+by, judge_key, agent, fingerprint, recipe)` makes the standing subjects exactly
+these keys: a subject under one of them found the same way by the same pass is
+kept (its lineage moved to the text read now), every other is closed, each key
+it lacks is written with its lineage; an empty set closes them all. It refuses
+as 113's door refuses (a text that moved, a filed ticket that disagrees), and
+`metadata` names one key. `record_thought_subject` is it with one key, and
+`close_thought_subjects` closes only the set the caller read
+(`close_thought_subject` a set of one). At a writer's commit the first re-link
+locks every key the transaction moved on the thought, in key order
+(`ob1_thread_lock_keys`), and the thought and its neighbours in those keys'
+threads, so writers moving thoughts across the same keys queue and a delete of a
+neighbour waits for the commit; a subject kept beside a replace is not locked.
+Statistics on a facet's key (`thought_facets_key_stats`) let the planner read a
+thread by its rows, not as 0.5% of the table. A thought in several threads
+counts in each of `threads.ts --status`'s and `brain_info`'s thought counts, a
+place in each thread. Nothing finds a set yet: the rules and the judge's
+question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is a no-op. A
+re-apply of 111 makes its index again until 130 runs, and fails once a thought
+holds a set (so does `--reapply`, which already fails at 064 on any brain
+holding a subject, SMD-3149). test-schema [116], test-upgrade [20bt], test-live
+[47] and [48], test-rest-sql [16].
+
+Migration 129 gives the agenda an order (SMD-4192). `priority`, the default, is
+126's order. `due` lists the items with a due time first, soonest first, so the
+longest overdue leads, then the undated ones by effective priority; a tie on the
+due time goes to the higher priority, and a stated None counts as undated, as it
+takes no urgency. The order is applied before the limit. The agenda takes it as
+the tenth argument of a ten-argument form with no defaults, and the
+nine-argument agenda becomes a wrapper calling it with `priority`, so a call
+from a server before 129 gets the priority order. Re-applying 124 or 126 after
+129 replaces only the wrapper (and puts back that file's comments). Every filter
+and term is 126's.
+
+Migration 128 moves `effective_priority`'s default weights into a function of
+their own, `ob1_priority_defaults()` (SMD-4194). The read takes them from it,
+so a retune is a migration replacing that function alone, not the read's whole
+body. `ob1_priority_span()` is the largest effective priority the defaults
+allow (a critical level plus the largest urgency and unblocks terms, 5.8), and a
+search ranked by `priority_weight` divides by it, read from the brain. Every
+effective number is 127's.
+
 Migration 127 orders `effective_priority` by level first (SMD-4177, the
 maintainer's option C). An item's level (stated, read from its open items,
 inherited, or unknown's 2) decides its place; urgency, overdue and what it
@@ -2660,7 +2743,7 @@ bun threads.ts --url … --key ticket:SMD-123    # re-links one thread, as after
 `--status`'s census is the one `brain_info`'s `Threads` row and preflight's
 `threads` row read, which stop at the first 10,000 subjects and thread edges in
 key order; `--status` reads it with no bound (SMD-3306 PR 7a-2c). A thought
-stands in one thread until its subjects are a set (PR 7a-3); the thread's read
+with a set of subjects (130) stands in each key's thread; the thread's read
 and fetch's "continues" are PR 7a-2's. Needs 061 and 064, 084, 111
 and 113; a re-apply is a no-op. test-schema [108] (the edges kept, the re-link,
 the validator, the judge's door beside a thread, the deletes with and without
@@ -2800,6 +2883,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE); board-sync's role, which states Linear's priorities on the tickets, and an ingester's, which states its records' (SMD-3666). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
+| | `priority_weight_settings` (132; the operator's weights, which every effective priority reads; a row changes only to end, once, and a DELETE and TRUNCATE are refused by trigger, for the owner too; `set_priority_weights` admits an operator key alone; the identity `id` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
 | | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
 | **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
@@ -3978,7 +4062,8 @@ said and a stop cancelling it, the budget set back as it ends, for the mark
 after it and the claims; unwatched (its watching connection refused, as at a
 role's connection limit) it keeps the budget, and a session with no
 statement_timeout leaves a role's or the database's own to bound it. One over a
-thought is the thought's or the poll's, as a claim pass's is (review pass 6):
+thought is the thought's or the poll's, as a claim pass's was until SMD-2636
+PR 4, which holds a claim pass instead (review pass 6):
 its own write past it fails the thought, for `--retry-failed`; its claim, its
 read, a put-back or set-back, its release or its answer's window costs the run
 its poll, counted and said once, naming the statement, what it holds going back,
@@ -4769,6 +4854,7 @@ bun sleep.ts --url …               # one period, if there is work, until its p
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
 #   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
@@ -4777,8 +4863,8 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 (`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_RESCAN`, `OB1_SLEEP_POLL` and
-`OB1_SLEEP_WORKERS` for its five numbers, and
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_MAX_WAIT`, `OB1_SLEEP_RESCAN`,
+`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its six numbers, and
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -5134,8 +5220,13 @@ the row's outcome failed, `holds` naming the pass with why `statement` and no
 time; the other passes go on, and the period ends once they drain. A held
 pass begins no period and starts in none, so the scan that timed out is not
 run again on its own; a one-shot run with one exits 1. A statement past its
-timeout inside a thought's own write fails that thought, as any database
-error there does; on a claim it costs that worker its poll. An operator's
+timeout in a claim pass's thought — at its claim or in its processing — holds
+that pass the same way, each following under the scheduler (re-embed's since
+SMD-2679, extract's and consolidate's since SMD-2636 PR 4; a one-shot run
+records it the thought's failure); the subject sweep records the thought failed
+instead, and one at its claim costs it the poll. The cost: a thought whose own write
+always runs past the timeout holds its pass at every restart, never recorded,
+so no --retry-failed or acceptance clears it — the hold's remedy names a scan. An operator's
 `pg_cancel_backend` is 57014 too ("user request"): no budget's, it ends the
 scheduler as a pass that throws does. Under `--follow` the row carries the
 budget in force (`budget`, its `minutes` 0 and its `stops` the passes a
@@ -6370,6 +6461,15 @@ row's `updated_at`, the database's `now()`.
   its start, on the clock again (SMD-3379 PR 1c-1). It keeps
   what the follower wrote last, its `refused` included, and writes a row of
   its own for one that wrote none. The follower's next stamp replaces it.
+- **`limited`:** on board-sync's row, while Linear's rate limit holds its
+  passes (SMD-4133): `until`, the time it makes its next request, and `by`,
+  `linear` when that is the reset time Linear sent with its 429 or
+  `RATELIMITED` answer, `backoff` when Linear sent none (two intervals,
+  doubling, an hour at most). Its outcome is `failed` meanwhile. Each trigger
+  before `until` runs no pass and re-stamps the row, so it stays fresh. The pass
+  after clears it, and so does an end, its supervisor's too. `brain_info` and
+  preflight say "rate-limited by Linear … until", not just "failed";
+  `deploy/README.md`, "What a pass costs", has the sum of requests per hour.
 
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
@@ -7066,6 +7166,7 @@ out the same way.
 - **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text. The wait (`waitOutProvider`, SMD-2636 PR 2) carries its schedule on: a wait beginning within a minute and a poll of the last one's answer, nothing having got past the provider since, goes on from the last one's step. Extract's and consolidate's followers, which spend the pauses before an outage begins, add them to that window. What got past is re-embed's thoughts finished or recorded failed; extract's too, and its windows of a long thought answered and kept; consolidate's thoughts finished having asked the judge, and recorded failed. A probe answered with a refusal — a chat probe's 401, 402, 403 or 404 (a key revoked or credit run out while the provider was away, or a proxy answering 404 before its route is back), or a redirect, which no call follows (SMD-2908), the decision tier's probe refused, or re-embed's meeting any error neither an outage nor a missing model — ends the follower with 2, nothing marked failed, its remedy naming the tier's or the escalation model's setting when the refused probe was theirs. After an answer, the follower polls again at once.
 - **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering; no follower on a 429, a 503 or the model not served, which make no suspect (`followClassify`'s backpressure; extract's and consolidate's since SMD-3311), and a probe tells a thought's 400 (answered) from the request's (refused) — re-embed's since SMD-2679, extract's and consolidate's since SMD-2636 PR 3a. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
 - **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
+- **A database error at the write** is read by `followClassify` in every follower (re-embed's since SMD-2679; extract's and consolidate's since SMD-2636 PR 4, where each was recorded the thought's): not answering, waited out; the end — a privilege or a function gone, a statement cancelled or past its statement_timeout — ends the follower, its row failed, the error thrown for the sleep scheduler's budget; a moment's — a deadlock, a lock not available, resources, a read-only transaction — sends the thought back unrecorded and stops that worker; any other — a function's own guard, the thought's data — is the thought's, recorded failed. At a claim the end ends the follower too (extract's and consolidate's since PR 4, where a timeout there cost the poll, every poll). The costs, the maintainer's rule kept (2026-11-09): a thought whose own write always times out holds its pass at every restart, never recorded; a moment that recurs sends the thought back every poll, a model call each time, with nothing but the per-poll line to say so; a privilege revoked on the write ends the follower, and a restart meets it again (follow-ups SMD-4196, SMD-4197, SMD-4198).
 - **Re-embed's follower** reads a database error by `followClassify`: the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the thought's (its data, a guard). It reads a provider error by `fault`, as extract and consolidate do (SMD-2636 PR 3b): the thought's when it names the thought (its length, the egress gate) or the provider answers the probe's text right after; else the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one), each said as the provider "is not answering", or the request's (the probe refused, a 402 saying the call asks more than the account affords: every worker stops, exit 2). Its probe after a call the probe decides is part of the call in hand: the sleep scheduler aborting that call sets the thought back (extract's and consolidate's probe does not yet hear it, SMD-4166). It has no pauses: one 5xx, 408 or 429 is an outage, one coming back within a minute and a poll interval of the probe answering, no thought finished or recorded failed since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.
 - **One copy** (SMD-2636 PR 1): the start probe's refusal (`probeAtStart`, extract's and consolidate's), the wait at the start (`waitAtStart`), the database wait (`waitForDatabase`), the pass it does not end (`followedPass`, extract's and consolidate's) and the leases returned later (`Unreturned`) are `worker-bootstrap.ts`'s, each worker passing its own words and probe; the outage wait too (`waitOutProvider`, PR 2), and the reading of a provider's fault (`fault`: extract's and consolidate's since PR 3a, re-embed's since PR 3b).
 
@@ -7110,13 +7211,26 @@ no `sensitivity_tier` column the run refuses rather than page every row, unless
 `--no-sensitivity-filter` says so. A row is left out by the column or by its
 `metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
 `--include-personal`): the import recipes set the facet and leave the column
-at its default (SMD-2493). The prompt takes a share of each day and
-writer (`metadata.actor_name`), a turn at a time, newest first within each, so
-neither a busy day nor one key's burst fills it; `importance`, which any key
-could set on its own rows, is retired (SMD-2653, `docs/priority.md` decision 8). `test-weekly-digest.ts` holds the pick, the
+at its default (SMD-2493). The prompt takes a share of each day and writer
+(`metadata.actor_name`), a turn at a time, so neither a busy day nor one key's
+burst fills it, and each share what matters most first: open work before
+closed (a settled ticket or item keeps its level in the read; the maintainer,
+2026-11-11), then by each thought's
+effective priority (`docs/priority.md` decision 8, SMD-4112), read for the
+window (up to 5,000 rows) in calls of `effective_priority`'s 1,000, then newest
+first. A key stating Urgent on all its own captures still gets one row per day
+per turn (the maintainer, 2026-11-11). The picks are listed what matters most
+first, and each says why it matters: its level and where it came from, its due
+time or overdue. A brain before migration 122, or a priority read that fails (a
+role without the priority group's grants, a refused operator's setting), leaves
+the share by recency, and the run says why; `importance`, which any key could
+set on its own rows, is retired (SMD-2653). `test-weekly-digest.ts` holds the pick, the
+priority read's fallbacks, each pick's reason, the
 chunking and the gate over a digest subject (the drop-the-gate mutant and each
 allow term); `test-live.ts` [36] the sink end to end — a stub that records zero
-Telegram sends under deny and one when allowed.
+Telegram sends under deny and one when allowed, an Urgent ticket's row and an
+overdue item leading the prompt before newer rows, and a burst stated Urgent kept
+to its share.
 
 ```bash
 bun weekly-digest.ts --url … --output stdout                 # synthesize + print; no send hop

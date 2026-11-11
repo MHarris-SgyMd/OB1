@@ -1,0 +1,64 @@
+# The federated coordinator (SMD-3379 PR 3a; docs/brain-coordinator.md, row 2):
+# what the brains on one host share and no one brain can see. First of all its
+# slot broker, which hands the brains' model calls the shared model servers'
+# slots (deploy/federated/broker.ts says how). It is a compose project of its
+# own, as the edge proxy is (deploy/edge/), and joins no brain's network: a
+# brain's container reaches it at the host alias, as it reaches the host's
+# Ollama, and the port is published on the host's loopback alone.
+#
+# Run it with deploy/federated/federated.ts, which checks the registry with the
+# broker's own reading, refuses a runtime no shape was measured on, and runs
+# compose with the project's settings and nothing of the shell's:
+#
+#   bun --no-env-file deploy/federated/federated.ts up
+#
+# Until SMD-3379 PR 3b no brain asks it.
+name: ob1-federated
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # The broker: the stack's own Bun, by digest (the forwarder's), running the one
+  # file and reading the registry, both mounted read-only. Nothing it needs is
+  # root's: it listens on the registry's port and writes only to stdout. Bun as
+  # PID 1 would ignore SIGTERM's default; the script handles it, and init reaps.
+  slots:
+    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    init: true
+    command: ["bun", "--no-install", "--no-env-file", "/broker.ts", "--registry", "/federation.yaml", "--host", "0.0.0.0"]
+    configs:
+      - source: broker
+        target: /broker.ts
+      - source: registry
+        target: /federation.yaml
+    # The two files' digests, as labels nothing reads, so a changed broker or
+    # registry recreates the container on an `up`.
+    labels:
+      ob1.broker-sha256: ${FEDERATED_BROKER_SHA256:?run deploy/federated/federated.ts}
+      ob1.registry-sha256: ${FEDERATED_REGISTRY_SHA256:?run deploy/federated/federated.ts}
+    ports:
+      - "127.0.0.1:${FEDERATED_PORT:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${FEDERATED_PORT:?run deploy/federated/federated.ts}/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+    restart: unless-stopped
+    logging: *logging
+
+configs:
+  broker:
+    file: ./broker.ts
+  registry:
+    file: ${FEDERATED_REGISTRY:?run deploy/federated/federated.ts}

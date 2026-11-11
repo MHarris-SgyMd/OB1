@@ -41,10 +41,12 @@ export function egressDescription(endpoint: ProviderEndpoint, policy: EgressPoli
 /**
  * The bare reason every call to this endpoint would be refused, or null when at
  * least one would go through. `units` are what a row of the pass carries; left
- * undefined it is the full set (an actor credited optimistically before a worker
- * key has, or has not, resolved). A caller that wants the worker's full "Nothing
- * would be <verb>" sentence uses blanketGate; sync-linear.ts, and reembed.ts's
- * blurbs warning, wrap the bare reason in their own text and use this.
+ * undefined it is every unit a keyed caller carries (KEYED_UNITS: an actor
+ * credited optimistically before a worker key has, or has not, resolved, and a
+ * row's units; never plugin, which names a plugin's model call alone). A
+ * caller that wants the worker's full "Nothing would be <verb>" sentence uses
+ * blanketGate; sync-linear.ts, and reembed.ts's blurbs warning, wrap the bare
+ * reason in their own text and use this.
  */
 export function egressRefusal(
   endpoint: Pick<ProviderEndpoint, "base" | "local">,
@@ -308,10 +310,12 @@ export function lookupOutage(e: unknown): boolean {
  * Whether a database error is one no wait mends (SMD-2599, review pass 4):
  * a statement or object the server refuses — SQLSTATE class 42 (a function
  * or table missing, a privilege revoked) or 28 (authorization) — or a
- * database or schema that does not exist (3D000, 3F000). A follower's worker
- * ends the run on one of these, as the pass's own errors do; anything else
- * not databaseUnavailable's — a statement or lock timeout, out of memory or
- * disk, a serialization failure — costs that worker its poll, as before.
+ * database or schema that does not exist (3D000, 3F000). followClassify's
+ * `db-end` is these and a statement cancelled or past its timeout (57014), a
+ * feature the server lacks (0A000) or the database dropped (57P04): every
+ * follower ends on `db-end` at a claim or a thought's processing (re-embed's
+ * since SMD-2679, extract's and consolidate's since SMD-2636 PR 4, whose
+ * claims read this alone before, a claim's timeout costing the poll).
  */
 export function databasePermanent(e: unknown): boolean {
   const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
@@ -444,7 +448,8 @@ export function followClassify(e: unknown): FollowVerdict {
  * - `probe`: a deadline with no answer, or a 4xx or a redirect no rule reads (a 401, 402 or 403, a 404 naming no
  *   model, a 400 neither the thought's length nor the request's shape): the probe's answer decides (`probedFault`);
  * - `thought`: the error names the thought — its length, the egress gate's refusal of it — or is a database error at
- *   write time (the caller reads one not answering first; PR 4 reads the rest), recorded failed;
+ *   write time that followClassify calls the thought's (a function's guard, the thought's data), recorded failed; the
+ *   caller reads a database not answering, its end and its moment first (SMD-2636 PR 4);
  * - `fatal`: the request's shape refused (`requestFault`: a 400 naming a field every call sends whose refusal the
  *   probe's one-token call does not meet — a response_format or a reasoning_effort it does not send, an answer budget
  *   it asks one token of — so the probe would answer and read it the thought's, failing the pool row by row); a 402

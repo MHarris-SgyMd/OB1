@@ -6,7 +6,8 @@
  * (arXiv 2609.05441) measured the next layer — whether a retrieved fact changed
  * what the agent did — and found agents ignore 45–53% of correctly retrieved
  * facts. This module computes that layer from the opt-in query log (migration
- * 034): a search row per call with the ids it returned, and an action row per
+ * 034): a search row per call with the ids it returned (SEARCH_KINDS: a
+ * plan_context call's knowledge hits too, SMD-2684), and an action row per
  * follow-up touch of an id by the same agent. Two kinds of touch are told apart
  * by the `tool` that wrote the action row:
  *
@@ -47,6 +48,21 @@
  */
 
 import { parsePgUuidArray } from "./query-log.ts";
+
+/**
+ * The query_log kinds read as searches: rows that returned thoughts a caller could go on to use, their ids in
+ * result_ids. `search` (034) and `plan_context` (126, SMD-2684: its knowledge hits; the board's tickets are in
+ * result_items). A plan_context row's arm is its own (armOf names the tool), so it is never pooled with a search's.
+ */
+export const SEARCH_KINDS = ["search", "plan_context"] as const;
+/**
+ * The kinds that are not: `action` rows are the touches themselves, and `agenda` rows (123) list tickets and items in
+ * result_items, never thoughts in result_ids. test-schema [39] holds every kind query_log's CHECK allows to one list
+ * or the other, so a new kind can't go unread without a decision.
+ */
+export const NOT_SEARCH_KINDS = ["action", "agenda"] as const;
+/** SEARCH_KINDS as the Postgres array literal both readers bind (`kind = ANY(${SEARCH_KINDS_LITERAL}::text[])`). */
+export const SEARCH_KINDS_LITERAL = `{${SEARCH_KINDS.join(",")}}`;
 
 export type SearchRow = {
   id: string;
@@ -124,7 +140,9 @@ export function toSearchRow(r: SearchDbRow): SearchRow {
   const resultIds = parsePgUuidArray(r.result_ids);
   const surviving = Number(r.surviving);
   const returned = new Set(resultIds).size;
-  const whole = r.chars !== null && returned > 0 && surviving === returned;
+  // A plan_context call hands over each hit cut to its share of a budget (core/plan.ts, SMD-4191), so the stored
+  // text's length is no estimate of what it returned: no token estimate for its row (SMD-2684 PR 2, review pass 2).
+  const whole = r.chars !== null && returned > 0 && surviving === returned && r.tool !== "plan_context";
   return {
     id: r.id,
     agentId: r.agent_id,
@@ -150,6 +168,23 @@ export function toActionRow(r: ActionDbRow): ActionRow {
  * a hand-labelled set calls relevant. `relevant` is an array in a fresh export
  * and may be the `{a,b}` literal in a re-serialised one; both read.
  */
+/**
+ * The export's click-through labels: each attributed use, under the query of the search it attributes to. A
+ * plan_context row takes its uses (SEARCH_KINDS), so a touch after it is never an earlier search's, but its request is
+ * no search eval-replay can run, so it labels no query (SMD-2684 PR 2).
+ */
+export function queryLabels(searches: SearchRow[], bySearch: Map<string, Uses>): { query: string; target_id: string }[] {
+  const byId = new Map(searches.map((s) => [s.id, s]));
+  const links: { query: string; target_id: string }[] = [];
+  for (const [searchId, uses] of bySearch) {
+    const s = byId.get(searchId);
+    if (!s || s.query === null || s.query === undefined) continue; // a search row always carries its query (034's CHECK)
+    if (s.tool === "plan_context") continue;
+    for (const target_id of uses.used) links.push({ query: s.query, target_id });
+  }
+  return links;
+}
+
 export function goldFromFixture(fx: { queries?: { query: string; relevant: unknown }[] }): Map<string, Set<string>> {
   const gold = new Map<string, Set<string>>();
   // Lower-cased: the log holds ids as Postgres emits them, and a hand-labelled

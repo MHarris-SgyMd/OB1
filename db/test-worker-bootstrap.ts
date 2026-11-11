@@ -47,7 +47,7 @@ const deny = resolveEgressPolicy({});
 
 // ---------------------------------------------------------------------------
 // The units default — the optimistic keyed gate. With a worker key set the
-// workers pass units=undefined, which credits the full set (an actor among
+// workers pass units=undefined, which credits KEYED_UNITS (an actor among
 // them); the keyless caller passes ROW_UNITS, which carries no actor. Under a
 // deny policy whose only allow term is an actor:, the two must differ — the
 // keyed gate passes, the keyless one (and the identity re-gate) is refused.
@@ -55,7 +55,7 @@ const deny = resolveEgressPolicy({});
 {
   const actorAllow = resolveEgressPolicy({ OB1_EGRESS_ALLOW: "actor:someone" });
   ok(egressRefusal(remote, actorAllow, undefined) === null,
-    "units undefined reaches the default EGRESS_UNITS (an actor among them): an actor: allow term lets the optimistic keyed gate pass");
+    "units undefined reaches the default KEYED_UNITS (an actor among them): an actor: allow term lets the optimistic keyed gate pass");
   const keyless = egressRefusal(remote, actorAllow, ROW_UNITS);
   ok(keyless !== null && /names a unit this caller never carries/.test(keyless),
     "the same policy refuses a ROW_UNITS caller — it carries no actor for the actor: term to match (the re-gate case)");

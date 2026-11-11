@@ -27,9 +27,10 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
-import type { AgendaCode, AgendaResult } from "./core/agenda.ts";
+import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
+import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
@@ -38,7 +39,7 @@ import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
-import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, EvidenceAppended, EvidenceCode, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
@@ -68,6 +69,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** An embedding as `<model>@<dim>` (qwen3-embedding:4b@1024, an OpenAI or Ollama name, Cloudflare's leading @): no space, so no sentence. */
+const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -96,6 +99,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
   if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
+  // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
+  if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -371,13 +376,23 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
   );
 }
 
-/** The refusals the search tools share: the gate's, and a filter's (said as the fault it was, `Error:`). */
+/** The refusals the search tools share: the gate's, a filter's (said as the fault it was, `Error:`), and search_thoughts' weights' (SMD-4193). */
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
   if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
+  if (r.code === "REFUSED_WEIGHTS") return weightsRefusal(r);
   return unknownRefusal(r);
 }
+
+/** A read's weights refused (SMD-4193): the database's words, naming the weight, or why nothing would read them. */
+const weightsRefusal = (r: Extract<Refusal, { code: "REFUSED_WEIGHTS" }>): string =>
+  r.problem === "unranked"
+    ? "Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither; add priority_weight above 0 or min_priority, or drop weights"
+    : `Refused: ${oneLine(snipText(r.message, 300))}`;
+
+/** A call's own weights in words (SMD-4193), as given: `overdue 3, soon 2`. */
+export const weightsText = (w: Record<string, unknown>): string => Object.entries(w).map(([k, v]) => `${k} ${String(v)}`).join(", ");
 
 /**
  * The `By:` line under a hit — who wrote its current text, from the two keys
@@ -407,6 +422,7 @@ export { INGESTED_NOTICE, ingestedNotice };
 // decision's guard (proposal-review.ts) reads without this file's imports.
 export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
 import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { dueText, LEVEL_WORDS } from "./priority-scale.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
 export function standingFlagText(f: StandingFlag): string {
@@ -555,7 +571,9 @@ export function priorityNote(p: PriorityRanking | null | undefined): string | nu
   const floor = p.min === null ? "" : `; kept ${p.kept} at ${levelText(p.min)} or above (min_priority, a known priority alone)`;
   // Not full: the window held every match there was, so nothing past it was missed.
   const past = p.read < p.window ? "" : ` A match past the top ${p.read} was not read${p.window < 100 ? " — raise limit to read further" : " — the window is capped at 100"}.`;
-  return `${ranked}; ${known}${floor}.${past}`;
+  // A call's own weights (SMD-4193): absent from a REST core older than this server, said only when given.
+  const weights = p.weights ? ` Under this call's weights, ${weightsText(p.weights)} (the rest the brain's defaults)${p.span !== null && p.span !== undefined ? `, the blend's scale ${p.span}` : ""}; a term may cross a level.` : "";
+  return `${ranked}; ${known}${floor}.${past}${weights}`;
 }
 
 /**
@@ -585,7 +603,22 @@ export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolea
  * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
  */
 export function priorityHint(msg: string): string {
-  return /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
+  // The operator's stored weights refused, or unreadable (migration 132): every ranked read fails alike.
+  const setting = weightSettingHint(msg);
+  if (setting) return setting;
+  // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span. Under
+  // a call's own weights (SMD-4193) the scale is 131's ob1_priority_span(jsonb): a brain before 131 lacks that alone.
+  return /ob1_priority_span\(jsonb\)/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — priority_weight under weights reads its scale from ob1_priority_span(jsonb), migration 131 (db/migrations/131_priority_span_weights.sql), which is not applied; search without weights, or with min_priority alone, meanwhile"
+    : /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — priority_weight reads the brain's scale, ob1_priority_span, migration 128 (db/migrations/128_priority_defaults.sql), which is not applied; search without it meanwhile"
+    : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
+    ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), which 128 leaves to PUBLIC's EXECUTE: the database's default privileges or a REVOKE took it from the server's role, so grant EXECUTE on both to it (migrate.ts --grant does not); search without them meanwhile"
+    : /ob1_priority_defaults/.test(msg) && /does not exist|could not find|lacks weight/i.test(msg)
+    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128; since 132 the built-in weights ob1_priority_builtin under the operator's setting), which is missing or lacks a weight; re-apply every migration, so the last to define each stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
+    : /ob1_priority_span answered no span/.test(msg)
+    ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without priority_weight meanwhile"
+    : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight and min_priority read effective_priority, migration 122 (db/migrations/122_effective_priority.sql), which is not applied; search without them meanwhile"
     : /permission denied for (table|function|relation) (priority_|open_item|ob1_|thought_facets|thought_sources|node_)/i.test(msg)
     ? " — priority_weight and min_priority read effective_priority (migration 122), and the server's role needs the grants migrations 116, 117 and 122 add (db/README.md, Grants for a capturing role; migrate.ts --grant issues them, and a role granted before 116 must be granted again); search without them meanwhile"
@@ -1908,32 +1941,108 @@ export function renderResetCaptureStamp(o: Outcome<StampReset, StampResetCode>):
       + "Until you do, the next classified key that can read to re-capture it is the one weighed. fetch's label, or thought_changes, shows which way it went.";
   }, (r) => {
     switch (r.code) {
-      case "REFUSED_NOT_OPERATOR": {
-        // The fix depends on what the key is (review pass 2): an unclassified
-        // key may be the operator's, and its line is given; a key classified
-        // otherwise is someone else's, and classifying it operator would
-        // raise the trust of everything it writes.
-        const key = snipText(r.key, 80);
-        const lead = "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.";
-        if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
-        // The line only for a name set_agent_kind takes as written — no
-        // control character, nothing it trims — or the line would classify
-        // another label (review pass 3: a mangled name created an operator row).
-        const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
-        if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
-        return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
-      }
+      case "REFUSED_NOT_OPERATOR": return notOperatorText(r, "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.");
       case "REFUSED_NOT_CAPTURE_STAMP": return `Refused: ${r.id}'s label is not one a reset can put back — a capture-only key did not capture it (or captured it before the server marked such captures), or its text was changed since. Its label is its writer's: a text edit restamps it.`;
       default: return mutationRefusalText(r);
     }
   }, (v) => ({ id: v.id, reset: v.reset, restored: v.restored, declines: v.declines, actorKind: oneOf(SAID_BY, v.stamp.actorKind), trust: oneOf(TRUST, v.stamp.trust) }));
 }
 
+/**
+ * An operator-only call refused (086's reset, 132's weights): what the key is, and the fix that fits it (review pass
+ * 2): an unclassified key may be the operator's, and its line is given; a key classified otherwise is someone else's,
+ * and classifying it operator would raise the trust of everything it writes.
+ */
+function notOperatorText(r: Extract<Refusal, { code: "REFUSED_NOT_OPERATOR" }>, lead: string): string {
+  const key = snipText(r.key, 80);
+  if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
+  // The line only for a name set_agent_kind takes as written — no
+  // control character, nothing it trims — or the line would classify
+  // another label (review pass 3: a mangled name created an operator row).
+  const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
+  if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
+  return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
+}
+
+/**
+ * The operator's priority weights (SMD-4193 PR 2, migration 132): what every read now takes as its defaults, and what
+ * it replaced. A call's own weights still override them by name.
+ */
+export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>): Reply {
+  return render(o, (v) => {
+    const now = v.weights ? `${weightsText(v.weights)}, the rest built in` : "the built-in weights";
+    if (!v.changed) return `Unchanged: every read already takes ${now} as its defaults${v.weights && v.setAt ? ` (set ${v.setAt}${v.setBy ? ` by ${snipText(v.setBy, 80)}` : ""})` : ""}. Nothing was written.`;
+    const before = v.previous ? `${weightsText(v.previous)}, the rest built in` : "the built-in weights";
+    return `${v.weights ? "Set" : "Cleared"} the operator's priority weights: every read now takes ${now} as its defaults, and a call's own weights still override them by name. Before: ${before}.`
+      + (v.weights ? " A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it." : "");
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may set the priority weights, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
+    : r.code === "PRIORITY_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+    : unknownRefusal(r),
+  (v) => ({ changed: v.changed, weights: v.weights, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
+}
+
+/** set_priority_weights' fault: a database before 132 has no such function. */
+export const setWeightsHint = (msg: string): string =>
+  /set_priority_weights/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 132 (db/migrations/132_priority_weight_setting.sql) is not applied"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — the server's role needs the priority group's grants on priority_weight_settings (migration 132; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
+/**
+ * The fault every ranked priority read gives while the operator's stored weights are refused (migration 132): a later
+ * migration narrowed a range under them, or a raw write. The read fails rather than order by weights the operator did
+ * not choose; this says how to mend it.
+ */
+export const weightSettingHint = (msg: string): string =>
+  /the operator's priority weights \(set .*\) are refused/.test(msg)
+    ? " — an operator key sets them again, or clears them with {}, through set_priority_weights (REST POST /v1/priority-weights); brain_info shows the setting"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — every effective priority takes the operator's weights from priority_weight_settings (migration 132), and the server's role needs the priority group's grants on it (db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
 /** reset_capture_stamp's fault: a database before 086 has no such function. */
 export const resetHint = (msg: string): string =>
   /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied"
     : "";
+
+// ── append_thought_evidence (SMD-2690 PR 3b) ─────────────────────────────────
+
+/**
+ * append_thought_evidence's reply: the entry added, or found there already,
+ * and the list's length — the thought by its id, lower-case as the brain
+ * writes it, and the client_key that named it. A refusal names what holds the
+ * list and what to do; a busy thought is other writers' edits in the way of
+ * each of the append's reads, never the caller's old read, and retryable.
+ */
+export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, EvidenceCode>): Reply {
+  return render(o, (v) => {
+    const named = v.byClientKey ? `${v.id} (client_key ${v.byClientKey})` : v.id;
+    const count = `${v.evidenceCount} evidence entr${v.evidenceCount === 1 ? "y" : "ies"}`;
+    return v.action === "appended"
+      ? `Appended the evidence to ${named}: it holds ${count}.`
+      : `${named} already holds that evidence (the same source label and excerpt): nothing written. It holds ${count}.`;
+  }, (r) => {
+    switch (r.code) {
+      case "THOUGHT_EVIDENCE_BUSY":
+        return `Not yet: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it. Retry in a moment: an entry already added is not added twice.`;
+      case "REFUSED_THOUGHT_EVIDENCE":
+        switch (r.problem) {
+          case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; a write key may prune metadata.evidence with update_thought.`;
+          case "not_list": return `Refused: ${r.id}'s metadata.evidence is not a list, so no entry can join it. Another writer set it; update_thought's metadata_patch can set it to a list (or null) first.`;
+          case "metadata_not_object": return `Refused: ${r.id}'s metadata is not an object (a raw writer's), so it holds no evidence list.`;
+          case "unstamped": return `Refused: ${r.id} has neither an updated_at nor a created_at (a raw writer's row), so an append could not be checked against another at the same moment. An update_thought that changes it stamps it; then append again.`;
+        }
+      // falls through: a problem this server does not know is said as an edit's refusal
+      default: return mutationRefusalText(r);
+    }
+  }, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), action: v.action, evidenceCount: v.evidenceCount, ...(v.updatedAt ? { updatedAt: v.updatedAt } : {}) }));
+}
 
 // ── review_supersession_proposal (SMD-3338) ──────────────────────────────────
 
@@ -2233,18 +2342,8 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 // Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
 // null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
 
-const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
-/**
- * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
- * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
- * and any other as the instant itself.
- */
-const dueText = (iso: string) => {
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
-};
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
   `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
@@ -2421,15 +2520,20 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   return title ? words : `${words}.`;
 }
 /** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
-function agendaLine(i: AgendaItem): string {
+function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }, now = new Date().toISOString()): string {
+  // `more`: what plan_context's budget left out of this line (SMD-4191), said as "and N more"; the agenda's own lines pass none.
+  const and = (n: number) => (n > 0 ? ` and ${n} more` : "");
   // A ticket's status is its board's word (124): quoted and cut, as a title is.
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
-    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}` : null,
-    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}: check before starting` : null,
+    // A due time no urgency term states (past the week, or a level 0): said, so the due order's lead is seen (SMD-4192 review pass 1);
+    // a level 0's past date said past, as 122 never calls it overdue (review pass 3).
+    i.dueAt && !i.overdue && i.urgency === 0 ? `${Date.parse(i.dueAt) <= Date.parse(now) ? "was due" : "due"} ${dueText(i.dueAt)}` : null,
+    i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.claimed)}` : null,
+    i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
-    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${i.blockers.length > 10 ? ` and ${i.blockers.length - 10} more` : ""}` : null,
+    i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${and(Math.max(0, i.blockers.length - 10) + more.blockers)}` : null,
   ].filter(Boolean);
   return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
 }
@@ -2439,13 +2543,18 @@ function agendaLine(i: AgendaItem): string {
  * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
  * read. A title, a holder and a blocker are other keys' words: quoted and cut, never a line of their own.
  */
-export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => render(o, (v) => {
+export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => render(o, (v) => {
   const lines = v.items.length === 0
     ? ["Nothing on the agenda in this scope."]
     : [
-        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
-        ...v.items.map(agendaLine),
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, ${v.order !== "due" ? "most pressing first"
+          // The undated named only when the list holds both kinds (review pass 2).
+          : v.items.every((i) => i.dueAt === null) ? "none due, most pressing first" : v.items.some((i) => i.dueAt === null) ? "soonest due first, the undated after" : "soonest due first"}:`,
+        // Wrapped: map's index must never reach agendaLine's `more`.
+        ...v.items.map((i) => agendaLine(i, undefined, v.now)),
       ];
+  // A call's own weights (SMD-4193), under the list or in place of one: a REST core older than this server sends none.
+  if (v.weights) lines.push(`Under this call's weights, ${weightsText(v.weights)} (the rest the brain's defaults): a term may cross a level.`);
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
@@ -2454,7 +2563,13 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
-}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder"
+  : r.code === "ORDER_UNAVAILABLE" ? "Refused: order due needs migration 129 (db/migrations/129_agenda_order.sql), which this brain lacks; ask with the priority order meanwhile"
+  : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+  : unknownRefusal(r), AS_JSON);
+
+/** A similarity to three places, rounded down, so a value under a bar never prints as the bar (0.7399 is 0.739, not 0.740). */
+const simDown = (x: number): string => (Math.floor(x * 1000) / 1000).toFixed(3);
 
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {
@@ -2463,8 +2578,18 @@ const gapWords = (g: PlanGap): string => {
     case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
     case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
-    case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}.`;
+    case "little": return `Little on this: ${g.topSimilarity === null ? "no hit has a similarity (exact matches alone)" : `the best hit's similarity is ${simDown(g.topSimilarity)}`}, under ${g.bar}, where the brain was measured to hold little that bears on a request (SMD-4212, on ${quoted(g.embeddingId, 80)}). A coverage signal, not a verdict: weigh the hits.`;
+    case "little_not_measured": return `A note, not a gap: whether the brain has little on this is not measured for this embedding (${quoted(g.embeddingId, 80)}; the bar was measured on ${quoted(g.measuredOn, 80)})${g.topSimilarity === null ? "; no hit has a similarity" : `; the best hit's similarity is ${simDown(g.topSimilarity)}, on that embedding's own scale`}.`;
+    case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}${g.more ? ` and ${g.more} more` : ""}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
+    case "trimmed": return `Cut to keep this reply readable: ${[
+      g.hitText ? `${g.hitText} hit${g.hitText === 1 ? "'s" : "s'"} text to its head (fetch the id for the whole)` : null,
+      g.labels ? `${g.labels} label${g.labels === 1 ? "" : "s"} or metadata item${g.labels === 1 ? "" : "s"} past a hit's first few (list_claims, relations and fetch read them)` : null,
+      g.boardLabels ? `${g.boardLabels} blocker${g.boardLabels === 1 ? "" : "s"} or holder${g.boardLabels === 1 ? "" : "s"} past a board line's first few, each line saying how many (list_claims and the ticket read them)` : null,
+      g.tickets ? `${g.tickets} open ticket${g.tickets === 1 ? "" : "s"} past the board's first 15, listed by key alone` : null,
+      g.titles ? `${g.titles} title${g.titles === 1 ? "" : "s"} shortened or left off` : null,
+      g.unlisted ? `${g.unlisted} settled, not yet startable or unknown ticket${g.unlisted === 1 ? "" : "s"} past the lists, counted and not named` : null,
+    ].filter(Boolean).join("; ")}.`;
     case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}; the hits name ${g.named} ticket${g.named === 1 ? "" : "s"}.`;
   }
 };
@@ -2489,16 +2614,36 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (k.hits.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     if (k.hits.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(k.hits)) notes.push(STALE_KEY);
-    out.push(...notes, "", hitBlocks(k.hits, literal).join("\n\n"));
+    // A hit cut to its head says so under its text, and how to read the whole (SMD-4191).
+    const blocks = hitBlocks(k.hits, literal).map((b, i) => {
+      const h = k.hits[i];
+      if (h.contentChars <= h.content.length) return b;
+      // An exact match past the head is in the whole text, not in what is shown (review pass 1); a shown one stays said
+      // as shown (review pass 2). Lower-cased as the search's ILIKE folds ASCII, which keys and quoted spans are.
+      const shown = h.content.toLowerCase();
+      const inHead = h.matchedNeedles.filter((n) => shown.includes(n.toLowerCase())), past = h.matchedNeedles.filter((n) => !shown.includes(n.toLowerCase()));
+      const contains = [inHead.length ? `Contains: ${inHead.join(", ")}` : null, past.length ? `Contains (in the whole text, past what is shown): ${past.join(", ")}` : null].filter(Boolean).join("\n");
+      // A function, not a string: a quoted span holding `$'` or `$$` is a needle, never a replacement pattern (review pass 3).
+      return `${past.length ? b.replace(/^Contains: .*$/m, () => contains) : b}\n… cut at ${h.content.length} of ${h.contentChars} characters: fetch ${h.id} for the whole text.`;
+    });
+    out.push(...notes, "", blocks.join("\n\n"));
   }
   const b = v.board;
   out.push("\n## Board: the tickets the hits name");
   if (!b.available) out.push(b.reason === "deadline" ? "Not read: it ran out of time." : b.reason === "no_keys_scope" ? "Not available here: this brain's agenda predates migration 126." : "Not read: the agenda's read failed (the server's log says why).");
   else if (!b.tickets.length && !b.others.length && !b.waiting.length) out.push(b.claimsRead === null ? "The hits name no ticket." : "The hits name no ticket this brain holds.");
   else {
-    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map(agendaLine));
-    if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`));
-    if (b.others.length) out.push(`Not ranked (${b.others.length}):`, ...b.others.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)}${t.settled ? " — settled: finished, or not to be done" : " — a status type this brain does not know"}`));
+    if (b.tickets.length) out.push(`${b.tickets.length} open, in agenda order (blocked, claimed and started ones included, each said):`, ...b.tickets.map((t) => agendaLine(t, b.ticketMore?.[t.key])));
+    if (b.moreOpen?.length) out.push(`- and ${b.moreOpen.length} more open, in agenda order: ${b.moreOpen.join(", ")}.`);
+    if (b.waiting.length) out.push(`Not yet startable (${b.waiting.length + (b.waitingMore ?? 0)}):`, ...b.waiting.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)} — not before ${t.notBefore ?? "a time not read"}`),
+      ...(b.waitingMore ? [`- and ${b.waitingMore} more, not listed.`] : []));
+    if (b.others.length) {
+      // Past the first few, by key and status alone (SMD-4191): a title left off is no title said.
+      const titled = b.others.filter((t) => t.title !== ""), bare = b.others.filter((t) => t.title === "");
+      out.push(`Not ranked (${b.others.length + (b.othersMore ?? 0)}):`, ...titled.map((t) => `- ticket ${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""} ${quoted(t.title)}${t.settled ? " — settled: finished, or not to be done" : " — a status type this brain does not know"}`));
+      if (bare.length) out.push(`- and ${bare.length} more: ${bare.map((t) => `${t.key}${t.status ? ` (${quoted(t.status, 40)})` : ""}${t.settled ? "" : " unknown type"}`).join(", ")}.`);
+      if (b.othersMore) out.push(`- and ${b.othersMore} more, not listed.`);
+    }
     out.push(b.boardSync ? `Board-sync last stamped ${b.boardSync.at}${typeof b.boardSync.outcome === "string" ? `, its last pass ${quoted(b.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
     if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
     else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
@@ -2510,16 +2655,31 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     t.plugins === null ? "Plugins: the plugin list could not be read." : `Plugins: ${t.plugins.join(", ") || "none enabled for this scope"}.`,
     "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
   // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
-  out.push("\n## Gaps", ...(v.gaps.length ? v.gaps.map((g) => `- ${gapWords(g)}`) : ["- None found. How close the hits are to the request is each hit's match; weigh them before relying on them."]));
+  // A budget cut is no coverage gap (review pass 1): the weighing line stands whenever nothing else is found.
+  // Nor is a bar not measured for this embedding (SMD-4212): it finds nothing, so the weighing line stands beside it.
+  const found = v.gaps.filter((g) => g.gap !== "trimmed" && g.gap !== "little_not_measured");
+  out.push("\n## Gaps", ...v.gaps.map((g) => `- ${gapWords(g)}`),
+    ...(found.length ? [] : [`- ${v.gaps.length ? "Nothing else found" : "None found"}. How close the hits are to the request is each hit's match; weigh them before relying on them.`]));
   return out.join("\n");
 }, (r) => searchRefusal(r), (v) => ({
-  knowledge: { preferCurrent: v.knowledge.preferCurrent, ...(v.knowledge.vectorFailed ? { vectorFailed: v.knowledge.vectorFailed.reason } : {}), hits: v.knowledge.hits.map(safeHit) },
+  // Lean (SMD-4191: the labels as objects were most of a 63,000-character reply): per hit its id, time, scores, trust and
+  // how much each label holds; the text says each label, and fetch, relations and list_claims read them whole.
+  knowledge: { preferCurrent: v.knowledge.preferCurrent, ...(v.knowledge.vectorFailed ? { vectorFailed: v.knowledge.vectorFailed.reason } : {}),
+               hits: v.knowledge.hits.map((h) => ({
+                 id: h.id, created_at: h.created_at, similarity: h.similarity, supersededBy: h.supersededBy, trust: trustOf(h.metadata), contentChars: h.contentChars,
+                 moved: Array.isArray(h.moved) ? h.moved.length : null, claimed: h.claimed === null ? null : h.claimed.length + (h.claimedMore ?? 0),
+                 relations: h.relations === null ? null : h.relations.length + (h.relationsMore ?? 0), priority: h.priority === null ? null : h.priority.length + (h.priorityMore ?? 0),
+               })) },
   board: v.board.available
     ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,
-        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, level: i.level, overdue: i.overdue, unblocks: i.unblocks,
-                                              blockers: i.blockers.filter((x) => TOKEN.test(x)), claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+        // Counts as the ticket has them, not as the budget listed them (review pass 3).
+        tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, blockers: i.blockers.length + ((v.board.available && v.board.ticketMore?.[i.key]?.blockers) || 0),
+                                              claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+        moreOpen: v.board.moreOpen ?? [], othersMore: v.board.othersMore ?? 0, waitingMore: v.board.waitingMore ?? 0,
         // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
-        others: v.board.others.map((x) => ({ key: x.key, statusType: x.statusType, settled: x.settled })),
+        // Compact (SMD-4191): the settled by key; an unknown status type with its word, which guard() holds to a token.
+        settled: v.board.others.filter((x) => x.settled).map((x) => x.key),
+        unknownType: v.board.others.filter((x) => !x.settled).map((x) => ({ key: x.key, statusType: x.statusType })),
         waiting: v.board.waiting.map((x) => ({ key: x.key, notBefore: x.notBefore })) }
     : { available: false, reason: v.board.reason },
   specs: { available: false, waitsOn: v.specs.waitsOn },

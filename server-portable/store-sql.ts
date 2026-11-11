@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -41,6 +41,7 @@ import type {
   ThoughtListPage,
   DeleteResult,
   ResetStampResult,
+  SetWeightsResult,
   ProvenanceNode,
   QueryActionLog,
   QueryAgendaLog,
@@ -426,7 +427,7 @@ export class SqlStore implements ThoughtStore {
     if (!UUID_RE.test(id)) return null;
 
     const rows = await this.sql`
-      SELECT id, content, metadata, created_at, updated_at
+      SELECT id, content, metadata, created_at, updated_at, jsonb_typeof(metadata) AS metadata_type
       FROM thoughts WHERE id = ${id}::uuid LIMIT 1`;
     if (rows.length === 0) return null;
     return normaliseThoughtRecord(rows[0]);
@@ -1187,18 +1188,46 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseEffectivePriority(r, "effective_priority"));
   }
 
-  // SMD-3669, SMD-4162: 124's agenda, one statement. The scope and the holder ride as JSON text, cast in SQL.
+  // SMD-4194: 128's span, the largest effective priority the brain's defaults allow, read as text (numeric). Under a
+  // call's weights (SMD-4193), 131's: the zero-argument call stays 128's, so a brain before 131 reads it as before.
+  async prioritySpan(weights?: Partial<PriorityWeights>): Promise<number> {
+    const [r] = (weights === undefined
+      ? await this.sql`SELECT ob1_priority_span()::text AS span`
+      : await this.sql`SELECT ob1_priority_span((${JSON.stringify(weights)}::text)::jsonb)::text AS span`) as { span: string }[];
+    const span = Number(r?.span);
+    if (!Number.isFinite(span) || span <= 0) throw new Error("ob1_priority_span answered no span this server reads");
+    return span;
+  }
+
+  // SMD-4193 PR 2: 132's operator write, one statement. The weights ride as JSON text, cast in SQL; null clears.
+  async setPriorityWeights(opts: { weights: Partial<PriorityWeights> | null; actor?: Actor }): Promise<SetWeightsResult> {
+    const rows = await this.sql`
+      SELECT set_priority_weights((${opts.weights === null ? null : JSON.stringify(opts.weights)}::text)::jsonb, ${actorPayload(opts.actor)}::jsonb) AS r`;
+    return normaliseSetWeights(rows[0]?.r);
+  }
+
+  // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope, the
+  // holder and the weights (SMD-4193) ride as JSON text, cast in SQL.
   async agenda(opts: {
     scope?: { source?: string; project?: string; label?: string; keys?: string[] }; holder?: { name: string; agentId?: string }; limit: number;
     includeBlocked: boolean; includeClaimed: boolean; includeProposed: boolean; includeStarted?: boolean; now?: string; timeoutMs?: number;
+    order?: AgendaOrder; weights?: Partial<PriorityWeights>;
   }): Promise<AgendaResult> {
     const scope = opts.scope && Object.keys(opts.scope).length ? JSON.stringify(opts.scope) : null;
     const holder = opts.holder ? JSON.stringify({ name: opts.holder.name, agent_id: opts.holder.agentId ?? null }) : null;
+    // The priority order is the nine-argument call, so it reads a brain before 129 as before (SMD-4192); due adds
+    // the tenth argument, which only 129's agenda takes. One template, the tail a fragment (review pass 2).
     const call = (q: typeof this.sql) => q`
       SELECT agenda((${scope}::text)::jsonb, (${holder}::text)::jsonb, ${opts.limit}::int, ${opts.includeBlocked}::boolean,
-                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, NULL::jsonb,
-                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean) AS a` as Promise<{ a: unknown }[]>;
-    if (opts.timeoutMs === undefined) return normaliseAgenda((await call(this.sql))[0]?.a, "agenda");
+                    ${opts.includeClaimed}::boolean, ${opts.includeProposed}::boolean, (${opts.weights === undefined ? null : JSON.stringify(opts.weights)}::text)::jsonb,
+                    COALESCE(${opts.now ?? null}::timestamptz, now()), ${opts.includeStarted === true}::boolean${opts.order === "due" ? q`, 'due'::text` : q``}) AS a` as Promise<{ a: unknown }[]>;
+    // The order answered is the one asked (review pass 2): a brain answering another would be labelled with it unseen.
+    const asked = opts.order ?? "priority";
+    const checked = (r: AgendaResult): AgendaResult => {
+      if (r.order !== asked) throw new Error(`agenda answered the ${r.order} order where ${asked} was asked`);
+      return r;
+    };
+    if (opts.timeoutMs === undefined) return checked(normaliseAgenda((await call(this.sql))[0]?.a, "agenda"));
     // A deadline (plan_context, SMD-2684): a ceiling, as readDatabaseFacts sets one — 0 (none) or a looser setting is
     // lowered to it, a stricter one kept — local to the call's own transaction.
     const ms = Math.max(1, Math.floor(opts.timeoutMs));
@@ -1207,7 +1236,7 @@ export class SqlStore implements ThoughtStore {
                  FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
       return call(tx as unknown as typeof this.sql);
     });
-    return normaliseAgenda(rows[0]?.a, "agenda");
+    return checked(normaliseAgenda(rows[0]?.a, "agenda"));
   }
 
   async logPlanContext(row: QueryPlanContextLog): Promise<void> {

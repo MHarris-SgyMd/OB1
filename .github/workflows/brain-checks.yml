@@ -212,6 +212,15 @@ jobs:
       # in front of the stack and a second brain.
       - name: The edge proxy's registry, table and shape
         run: bun deploy/edge/edge.ts --self-check
+      # SMD-3379 PR 3a: the federated coordinator's slot broker. Its registry's
+      # reading and its runner's checks on fixtures, then the broker itself over
+      # real WebSockets on loopback: live at once, background within the room
+      # live leaves, turns across brains, the lease, the warm-up, a socket that
+      # closes or goes silent. Bun only, no container.
+      - name: The slot broker's registry and runner
+        run: bun deploy/federated/broker.ts --self-check && bun deploy/federated/federated.ts --self-check
+      - name: The slot broker over WebSockets
+        run: bun deploy/federated/test-broker.ts
       # SMD-3305: the maintainer scripts' parsing and figures on fixtures — a CI job's step times over runs, and a
       # suite's sections by wall time. Neither is a gate; their self-checks keep the fixtures from going stale. The
       # first also holds the shifts ci-shift.yml warns of on main (SMD-3467) to four of main's real series.
@@ -265,6 +274,18 @@ jobs:
       # link. No network and no key; the live run that calls it is cut 2c-3.
       - name: The agent runner's claim client
         run: bun scripts/agent-runner/claims-check.ts --self-check
+      # SMD-4087 cut 2c-2: the runner's Linear moves on a stubbed GraphQL client —
+      # the move to In Progress at the claim, and the hand-back to Backlog
+      # (relabelled for a person on a work failure, the label kept on an
+      # environment failure). No key; the live run that calls it is cut 2c-3.
+      - name: The agent runner's Linear moves
+        run: bun scripts/agent-runner/board-check.ts --self-check
+      # SMD-4089: the runner's identity setup tool on a temp directory — the shape
+      # gate, the 0600 write, the no-symlink write (O_NOFOLLOW), the owner-only read
+      # and the directory check. No clipboard, no network, no key; placing the real
+      # secrets is the maintainer's, on the brain host.
+      - name: The agent runner's identity setup
+        run: bun scripts/agent-runner/setup.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -595,6 +616,24 @@ jobs:
       - name: Board replay rules
         working-directory: evals
         run: bun board-replay.ts --self-check
+
+      # Whether one plan_context call helps an agent plan (SMD-2684 PR 2): the
+      # draw of the requests, a run's stream read (model, tool set, calls, ids
+      # seen and cited), the blind sheets, κ, the sign test and the verdict at
+      # its edges, and the planner's command line — probed with hand-known
+      # answers. No brain, no model; the runs themselves are by hand.
+      - name: Plan-context eval rules
+        working-directory: evals
+        run: bun eval-plan-context.ts --self-check
+
+      # Where "the brain has little on this" begins (SMD-4212 PR 1): the draw
+      # of the two kinds of ticket and the paraphrases' checks, a reply's hits
+      # and literal matches read, each candidate signal at its threshold, the
+      # dev/test split, the choice and the bar at their edges, and the blind
+      # sheets. No brain, no model; the run itself is by hand.
+      - name: Little-on-this eval rules
+        working-directory: evals
+        run: bun eval-little.ts --self-check
 
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:

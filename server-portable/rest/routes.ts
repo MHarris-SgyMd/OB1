@@ -47,6 +47,8 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED: 422,
   REFUSED_NOT_OPERATOR: 403,
   REFUSED_NOT_CAPTURE_STAMP: 409,
+  REFUSED_THOUGHT_EVIDENCE: 409,
+  THOUGHT_EVIDENCE_BUSY: 503,
   WORK_CLAIMED: 409,
   CLAIM_NOT_FOUND: 404,
   CLAIM_NOT_YOURS: 403,
@@ -70,6 +72,8 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   PROPOSAL_YOURS: 403,
   CONFIRM_NOT_YOURS: 403,
   CLAIMS_UNREADABLE: 503,
+  ORDER_UNAVAILABLE: 503,
+  REFUSED_WEIGHTS: 400,
   REFUSED_EDITED_SINCE: 409,
   REFUSED_LINEAGE_PAIR: 409,
   REFUSED_WRITER: 409,
@@ -127,6 +131,7 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   update_thought: { method: "PATCH", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.update_thought },
   delete_thought: { method: "DELETE", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.delete_thought },
   reset_capture_stamp: { method: "POST", path: "/v1/thoughts/{id}/reset-capture-stamp", ok: 200, call: CALLS.reset_capture_stamp },
+  append_thought_evidence: { method: "POST", path: "/v1/thoughts/{id}/evidence", ok: 200, call: CALLS.append_thought_evidence },
   review_supersession_proposal: { method: "POST", path: "/v1/proposals/{id}/review", ok: 200, call: CALLS.review_supersession_proposal },
   retry_failed: { method: "POST", path: "/v1/workers/retry", ok: 200, call: CALLS.retry_failed },
   release_stale_leases: { method: "POST", path: "/v1/workers/release-leases", ok: 200, call: CALLS.release_stale_leases },
@@ -139,6 +144,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   // Priority assertions (SMD-3664, migration 116): an item by its kind and key in the path; a reason rides the body.
   set_priority: { method: "POST", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.set_priority },
   clear_priority: { method: "DELETE", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.clear_priority },
+  // The operator's weights every read takes as its defaults (SMD-4193 PR 2, migration 132): the weights in the body, {} to clear.
+  set_priority_weights: { method: "POST", path: "/v1/priority-weights", ok: 200, call: CALLS.set_priority_weights },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },

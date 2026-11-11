@@ -1530,7 +1530,7 @@ else {
   const sub111 = await recordSubject();
   await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = '${sub111.id}'::uuid`);
   const noSubject = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
-  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written by 111's record_thought_subject: close the facet/.test(noSubject.out),
+  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written with it by 130's record_thought_subjects \(111's record_thought_subject its set of one\): close the facet/.test(noSubject.out),
          `an own subject without its lineage row does not start, the subject named, and the remedy is the subject's own (exit ${noSubject.code}: ${noSubject.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
   await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${sub111.id}'::uuid`);
   const reRecorded = await recordSubject();
@@ -3332,10 +3332,11 @@ else {
       assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim and release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
-      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing.
-      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
+      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing; 132's
+      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE: set_priority and clear_priority fail naming the table; set_priority_weights fails naming priority_weight_settings \(migration 132\), and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
-             "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
+             `…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it (${missingBoth.out.split("\n").find((l) => /!  priority\s/.test(l))?.trim()})`);
       // 117's items group (SMD-3665 PR 2): soft too — the writes it lacks named, the open-item writers alone failing.
       assert(/!  open items\s+the server's role holds no open_item_events INSERT, open_items INSERT, open_items UPDATE, open_items DELETE, open_item_close_proposals INSERT, open_item_close_proposals UPDATE: the open-item writers \(open_item, update_item, set_item_status, propose_item_close and decide_item_close\) fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups items/.test(missingBoth.out),
@@ -3354,6 +3355,10 @@ else {
       await claims.unsafe("REVOKE SELECT ON open_items FROM ob1_pf_capture");
       const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
+      // 132's operator's weights (SMD-4193 PR 2): without SELECT on them every ranked priority read fails, and the row says so.
+      await claims.unsafe("REVOKE SELECT ON priority_weight_settings FROM ob1_pf_capture");
+      const noWeights = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_weight_settings TO ob1_pf_capture");
       // The threads row (SMD-3306 PR 7a-2c, review pass 4): without SELECT on thought_facets it warns with the grant, never
       // skips as if 120 were not applied — the read's unread entry reaches the row.
       await claims.unsafe("REVOKE SELECT ON thought_facets FROM ob1_pf_capture");
@@ -3363,9 +3368,12 @@ else {
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
-      assert(/, and so does agenda \(SMD-3669\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\); plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
+      // 132's setting's writes, missing for this role too, are a clause of their own between (SMD-4193 PR 2).
+      assert(/, and so does agenda \(SMD-3669\); set_priority_weights fails naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\);.* plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
              && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
+      assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
+        `…and without SELECT on the operator's weights, the priority row says every ranked priority read fails (${rowOf(noWeights.out, "priority").trim().slice(-260)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.
@@ -4433,6 +4441,26 @@ else {
       `a failed last pass and a malformed alarm each warn on a fresh heartbeat (${row(wrong.out, "workers")})`);
     assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row carries the block until the follower judges its next block \(48 answers or more\)\. A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers\./.test(fix(wrong.out, "workers")),
       `…each with its own remedy (${fix(wrong.out, "workers")})`);
+    // Held by Linear's rate limit (SMD-4133): the row says the hold and its time left, the fix that it passes on its
+    // own and the hour's sum — not "its log says why".
+    {
+      const until = new Date(Date.now() + 20 * 60_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until, by: "linear" } }), 60);
+      const held = await run(SQL_ENV);
+      const at = until.replace(/\./g, "\\.");
+      assert(new RegExp(`!\\s+workers\\s+board-sync alive, its last pass rate-limited by Linear: no pass, and no request, until ${at} \\(in (19|20|21) min; the reset time Linear sent\\) \\(last stamped`).test(row(held.out, "workers")),
+        `a held board-sync's row says the hold and its time left (${row(held.out, "workers")})`);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: it sends no request until ${at} \\(the reset time Linear sent\\), then passes again on its own\\. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user`).test(fix(held.out, "workers"))
+          && !/its log says why/.test(fix(held.out, "workers")),
+        `…and its fix that it passes again on its own, with the hour's sum (${fix(held.out, "workers")})`);
+      // A hold already past is said as past, not "no request until" a time gone (review pass 1).
+      const gone = new Date(Date.now() - 30_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until: gone, by: "backoff" } }), 60);
+      const past = await run(SQL_ENV);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: its hold ended at ${gone.replace(/\./g, "\\.")} \\(a backoff: Linear sent no reset time\\), and its next trigger passes\\.`).test(fix(past.out, "workers")),
+        `…and a hold already past is said as past (${fix(past.out, "workers")})`);
+      await beat("heartbeat:board-sync", v({ outcome: "failed" }), 60);
+    }
 
     // A custom --job: the restart names the job the follower works, not its key (review pass 1).
     await beat("heartbeat:extract:my-job", v({ job: "my-job", every_s: 60 }), 600);
@@ -4657,7 +4685,7 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last period ended 12 min ago, after 3 min; when it runs, a live write pauses its passes; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last period ended 12 min ago, after 3 min; when it runs, a live write pauses its passes; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Working, with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
@@ -5405,7 +5433,7 @@ if (want("8")) {
   // A knob that does not parse fails by name, and the endpoint row says the
   // gate is closed meanwhile.
   const bad = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi,nonsense" });
-  assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
+  assert(bad.code === 1 && /✗\s+egress policy\s+OB1_EGRESS_DENY: `nonsense` is not unit:value \(units: actor, source, type, topic, marker, plugin\) — the gate fails closed \(deny\) until this is fixed/.test(bad.out),
          "a term that does not parse fails by name");
   assert(/!\s+embeddings egress\s+every embeddings and chat call to openrouter\.ai is refused while the policy does not parse/.test(bad.out), "…and the endpoint row says every call is refused meanwhile");
   // Terms in the knob the mode does not read: a warning naming both knobs.
@@ -5436,6 +5464,47 @@ if (want("8")) {
   const inherit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_API_KEY: "k" });
   assert(new RegExp(String.raw`✓\s+chat egress\s+${rx(LOCAL)} is declared local \(OB1_LLM_LOCAL\)`).test(inherit.out),
          "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
+
+  // A plugin: term reaches a plugin's model call alone (SMD-2690 PR 3a): it
+  // lets no capture or pass out, so it is no "some call might pass" on a row,
+  // and it never reaches the embeddings endpoint at all.
+  const pluginOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+embeddings egress\s+every embeddings and chat call a capture or pass makes to openrouter\.ai is refused — deny with no OB1_EGRESS_ALLOW term over actor, source, type, topic, marker; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land without a vector/.test(pluginOnly.out),
+         "plugin: terms alone under deny: the shared endpoint's row warns that every capture's and pass's call is refused, and says what the terms do let out");
+  const pluginOnlySplit = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_CHAT_BASE_URL: LOCAL, OB1_CHAT_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+embeddings egress\s+every embeddings call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) reach a plugin's model call on the chat endpoint, never this one — so/.test(pluginOnlySplit.out),
+         "…and an embeddings endpoint of its own is told the terms never reach it");
+  const HOSTED_CHAT = { OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: HOSTED, OB1_CHAT_API_KEY: "k" };
+  const pluginOnlyChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/!\s+chat egress\s+every chat call a capture or pass makes to openrouter\.ai is refused — .*; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out those plugins' model calls \(ctx\.model\) and nothing else — so captures land untagged/.test(pluginOnlyChat.out),
+         "…while a chat endpoint of its own is told what they let out");
+  const undeclaredPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:example" });
+  assert(/looks local but is not declared so — the gate treats it as remote, and under deny with no allow term a capture or pass can match, every embeddings and chat call they make is refused; its only OB1_EGRESS_ALLOW terms \(plugin:example\) let out/.test(undeclaredPlugin.out),
+         "…and the upgrade-case row says the same");
+  // A plugin: term naming no enabled plugin matches nothing: warned by name.
+  const strayPlugin = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: HOSTED, OPENROUTER_API_KEY: "k", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:exampel, actor:chatgpt" });
+  assert(/!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables \(example\) — such a term matches no call/.test(strayPlugin.out)
+         && /✓\s+embeddings egress\s+the embeddings and chat text leaves to openrouter\.ai only under an OB1_EGRESS_ALLOW term/.test(strayPlugin.out),
+         "a plugin: term naming no enabled plugin is warned by name; an actor: term beside it keeps the endpoint row ok");
+  assert(!/no plugin OB1_PLUGINS enables/.test(pluginOnly.out), "…and no such warning for an enabled plugin's name");
+  const caseOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_ALLOW: "plugin:EXAMPLE" });
+  const offStray = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "off", OB1_EGRESS_ALLOW: "plugin:exampel" });
+  assert(!/no plugin OB1_PLUGINS enables/.test(caseOnly.out) && !/no plugin OB1_PLUGINS enables/.test(offStray.out),
+         "…nor for the name in another case (the gate matches it so), nor under off, where no term is read");
+  // Under allow a row's deny term, or a key's, holds no plugin's call carrying such a row (SMD-4195): said while a plugin is enabled.
+  const allowRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice, marker:#phi, plugin:exampel" });
+  const allowRowsNoPlugins = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi, actor:alice" });
+  const allowMarkerOnly = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:#phi" });
+  // A chat endpoint declared local is never judged; under deny OB1_EGRESS_DENY is unread: nothing to say in either.
+  const allowRowsLocalChat = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, OB1_LLM_BASE_URL: LOCAL, OB1_LLM_LOCAL: "1", OB1_PLUGINS: "example", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:phi" });
+  const denyRows = await run({ ...DB_DOWN, ...NO_KEYS, ...GATE, ...HOSTED_CHAT, OB1_PLUGINS: "example", OB1_EGRESS_DENY: "type:phi" });
+  assert(/!\s+egress policy\s+type:phi, actor:alice hold\(s\) no plugin's model call \(ctx\.model\) whose text carries such a row — .*\(SMD-4195\)/.test(allowRows.out)
+         && /!\s+egress policy\s+plugin:exampel name\(s\) no plugin OB1_PLUGINS enables/.test(allowRows.out)
+         && [allowRowsNoPlugins, allowMarkerOnly, allowRowsLocalChat, denyRows].every((r) => !/hold\(s\) no plugin's model call/.test(r.out)),
+         "under allow, a row's or a key's deny term is said to hold no plugin's call carrying such a row while a plugin is enabled and the chat endpoint is judged (not for a marker, a local chat endpoint, or under deny); a stray name in OB1_EGRESS_DENY is warned too");
+  // The chat row's consequence names what a plugin's call needs.
+  assert(/!\s+chat egress\s+every chat call to openrouter\.ai is refused — .* an enabled plugin's model call \(ctx\.model\) is refused unless an OB1_EGRESS_ALLOW plugin: term names it/.test(split.out),
+         "…and the chat row says a plugin's call needs a plugin: term");
 }
 
 if (want("9")) {
