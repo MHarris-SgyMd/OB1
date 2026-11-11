@@ -1354,6 +1354,11 @@ export class SqlStore implements ThoughtStore {
     return (rows[0] as { taken?: boolean } | undefined)?.taken !== false;
   }
 
+  async trustCeiling(agentId: string | null, name: string, declared: string | null): Promise<string | null> {
+    const [r] = await this.sql`SELECT ob1_trust_ceiling(ob1_registry_kind(${agentId}::uuid, ${name}::text), ${declared}::text) AS t` as { t: unknown }[];
+    return typeof r?.t === "string" ? r.t : null;
+  }
+
   async existingIds(ids: string[]): Promise<Set<string>> {
     const valid = idList(ids);
     if (valid.length === 0) return new Set();

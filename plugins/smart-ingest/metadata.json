@@ -1,6 +1,6 @@
 {
   "name": "Smart Ingest Plugin",
-  "description": "A document's durable thoughts: extracted by the brain's own model through the egress gate, matched by meaning against the brain's thoughts, and added, skipped, appended as evidence or written as revisions through the core, after a dry run that stores each decision. Ported from the Smart Ingest integration's standalone server and schema (SMD-2690).",
+  "description": "A document's durable thoughts: extracted by the brain's own model through the egress gate, matched by meaning against the brain's thoughts, and added, skipped, appended as evidence or written as revisions through the core, optionally after a dry run that stores each decision. Ported from the Smart Ingest integration's standalone server and schema (SMD-2690).",
   "category": "plugins",
   "author": {
     "name": "Alan Shurafa",

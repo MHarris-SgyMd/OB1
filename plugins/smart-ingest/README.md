@@ -10,8 +10,8 @@ You send it a document: meeting notes, a journal entry, an article, an email thr
 
 - **skip** it: too short (under 30 characters) or rated below 3 of 5, said twice in the same document, a thought the brain holds word for word (up to case and spacing), or a duplicate of one by meaning (a cosine similarity above 0.92);
 - **add** it: nothing the brain holds is as close as 0.85;
-- **append evidence**: a thought between 0.85 and 0.92 that is at least as long; the passage the new one came from (its own text when the model gave none) is added to that thought's `metadata.evidence` (`append_thought_evidence`), labelled with the job's `source_label` (`smart_ingest` without one);
-- **create a revision**: a thought between 0.85 and 0.92 that is shorter; the new one is captured as superseding it. A job whose declared `trust` is below that thought's (an `ingested` email against an operator's note) never supersedes it: the passage is appended as evidence instead (`lower_trust_than_match`).
+- **append evidence**: a thought between 0.85 and 0.92 that is at least as long; the passage the new one came from, as the model quoted it (its own text when the model gave none, or quoted words the document does not hold) is added to that thought's `metadata.evidence` (`append_thought_evidence`), labelled with the job's `source_label` (`smart_ingest` without one);
+- **create a revision**: a thought between 0.85 and 0.92 that is shorter; the new one is captured as superseding it. A job whose captures' trust is below that thought's never supersedes it: the passage is appended as evidence instead (`lower_trust_than_match`), its entry's `source` saying it came from below the thought's trust. The trust weighed is the one the captures are stamped with, the declared `trust` capped at the key's kind (`ctx.caller.trust`), so declaring none, or more than the key holds, does not get past it; an unclassified key's is below any. So an `ingested` email, or an agent's document, never demotes an operator's note.
 
 A **dry run** stores the decisions and writes nothing to the brain; `get_job` shows each one and `execute_job` carries them out. Without a dry run they are carried out at once.
 
@@ -28,7 +28,7 @@ Four operations, each an MCP tool on the brain's own connector and a route on th
 
 **The same text** is one job: sending it again answers that job (`existing: true`), and so does a `source_metadata.import_key` already ingested, even two sent at once. The answer's `message` says what to do with that job: `execute_job` for a dry run's. A job paused while carrying out an extract that was no dry run (a `503`, below) is carried out by the same call again. A failed job answers no one: the same call after a refusal while extracting or deciding runs again, as a new job. A job a server left extracting or executing when it stopped answers its text for good: send it with `reprocess: true`, which extracts a text again as a new job, paying for the model calls again.
 
-**A job is its creator's** (the maintainer's call, 2026-11-11), as the core's own `job_status` is: `list_jobs`, `get_job` and `execute_job` answer only the key that made the job, and another is told there is none (`NO_SUCH_JOB`). The same text from another key is that key's own job. So every capture of a job is written as the key that sent the document, under its trust.
+**A job is its creator's** (the maintainer's call, 2026-11-11), as the core's own `job_status` is, the creator told by the key's name (a key re-minted under the same name keeps its jobs): `list_jobs`, `get_job` and `execute_job` answer only the key that made the job, and another is told there is none (`NO_SUCH_JOB`). The same text from another key is that key's own job. So every capture of a job is written as the key that sent the document, under its trust.
 
 **Who wrote it.** Each thought is captured through the core as the key that called, with `source: smart-ingest` (the old server wrote `smart_ingest`, which the core's source labels do not take: a filter on the old label finds the old thoughts alone; evidence entries keep `source: smart_ingest`) and five metadata keys: `smart_ingest_job`, `smart_ingest_item`, `extraction_type`, and the job's `source_label` and `source_type` when given. The core embeds it and extracts its own metadata (its `type`, `topics`, `people`) as it does any capture. What the extraction said beside the text (its type, importance, tags and the passage it came from) is the item's, in the plugin's table. `trust` is passed to each capture: `ingested` for outside text. Each capture carries a `client_key` made from the job's random seed and the item's id, so a job resumed after a fault is answered its own earlier capture, nothing written twice.
 
@@ -58,7 +58,7 @@ One call does all of its work before it answers. Extraction is one model call pe
 ## Prerequisites
 
 - A working brain stack (`deploy/compose.yaml`), its chat endpoint answering (`OB1_LLM_BASE_URL`, `OB1_METADATA_MODEL`).
-- A key with write scope: `bun keygen.ts --name me --scope write` in `server-portable/` prints the key, and a line to add to `MCP_ACCESS_KEYS` in `deploy/.env` ([SETUP.md](../../SETUP.md) has the rest). A read key reads the jobs (`list_jobs`, `get_job`) and nothing more.
+- A key with write scope: `bun keygen.ts --name me --scope write` in `server-portable/` prints the key, and a line to add to `MCP_ACCESS_KEYS` in `deploy/.env` ([SETUP.md](../../SETUP.md) has the rest). A read key makes no jobs, so it reads none: a job is its creator's.
 
 ## Turn it on
 
@@ -85,7 +85,7 @@ Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off
 
 ## Moving from the standalone server
 
-The standalone server (`integrations/smart-ingest`) kept its jobs in `public.ingestion_jobs` and `public.ingestion_items`, made by `schemas/smart-ingest`. The thoughts it wrote stay as they are. The plugin starts with empty tables of its own, so `get_job` finds only its own jobs, and until the copy below an old job's text sent again is a new job; after it, the copied job answers it. Stop the old server (`bun integrations/smart-ingest/index.ts`) before turning the plugin on, and point its callers at the plugin:
+The standalone server (`integrations/smart-ingest`) kept its jobs in `public.ingestion_jobs` and `public.ingestion_items`, made by `schemas/smart-ingest`. The thoughts it wrote stay as they are. The plugin starts with empty tables of its own, so `get_job` finds only its own jobs, and until the copy below, and its hand-over to a key, an old job's text sent again is a new job; after them, the copied job answers that key. Stop the old server (`bun integrations/smart-ingest/index.ts`) before turning the plugin on, and point its callers at the plugin:
 
 | | The old server | The plugin |
 | --- | --- | --- |
@@ -94,8 +94,9 @@ The standalone server (`integrations/smart-ingest`) kept its jobs in `public.ing
 | The key | its one `MCP_ACCESS_KEY`, in `x-brain-key` or as a bearer | a brain key of write scope, in `x-brain-key`, `x-access-key` or as a bearer (`Authorization: Bearer`), never on the URL |
 | The answer | the job's fields at the top level, `status: "existing"` for a text already ingested | ingest: `{existing, job: {job_id, status, …counts}, message}`; execute: `{already, job}`; a refusal is `{code, …}` at its status (a job not ready is `409`, the old `400`) |
 | `skip_classification` | taken | refused (the input is strict): every capture runs the core's metadata call |
+| A restricted value, a text too long | `403`, `413` | `422 RESTRICTED_CONTENT`; `400 REFUSED_INPUT` |
 
-To keep the old jobs, copy them across. The block below copies every job and item, keeping their ids, so an old dry run's job can be executed by the plugin. Run it as the database owner in `psql`: on the compose stack, from `deploy/`, pipe it to `docker compose exec -T postgres psql -U postgres -d openbrain`. It is one transaction, so a refused row copies nothing, and it can be run again: a job already in the plugin's table is left as it is, with its items and counts. Run it before the plugin's first ingest: a job the plugin made holds an id, or a text, an old job may have, and that old job is then not copied; an item the plugin made holding an old item's id stops the copy, which then copies nothing. To copy after all, delete the plugin's own jobs first, as the database owner (`DELETE FROM plugin_smart_ingest.ingestion_jobs WHERE created_by <> 'MCP_ACCESS_KEY';`, their items with them), and run the block again.
+To keep the old jobs, copy them across. The block below copies every job and item, keeping their ids, so an old dry run's job can be executed by the plugin. Run it as the database owner in `psql`: on the compose stack, from `deploy/`, pipe it to `docker compose exec -T postgres psql -U postgres -d openbrain`. It is one transaction, so a refused row copies nothing, and it can be run again: a job already in the plugin's table is left as it is, with its items and counts. Run it before the plugin's first extract: a job the plugin made holds an id an old job may have, and that old job is then not copied; an item the plugin made holding an old item's id stops the copy, which then copies nothing. To copy after all, delete the plugin's own jobs first, as the database owner (`DELETE FROM plugin_smart_ingest.ingestion_jobs;`, their items with them: the copy has copied nothing yet), and run the block again.
 
 ```sql
 \set ON_ERROR_STOP on
@@ -150,7 +151,8 @@ COMMIT;
 - **The key** that made an old job is recorded as `MCP_ACCESS_KEY`, the one key the old server held, and a job is its creator's: hand the copied jobs to the key that will read and execute them, as the database owner:
 
   ```sql
-  UPDATE plugin_smart_ingest.ingestion_jobs SET created_by = '<your key's name>' WHERE created_by = 'MCP_ACCESS_KEY';
+  UPDATE plugin_smart_ingest.ingestion_jobs j SET created_by = '<your key's name>' WHERE j.created_by = 'MCP_ACCESS_KEY'
+     AND NOT EXISTS (SELECT 1 FROM plugin_smart_ingest.ingestion_jobs k WHERE k.created_by = '<your key's name>' AND k.input_hash = j.input_hash);
   ```
 - **What the old server spread** over each item's metadata beyond its type, importance, tags (those that are text) and passage stays in `public.ingestion_items`. The job's `source_metadata` is its metadata less `source_type`, `dry_run`, `skip_classification` and `trust`, which the plugin keeps in columns or drops.
 - **Afterwards**, the old tables and the function `public.append_thought_evidence(uuid, jsonb)` are no longer used: the core's `append_thought_evidence` operation writes evidence through the event log. `--grant` no longer grants them, but a grant made before stays until they are dropped; that function is `SECURITY DEFINER` and writes `thoughts.metadata` past the event log, so a role granted it keeps that until then (`bun migrate.ts --grant <role> --exact`, from `db/`, revokes what a role holds beyond its groups). When you no longer want the old rows, drop them as the database owner, the brain-health-monitoring view over them first:

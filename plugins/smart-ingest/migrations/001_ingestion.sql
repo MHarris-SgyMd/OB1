@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
   -- The text's sha256, hex; another job of the same text from the same key (a reprocess, or a resend after a failed
   -- job) adds -v2, -v3 … (one key's text and another's are each its own job: a job is its creator's).
   input_hash       text        NOT NULL,
-  -- The caller's session key (source_metadata.import_key): one live job per key unless reprocess (a failed job answers no one).
+  -- The caller's session key (source_metadata.import_key, a non-empty string): one job of its creator's per import_key
+  -- unless reprocess, a failed one aside (it answers no one).
   import_key       text,
   source_label     text,
   source_type      text,

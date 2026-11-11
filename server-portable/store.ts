@@ -2761,6 +2761,17 @@ export interface ThoughtStore {
    */
   pluginTx?<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T>;
 
+  /**
+   * The trust a thought this writer captures, declaring `declared`, is
+   * stamped with (SMD-2690 PR 4): the database's own rule, 046's
+   * ob1_trust_ceiling over ob1_registry_kind — the declaration capped at the
+   * key's kind (the agent id's, else the name's), the kind itself when none
+   * is declared, null for an unclassified key that declares none. What a
+   * plugin weighs before it supersedes another's thought. Optional for a
+   * test's fake.
+   */
+  trustCeiling?(agentId: string | null, name: string, declared: string | null): Promise<string | null>;
+
   close(): Promise<void>;
 }
 
@@ -2860,7 +2871,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   prioritySpan: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
-  pluginTx: true, jobSink: false, close: false,
+  pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 
 /**

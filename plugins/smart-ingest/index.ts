@@ -376,8 +376,10 @@ export class Unavailable {
  */
 /** The trust words, lowest first (migration 073's ladder). */
 const TRUST_RANK: Record<string, number> = { ingested: 0, agent: 1, operator: 2 };
+/** The evidence entry's `source` when a lower-trust job's passage is appended to a higher-trust thought: a reader sees whose it is. */
+export const LOWER_TRUST_SOURCE = "smart_ingest, below this thought's trust";
 
-export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, seen: Set<string>, trust: string | null = null): Promise<Decided> {
+export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, seen: Set<string>, trust: string | null): Promise<Decided> {
   const none = { matched: null, similarity: null, error: null, status: "ready" as const };
   if (t.content.length < MIN_THOUGHT_LENGTH) return { ...t, ...none, action: "skip", reason: "quality_gate_short_content" };
   if (t.importance < MIN_IMPORTANCE) return { ...t, ...none, action: "skip", reason: "quality_gate_low_importance" };
@@ -401,10 +403,13 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   const at = { ...none, matched: top.id, similarity: top.similarity };
   if (top.similarity > SIMILARITY.skip) return { ...t, ...at, action: "skip", reason: "semantic_duplicate" };
   if (top.content.length >= t.content.length) return { ...t, ...at, action: "append_evidence", reason: "existing_is_richer" };
-  // A job whose declared trust is below the matched thought's never supersedes it (the maintainer's call, 2026-11-11): an
-  // ingested email does not demote an operator's thought. Its passage is evidence for that thought instead.
+  // A job whose captures' trust is below the matched thought's never supersedes it (the maintainer's calls, 2026-11-11):
+  // an ingested email does not demote an operator's thought. `trust` is what the job's captures are stamped with (the
+  // caller's ctx.caller.trust: the declaration capped at the key's kind), so neither declaring none nor declaring more
+  // than the key holds gets past it; an unclassified key's (null) is below any. The passage is evidence for that
+  // thought instead, its entry marked as below the thought's trust.
   const theirs = typeof top.trust === "string" ? TRUST_RANK[top.trust] : undefined;
-  if (trust !== null && theirs !== undefined && TRUST_RANK[trust] < theirs) return { ...t, ...at, action: "append_evidence", reason: "lower_trust_than_match" };
+  if (theirs !== undefined && (trust === null || TRUST_RANK[trust] < theirs)) return { ...t, ...at, action: "append_evidence", reason: "lower_trust_than_match" };
   return { ...t, ...at, action: "create_revision", reason: "new_has_more_info" };
 }
 
@@ -485,8 +490,9 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
       if (held) return { status: held.own ? "executed" : "existed", result: held.id, error: null };
       const captured = await ctx.call("capture_thought", { content: item.content, source: "smart-ingest", metadata: metadataOf(job, item), client_key: key, ...trust });
       if (!captured.ok) return refusedBy("capture_thought", captured.refusal);
-      // `matched`: the key named a thought already, this item's own earlier capture, nothing written now.
-      const own = captured.value.keyed === "matched";
+      // `matched` or `recaptured`: the key names a thought already, this item's own earlier capture (only this item can
+      // name the key), answered as it stands.
+      const own = captured.value.keyed === "matched" || captured.value.keyed === "recaptured";
       return { status: captured.value.existed === true && !own ? "existed" : "executed", result: captured.value.id, error: null };
     }
     case "append_evidence": {
@@ -495,7 +501,7 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
         id: item.matched_thought_id,
         source_label: job.source_label ?? "smart_ingest",
         excerpt: item.source_snippet.trim() ? item.source_snippet : item.content,
-        source: "smart_ingest",
+        source: item.reason === "lower_trust_than_match" ? LOWER_TRUST_SOURCE : "smart_ingest",
       });
       if (!appended.ok) return refusedBy("append_thought_evidence", appended.refusal);
       return { status: appended.value.action === "already_exists" ? "existed" : "executed", result: appended.value.id, error: null };
@@ -509,7 +515,7 @@ export async function execute(ctx: Pick<PluginContext, "call">, job: Job, item: 
         content: item.content, source: "smart-ingest", supersedes: item.matched_thought_id, metadata: metadataOf(job, item), client_key: key, ...trust,
       });
       if (!captured.ok) return refusedBy("capture_thought", captured.refusal);
-      if (captured.value.keyed === "matched") return { status: "executed", result: captured.value.id, error: null };
+      if (captured.value.keyed === "matched" || captured.value.keyed === "recaptured") return { status: "executed", result: captured.value.id, error: null };
       // A re-capture writes no pointer (the thought's provenance stays its own), so the revision was not written.
       if (captured.value.existed === true) return revisionHeld(captured.value.id);
       return { status: "executed", result: captured.value.id, error: null };
@@ -595,7 +601,7 @@ export default definePlugin({
   operations: {
     extract: operation({
       title: "Extract a document's thoughts",
-      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess; a failed job answers no one, so the same call after a refusal runs again. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer (while executing, the job paused for execute_job), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose declared trust is below a matched thought's appends evidence rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision.`,
+      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess; a failed job answers no one, so the same call after a refusal runs again. A text holding what looks like a national id, a card or account number, a key or a password is refused before any model sees it. Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer (while executing, the job paused for execute_job), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. RESTRICTED_CONTENT (422) refuses a text holding what looks like a key, a card or account number or a national id (the old server's patterns, read loosely). A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest; it also answers a write the core says to retry (a thought kept busy). import_key counts as text alone.`,
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -650,7 +656,11 @@ export default definePlugin({
           const paused = made.job.status === "dry_run_complete" && !made.job.dry_run && !req.dry_run;
           const claimed = paused && (await ctx.db.tx((sql) => sql<{ id: string }>`
             UPDATE ingestion_jobs SET status = 'executing', error_message = NULL WHERE id = ${made.job.job_id}::bigint AND status = 'dry_run_complete' RETURNING id::text AS id`)).length > 0;
-          if (!claimed) return ok({ existing: true, job: made.job, message: `${why} as job ${made.job.job_id}; ${NEXT[made.job.status]}` });
+          if (!claimed) {
+            // Another call claimed it first (or it was never paused): answered as it stands now, not as first read.
+            const now = paused ? ((await ctx.db.tx((sql) => jobById(sql, made.job.job_id))) ?? made.job) : made.job;
+            return ok({ existing: true, job: now, message: `${why} as job ${now.job_id}; ${NEXT[now.status]}` });
+          }
           try {
             const resumed = await executeJob(ctx, { ...made.job, status: "executing" });
             return ok({ existing: true, job: resumed, message: `${why} as job ${made.job.job_id}, paused while executing; carried out now` });
@@ -696,14 +706,18 @@ export default definePlugin({
               await failJob(ctx, job.job_id, "the model's answer holds no thoughts list", calls);
               return refused(422, "EXTRACTION_FAILED", job.job_id, { detail: "the model's answer holds no thoughts list" });
             }
-            extracted.push(...thoughts);
+            // A passage the document does not hold (the model's own words, or a document steering it) is none: the
+            // evidence then quotes the thought, never text the source never said.
+            const held = sameText(chunk);
+            extracted.push(...thoughts.map((t) => (t.source_snippet && !held.includes(sameText(t.source_snippet.replace(/\.\.\.$/, ""))) ? { ...t, source_snippet: "" } : t)));
           }
 
-          // The decisions, each against the brain as it is now.
+          // The decisions, each against the brain as it is now, weighed at the trust the job's captures get.
           const seen = new Set<string>();
           const decided: Decided[] = [];
+          const effective = await ctx.caller.trust(req.trust ?? null);
           try {
-            for (const t of extracted) decided.push(await decide(ctx, t, seen, req.trust ?? null));
+            for (const t of extracted) decided.push(await decide(ctx, t, seen, effective));
           } catch (e) {
             if (!(e instanceof Unavailable)) throw e;
             await failJob(ctx, job.job_id, "the search was unavailable while deciding", calls);
@@ -771,7 +785,7 @@ export default definePlugin({
     }),
     list_jobs: operation({
       title: "Smart-ingest jobs",
-      description: "This key's jobs, newest first, each with its status and counts: what was extracted, added, skipped, appended, revised, already there (existed) and failed. status narrows to one status (dry_run_complete: dry runs waiting for execute_job; failed: with why). truncated says there are more than limit. get_job reads one job's items.",
+      description: "This key's jobs (a read key, which makes none, has none), newest first, at most 200 (no cursor: status narrows), each with its status and counts: what was extracted, added, skipped, appended, revised, already there (existed) and failed. status narrows to one status (dry_run_complete: dry runs waiting for execute_job; failed: with why). truncated says there are more than limit. get_job reads one job's items.",
       scope: "read",
       annotations: { openWorldHint: false },
       method: "GET",

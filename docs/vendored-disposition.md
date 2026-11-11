@@ -322,7 +322,7 @@ keep their rows below.
 | `GET`, `PUT`, `DELETE /thought/:id` | **served** — fetch, update and delete as above. Its tier escalation on update is sidecar: **moved to SMD-2280**. |
 | `GET /thought/:id/connections` | **moved to SMD-2280** — the entity-graph read. |
 | `PATCH /thought/:id/enrich` | **dropped** — a per-thought re-embed, re-classify and tier escalation. The nearest core operations work on pools: `POST /v1/workers/retry` requeues failed rows, and `POST /v1/workers/run` only previews (`dry_run`). |
-| `POST /ingest`, `GET /ingestion-jobs`, `GET /ingestion-jobs/:id`, `POST /ingestion-jobs/:id/execute` | **moved to SMD-2690** — the `smart-ingest` plugin's `ingest`, `list_jobs`, `get_job` and `execute_job` (PR 4). |
+| `POST /ingest`, `GET /ingestion-jobs`, `GET /ingestion-jobs/:id`, `POST /ingestion-jobs/:id/execute` | **moved to SMD-2690** — the `smart-ingest` plugin's `extract`, `list_jobs`, `get_job` and `execute_job` (PR 4). |
 | `GET /duplicates` | **dropped** — it calls `find_near_duplicates`, which no `.sql` in the tree defines. |
 | `POST /duplicates/resolve` | **dropped** — a raw merge and delete. A duplicate is retired by hand with `PATCH /v1/thoughts/{id}` `supersedes`, then `DELETE /v1/thoughts/{id}` if it should go. |
 | `GET /entities`, `GET /entities/:id` | **moved to SMD-2280** — the entity-graph read. They read the sidecar `entities` / `edges`, not migration 016's `ob1_entities`, and their integer ids never match a UUID. |
