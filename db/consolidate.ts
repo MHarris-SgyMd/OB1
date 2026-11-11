@@ -108,9 +108,9 @@
  * 429, a 503, the model not served), which makes no suspect (SMD-3311) — and
  * after it they are retried one at a time, one worker (SMD-2641): one that
  * errs again alone is recorded failed when a one-token call made at once
- * answers, or at its third outage alone with none answering. A follower probes once before it writes
- * anything, and refuses an unserved model, a refused key or a wrong base URL
- * with exit 2.
+ * answers, or at its third outage alone with none answering. A follower
+ * probes once before it writes anything, and refuses an unserved model, a
+ * refused key or a wrong base URL with exit 2.
  *
  * ── The key ─────────────────────────────────────────────────────────────────
  * `consolidate:<model>@p<prompt version>`. A different model or prompt is a
@@ -2212,14 +2212,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             let streakSuspect = false;
             /**
              * Another worker's outage halted this thought's streak mid-pause (SMD-2641): a suspect of that outage too when
-             * the streak could be its own — a crash meets every call in flight, and which worker's pauses end first, the
-             * outage's, is a race — so it is retried alone after it, not beside the rest. Not on a stopping pass.
+             * the streak could be its own — a crash meets every call in flight, and whose pauses end first, beginning the
+             * outage, is a race — so it is retried alone after it, not beside the rest, and says so (review pass 3). Not on
+             * a stopping pass.
              */
             const joinHalted = async (): Promise<void> => {
               if (stopping || outage.reason === null || !streakSuspect) return;
               outage.begin(outage.reason, b.thought_id);
               await backFirst(b.thought_id);
-              err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded (review pass 3)`);
+              err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded`);
             };
             for (let attempt = 0; outcome === null; attempt++) {
               try {

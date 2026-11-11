@@ -132,10 +132,10 @@
  * makes no suspect (SMD-3311) — and after it they are retried one at a time,
  * one worker (SMD-2641): one that errs again alone is its own fault, recorded
  * failed, when a one-token call made at once answers, or at its third outage
- * alone with none answering. Before it writes anything, the worker key's registration
- * included, a follower probes once. A model the provider does not serve, a
- * key it refuses or a wrong base URL exits 2 there, and an unreachable
- * provider is waited for.
+ * alone with none answering. Before it writes anything, the worker key's
+ * registration included, a follower probes once. A model the provider does
+ * not serve, a key it refuses or a wrong base URL exits 2 there, and an
+ * unreachable provider is waited for.
  * OB1_EXTRACT_ESCALATE_MODEL is checked by GET /models, which loads nothing:
  * refused where the list plainly leaves it out, waited for by name if the
  * start saw it and it goes missing, and a refusal at its first 404 if the
@@ -1690,14 +1690,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             let streakSuspect = false;
             /**
              * Another worker's outage halted this thought's streak mid-pause (SMD-2641): a suspect of that outage too when
-             * the streak could be its own — a crash meets every call in flight, and which worker's pauses end first, the
-             * outage's, is a race — so it is retried alone after it, not beside the rest. Not on a stopping pass.
+             * the streak could be its own — a crash meets every call in flight, and whose pauses end first, beginning the
+             * outage, is a race — so it is retried alone after it, not beside the rest, and says so (review pass 3). Not on
+             * a stopping pass.
              */
             const joinHalted = async (): Promise<void> => {
               if (stopping || outage.reason === null || !streakSuspect) return;
               outage.begin(outage.reason, b.thought_id);
               await backFirst(b.thought_id);
-              err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded (review pass 3)`);
+              err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded`);
             };
             for (let attempt = 0; outcome === null; attempt++) {
               try {

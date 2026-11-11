@@ -799,9 +799,9 @@ export const ALONE_OUTAGES = 3;
  * several workers that rule is a race — a poison thought's crash fails the innocent thought beside it as often as
  * itself — and a provider that crashes on a timer fails whichever suspect it meets first after the window opens. So,
  * once a probe answers, the follower retries the outage's suspects one at a time (`isolating`: one worker, a batch of
- * one, the pool's order, each suspect handed back at its front), and a suspect that errs again alone is blamed only on a probe made at once (`blames`, then
- * `blame`): answered, the provider is up while this thought fails — its own; no answer, an outage it was alone at, and
- * at the ALONE_OUTAGES-th its own. A new outage while isolating keeps the suspects not yet retried; isolation ends as
+ * one, the pool's order, each suspect handed back at its front), and a suspect that errs again alone is blamed only on
+ * a probe made at once (`blames`, then `blame`): answered, the provider is up while this thought fails — its own; no
+ * answer, an outage it was alone at, and at the ALONE_OUTAGES-th its own. A new outage while isolating keeps the suspects not yet retried; isolation ends as
  * each settles (finished, or recorded failed), when the isolated pass claims a thought none of them (`claimed`: they go
  * back at the pool's front, so those left are behind the backlog — edited, set back — or elsewhere: another process
  * holds them, or they were deleted), or past the window.

@@ -5163,9 +5163,7 @@ if (want("10")) {
   const crashedBy: string[] = [];
   /** While set, the call that crashes the provider hangs rather than answering 500: its deadline is the probe's to decide (review pass 1). */
   let crashHangs = false;
-  /** While above zero, the next probes answered find the model missing, one each, as while Ollama pulls it (review pass 1). */
-  let probeMissing = 0;
-  /** A probe answered when `callScript` has this many left: the model missing, or this status — the blame probe's own answer, armed by the stub, not raced from a poll (review pass 2). */
+  /** A probe answered when `callScript` has this many left: the model missing (as while Ollama pulls it), or this status — the blame probe's own answer, armed by the stub, not raced from a poll (review passes 1 and 2). */
   const probeAtScriptLeft = new Map<number, "missing" | number>();
   /** Calls the stub is up for in flight now, and the most at once once the crashes are spent: the isolated pass ended, the next with every worker. */
   let upCallsNow = 0;
@@ -5231,8 +5229,7 @@ if (want("10")) {
         if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
         const planned = probeAtScriptLeft.get(callScript.length);
         if (planned !== undefined) probeAtScriptLeft.delete(callScript.length);
-        if (probeMissing > 0 || planned === "missing") {
-          if (planned !== "missing") probeMissing--;
+        if (planned === "missing") {
           return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
         }
         if (typeof planned === "number") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: planned });
@@ -6055,11 +6052,8 @@ if (want("10")) {
     const restoreOutage = shortenOutage(1000, 2000);
     const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
     const created: string[] = [];
-    /**
-     * One follower (two workers, unless `o` says) over `texts`, seeded in order before it starts, until each is finished,
-     * the follower ends, or `ms` pass; then stopped. `during` runs beside it, reading its lines.
-     */
-    const followOver = async (texts: string[], ms: number, o: { workers?: number; follow?: number; timeout?: number; limit?: number; during?: (lines: string[]) => Promise<void> } = {}) => {
+    /** One follower (two workers, unless `o` says) over `texts`, seeded in order before it starts, until each is finished, the follower ends, or `ms` pass; then stopped. */
+    const followOver = async (texts: string[], ms: number, o: { workers?: number; follow?: number; timeout?: number; limit?: number } = {}) => {
       const ids: string[] = [];
       for (const text of texts) ids.push(await seed(text));
       created.push(...ids);
@@ -6071,9 +6065,7 @@ if (want("10")) {
         .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       let tookMs = -1;
       try {
-        const beside = o.during?.(lines);
         if (await pollUntil(async () => code !== -1 || (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms)) tookMs = Date.now() - startedAt;
-        await beside;
       } finally {
         ac.abort();
         await running;
@@ -6246,7 +6238,6 @@ if (want("10")) {
       inFlightMs = 0;
       crashProbes = 1;
       crashHangs = false;
-      probeMissing = 0;
       probeScript.length = 0;
       probeAtScriptLeft.clear();
       callScript.length = 0;
@@ -17508,9 +17499,9 @@ if (want("16")) {
     /**
      * One follower (two workers, unless `o` says) over pairs, each an older thought and a newer one sharing a subject,
      * the olders seeded first and then the newers in order, before it starts; until each newer is finished, the follower
-     * ends, or `ms` pass; then stopped. `during` runs beside it, reading its lines.
+     * ends, or `ms` pass; then stopped.
      */
-    const followOver = async (pairs: [string, string][], ms: number, o: { workers?: number; follow?: number; during?: (lines: string[]) => Promise<void> } = {}) => {
+    const followOver = async (pairs: [string, string][], ms: number, o: { workers?: number; follow?: number } = {}) => {
       const tags = pairs.map(() => `isolate-${axis}`);
       const axes = pairs.map(() => axis++);
       for (let i = 0; i < pairs.length; i++) created.push(await seed(pairs[i][0], axes[i], 3, [tags[i] + `-${i}`]));
@@ -17525,9 +17516,7 @@ if (want("16")) {
         .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       let tookMs = -1;
       try {
-        const beside = o.during?.(lines);
         if (await pollUntil(async () => code !== -1 || (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms)) tookMs = Date.now() - startedAt;
-        await beside;
       } finally {
         ac.abort();
         await running;
