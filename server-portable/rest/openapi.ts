@@ -67,6 +67,14 @@ const PLUGIN_ANSWERS = {
 };
 
 /**
+ * A query parameter: an object field as OpenAPI's deepObject, one parameter per field of it (`weights[overdue]=3`,
+ * SMD-4193), which openapi-fetch sends and the core reads (rest/app.ts, inputFromQuery).
+ */
+const queryParameter = (name: string, required: boolean, schema: Json): Json => ({
+  name, in: "query", required, schema, ...((schema as { type?: unknown }).type === "object" ? { style: "deepObject", explode: true } : {}),
+});
+
+/**
  * The document: every core operation, then the enabled plugins' (SMD-2310) —
  * each under its plugin's tag, its scope as a core operation's, and its
  * success described by the output schema its manifest declares.
@@ -80,7 +88,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
     const required = new Set((input.required ?? []) as string[]);
     const parameters: Json[] = fields.map((f) => ({ name: f, in: "path", required: true, schema: { type: "string" } }));
     if (readsQuery(op.method)) {
-      for (const [field, schema] of Object.entries(props)) parameters.push({ name: field, in: "query", required: required.has(field), schema });
+      for (const [field, schema] of Object.entries(props)) parameters.push(queryParameter(field, required.has(field), schema));
     }
     paths[op.path] ??= {};
     paths[op.path][op.method.toLowerCase()] = {
@@ -108,7 +116,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
     const required = new Set((input.required ?? []) as string[]);
     const parameters: Json[] = fields.map((f) => ({ name: f, in: "path", required: true, schema: { type: "string" } }));
     if (readsQuery(route.method)) {
-      for (const [field, schema] of Object.entries(props)) parameters.push({ name: field, in: "query", required: required.has(field), schema });
+      for (const [field, schema] of Object.entries(props)) parameters.push(queryParameter(field, required.has(field), schema));
     }
     paths[route.path] ??= {};
     paths[route.path][route.method.toLowerCase()] = {

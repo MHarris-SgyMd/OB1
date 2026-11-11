@@ -467,9 +467,10 @@ const FUNCTIONS = [
   // 125 (SMD-4149): an item's due time, and a thought's open items, for effective_priority's from_items terms.
   "ob1_priority_due(priority_assertions, text, text, boolean)",
   "ob1_thought_items(uuid, boolean)",
-  // 128 (SMD-4194): effective_priority's default weights, and the largest effective priority they allow.
+  // 128 (SMD-4194): effective_priority's default weights, and the largest effective priority they allow; 131 (SMD-4193) that largest under a read's own weights.
   "ob1_priority_defaults()",
   "ob1_priority_span()",
+  "ob1_priority_span(jsonb)",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",

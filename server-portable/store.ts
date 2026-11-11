@@ -2493,9 +2493,10 @@ export interface ThoughtStore {
   /**
    * The largest effective priority the brain's default weights allow (migration 128's ob1_priority_span, SMD-4194):
    * a critical level plus the largest urgency and unblocks terms. Search's priority_weight divides by it. A database
-   * before 128 throws.
+   * before 128 throws. `weights` (SMD-4193): the span under them laid over the defaults (migration 131's
+   * ob1_priority_span(jsonb), which checks them as 122 does and refuses a bad one 22023); a database before 131 throws.
    */
-  prioritySpan(): Promise<number>;
+  prioritySpan(weights?: Partial<PriorityWeights>): Promise<number>;
   /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
@@ -2514,6 +2515,8 @@ export interface ThoughtStore {
      * before `limit`. `due` needs migration 129; `priority` reads any brain from 123.
      */
     order?: AgendaOrder;
+    /** The call's own weights (SMD-4193), overriding the defaults by name: 123's agenda takes them and checks them as 122 does, refusing a bad one 22023. */
+    weights?: Partial<PriorityWeights>;
     /** A ceiling on the call's statement, in ms (plan_context's deadline, SMD-2684); a stricter role or database setting is kept. Past it the call throws 57014. */
     timeoutMs?: number;
   }): Promise<AgendaResult>;

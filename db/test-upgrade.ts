@@ -742,12 +742,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // key, statistics on a facet's key, a set door, a set close and the
   // threads' locks in key order — and redefines 113's two doors as sets of
   // one and 120's trigger function, refusing by name without 111, 113 or 120
-  // ([20bt]) — all recorded by the
+  // ([20bt]); 131 adds ob1_priority_span(jsonb), the span under a read's own
+  // weights, and restates query_log.filter's comment, refusing by name
+  // without 034 or 128 ([20bv]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 101, `030 is among the last one hundred and one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 102, `030 is among the last one hundred and two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5952,6 +5954,50 @@ console.log("\n[20bu] Migration 129: onto a populated brain at the file before i
     `applied: two agendas, the nine-argument wrapper and the ten-argument one; a nine-argument call reads as before, in the priority order; due lists the overdue Low first (${await agendas()} | ${keys(before)} → ${keys(after)} | ${keys(due)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the129 });
   assert(JSON.stringify(await nine()) === JSON.stringify(after) && await agendas() === "9,10", "a re-apply is a no-op: the same read, the same two functions");
+  await sql.close();
+}
+
+console.log("\n[20bv] Migration 131: onto a populated brain at the file before it — refused by name without 128's ob1_priority_defaults, nothing made; then applied: ob1_priority_span(jsonb) beside 128's, 9 under 122's weights, 5.8 under none, and the agenda under them puts an overdue Medium above a High with no date, which the defaults keep below it; a re-apply a no-op (SMD-4193)");
+{
+  const the131 = MIGRATIONS.find((f) => /^\d{3}_priority_span_weights\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the131 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ticket = async (issue: string, level: number, due: string | null) => {
+    const content = `upgrade 131: ${issue}`;
+    const meta = { source: "linear", issue, status: "Backlog", status_type: "backlog", project: "Upgrade 131", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    await sql`SELECT assert_priority('ticket', ${issue}, ${level}::int, ${due}::timestamptz, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  };
+  // A High with no date, a Medium overdue.
+  await ticket("SMD-9741", 3, null); await ticket("SMD-9742", 2, "2027-03-01T00:00:00Z");
+  const W122 = JSON.stringify({ soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 });
+  type A = { items: { key: string; effective: number }[] };
+  const agenda = async (weights: string | null) =>
+    ((await sql`SELECT agenda('{"project": "Upgrade 131"}'::jsonb, NULL, 100, false, false, false, (${weights}::text)::jsonb, '2027-03-10T15:00:00Z', false) AS a`)[0] as { a: A }).a;
+  const read = (a: A) => a.items.map((i) => `${i.key} ${i.effective}`).join(", ");
+  const spans = async () => Number((await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'ob1_priority_span'`)[0].n);
+  const before = read(await agenda(null));
+
+  // Without 128's defaults: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_priority_defaults() RENAME TO ob1_priority_defaults_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_priority_defaults_away() RENAME TO ob1_priority_defaults`;
+  assert(/^migration 131 needs 034 and 128 \(query_log, ob1_priority_defaults, ob1_priority_span and effective_priority\)/.test(without) && await spans() === 1,
+    `without 128's ob1_priority_defaults the file is refused by name, and only 128's span stands (${without.slice(0, 80)} | ${await spans()})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 });
+  const span = Number((await sql`SELECT ob1_priority_span((${W122}::text)::jsonb)::text AS s`)[0].s);
+  const span0 = Number((await sql`SELECT ob1_priority_span()::text AS s`)[0].s);
+  const after = read(await agenda(null)), weighed = read(await agenda(W122));
+  assert(await spans() === 2 && span === 9 && span0 === 5.8 && before === "SMD-9741 3, SMD-9742 2.6" && after === before && weighed === "SMD-9742 5, SMD-9741 3",
+    `applied: two spans, 9 under 122's weights and 5.8 under none; the defaults keep the overdue Medium below the High, and 122's weights put it above (${before} → ${after} | ${weighed})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the131 });
+  assert(Number((await sql`SELECT ob1_priority_span((${W122}::text)::jsonb)::text AS s`)[0].s) === 9 && await spans() === 2 && read(await agenda(null)) === after,
+    "a re-apply is a no-op: the same span, the same two functions, the same read");
   await sql.close();
 }
 
