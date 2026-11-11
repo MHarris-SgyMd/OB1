@@ -152,15 +152,17 @@ type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
  * every other writer does. Stable takes about 60 thoughts a day (2026-11-02):
  * the newest 80 alone would be a day and a half of a "weekly" digest.
  *
- * Within each group the rows go what matters most first, by effective priority
+ * Within each group the rows go what matters most first: open work before
+ * settled (a Done or Canceled ticket, a closed item, which keeps its level in
+ * the read: the maintainer, 2026-11-11), then by effective priority
  * (`docs/priority.md` decision 8, SMD-4112), then newest first; within a turn,
- * too. So a group's Urgent ticket is its first turn, and a key that states
+ * too. So a group's open Urgent ticket is its first turn, and a key that states
  * Urgent on all of its own captures still gets one row per day per turn (the
  * maintainer, 2026-11-11: priority within each share, not over it). The pick
  * is then said what matters most first, newest first among equals. With no
- * priority read, or none stated (every row unknown's 2), that is the turns by
- * recency and the newest first, the order before SMD-4112. A row with no
- * `group` keeps the turn readThoughts gave it.
+ * priority read, or none stated and nothing settled (every row unknown's 2),
+ * that is the turns by recency and the newest first, the order before
+ * SMD-4112. A row with no `group` keeps the turn readThoughts gave it.
  *
  * `importance` takes no part. It is retired (SMD-3661, decision 8): any key
  * could set it on its own rows, so ten captures carrying a high value ranked
@@ -178,7 +180,9 @@ export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_
   const at = (t: DigestThought) => times.get(t) ?? -Infinity;
   const newestFirst = (a: DigestThought, b: DigestThought) => (at(a) === at(b) ? 0 : at(a) < at(b) ? 1 : -1);
   const effective = (t: DigestThought) => t.priority?.effective ?? 0;
-  const mattersMost = (a: DigestThought, b: DigestThought) => effective(b) - effective(a);
+  // Closed work below open work by default (the maintainer, 2026-11-11), then by effective priority.
+  const settled = (t: DigestThought) => (t.priority?.settled ? 1 : 0);
+  const mattersMost = (a: DigestThought, b: DigestThought) => settled(a) - settled(b) || effective(b) - effective(a);
   // Each group's rows numbered again, what matters most first, then by readThoughts' own turn: Postgres' order to the
   // microsecond, then by id, where a JavaScript Date keeps milliseconds (review pass 3). A row without one, newest first.
   const turns = new Map<DigestThought, number>();
@@ -207,7 +211,7 @@ const dueWords = (iso: unknown) => (typeof iso === "string" && Number.isFinite(D
  * its open items, or inherited from the ticket or item it serves), then its due time or overdue, what it unblocks, and
  * whether it is settled, as effective_priority's terms say them; the level's words and a due time's are the MCP
  * replies' (render.ts). Null when the read knows nothing of it beyond unknown's level, settled or not: settled is
- * said beside a known priority, so a brain with none stated gets the prompt it got before.
+ * said beside a known priority, so a row with none known carries no field (a closed one still goes after open work).
  */
 export function priorityReason(p: DigestPriority | undefined): string | null {
   if (!p) return null;

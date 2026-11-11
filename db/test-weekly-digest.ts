@@ -154,6 +154,22 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const before = plainWeek.map(({ group: _g, ...t }) => t);
   ok(ids(pickForDigest(flat, 3)) === ids(pickForDigest(before, 3)) && ids(pickForDigest(flat, 3)) === "busy1,busy2,quiet",
     `with no priority stated the pick is the one before SMD-4112 (${ids(pickForDigest(flat, 3))})`);
+  // Closed work below open work (the maintainer, 2026-11-11): in board-sync's day a closed Urgent ticket's row, newest,
+  // after an open overdue Medium one and an open unknown one; listed after them too.
+  const closedUrgent: DigestPriority = { ...stated(4), settled: true };
+  const closedWeek = grouped([
+    { id: "closedUrgent", group: "board|9", created_at: at(9, 22), priority: closedUrgent },
+    { id: "openOverdue", group: "board|9", created_at: at(9, 8), priority: stated(2, [overdue]) },
+    { id: "openPlain", group: "board|9", created_at: at(9, 7), priority: unknown() },
+  ]);
+  ok(ids(pickForDigest(closedWeek, 2)) === "openOverdue,openPlain" && ids(pickForDigest(closedWeek)) === "openOverdue,openPlain,closedUrgent",
+    `closed work comes after open work, whatever its level, in its share and in the list (${ids(pickForDigest(closedWeek))})`);
+  // Two closed: between themselves, by priority.
+  const twoClosed = grouped([
+    { id: "closedLow", group: "g|9", created_at: at(9, 22), priority: { ...stated(1), settled: true } },
+    { id: "closedHigh", group: "g|9", created_at: at(9, 8), priority: { ...stated(3), settled: true } },
+  ]);
+  ok(ids(pickForDigest(twoClosed)) === "closedHigh,closedLow", `closed work orders by priority among itself (${ids(pickForDigest(twoClosed))})`);
   // Within a turn, what matters most first: two shares' first turns, a High and an unknown, the cap taking one.
   const within = grouped([
     { id: "newUnknown", group: "a|2", created_at: at(2, 20), priority: unknown() },

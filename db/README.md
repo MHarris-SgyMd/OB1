@@ -7204,7 +7204,9 @@ no `sensitivity_tier` column the run refuses rather than page every row, unless
 `--include-personal`): the import recipes set the facet and leave the column
 at its default (SMD-2493). The prompt takes a share of each day and writer
 (`metadata.actor_name`), a turn at a time, so neither a busy day nor one key's
-burst fills it, and each share what matters most first: by each thought's
+burst fills it, and each share what matters most first: open work before
+closed (a settled ticket or item keeps its level in the read; the maintainer,
+2026-11-11), then by each thought's
 effective priority (`docs/priority.md` decision 8, SMD-4112), read for the
 window (up to 5,000 rows) in calls of `effective_priority`'s 1,000, then newest
 first. A key stating Urgent on all its own captures still gets one row per day
