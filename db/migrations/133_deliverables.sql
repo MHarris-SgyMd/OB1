@@ -26,10 +26,13 @@
 --   1. AN EVENT is one row of deliverable_events: captured or verification.
 --      Each carries the deliverable's whole state after it (spec_ref,
 --      checkpoint, status), a verification its method and outcome, and its
---      maker stamped from the call's actor envelope (117's ob1_actor_maker:
---      the key's name, agent id, the registry's kind and trust, the
---      envelope's scope). Events never change: a trigger refuses every
---      UPDATE, DELETE and TRUNCATE, for the owner too (046's rule).
+--      maker, which the writers stamp from the call's actor envelope (117's
+--      ob1_actor_maker: the key's name, agent id, the registry's kind and
+--      trust, the envelope's scope). A role holding INSERT on the table writes
+--      any maker it names, as on 117's events: the maker, and the rule below
+--      that it does not verify its own, hold through the writers. Events never
+--      change: a trigger refuses every UPDATE, DELETE and TRUNCATE, for the
+--      owner too (046's rule).
 --   2. THE TRANSITIONS are the event's, checked by a trigger on every insert,
 --      the writers' and a raw one alike, under the deliverable's lock:
 --      * the first event of a thought is its capture, status unverified, of a
@@ -73,11 +76,16 @@
 --        deleted. STABLE, no actor.
 --      * ob1_deliverable_projection_drift() and
 --        ob1_rebuild_deliverable_projection(): 068's pattern.
---   5. CONCURRENCY. The writers and the event trigger take a transaction
---      advisory lock on the thought (ob1:deliverable:<id>) before they read
---      its events, and the writers raise above READ COMMITTED (116's
---      ob1_priority_isolation), so two verifications of one deliverable
---      queue and the second reads the first's status.
+--   5. CONCURRENCY. The writers, the event trigger and the facet's branch of
+--      the validator take a transaction advisory lock on the thought
+--      (ob1:deliverable:<id>) before they read its events, and raise above
+--      READ COMMITTED (116's ob1_priority_isolation), so two verifications of
+--      one deliverable queue and the second reads the first's status. An
+--      event's seq is drawn before its trigger runs, so a raw insert that
+--      waited on the lock while another event was written is refused 40001,
+--      to be made again: its seq would sort it below the event it follows.
+--      The projector locks the thought FOR KEY SHARE, so a delete in flight
+--      is waited out.
 --
 -- NOT HERE
 --   * The operations over REST and MCP, capture_deliverable and
@@ -174,7 +182,7 @@ CREATE TABLE IF NOT EXISTS deliverable_events (
   CONSTRAINT deliverable_events_scope      CHECK (actor_scope IS NULL OR (actor_scope <> '' AND length(actor_scope) <= 40))
 );
 COMMENT ON TABLE deliverable_events IS
-  'Every event of a deliverable (SMD-1715), in the order written (seq): its capture, then each verification, each carrying the deliverable''s whole state after it (spec_ref, checkpoint, status) and its maker stamped from the call''s actor envelope (never an argument); a verification its method and outcome. The status moves only unverified -> verified, unverified -> corrected, verified -> corrected or corrected -> verified (ob1_deliverable_transition_ok), checked on every insert by deliverable_events_transitions. Never changed: a trigger refuses UPDATE, DELETE and TRUNCATE. Written through record_deliverable and verify_deliverable; the thought''s `deliverable` facet is its projection. Migration 133 / SMD-1715.';
+  'Every event of a deliverable (SMD-1715), in the order written (seq): its capture, then each verification, each carrying the deliverable''s whole state after it (spec_ref, checkpoint, status) and its maker, which the writers stamp from the call''s actor envelope (never an argument; a role with INSERT on the table writes any maker it names, as on 117''s events); a verification its method and outcome. The status moves only unverified -> verified, unverified -> corrected, verified -> corrected or corrected -> verified (ob1_deliverable_transition_ok), checked on every insert by deliverable_events_transitions. Never changed: a trigger refuses UPDATE, DELETE and TRUNCATE. Written through record_deliverable and verify_deliverable; the thought''s `deliverable` facet is its projection. Migration 133 / SMD-1715.';
 COMMENT ON COLUMN deliverable_events.spec_ref IS
   'The thought the deliverable was meant to meet: the spec, any thought''s id (SMD-2683''s spec record is a thought too). Fixed at the capture. Migration 133 / SMD-1715.';
 COMMENT ON COLUMN deliverable_events.checkpoint IS
@@ -295,8 +303,21 @@ DECLARE
   p deliverable_events;
 BEGIN
   -- ob1:deliverable-transitions-on-the-event (133)
+  -- READ COMMITTED alone: above it the newest event read after the lock is the
+  -- transaction's old snapshot's, and a move from a status since replaced
+  -- would be admitted for good (review pass 1).
+  PERFORM ob1_priority_isolation('a deliverable event');
   PERFORM ob1_deliverable_lock(NEW.thought_id);
   SELECT * INTO p FROM deliverable_events WHERE thought_id = NEW.thought_id ORDER BY seq DESC LIMIT 1;
+  -- The identity seq is drawn before a BEFORE trigger runs, so an insert that
+  -- waited on the lock holds a seq below an event written meanwhile, and would
+  -- sort under it: the move it makes would read as older than the one it
+  -- follows (review pass 1). The writers lock before they insert and never
+  -- meet it; a raw insert that does is refused, to be made again.
+  IF p.seq > NEW.seq THEN
+    RAISE EXCEPTION USING ERRCODE = 'serialization_failure',
+      MESSAGE = format('deliverable %s took event %s while this insert, numbered %s, waited for its lock: make the insert again, after reading its status anew', NEW.thought_id, p.seq, NEW.seq);
+  END IF;
   IF NEW.event = 'captured' THEN
     IF p.id IS NOT NULL THEN
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
@@ -336,7 +357,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_event_check() IS
-  'BEFORE INSERT on deliverable_events, under the deliverable''s lock: a capture is a thought''s first event, of a thought that exists, citing a spec_ref that exists (both locked FOR KEY SHARE); every later event is a verification of a thought still there, keeping the capture''s spec_ref and checkpoint, its status one allowed move from the newest event''s (ob1_deliverable_transition_ok). check_violation naming what was refused, for the writers'' inserts and a raw one alike. Migration 133 / SMD-1715.';
+  'BEFORE INSERT on deliverable_events, under READ COMMITTED alone (0A000 above it) and the deliverable''s lock: an insert whose seq, drawn before the lock was waited on, is below the newest event''s is refused 40001, to be made again; a capture is a thought''s first event, of a thought that exists, citing a spec_ref that exists (both locked FOR KEY SHARE); every later event is a verification of a thought still there, keeping the capture''s spec_ref and checkpoint, its status one allowed move from the newest event''s (ob1_deliverable_transition_ok). check_violation naming what was refused, for the writers'' inserts and a raw one alike. Migration 133 / SMD-1715.';
 
 DROP TRIGGER IF EXISTS deliverable_events_transitions ON deliverable_events;
 CREATE TRIGGER deliverable_events_transitions
@@ -392,7 +413,9 @@ BEGIN
     -- their projection of the newest one, so a status moves by an event
     -- (verify_deliverable), whose trigger checks the move, and never by an
     -- UPDATE of the facet, forbidden or allowed. Under the deliverable's lock,
-    -- so the newest event read is the one a writer in flight leaves.
+    -- so the newest event read is the one a writer in flight leaves, and READ
+    -- COMMITTED alone, so that read is not an older snapshot's (review pass 1).
+    PERFORM ob1_priority_isolation('a deliverable facet');
     PERFORM ob1_deliverable_lock(NEW.thought_id);
     IF TG_OP = 'UPDATE' AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.thought_id IS DISTINCT FROM OLD.thought_id
                              OR NEW.created_at IS DISTINCT FROM OLD.created_at) THEN
@@ -678,7 +701,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate | distinct (distinct since 102), target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. For a subject (111): written standing, key a subject key (subject_key_valid), by one of metadata | first_line | model, judge_key a non-empty string of at most 200 characters; writes origin = derived; afterwards only its close, as a relation''s. For a relation since 120: one naming a subject key is a thread''s edge — relation evolves, the key a subject key (subject_key_valid), judge_key thread:<version>, no confidence — and writes origin = thread; any other must name no thread''s judge key, and writes origin = judged. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. For a deliverable (133): standing, on the thought it was written on, its payload exactly the projection of the thought''s deliverable_events (ob1_deliverable_payload), read under the deliverable''s lock; a thought with no events has none, and an UPDATE of its status, forbidden or allowed, is refused unless an event moved it first. Migrations 042, 053, 084, 102, 111, 120, 133.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate | distinct (distinct since 102), target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. For a subject (111): written standing, key a subject key (subject_key_valid), by one of metadata | first_line | model, judge_key a non-empty string of at most 200 characters; writes origin = derived; afterwards only its close, as a relation''s. For a relation since 120: one naming a subject key is a thread''s edge — relation evolves, the key a subject key (subject_key_valid), judge_key thread:<version>, no confidence — and writes origin = thread; any other must name no thread''s judge key, and writes origin = judged. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. For a deliverable (133): standing, on the thought it was written on, its payload exactly the projection of the thought''s deliverable_events (ob1_deliverable_payload), read under the deliverable''s lock and READ COMMITTED alone; a thought with no events has none, and an UPDATE of its status, forbidden or allowed, is refused unless an event moved it first. Migrations 042, 053, 084, 102, 111, 120, 133.';
 
 
 -- One standing deliverable per thought: the projection's row.
@@ -827,7 +850,15 @@ AS $$
 DECLARE
   v_want jsonb := ob1_deliverable_payload(p_thought);
 BEGIN
-  IF v_want IS NULL OR NOT EXISTS (SELECT 1 FROM thoughts WHERE id = p_thought) THEN
+  IF v_want IS NULL THEN
+    RETURN NULL;
+  END IF;
+  -- Locked, not just read: a delete in flight is waited out and then seen, where
+  -- a plain read saw the thought, the facet's cascade went under it and the
+  -- INSERT below failed its foreign key, taking a whole rebuild with it (review
+  -- pass 1).
+  PERFORM 1 FROM thoughts WHERE id = p_thought FOR KEY SHARE;
+  IF NOT FOUND THEN
     RETURN NULL;
   END IF;
   UPDATE thought_facets SET payload = v_want
@@ -839,7 +870,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_project(uuid) IS
-  'Makes one thought''s deliverable facet current from its events (ob1_deliverable_payload): replaced when it differs, written when there is none; returns the deliverable (ob1_deliverable_json), NULL for a thought with no capture or one deleted. Called by the writers under the deliverable''s lock, and by the rebuild. Migration 133 / SMD-1715.';
+  'Makes one thought''s deliverable facet current from its events (ob1_deliverable_payload): replaced when it differs, written when there is none; returns the deliverable (ob1_deliverable_json), NULL for a thought with no capture or one deleted. The thought is locked FOR KEY SHARE, so a delete in flight is waited out. Called by the writers under the deliverable''s lock, and by the rebuild. Migration 133 / SMD-1715.';
 
 -- Whether the call is the key that captured the deliverable: by its name, or
 -- by its agent id. Either is enough, so a call made without its agent id

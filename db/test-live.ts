@@ -31163,6 +31163,93 @@ if (want("48")) {
   }
 }
 
+if (want("49")) {
+  console.log("\n[49] Migration 133 on a real Postgres, beside other transactions: a second verification of one deliverable waits for the first and reads its status; a raw event that waited on the deliverable's lock while another was written is refused 40001, not sorted under it; the rebuild beside a delete of the thought waits it out and repairs the rest (SMD-1715 review pass 1)");
+  const owner = new SQL({ url: URL_!, max: 1 });
+  const A = new SQL({ url: URL_!, max: 1 }), B = new SQL({ url: URL_!, max: 1 });
+  const W = (name: string) => JSON.stringify({ name, scope: "write" });
+  const thought = async (label: string) =>
+    ((await owner`INSERT INTO thoughts (content, metadata) VALUES (${`[49] ${label}`}, '{}'::jsonb) RETURNING id::text AS id`)[0] as { id: string }).id;
+  const pidOf = async (c: SQL) => Number(((await c`SELECT pg_backend_pid() AS p`)[0] as { p: number }).p);
+  /** Whether backend `pid` waits on a lock (of wait event `event`, or any). */
+  const waits = async (pid: number, event: string | null) =>
+    Number(((await owner`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${pid} AND wait_event_type = 'Lock'
+      AND (${event}::text IS NULL OR wait_event = ${event})`)[0] as { n: number }).n) > 0;
+  const statuses = async (d: string) =>
+    ((await owner`SELECT status FROM deliverable_events WHERE thought_id = ${d}::uuid ORDER BY seq`) as { status: string }[]).map((r) => r.status).join(" ");
+  /** Hold a transaction on `c` open after `first`, until `release` is called; resolves with how it ended. */
+  const holding = (c: SQL, first: (tx: SQL) => Promise<unknown>) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let started!: () => void;
+    const begun = new Promise<void>((r) => { started = r; });
+    const ended = c.begin(async (tx) => { await first(tx as unknown as SQL); started(); await gate; }).then(() => "committed", (e: Error) => `failed: ${e.message.split("\n")[0]}`);
+    return { begun, release, ended };
+  };
+  try {
+    const spec = await thought("the spec"), d = await thought("the output");
+    await owner`SELECT record_deliverable(${d}, ${spec}, 'c0ffee', (${W("[49] maker")}::text)::jsonb)`;
+    const bPid = await pidOf(B);
+
+    // Two verifications at once: the second waits on the deliverable's lock, then reads the first's status.
+    const first = holding(A, (tx) => tx`SELECT verify_deliverable(${d}, 'verified', 'review', 'it meets the spec', (${W("[49] checker")}::text)::jsonb)`);
+    await first.begun;
+    const second = B`SELECT verify_deliverable(${d}, 'verified', 'review', 'it meets the spec too', (${W("[49] second checker")}::text)::jsonb) AS r`
+      .then((rows) => (rows[0] as { r: { outcome: string; code?: string; from?: string } }).r,
+        (e: { errno?: string; message: string }) => ({ outcome: `raised ${e.errno} ${e.message.split("\n")[0]}`, code: undefined, from: undefined }));
+    const secondWaited = await pollUntil(() => waits(bPid, "advisory"), 5000);
+    first.release();
+    const [firstEnd, secondR] = [await first.ended, await second];
+    assert(secondWaited && firstEnd === "committed" && secondR.code === "ILLEGAL_TRANSITION" && secondR.from === "verified" && await statuses(d) === "unverified verified",
+      `a second verification waits on the first's lock, then reads its status and is refused verified -> verified (waited ${secondWaited}; ${firstEnd}; ${JSON.stringify(secondR)}; ${await statuses(d)})`);
+
+    // A raw event that waited on the lock while a writer's event was written: its seq, drawn before it waited, is below
+    // the writer's, so it is refused 40001 rather than sorted under the move it follows.
+    let txA!: SQL;
+    const writer = holding(A, async (tx) => { txA = tx; await tx`SELECT ob1_deliverable_lock(${d}::uuid)`; });
+    await writer.begun;
+    const raw = B`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+      VALUES (${d}::uuid, 'verification', 'verified', ${spec}::uuid, 'c0ffee', 'raw', 'a raw verification', '[49] raw', false, now())`
+      .then(() => "inserted", (e: { errno?: string; code?: string; message: string }) => `${e.errno ?? e.code} ${e.message.split("\n")[0]}`);
+    const rawWaited = await pollUntil(() => waits(bPid, "advisory"), 5000);
+    // The holder writes its own event under the lock it holds, while the raw insert waits, then commits.
+    const viaWriter = ((await txA`SELECT verify_deliverable(${d}, 'corrected', 'rerun', 'a failing case', (${W("[49] checker")}::text)::jsonb) AS r`)[0] as { r: { outcome: string } }).r;
+    writer.release();
+    const [writerEnd, rawEnd] = [await writer.ended, await raw];
+    assert(rawWaited && viaWriter.outcome === "changed" && writerEnd === "committed"
+           && /^40001 deliverable \S+ took event \d+ while this insert, numbered \d+, waited for its lock/.test(rawEnd)
+           && await statuses(d) === "unverified verified corrected",
+      `a raw event that waited on the lock while a writer wrote is refused 40001, and the events read in the order made (waited ${rawWaited}; ${viaWriter.outcome}, ${writerEnd}; ${rawEnd.slice(0, 120)}; ${await statuses(d)})`);
+
+    // The rebuild beside a delete of a drifted deliverable's thought: it waits the delete out, writes nothing for that
+    // thought, and repairs the other in the same call (review pass 1: it saw the thought, its facet went by the cascade
+    // under it, and its INSERT failed the foreign key, taking every repair with it).
+    const gone = await thought("an output being deleted"), kept = await thought("an output whose facet drifted");
+    for (const t of [gone, kept]) await owner`SELECT record_deliverable(${t}, ${spec}, 'f00d', (${W("[49] maker")}::text)::jsonb)`;
+    await owner`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`;
+    await owner`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"verified"') WHERE thought_id IN (${gone}::uuid, ${kept}::uuid) AND kind = 'deliverable'`;
+    await owner`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`;
+    const drifted = ((await owner`SELECT thought_id::text AS t FROM ob1_deliverable_projection_drift()`) as { t: string }[]).map((r) => r.t).sort().join(" ");
+    const deleter = holding(A, (tx) => tx`DELETE FROM thoughts WHERE id = ${gone}::uuid`);
+    await deleter.begun;
+    const rebuild = B`SELECT ob1_rebuild_deliverable_projection() AS n`
+      .then((rows) => `rebuilt ${(rows[0] as { n: number }).n}`, (e: { errno?: string; message: string }) => `${e.errno} ${e.message.split("\n")[0]}`);
+    const rebuildWaited = await pollUntil(() => waits(bPid, null), 5000);
+    deleter.release();
+    const [deleteEnd, rebuildEnd] = [await deleter.ended, await rebuild];
+    const after = await owner`SELECT * FROM ob1_deliverable_projection_drift()`;
+    const keptStatus = ((await owner`SELECT payload->>'status' AS s FROM thought_facets WHERE thought_id = ${kept}::uuid AND kind = 'deliverable'`)[0] as { s: string }).s;
+    assert(drifted === [gone, kept].sort().join(" ") && rebuildWaited && deleteEnd === "committed" && /^rebuilt \d+$/.test(rebuildEnd)
+           && after.length === 0 && keptStatus === "unverified",
+      `the rebuild beside a delete of one drifted thought waits it out, writes nothing for it and repairs the other (waited ${rebuildWaited}; ${deleteEnd}; ${rebuildEnd}; drift after ${after.length}; ${keptStatus})`);
+  } finally {
+    await owner`DELETE FROM thoughts WHERE content LIKE '[49]%'`;
+    await A.close();
+    await B.close();
+    await owner.close();
+  }
+}
+
 console.log("\n[end] Every section this run ran left the node_state projection exact (SMD-3048)");
 // Every shard runs [end], on purpose: its assertion is no stray outside a section.
 sections.at("end", true);

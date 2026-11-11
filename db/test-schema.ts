@@ -19535,6 +19535,27 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
          && JSON.stringify(await facet(out)) === before,
     `below the tools: a raw UPDATE of the facet's status refused whether the move is forbidden or allowed, a close and a move refused, a facet with no events refused, a DELETE of it alone refused; a raw event's forbidden move, a move to the same status, a changed checkpoint, a second capture, a verification with no capture and a capture of no spec refused; an event's UPDATE, DELETE and TRUNCATE refused; the facet as it was (${Object.values(raw).map((r) => r.slice(0, 30)).join(" | ")})`);
 
+  // READ COMMITTED alone: above it a read of the newest event is an older snapshot's, so the writers, a raw event and a
+  // raw facet write are each refused 0A000 (review pass 1: the trigger and the validator checked no isolation, and a raw
+  // insert under REPEATABLE READ wrote a move from a status since replaced). Two sessions are test-live [49]'s.
+  const above = async (sql: string, params: unknown[] = []) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(sql, params); });
+      return "taken";
+    } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const isolated = [
+    await above(`SELECT verify_deliverable($1, 'corrected', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await above(`SELECT record_deliverable($1, $2, 'c', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]),
+    await above(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+                 VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, 'c0ffee', 'm', 'o', 'raw', false, now())`, [out, spec]),
+    await above(`UPDATE thought_facets SET payload = payload WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+  ];
+  assert(/^0A000 verify_deliverable must run under READ COMMITTED/.test(isolated[0]) && /^0A000 record_deliverable must run under READ COMMITTED/.test(isolated[1])
+         && /^0A000 a deliverable event must run under READ COMMITTED/.test(isolated[2]) && /^0A000 a deliverable facet must run under READ COMMITTED/.test(isolated[3])
+         && JSON.stringify(await facet(out)) === before,
+    `above READ COMMITTED the writers, a raw event and a raw facet write are refused 0A000, and the facet stands as it was (${isolated.map((r) => r.slice(0, 60)).join(" | ")})`);
+
   // The time zone: the payload's times are UTC text, so a session elsewhere computes the same projection.
   await db.exec(`SET TimeZone = 'Asia/Kolkata'`);
   const elsewhere = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);

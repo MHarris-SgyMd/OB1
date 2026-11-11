@@ -2675,7 +2675,8 @@ export const ROLE_GRANTS = Object.freeze({
   // deliverable_history. No UPDATE or DELETE on the events: a trigger refuses
   // them. The `deliverable` facet is their projection, written and replaced,
   // so INSERT on thought_facets, which only the structure group grants
-  // otherwise. A thought's existence and its KEY SHARE locks are the capture
+  // otherwise; Postgres grants it per table, so a role holding this group
+  // writes any facet kind, as one holding structure does. A thought's existence and its KEY SHARE locks are the capture
   // group's SELECT and UPDATE. Soft: a role without the group is refused the
   // deliverable calls, naming the table, and nothing else.
   deliverables: Object.freeze([

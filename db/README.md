@@ -2535,11 +2535,21 @@ deliverable does not verify it.
   by its name or its agent id). `deliverable_history` reads one;
   `ob1_deliverable_projection_drift` and `ob1_rebuild_deliverable_projection`
   are 068's pattern.
+- **Who made it.** The writers stamp each event's maker from the call's
+  envelope. A role holding INSERT on the table writes any maker it names, as
+  on 117's events, so the maker and `VERIFY_NOT_YOURS` hold through the
+  writers. The transitions hold for a raw insert too.
+- **Concurrency.** The writers, the event trigger and the facet's validator lock
+  the deliverable and refuse a transaction above READ COMMITTED. An event's
+  `seq` is drawn before its trigger runs, so a raw insert that waited on the
+  lock while another event was written is refused 40001, to be made again.
 
 The new **deliverables** grant group holds `SELECT, INSERT` on the events and
-`SELECT, INSERT, UPDATE` on `thought_facets`. The operations over REST and MCP
-are PR 2. Needs 042, 116, 117 and 120; a re-apply keeps the rows. test-schema
-[120], test-upgrade [20bx].
+`SELECT, INSERT, UPDATE` on `thought_facets`. Postgres grants INSERT per table,
+so a role holding the group can write any facet kind, as one holding the
+**structure** group can. The operations over REST and MCP are PR 2. Needs 042,
+116, 117 and 120; a re-apply keeps the rows. test-schema [120], test-upgrade
+[20bx], test-live [49].
 
 Migration 132 adds the operator's priority weights (SMD-4193 PR 2), which every
 read takes as its defaults: `priority_weight_settings`, one standing row at most,
@@ -2926,7 +2936,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
 | **deliverables** — deliverables (133, SMD-1715): a role whose clients record and verify deliverables through `record_deliverable` and `verify_deliverable`, or read them through `deliverable_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and its KEY SHARE locks are the **capture** group's `SELECT` and `UPDATE`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `deliverable_events` (133; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
-| | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise) | `SELECT, INSERT, UPDATE` |
+| | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise; Postgres grants it per table, so the group writes any facet kind, as structure does) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
