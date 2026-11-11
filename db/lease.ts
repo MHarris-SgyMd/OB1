@@ -706,6 +706,23 @@ export async function setBack(sql: SQL, job: string, workerId: string, id: strin
 }
 
 /**
+ * Hand this worker's claim on `id` back to the pool at its front (SMD-2641): pending, its attempt refunded, dated just
+ * before the oldest row pending or claimed under `job` — a suspect of a follower's provider outage, which the isolated
+ * pass after it claims before anything else, however the pool's dates tie (a backlog pooled in one statement). False
+ * when the claim is no longer this worker's.
+ */
+export async function setFront(sql: SQL, job: string, workerId: string, id: string): Promise<boolean> {
+  const rows = (await sql`
+    UPDATE thought_work_claims c
+       SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0),
+           enqueued_at = LEAST(c.enqueued_at, (SELECT min(o.enqueued_at) FROM thought_work_claims o
+                                                WHERE o.work_type = ${job} AND o.status IN ('pending', 'claimed')) - interval '1 millisecond')
+     WHERE c.thought_id = ${id}::uuid AND c.work_type = ${job} AND c.worker_id = ${workerId} AND c.status = 'claimed'
+    RETURNING 1 AS ok`) as { ok: number }[];
+  return rows.length > 0;
+}
+
+/**
  * The CLI's signals for a claim worker's pass: SIGINT and SIGTERM call the
  * pass's stop, and a stop that returns a release ends the process with 130
  * once the leases are returned, or after `graceMs` if they are not — leases

@@ -194,7 +194,7 @@ import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, setBack, setFront, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -2121,6 +2121,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       onLost: (ids) => { if (!hardStopped) errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`); },
       onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
     });
+    /**
+     * A suspect of this follower's outage handed back at the pool's front (SMD-2641, review pass 1), out of the
+     * heartbeat's set first; the database refusing it, the finally returns it with this worker's leases, where it stood.
+     */
+    const backFirst = async (id: string): Promise<void> => {
+      hb.held.delete(id);
+      const back = await setFront(sql, JOB, workerId, id).catch(() => null);
+      if (back === null) hb.held.add(id);
+    };
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
         // The last outage's suspects all retried (SMD-2641): the isolated pass ends, the next polled at once with every worker.
@@ -2151,11 +2160,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           }
           // Tracked under --limit only: a follower without one runs for months (review pass 4).
           if (LIMIT > 0) for (const b of batch) taken.add(b.thought_id);
-          if (batch.length === 0) {
-            // Nothing left to claim while retrying suspects: those left are not in this pool (SMD-2641).
-            if (isolated) outage.unpooled();
-            return;
-          }
+          if (batch.length === 0) return;
+          // A thought no suspect, its suspects at the pool's front: none is left there to retry (review pass 1).
+          if (isolated) for (const b of batch) outage.claimed(b.thought_id);
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           readAt = performance.now();
@@ -2205,8 +2212,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
              * the streak could be its own — a crash meets every call in flight, and which worker's pauses end first, the
              * outage's, is a race — so it is retried alone after it, not beside the rest. Not on a stopping pass.
              */
-            const joinHalted = (): void => {
-              if (!stopping && outage.reason !== null && streakSuspect) outage.begin(outage.reason, b.thought_id);
+            const joinHalted = async (): Promise<void> => {
+              if (stopping || outage.reason === null || !streakSuspect) return;
+              outage.begin(outage.reason, b.thought_id);
+              await backFirst(b.thought_id);
             };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
@@ -2313,23 +2322,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                     halt.abort();
                     const alone = blamed === "outage" ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES})` : "";
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
+                    // A suspect goes back at the pool's front, for the isolated pass to claim first (review pass 1).
+                    if (streakSuspect) await backFirst(b.thought_id);
                     return;
                   }
-                  if (blamed === "answered") {
+                  // Isolated, `begin` never says "thought": only the blame says whose.
+                  if (blamed !== "alone") {
                     outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg}` };
-                  } else if (blamed === "alone") {
+                  } else {
                     // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
                     // this worker stops after recording it.
-                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages running, the one-token call after each unanswered, so this thought's: ${msg}` };
+                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg}` };
                     outage.begin(msg);
                     providerStops++;
                     halt.abort();
-                    stopAfter = true;
-                  } else {
-                    // Again, right after the provider answered a probe: this
-                    // thought's own, recorded failed so it is visible rather than
-                    // cycling through the pool for ever.
-                    outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                     stopAfter = true;
                   }
                 } else if (act === "thought") {
@@ -2352,7 +2358,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // the thought goes back to the pool with the leases the finally
                   // returns (SMD-2401, SMD-2599); one whose streak could be its own
                   // joins the outage as its suspect (SMD-2641).
-                  joinHalted();
+                  await joinHalted();
                   return;
                 } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
@@ -2363,7 +2369,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
                   await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
                   if (stopping || outage.reason !== null) {
-                    joinHalted();
+                    await joinHalted();
                     return;
                   }
                 } else {
@@ -2630,10 +2636,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     lastPassIdle = before.pending + before.claimed === 0;
     // The last outage's suspects, while any is left to retry (SMD-2641), as extract-entities.ts's.
     isolated = !!FOLLOW && outage.isolating();
-    if (isolated && lastPassIdle) {
-      outage.unpooled();
-      isolated = false;
-    }
     if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) printCounts(before, "before");
     if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the pass goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a one-token call made at once`);

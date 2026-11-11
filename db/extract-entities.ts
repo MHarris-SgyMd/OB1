@@ -219,7 +219,7 @@ import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, setFront, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -1602,6 +1602,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       onLost: (ids) => { if (!hardStopped) errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`); },
       onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
     });
+    /**
+     * A suspect of this follower's outage handed back at the pool's front (SMD-2641, review pass 1), out of the
+     * heartbeat's set first; the database refusing it, the finally returns it with this worker's leases, where it stood.
+     */
+    const backFirst = async (id: string): Promise<void> => {
+      hb.held.delete(id);
+      const back = await setFront(sql, JOB, workerId, id).catch(() => null);
+      if (back === null) hb.held.add(id);
+    };
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
         // The last outage's suspects all retried (SMD-2641): the isolated pass ends, the next polled at once with every worker.
@@ -1632,11 +1641,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           }
           // Tracked under --limit only: a follower without one runs for months (review pass 4).
           if (LIMIT > 0) for (const b of batch) taken.add(b.thought_id);
-          if (batch.length === 0) {
-            // Nothing left to claim while retrying suspects: those left are not in this pool (SMD-2641).
-            if (isolated) outage.unpooled();
-            return;
-          }
+          if (batch.length === 0) return;
+          // A thought no suspect, its suspects at the pool's front: none is left there to retry (review pass 1).
+          if (isolated) for (const b of batch) outage.claimed(b.thought_id);
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           readAt = performance.now();
@@ -1683,8 +1690,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
              * the streak could be its own — a crash meets every call in flight, and which worker's pauses end first, the
              * outage's, is a race — so it is retried alone after it, not beside the rest. Not on a stopping pass.
              */
-            const joinHalted = (): void => {
-              if (!stopping && outage.reason !== null && streakSuspect) outage.begin(outage.reason, b.thought_id);
+            const joinHalted = async (): Promise<void> => {
+              if (stopping || outage.reason === null || !streakSuspect) return;
+              outage.begin(outage.reason, b.thought_id);
+              await backFirst(b.thought_id);
             };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
@@ -1833,23 +1842,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                     halt.abort();
                     const alone = blamed === "outage" ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES})` : "";
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
+                    // A suspect goes back at the pool's front, for the isolated pass to claim first (review pass 1).
+                    if (streakSuspect) await backFirst(b.thought_id);
                     return;
                   }
-                  if (blamed === "answered") {
+                  // Isolated, `begin` never says "thought": only the blame says whose.
+                  if (blamed !== "alone") {
                     outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg}` };
-                  } else if (blamed === "alone") {
+                  } else {
                     // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
                     // this worker stops after recording it.
-                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages running, the one-token call after each unanswered, so this thought's: ${msg}` };
+                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg}` };
                     outage.begin(msg);
                     providerStops++;
                     halt.abort();
-                    stopAfter = true;
-                  } else {
-                    // Again, right after the provider answered a probe: this
-                    // thought's own, recorded failed so it is visible rather than
-                    // cycling through the pool for ever.
-                    outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                     stopAfter = true;
                   }
                 } else if (act === "thought") {
@@ -1871,7 +1877,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // the thought goes back to the pool with the leases the finally
                   // returns (SMD-2401, SMD-2599); one whose streak could be its own
                   // joins the outage as its suspect (SMD-2641).
-                  joinHalted();
+                  await joinHalted();
                   return;
                 } else if (attempt < TRANSIENT_PAUSES_MS.length) {
                   err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
@@ -1885,7 +1891,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   const paused = inHand.get(workerId);
                   if (paused) paused.since = Date.now();
                   if (stopping || outage.reason !== null) {
-                    joinHalted();
+                    await joinHalted();
                     return;
                   }
                 } else {
@@ -2232,13 +2238,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (added > 0 || !FOLLOW) out(`  pool: ${added} thought(s) added`);
     total += before.pending + before.claimed;
     lastPassIdle = before.pending + before.claimed === 0;
-    // The last outage's suspects, while any is left to retry (SMD-2641): one worker, one thought a claim; none in the
-    // pool, none is left to retry.
+    // The last outage's suspects, while any is left to retry (SMD-2641): one worker, one thought a claim.
     isolated = !!FOLLOW && outage.isolating();
-    if (isolated && lastPassIdle) {
-      outage.unpooled();
-      isolated = false;
-    }
     if (lastPassIdle) return before;
     if (!FOLLOW || added > 0 || before.pending > 0) {
       printCounts(before, "before");
