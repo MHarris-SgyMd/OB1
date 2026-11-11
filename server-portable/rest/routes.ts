@@ -141,6 +141,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   // Priority assertions (SMD-3664, migration 116): an item by its kind and key in the path; a reason rides the body.
   set_priority: { method: "POST", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.set_priority },
   clear_priority: { method: "DELETE", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.clear_priority },
+  // The operator's weights every read takes as its defaults (SMD-4193 PR 2, migration 132): the weights in the body, {} to clear.
+  set_priority_weights: { method: "POST", path: "/v1/priority-weights", ok: 200, call: CALLS.set_priority_weights },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },

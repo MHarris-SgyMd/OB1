@@ -39,6 +39,7 @@ export const OPERATIONS = {
   search_thoughts_keyword: { method: "POST", path: "/v1/search/keyword" },
   set_item_status: { method: "POST", path: "/v1/items/{id}/status" },
   set_priority: { method: "POST", path: "/v1/priorities/{kind}/{key}" },
+  set_priority_weights: { method: "POST", path: "/v1/priority-weights" },
   task_status: { method: "GET", path: "/v1/status" },
   thought_changes: { method: "GET", path: "/v1/changes" },
   thought_stats: { method: "GET", path: "/v1/stats" },

@@ -2962,6 +2962,70 @@ console.log("\n[19b] A search's own priority weights through both doors (SMD-419
   assert(probes.length === 68 && disagree.length === 0, `the schema takes and refuses each weight's edges as effective_priority does (${probes.length} probes; ${disagree.join("; ") || "none disagree"})`);
 }
 
+console.log("\n[19c] The operator's priority weights through both doors (SMD-4193 PR 2, migration 132): an operator key sets 122's weights over REST, and MCP's same call writes nothing; the agenda and a ranked search then order by them for every key, a reader's included, the search's scale 9, a call's own weights still overriding them; brain_info says the setting; a key not classified operator refused 403, a read key's scope 403, bad weights 400 naming them; a stored setting the database refuses fails every ranked read, said with its mend; {} clears it");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const W127 = { soon: 0.4, week: 0.2, overdue: 0.6, unblocks_one: 0.1, unblocks_many: 0.2 };
+  // [17]'s board (the High with no date, the Medium due tomorrow) and [19b]'s search rows (the High, the Medium overdue).
+  const agendaQ = `/v1/agenda?project=${encodeURIComponent("Agenda rest [17]")}`;
+  const ask = { query: '"zephyr weights gamma"', limit: 10, priority_weight: 1 };
+  type It = { key: string; effective: number };
+  type Hit = { id: string; content?: string };
+  const board = (b: Record<string, unknown>) => ((b.items ?? []) as It[]).filter((i) => i.key === "SMD-9911" || i.key === "SMD-9912").map((i) => `${i.key} ${i.effective}`).join(", ");
+  const found = (b: Record<string, unknown>) => ((b.hits ?? []) as Hit[]).map((h) => /the High with no date/.test(h.content ?? "") ? "high" : /the Medium overdue/.test(h.content ?? "") ? "late" : null).filter(Boolean).join(" ");
+  const beforeBoard = board((await rest("GET", agendaQ)).body), beforeSearch = found((await rest("POST", "/v1/search", ask)).body);
+
+  const setR = await rest("POST", "/v1/priority-weights", { weights: W122 });
+  const setM = await mcp("set_priority_weights", { weights: { unblocks_many: 1, overdue: 3, soon: 2, week: 1, unblocks_one: 0.5 } });
+  assert(setR.status === 200 && setR.body.changed === true && same(setR.body.weights, W122) && setR.body.previous === null && setR.body.setBy === "writer"
+      && !setM.isError && setM.sc.changed === false && /^Unchanged: every read already takes soon 2, week 1, overdue 3, unblocks_one 0\.5, unblocks_many 1, the rest built in as its defaults \(set .* by writer\)\. Nothing was written\.$/.test(setM.text),
+    `an operator key sets 122's weights over REST (changed, none before, by its key); MCP's call with the same weights writes nothing, and says so (${setR.status} ${JSON.stringify(setR.body).slice(0, 120)} | ${setM.text.slice(0, 120)})`);
+
+  const [agR, agM, agReader, srR, srM, srCall] = [await rest("GET", agendaQ), await mcp("agenda", { project: "Agenda rest [17]" }), await rest("GET", agendaQ, undefined, KEYS.reader),
+    await rest("POST", "/v1/search", ask), await mcp("search_thoughts", ask), await rest("POST", "/v1/search", { ...ask, weights: W127 })];
+  const srP = srR.body.priority as { weights: unknown; span: number | null } | undefined;
+  assert(beforeBoard === "SMD-9911 3, SMD-9912 2.4" && beforeSearch === "high late"
+      && board(agR.body) === "SMD-9912 4, SMD-9911 3" && agR.body.weights === null && !agM.isError && same({ ...agM.sc, now: null }, { ...agR.body, now: null }) && same(agReader.body.items, agR.body.items)
+      && found(srR.body) === "late high" && srP?.weights === null && srP?.span === 9 && !srM.isError && found(srCall.body) === "high late",
+    `under the operator's 122's weights the agenda puts the Medium due tomorrow (4) above the High (3) over both doors and for a reader, its call's weights null; a ranked search puts the overdue Medium first over the scale 9; a call's 127 weights order as before (${beforeBoard} → ${board(agR.body)} | ${beforeSearch} → ${found(srR.body)} → ${found(srCall.body)} | span ${srP?.span})`);
+
+  const infoR = await rest("GET", "/v1/brain");
+  const infoM = await mcp("brain_info", {});
+  const pw = ((infoR.body.database ?? {}) as Record<string, unknown>).priorityWeights as { standing: { weights: unknown; setBy: string | null; refused: string | null } | null } | undefined;
+  assert(infoR.status === 200 && same(pw?.standing?.weights, W122) && pw?.standing?.setBy === "writer" && pw?.standing?.refused === null
+      && /\nPriority weights: +the operator's: soon 2, week 1, overdue 3, unblocks_one 0\.5, unblocks_many 1, the rest built in \(set \S+ by writer\)\n/.test(infoM.text),
+    `brain_info gives the operator's setting, its key and no refusal, and its text says it (${JSON.stringify(pw)?.slice(0, 160)} | ${infoM.text.split("\n").find((l) => l.startsWith("Priority weights"))})`);
+
+  // Refused: an agent's key 403, a read key's scope 403, bad weights 400 by the database's rule and by the schema, over both doors.
+  await sql`SELECT set_agent_kind('writer', 'agent')`;
+  const [agentR, agentM] = [await rest("POST", "/v1/priority-weights", { weights: { overdue: 2 } }), await mcp("set_priority_weights", { weights: { overdue: 2 } })];
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  const [readerR, capR, capM, rangeR] = [await rest("POST", "/v1/priority-weights", { weights: { overdue: 2 } }, KEYS.reader), await rest("POST", "/v1/priority-weights", { weights: { cap: 2 } }),
+    await mcp("set_priority_weights", { weights: { cap: 2 } }), await rest("POST", "/v1/priority-weights", { weights: { overdue: 11 } })];
+  assert(agentR.status === 403 && agentR.body.code === "REFUSED_NOT_OPERATOR" && agentM.isError && /may set the priority weights\. This key, writer, is classified agent/.test(agentM.text)
+      && readerR.status === 403 && readerR.body.code === "FORBIDDEN"
+      && capR.status === 400 && capR.body.code === "REFUSED_WEIGHTS" && same(capR.body.named, ["unblocks_many_at", "cap"]) && capM.isError && /^Refused: a weight out of range: cap is below unblocks_many_at/.test(capM.text)
+      && rangeR.status === 400 && rangeR.body.code === "REFUSED_INPUT"
+      && board((await rest("GET", agendaQ)).body) === "SMD-9912 4, SMD-9911 3",
+    `refused: a key classified agent 403 (and its MCP words), a read key's scope 403, cap below unblocks_many_at 400 naming both, a value out of range 400 by the schema; the setting stands (${agentR.status} ${readerR.status} ${capR.status} ${rangeR.status} ${rangeR.body.code})`);
+
+  // A stored setting the database refuses (the trigger off, as a later migration narrowing a range would leave one):
+  // every ranked read fails, saying the setting and how to mend it; brain_info says it; {} clears it.
+  await sql.unsafe(`ALTER TABLE priority_weight_settings DISABLE TRIGGER priority_weight_settings_history`);
+  await sql`UPDATE priority_weight_settings SET weights = '{"soon": 20}'::jsonb WHERE ended_at IS NULL`;
+  await sql.unsafe(`ALTER TABLE priority_weight_settings ENABLE TRIGGER priority_weight_settings_history`);
+  const [brokenR, brokenM, brokenS, brokenInfo] = [await rest("GET", agendaQ), await mcp("agenda", { project: "Agenda rest [17]" }), await mcp("search_thoughts", ask), await mcp("brain_info", {})];
+  assert(brokenR.status === 500 && brokenM.isError && /^Error: the operator's priority weights \(set \S+ by writer\) are refused, so no effective priority is read: a weight out of range: soon /.test(brokenM.text)
+      && /through set_priority_weights \(REST POST \/v1\/priority-weights\); brain_info shows the setting$/.test(brokenM.text) && brokenS.isError && /brain_info shows the setting$/.test(brokenS.text)
+      && /\nPriority weights: +the operator's, REFUSED, so every priority read fails: soon 20 /.test(brokenInfo.text),
+    `a stored setting the database refuses fails the agenda (500 over REST) and a ranked search, each saying the setting and its mend; brain_info says it refused (${brokenR.status} | ${brokenM.text.slice(0, 160)})`);
+  const clearR = await rest("POST", "/v1/priority-weights", { weights: {} });
+  assert(clearR.status === 200 && clearR.body.changed === true && clearR.body.weights === null && same(clearR.body.previous, { soon: 20 })
+      && board((await rest("GET", agendaQ)).body) === "SMD-9911 3, SMD-9912 2.4" && found((await rest("POST", "/v1/search", ask)).body) === "high late",
+    `{} clears it: the agenda and the search as before the setting (${clearR.status} ${JSON.stringify(clearR.body).slice(0, 120)})`);
+}
+
 console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_INFER_PRIORITY on, \"Urgent: … by Friday\" is stated High, due Friday, quoting both phrases, at the inferred tier by the capturing key — on the thought, or on each item the capture proposed from it; an operator's Low wins and the inferred statement stays in the history; effective_priority passes it over unless count_inferred; a re-capture makes no call and states nothing again; a capture key's on its own thought (the knob off: test-thoughts [18])");
 {
   type A = { id: string; item: { kind: string; key: string }; level: number; dueAt: string | null; reason: string | null; inferred: boolean; maker: { name: string; scope: string | null }; tierName: string; closedAt: string | null };

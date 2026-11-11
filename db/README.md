@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and thirty-one (131) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and thirty-two (132) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2505,6 +2505,29 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 132 adds the operator's priority weights (SMD-4193 PR 2), which every
+read takes as its defaults: `priority_weight_settings`, one standing row at most,
+its weights overrides by name over the brain's built-in weights. The maintainer
+chose (2026-11-11) that an operator key alone sets them, by `set_priority_weights`
+(the MCP tool and `POST /v1/priority-weights`, or the function in psql with the
+operator key's name and agent id as `p_actor`), and that a bad setting is refused
+when written and fails every read if one is stored anyway. 128's constant moves to
+`ob1_priority_builtin()`, which a retune of the brain's own defaults now replaces;
+`ob1_priority_defaults()` lays the standing setting over it, so `effective_priority`,
+the agenda, search's ranking and both spans take it, and a call's own weights still
+override it by name. `ob1_priority_weights_refusal` checks a setting in
+`effective_priority`'s words, by a copy of its rule that test-schema holds to it
+probe by probe. A row is history: it changes only to end, once, when the next
+setting or a clear (`{}`) replaces it, and a DELETE or TRUNCATE is refused. A
+stored setting the check refuses (a later migration narrowing a range, a raw write
+with the trigger off) raises 22000 on every read, naming the setting and the weight;
+`priority_weight_setting()` says it without raising, for `brain_info`. Its own
+table rather than an `ob1_config` row: the server's roles hold `SELECT` alone on
+`ob1_config`. The priority group gains `SELECT, INSERT, UPDATE` on the table, so a
+role granted that group before 132 must be granted again (`migrate.ts --grant`)
+or every priority read fails naming it. Needs 008, 046, 061, 116, 128 and 131; a
+re-apply keeps the rows. test-schema [119], test-upgrade [20bw].
+
 Migration 131 adds `ob1_priority_span(weights)` (SMD-4193 PR 1): 128's span
 under the defaults with a read's own weights laid over them. A call of the agenda
 or of `search_thoughts` may now pass weights (the maintainer, 2026-11-10), and a
@@ -2857,6 +2880,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE); board-sync's role, which states Linear's priorities on the tickets, and an ingester's, which states its records' (SMD-3666). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
+| | `priority_weight_settings` (132; the operator's weights, which every effective priority reads; a row changes only to end, once, and a DELETE and TRUNCATE are refused by trigger, for the owner too; `set_priority_weights` admits an operator key alone; the identity `id` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
 | | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
 | **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |

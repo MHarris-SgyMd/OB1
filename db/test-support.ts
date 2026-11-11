@@ -81,6 +81,8 @@ const TABLES = [
   "priority_assertions",
   "priority_current",
   "priority_sources",
+  // 132's operator's weights (SMD-4193 PR 2): no foreign key either way; its CASCADE takes its triggers.
+  "priority_weight_settings",
   // 117's open items (SMD-3665): no foreign key either way — an event, a
   // projection row and a proposal name their item by id, not a reference —
   // so their place is free. Each CASCADE takes the helpers whose arguments or
@@ -471,6 +473,12 @@ const FUNCTIONS = [
   "ob1_priority_defaults()",
   "ob1_priority_span()",
   "ob1_priority_span(jsonb)",
+  // 132 (SMD-4193 PR 2): the built-in weights, their refusal, the setting's guard, its write and its read.
+  "ob1_priority_builtin()",
+  "ob1_priority_weights_refusal(jsonb)",
+  "ob1_priority_weight_settings_guard()",
+  "set_priority_weights(jsonb, jsonb)",
+  "priority_weight_setting()",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
   "ob1_priority_owns_item(text, text, uuid, text)",

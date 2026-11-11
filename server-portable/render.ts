@@ -30,6 +30,7 @@ import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
+import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
@@ -597,6 +598,9 @@ export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolea
  * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
  */
 export function priorityHint(msg: string): string {
+  // The operator's stored weights refused, or unreadable (migration 132): every ranked read fails alike.
+  const setting = weightSettingHint(msg);
+  if (setting) return setting;
   // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span. Under
   // a call's own weights (SMD-4193) the scale is 131's ob1_priority_span(jsonb): a brain before 131 lacks that alone.
   return /ob1_priority_span\(jsonb\)/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -1932,26 +1936,65 @@ export function renderResetCaptureStamp(o: Outcome<StampReset, StampResetCode>):
       + "Until you do, the next classified key that can read to re-capture it is the one weighed. fetch's label, or thought_changes, shows which way it went.";
   }, (r) => {
     switch (r.code) {
-      case "REFUSED_NOT_OPERATOR": {
-        // The fix depends on what the key is (review pass 2): an unclassified
-        // key may be the operator's, and its line is given; a key classified
-        // otherwise is someone else's, and classifying it operator would
-        // raise the trust of everything it writes.
-        const key = snipText(r.key, 80);
-        const lead = "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.";
-        if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
-        // The line only for a name set_agent_kind takes as written — no
-        // control character, nothing it trims — or the line would classify
-        // another label (review pass 3: a mangled name created an operator row).
-        const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
-        if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
-        return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
-      }
+      case "REFUSED_NOT_OPERATOR": return notOperatorText(r, "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.");
       case "REFUSED_NOT_CAPTURE_STAMP": return `Refused: ${r.id}'s label is not one a reset can put back — a capture-only key did not capture it (or captured it before the server marked such captures), or its text was changed since. Its label is its writer's: a text edit restamps it.`;
       default: return mutationRefusalText(r);
     }
   }, (v) => ({ id: v.id, reset: v.reset, restored: v.restored, declines: v.declines, actorKind: oneOf(SAID_BY, v.stamp.actorKind), trust: oneOf(TRUST, v.stamp.trust) }));
 }
+
+/**
+ * An operator-only call refused (086's reset, 132's weights): what the key is, and the fix that fits it (review pass
+ * 2): an unclassified key may be the operator's, and its line is given; a key classified otherwise is someone else's,
+ * and classifying it operator would raise the trust of everything it writes.
+ */
+function notOperatorText(r: Extract<Refusal, { code: "REFUSED_NOT_OPERATOR" }>, lead: string): string {
+  const key = snipText(r.key, 80);
+  if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
+  // The line only for a name set_agent_kind takes as written — no
+  // control character, nothing it trims — or the line would classify
+  // another label (review pass 3: a mangled name created an operator row).
+  const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
+  if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
+  return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
+}
+
+/**
+ * The operator's priority weights (SMD-4193 PR 2, migration 132): what every read now takes as its defaults, and what
+ * it replaced. A call's own weights still override them by name.
+ */
+export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>): Reply {
+  return render(o, (v) => {
+    const now = v.weights ? `${weightsText(v.weights)}, the rest built in` : "the built-in weights";
+    if (!v.changed) return `Unchanged: every read already takes ${now} as its defaults${v.weights && v.setAt ? ` (set ${v.setAt}${v.setBy ? ` by ${snipText(v.setBy, 80)}` : ""})` : ""}. Nothing was written.`;
+    const before = v.previous ? `${weightsText(v.previous)}, the rest built in` : "the built-in weights";
+    return `${v.weights ? "Set" : "Cleared"} the operator's priority weights: every read now takes ${now} as its defaults, and a call's own weights still override them by name. Before: ${before}.`
+      + (v.weights ? " A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it." : "");
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
+    : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+    : unknownRefusal(r),
+  (v) => ({ changed: v.changed, weights: v.weights, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
+}
+
+/** set_priority_weights' fault: a database before 132 has no such function. */
+export const setWeightsHint = (msg: string): string =>
+  /set_priority_weights/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 132 (db/migrations/132_priority_weight_setting.sql) is not applied"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — the server's role needs the priority group's grants on priority_weight_settings (migration 132; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
+/**
+ * The fault every priority read gives while the operator's stored weights are refused (migration 132): a later
+ * migration narrowed a range under them, or a raw write. The read fails rather than order by weights the operator did
+ * not choose; this says how to mend it.
+ */
+export const weightSettingHint = (msg: string): string =>
+  /the operator's priority weights \(set .*\) are refused/.test(msg)
+    ? " — an operator key sets them again, or clears them with {}, through set_priority_weights (REST POST /v1/priority-weights); brain_info shows the setting"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — every priority read takes the operator's weights from priority_weight_settings (migration 132), and the server's role needs the priority group's grants on it (db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
 
 /** reset_capture_stamp's fault: a database before 086 has no such function. */
 export const resetHint = (msg: string): string =>

@@ -3332,10 +3332,11 @@ else {
       assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim and release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
-      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing.
-      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
+      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing; 132's
+      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE: set_priority, clear_priority and set_priority_weights fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
-             "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
+             `…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it (${missingBoth.out.split("\n").find((l) => /!  priority\s/.test(l))?.trim()})`);
       // 117's items group (SMD-3665 PR 2): soft too — the writes it lacks named, the open-item writers alone failing.
       assert(/!  open items\s+the server's role holds no open_item_events INSERT, open_items INSERT, open_items UPDATE, open_items DELETE, open_item_close_proposals INSERT, open_item_close_proposals UPDATE: the open-item writers \(open_item, update_item, set_item_status, propose_item_close and decide_item_close\) fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups items/.test(missingBoth.out),
@@ -3354,6 +3355,10 @@ else {
       await claims.unsafe("REVOKE SELECT ON open_items FROM ob1_pf_capture");
       const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
+      // 132's operator's weights (SMD-4193 PR 2): without SELECT on them every priority read fails, and the row says so.
+      await claims.unsafe("REVOKE SELECT ON priority_weight_settings FROM ob1_pf_capture");
+      const noWeights = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_weight_settings TO ob1_pf_capture");
       // The threads row (SMD-3306 PR 7a-2c, review pass 4): without SELECT on thought_facets it warns with the grant, never
       // skips as if 120 were not applied — the read's unread entry reaches the row.
       await claims.unsafe("REVOKE SELECT ON thought_facets FROM ob1_pf_capture");
@@ -3366,6 +3371,8 @@ else {
       assert(/, and so does agenda \(SMD-3669\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\); plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
              && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
+      assert(/priority_weight_settings SELECT[^:]*: .*set_priority_weights fail naming the table, and so does every priority read — agenda and search_thoughts' priority_weight and min_priority \(migration 132\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
+        `…and without SELECT on the operator's weights, the priority row says every priority read fails (${rowOf(noWeights.out, "priority").trim().slice(-260)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.

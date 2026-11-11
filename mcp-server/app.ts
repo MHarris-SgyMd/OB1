@@ -343,6 +343,7 @@ const WORDS: Record<ToolName, Words> = {
   // Priority assertions (SMD-3664).
   set_priority: { render: (o) => say.renderSetPriority(o), fault: writeFault("set_priority failed: ") },
   clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },
+  set_priority_weights: { render: (o) => say.renderSetPriorityWeights(o), fault: writeFault("set_priority_weights failed: ", say.setWeightsHint) },
   priority_history: { render: (o) => say.renderPriorityHistory(o), fault: readFault() },
   // Open items (SMD-3665 PR 2).
   open_item: { render: (o) => say.renderOpenItem(o), fault: writeFault("open_item failed: ") },
@@ -353,7 +354,7 @@ const WORDS: Record<ToolName, Words> = {
   item_history: { render: (o) => say.renderItemHistory(o), fault: readFault() },
   list_items: { render: (o) => say.renderListItems(o), fault: readFault() },
   // The agenda (SMD-3669).
-  agenda: { render: (o) => say.renderAgenda(o), fault: readFault() },
+  agenda: { render: (o) => say.renderAgenda(o), fault: readFault(() => say.weightSettingHint) },
   // plan_context (SMD-2684).
   plan_context: { render: (o) => say.renderPlanContext(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
