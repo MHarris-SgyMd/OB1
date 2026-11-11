@@ -4338,6 +4338,10 @@ console.log("\n[26] plan_context's query_log row (migration 126, SMD-2684): one 
     const [searchAfter, planAfter] = [await count("search"), await count("plan_context")];
     const [row] = await sql`SELECT tool, query, match_count, arm, result_ids::text[] AS ids, result_items FROM query_log WHERE kind = 'plan_context' AND query = 'what is "kestrel plan"' ORDER BY logged_at DESC LIMIT 1`;
     const shown = [...text.matchAll(/^ID: ([0-9a-f-]{36})$/gm)].map((m) => m[1]);
+    // SMD-4212: through the real search and server, this suite's embedding (not the one the bar was measured on) gives
+    // the little_not_measured note, naming it as the server's settings do.
+    assert(text.includes(`A note, not a gap: whether the brain has little on this is not measured for this embedding ("${EMBEDDING_MODEL}@${EMBEDDING_DIM}"; the bar was measured on "qwen3-embedding:4b@1024")`),
+      `the little note names this server's embedding through the real read (${text.match(/- A note, not a gap.*/)?.[0]?.slice(0, 160)})`);
     assert(planAfter === planBefore + 2 && searchAfter === searchBefore && defaultLimit === 8 && row?.tool === "plan_context" && row.query === 'what is "kestrel plan"' && row.match_count === 5 && row.arm === "current"
         && JSON.stringify(row.ids) === JSON.stringify(shown) && row.ids.includes(note) && Array.isArray(row.result_items)
         && row.result_items.some((i: { key: string }) => i.key === "KES-1"),

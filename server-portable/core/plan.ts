@@ -191,11 +191,35 @@ export type PlanBoard =
     }
   | { available: false; reason: BoardNotRead; waitsOn: string[] };
 
+/**
+ * Where "the brain has little on this" begins (SMD-4212), measured once in its PR 1 (evals/eval-little.ts; the ticket's
+ * comment 7689f339): no knowledge hit with a similarity of LITTLE_BAR or more, on the embedding LITTLE_MEASURED_ON. On
+ * 40 held-out requests it scored 0.885 balanced accuracy and 0.789 precision. Similarity is the embedding's own scale,
+ * so on any other the bar is not applied and a note says it was not measured there. A request whose ticket the brain
+ * holds only as its board record reads as covered: its own record is a close match.
+ */
+export const LITTLE_BAR = 0.74;
+export const LITTLE_MEASURED_ON = "qwen3-embedding:4b@1024";
+/**
+ * The hits the bar was measured over: the first 8 in the search's order (plan_context's default limit). A larger limit
+ * reads its first 8, as measured; a smaller one reads what it has. On the 80 measured requests, the best of the first
+ * 1, 3 or 5 hits made the same call as the best of 8 on every one (review pass 1), though an exact-literal hit ranks
+ * first whatever its similarity.
+ */
+export const LITTLE_HITS = 8;
+
 export type PlanGap =
   | { gap: "no_knowledge" }
   | { gap: "all_superseded"; hits: number }
   | { gap: "ingested_only"; hits: number }
   | { gap: "semantic_unavailable"; reason: string }
+  /**
+   * The best similarity of the first LITTLE_HITS hits under LITTLE_BAR, on the embedding it was measured on: the brain
+   * may hold little here. Null: no hit read has a similarity.
+   */
+  | { gap: "little"; topSimilarity: number | null; bar: number; embeddingId: string }
+  /** A note, not a coverage gap: this server's embedding is not the one the bar was measured on, so no bar is applied. */
+  | { gap: "little_not_measured"; topSimilarity: number | null; embeddingId: string; measuredOn: string }
   | { gap: "tickets_missing"; keys: string[]; more?: number }
   | { gap: "tickets_not_read"; count: number }
   | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number }
@@ -267,12 +291,13 @@ export function toolsFor(ctx: Pick<Ctx, "env">, principal: Pick<Principal, "scop
 const ingested = (h: { metadata?: Record<string, unknown> | null }) => h.metadata?.trust === "ingested";
 
 /**
- * The gaps the knowledge section shows: no hit at all, every hit superseded, every hit outside text, no vector. Not
- * how relevant the hits are: the search keeps its nearest matches whatever their similarity, which each hit says. The
- * bar for "little on this" is SMD-4212's: measured in its PR 1 (evals/eval-little.ts) as the best hit's similarity
- * below 0.74 on qwen3-embedding:4b@1024, and raised as a gap in its PR 2.
+ * The gaps the knowledge section shows: no hit at all, every hit superseded, every hit outside text, no vector, and,
+ * given the embedding the search ran on (`<model>@<dim>`), little on this (SMD-4212): the best similarity of the first
+ * LITTLE_HITS hits under LITTLE_BAR, or a note that no bar is measured for that embedding. A hit with no similarity
+ * counts as 0, as the measurement read it, and none having one is said as no similarity. No vector (the hits are exact
+ * matches), no hit, or no embedding named: no little gap.
  */
-export function knowledgeGaps(hits: readonly Pick<SearchHit, "supersededBy" | "metadata">[], vectorFailed: QueryVectorFailed | undefined): PlanGap[] {
+export function knowledgeGaps(hits: readonly Pick<SearchHit, "supersededBy" | "metadata" | "similarity">[], vectorFailed: QueryVectorFailed | undefined, embeddingId?: string): PlanGap[] {
   const gaps: PlanGap[] = [];
   if (vectorFailed) gaps.push({ gap: "semantic_unavailable", reason: vectorFailed.reason });
   if (hits.length === 0) gaps.push({ gap: "no_knowledge" });
@@ -280,7 +305,20 @@ export function knowledgeGaps(hits: readonly Pick<SearchHit, "supersededBy" | "m
     if (hits.every((h) => h.supersededBy !== null)) gaps.push({ gap: "all_superseded", hits: hits.length });
     if (hits.every(ingested)) gaps.push({ gap: "ingested_only", hits: hits.length });
   }
+  if (!vectorFailed && hits.length && embeddingId !== undefined) {
+    const sims = hits.slice(0, LITTLE_HITS).map((h) => h.similarity).filter((s): s is number => typeof s === "number");
+    const topSimilarity = sims.length ? Math.max(...sims) : null;
+    if (embeddingId !== LITTLE_MEASURED_ON) gaps.push({ gap: "little_not_measured", topSimilarity, embeddingId, measuredOn: LITTLE_MEASURED_ON });
+    else if ((topSimilarity ?? 0) < LITTLE_BAR) gaps.push({ gap: "little", topSimilarity, bar: LITTLE_BAR, embeddingId });
+  }
   return gaps;
+}
+
+/** The embedding this server searches with, as `<model>@<dim>` (the form SMD-4212's bar names); undefined when the context can't say. */
+export function embeddingIdOf(ctx: Partial<Pick<Ctx, "embedConfig">>): string | undefined {
+  if (typeof ctx.embedConfig !== "function") return undefined;
+  const c = ctx.embedConfig();
+  return `${c.embeddingModel}@${c.embeddingDim}`;
 }
 
 const sqlState = (e: unknown) => String((e as { errno?: unknown; code?: unknown })?.errno ?? (e as { code?: unknown })?.code ?? "");
@@ -350,7 +388,7 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
   const r = await (opts.search ?? planSearch)(ctx, principal, { query: request, limit: input.limit, signal: stop });
   if (r.refusal) return refuse(r.refusal);
   const { rows, hits } = r;
-  const gaps = knowledgeGaps(hits, r.vectorFailed);
+  const gaps = knowledgeGaps(hits, r.vectorFailed, embeddingIdOf(ctx));
 
   // Board: the named tickets, in one agenda call, with what is left of the deadline.
   const named = boardKeysOf(hits);

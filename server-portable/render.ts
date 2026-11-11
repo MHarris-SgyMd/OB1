@@ -69,6 +69,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** An embedding as `<model>@<dim>` (qwen3-embedding:4b@1024, an OpenAI or Ollama name, Cloudflare's leading @): no space, so no sentence. */
+const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -97,6 +99,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
   if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
+  // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
+  if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -2573,6 +2577,9 @@ export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => ren
   : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
   : unknownRefusal(r), AS_JSON);
 
+/** A similarity to three places, rounded down, so a value under a bar never prints as the bar (0.7399 is 0.739, not 0.740). */
+const simDown = (x: number): string => (Math.floor(x * 1000) / 1000).toFixed(3);
+
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {
   switch (g.gap) {
@@ -2580,6 +2587,8 @@ const gapWords = (g: PlanGap): string => {
     case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
     case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
+    case "little": return `Little on this: ${g.topSimilarity === null ? "no hit has a similarity (exact matches alone)" : `the best hit's similarity is ${simDown(g.topSimilarity)}`}, under ${g.bar}, where the brain was measured to hold little that bears on a request (SMD-4212, on ${quoted(g.embeddingId, 80)}). A coverage signal, not a verdict: weigh the hits.`;
+    case "little_not_measured": return `A note, not a gap: whether the brain has little on this is not measured for this embedding (${quoted(g.embeddingId, 80)}; the bar was measured on ${quoted(g.measuredOn, 80)})${g.topSimilarity === null ? "; no hit has a similarity" : `; the best hit's similarity is ${simDown(g.topSimilarity)}, on that embedding's own scale`}.`;
     case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}${g.more ? ` and ${g.more} more` : ""}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
     case "trimmed": return `Cut to keep this reply readable: ${[
@@ -2656,7 +2665,8 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
   // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
   // A budget cut is no coverage gap (review pass 1): the weighing line stands whenever nothing else is found.
-  const found = v.gaps.filter((g) => g.gap !== "trimmed");
+  // Nor is a bar not measured for this embedding (SMD-4212): it finds nothing, so the weighing line stands beside it.
+  const found = v.gaps.filter((g) => g.gap !== "trimmed" && g.gap !== "little_not_measured");
   out.push("\n## Gaps", ...v.gaps.map((g) => `- ${gapWords(g)}`),
     ...(found.length ? [] : [`- ${v.gaps.length ? "Nothing else found" : "None found"}. How close the hits are to the request is each hit's match; weigh them before relying on them.`]));
   return out.join("\n");
