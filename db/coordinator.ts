@@ -82,6 +82,7 @@ import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, typ
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
+import { startRelay, type Relay } from "./slot-relay.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
 import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S, rowWriter } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
@@ -183,8 +184,26 @@ export const CHILDREN: Record<ChildName, Child> = {
 
 /** Every setting some child owns: handed to no child that does not. */
 export const OWNED: ReadonlySet<string> = new Set(Object.values(CHILDREN).flatMap((c) => c.own));
-/** The coordinator's own settings, handed to no child. PORT is the server's, which no pass reads. */
-export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT"];
+/**
+ * The coordinator's own settings, handed to no child. PORT is the server's, which no pass reads. The slot broker's URL
+ * and key are the brain's own to the host's broker (SMD-3379 PR 3b-1): only the coordinator holds them, and its
+ * children ask through it (docs/brain-coordinator.md, row 2).
+ */
+export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT", "OB1_SLOT_BROKER_URL", "OB1_SLOT_BROKER_KEY"];
+
+/**
+ * The relay's settings, where both are set: the broker's WebSocket URL and the brain's key to it; else null, and no
+ * child is started with a channel. A URL that is no ws:// or wss:// one is said, and null. Pure.
+ */
+export function relaySettings(env: Record<string, string | undefined>): { url: string; key: string } | { problem: string } | null {
+  const url = env.OB1_SLOT_BROKER_URL?.trim(), key = env.OB1_SLOT_BROKER_KEY?.trim();
+  if (!url && !key) return null;
+  if (!url || !key) return { problem: `coordinator: ${url ? "OB1_SLOT_BROKER_KEY" : "OB1_SLOT_BROKER_URL"} is unset beside ${url ? "OB1_SLOT_BROKER_URL" : "OB1_SLOT_BROKER_KEY"} — no slot relay; the passes keep their own shares` };
+  let u: URL | null = null;
+  try { u = new URL(url); } catch { u = null; }
+  if (!u || (u.protocol !== "ws:" && u.protocol !== "wss:")) return { problem: `coordinator: OB1_SLOT_BROKER_URL is no ws:// or wss:// URL — no slot relay; the passes keep their own shares` };
+  return { url, key };
+}
 
 export type Plan = {
   /** The children to run, in the order they start. */
@@ -439,6 +458,8 @@ export type CoordinatorOptions = {
   stampTimeoutMs?: number;
   /** The host its row names: this machine's (os.hostname), unless a test plants another. */
   host?: string;
+  /** The slot relay in place of the one OB1_SLOT_BROKER_URL would open: a test's, or null for none. */
+  relay?: Relay | null;
 };
 
 /** Start the children OB1_PASSES names; `done` settles with 0 once a stop has ended them all and the row says so. */
@@ -468,9 +489,15 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
     err: writer.err,
     value: (ended) => coordinatorValue({ id, host, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
   });
+  // The host's slot broker, through this process alone (SMD-3379 PR 3b-1): each child started with a channel to it.
+  const rs = plan.children.length ? relaySettings(env) : null;
+  if (rs && "problem" in rs) writer.err(rs.problem);
+  const relay: Relay | null = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err }) : null;
+  if (relay) writer.err(`coordinator: the passes ask the host's slot broker through this process (OB1_SLOT_BROKER_URL), their own shares while it is away`);
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
+    if (relay) l.env.OB1_SLOT_RELAY = "ipc";
     const every = child.every?.(l.env);
     keys.set(child.name, followerKey(child.name, l.env));
     return supervise({
@@ -488,6 +515,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
         states.set(child.name, state);
         row.changed();
       },
+      ...(relay ? { ipc: relay.port(child.name) } : {}),
     });
   });
   row.changed();
@@ -495,7 +523,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const ended = children.length
     ? Promise.all(children.map((c) => c.done))
     : new Promise<void>((settle) => stopped.signal.addEventListener("abort", () => settle(), { once: true }));
-  const done = ended.then(() => row.end()).then(() => 0);
+  const done = ended.then(() => relay?.stop()).then(() => row.end()).then(() => 0);
   return {
     done,
     stop(signal) {

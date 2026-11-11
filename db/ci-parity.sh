@@ -351,6 +351,7 @@ free_rows() {
   nodb db                 test-board-findings.ts
   nodb db                 test-weekly-digest.ts
   nodb db                 test-coordinator.ts
+  nodb db                 test-slot-relay.ts
 
   typecheck scripts
   typecheck server-portable

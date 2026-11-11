@@ -222,6 +222,12 @@ export type SuperviseOptions = {
   writer?: Writer;
   /** Told each change of the follower's state; a throw from it is said, never the follower's end. */
   onState?: (state: FollowerState) => void;
+  /**
+   * An IPC channel to each start of the follower (SMD-3379 PR 3b-1: the coordinator's slot relay): its messages to
+   * `onMessage`, `attach` handed the sender at each start, `detach` told at each end. Unset, it has none.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the channel carries whatever its user sends
+  ipc?: { onMessage(m: unknown): void; attach(send: (m: any) => void): void; detach(): void };
 };
 
 export type Supervisor = {
@@ -295,7 +301,12 @@ export function supervise(opts: SuperviseOptions): Supervisor {
           ...(opts.gid === undefined ? {} : { gid: opts.gid }),
           stdio: ["ignore", piped ? "pipe" : "inherit", piped ? "pipe" : "inherit"],
           detached: true,
+          ...(opts.ipc ? { ipc: (m: unknown) => opts.ipc!.onMessage(m), serialization: "json" as const } : {}),
         });
+        if (opts.ipc) {
+          const sub = child;
+          opts.ipc.attach((m) => { if (sub.exitCode === null && sub.signalCode === null) sub.send(m); });
+        }
         tell({ state: "running", since: began.getTime() });
         const drained = piped
           ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
@@ -319,6 +330,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
           code = await child.exited;
         } finally {
           clearInterval(tick);
+          opts.ipc?.detach();
         }
         // The pumps never reject (labelled), so a drain cut short by the timer leaves nothing unhandled.
         await Promise.race([drained, Bun.sleep(DRAIN_MS)]);

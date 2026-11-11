@@ -3258,6 +3258,7 @@ const NOT_FORWARDED: Record<string, string> = {
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
+  OB1_SLOT_RELAY: "set by the coordinator alone, in the environment of each pass it starts with an IPC channel to its slot relay (SMD-3379 PR 3b-1) — the api has no channel, and a value forwarded from deploy/.env would have a process ask a relay that is not there",
 };
 
 /**
