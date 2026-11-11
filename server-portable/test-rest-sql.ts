@@ -551,11 +551,22 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
     await rest("PATCH", `/v1/thoughts/${evMcp}`, { metadata_patch: { evidence: Array.from({ length: 100 }, (_, i) => ({ _identity: `x${i}` })) } });
     const full = await rest("POST", `/v1/thoughts/${evMcp}/evidence`, entry);
     const tooLong = await rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: "x", excerpt: "y".repeat(2_001) });
+    // Review pass 3: each other bound, and a time with no zone or no time at all.
+    const pastBounds = await Promise.all([
+      { source_label: "x".repeat(201), excerpt: "y" }, { source_label: "x", excerpt: "y", source: "s".repeat(201) },
+      { source_label: "x", excerpt: "y", extracted_at: "2026-11-10T09:00:00" }, { source_label: "x", excerpt: "y", extracted_at: "yesterday" },
+    ].map((b) => rest("POST", `/v1/thoughts/${evRest}/evidence`, b)));
+    const atBounds = await rest("POST", `/v1/thoughts/${evRest}/evidence`, { source_label: "x".repeat(200), excerpt: "y".repeat(2_000), source: "s".repeat(200), extracted_at: "2026-11-10T09:00:00+01:00" });
+    // By client_key: the thought it names, and the key, in the answer.
+    const keyed = "11111111-2222-4333-8444-5555555527a7";
+    const keyedId = String((await rest("POST", "/v1/thoughts", { content: "psi: a thought named by its client_key, for evidence", client_key: keyed })).body.id);
+    const byKey = await rest("POST", `/v1/thoughts/${keyed}/evidence`, entry);
     assert(noThought.status === 404 && noThought.body.code === "NOT_FOUND" && asReader.status === 403 && asReader.body.code === "FORBIDDEN"
         && notList.status === 409 && notList.body.code === "REFUSED_THOUGHT_EVIDENCE" && notList.body.problem === "not_list"
         && full.status === 409 && full.body.code === "REFUSED_THOUGHT_EVIDENCE" && full.body.problem === "full" && full.body.count === 100
-        && tooLong.status === 400,
-      `append_thought_evidence's refusals: no thought 404, a read key 403, a list that is no list 409, a full one 409 with its count, an excerpt past 2,000 characters 400 (${noThought.status} ${asReader.status} ${notList.status}:${notList.body.problem} ${full.status}:${full.body.problem}/${full.body.count} ${tooLong.status})`);
+        && tooLong.status === 400 && pastBounds.every((b) => b.status === 400 && b.body.code === "REFUSED_INPUT") && atBounds.status === 200 && atBounds.body.action === "appended"
+        && byKey.status === 200 && byKey.body.id === keyedId && byKey.body.byClientKey === keyed && byKey.body.action === "appended",
+      `append_thought_evidence's refusals: no thought 404, a read key 403, a list that is no list 409, a full one 409 with its count, an excerpt past 2,000 characters, a label or source past 200, a time with no zone or none 400, each bound itself taken; by client_key, the thought and the key answered (${noThought.status} ${asReader.status} ${notList.status}:${notList.body.problem} ${full.status}:${full.body.problem}/${full.body.count} ${tooLong.status} ${pastBounds.map((b) => b.status).join(",")} ${atBounds.status} ${JSON.stringify(byKey.body).slice(0, 160)})`);
   }
 
   // Each door acts on its own seeded pool or holder, so both act on a row.

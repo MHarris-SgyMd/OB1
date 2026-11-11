@@ -5124,9 +5124,10 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
   const { renderAppendThoughtEvidence } = await import("./render.ts");
   const said = (o: unknown) => renderAppendThoughtEvidence(o as never);
   const added = said({ ok: true, value: { id: ID, action: "appended", evidenceCount: 1, updatedAt: "2026-11-10T09:00:00.000Z" } });
-  const byKey = said({ ok: true, value: { id: ID, byClientKey: "k-1", action: "appended", evidenceCount: 3 } });
+  const KEY = "11111111-1111-4111-8111-111111111111";
+  const byKey = said({ ok: true, value: { id: ID, byClientKey: KEY, action: "appended", evidenceCount: 3 } });
   const found = said({ ok: true, value: { id: ID, action: "already_exists", evidenceCount: 2 } });
-  assert(added.content[0].text === `Appended the evidence to ${ID}: it holds 1 evidence entry.` && /\(client_key k-1\): it holds 3 evidence entries\./.test(byKey.content[0].text)
+  assert(added.content[0].text === `Appended the evidence to ${ID}: it holds 1 evidence entry.` && byKey.content[0].text.includes(`(client_key ${KEY}): it holds 3 evidence entries.`)
       && found.content[0].text.startsWith(`${ID} already holds that evidence (the same source label and excerpt): nothing written. It holds 2`)
       && JSON.stringify(added.structuredContent) === JSON.stringify({ id: ID, action: "appended", evidenceCount: 1, updatedAt: "2026-11-10T09:00:00.000Z", text: added.content[0].text }),
     `the entry added or found, its count in the singular or plural, a client_key named, the value's fields (${added.content[0].text} | ${found.content[0].text})`);
@@ -5139,7 +5140,7 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
   const busy = busyReply.content[0].text;
   const gone = refusal({ code: "NOT_FOUND", id: ID });
   assert(/already holds 100 evidence entries, the most a thought keeps \(100\)/.test(full) && /metadata\.evidence is not a list/.test(notList) && /metadata is not an object/.test(notObject)
-      && /has neither an updated_at nor a created_at .* Any update_thought of it stamps it; then append again\./.test(unstamped)
+      && /has neither an updated_at nor a created_at .* An update_thought that changes it stamps it; then append again\./.test(unstamped)
       && /^Not yet: .* was edited by another write each of the 10 times the append read it\. Retry in a moment: an entry already added is not added twice\./.test(busy) && !/if_unchanged_since/.test(busy)
       && (busyReply.structuredContent as { retryable?: unknown }).retryable === true
       && /^No thought with id /.test(gone),
@@ -5174,6 +5175,40 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
   const dropped = await staleFor(0, { patchDropped: true }, false).core.appendThoughtEvidence(writer, input);
   assert(!dropped.ok && dropped.refusal.code === "REFUSED_THOUGHT_EVIDENCE" && dropped.refusal.problem === "metadata_not_object",
     `an update that dropped the patch is refused as metadata that is no object (${JSON.stringify(dropped)})`);
+
+  // Review pass 3: what PR 4's caller reads off the answer, against a store holding a given list and answering a given update.
+  const { evidenceIdentity } = await import("./core/writes.ts");
+  const { REFUSAL_STATUS } = await import("./rest/routes.ts");
+  const holding = (evidence: unknown[], update: Record<string, unknown> = { ok: true, id: ID, updatedAt: "2026-11-10T09:00:02.000Z" }) => {
+    const store = {
+      thoughtsNamed: async () => new Map(),
+      getThought: async () => ({ id: ID, content: "c", metadata: { evidence }, metadataType: "object", created_at: "2026-11-10T09:00:00.000Z", updated_at: "2026-11-10T09:00:01.000Z" }),
+      updateThought: async () => update,
+    };
+    return createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+  };
+  const mine = { _identity: evidenceIdentity("L", "E", ID) };
+  // A retry whose entry was the hundredth finds it, not a full list: the dedup reads before the cap.
+  const retried = await holding([...Array.from({ length: 99 }, (_, i) => ({ _identity: `x${i}` })), mine]).appendThoughtEvidence(writer, input);
+  // A raw writer's null entry in the list is passed over, not a fault.
+  // A throw is caught into a refusal, so it fails this row and not the suite.
+  const thrown = (e: unknown) => ({ ok: false as const, refusal: { code: `THROWN: ${String(e)}` } }) as never;
+  const pastNull = await holding([null, mine]).appendThoughtEvidence(writer, input).catch(thrown);
+  // The stamps a caller passes on: the write's when it appended, the row's when it found the entry.
+  const appendedStamp = await holding([]).appendThoughtEvidence(writer, input);
+  // Deleted between the read and the write: NOT_FOUND, not a fault.
+  const goneUnder = await holding([], { ok: false, error: "NOT_FOUND" }).appendThoughtEvidence(writer, input).catch(thrown);
+  // A raw writer's longer list is said at its own count.
+  const over = said({ ok: false, refusal: { code: "REFUSED_THOUGHT_EVIDENCE", retryable: false, id: ID, problem: "full", count: 150 } }).content[0].text;
+  assert(retried.ok && retried.value.action === "already_exists" && retried.value.evidenceCount === 100 && retried.value.updatedAt === "2026-11-10T09:00:01.000Z"
+      && pastNull.ok && pastNull.value.action === "already_exists"
+      && appendedStamp.ok && appendedStamp.value.action === "appended" && appendedStamp.value.updatedAt === "2026-11-10T09:00:02.000Z"
+      && !goneUnder.ok && goneUnder.refusal.code === "NOT_FOUND"
+      && /already holds 150 evidence entries, the most a thought keeps \(100\)/.test(over)
+      && REFUSAL_STATUS.THOUGHT_EVIDENCE_BUSY === 503 && REFUSAL_STATUS.REFUSED_THOUGHT_EVIDENCE === 409,
+    `a retried hundredth entry found, not full; a null entry passed over; each answer's stamp; deleted under the read NOT_FOUND; a longer list at its count; busy 503 and the list's refusals 409 over REST (${JSON.stringify([retried, pastNull.ok, appendedStamp, goneUnder.ok ? "ok" : goneUnder.refusal.code])})`);
+  assert(JSON.stringify(byKey.structuredContent) === JSON.stringify({ id: ID, byClientKey: KEY, action: "appended", evidenceCount: 3, text: byKey.content[0].text }),
+    `…and the MCP reply's values carry the client_key that named the thought, as the REST answer does (${JSON.stringify(byKey.structuredContent)})`);
 }
 
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
