@@ -17,8 +17,56 @@
 export const LINEAR_API = "https://api.linear.app/graphql";
 
 /** A GraphQL answer as Linear sends it: data and errors can both be present (HTTP 200 either way). */
-export type GqlResult<T> = { data: T | null; errors: { message: string; path?: (string | number)[] }[] };
+export type GqlResult<T> = { data: T | null; errors: { message: string; path?: (string | number)[]; extensions?: { code?: unknown } }[] };
 export type Gql = <T>(query: string, variables?: Record<string, unknown>) => Promise<GqlResult<T>>;
+
+/**
+ * Linear refused the request for its rate limit (SMD-4133): HTTP 429, or an
+ * answer whose errors carry the code RATELIMITED. Linear limits by user, not
+ * by key — 2,500 requests an hour, and a complexity budget beside it — so
+ * every brain and tool under one Linear user spends the same hour, and a
+ * refused request counts against it too. `resetAt` is when Linear says the
+ * window has room again (epoch ms), from the exhausted limit's
+ * `X-RateLimit-*-Reset` or a `Retry-After`; null when it said neither.
+ */
+export class LinearRateLimited extends Error {
+  readonly resetAt: number | null;
+  constructor(message: string, resetAt: number | null) {
+    super(message);
+    this.name = "LinearRateLimited";
+    this.resetAt = resetAt;
+  }
+}
+
+/**
+ * When a rate-limited answer says the window has room again, in epoch ms, or
+ * null. Linear sends `X-RateLimit-Requests-Reset` and
+ * `X-RateLimit-Complexity-Reset` (epoch ms) with their `-Remaining`: the
+ * exhausted one's reset is the time. When neither reads exhausted, the refusal
+ * may be another limit's, so `Retry-After` (seconds, or an HTTP date) comes
+ * next, and the later of the two resets last (review pass 1: the hourly reset
+ * first could hold a short refusal for an hour). A value that does not read as
+ * a time is no time.
+ */
+export function rateLimitReset(headers: Headers, now: number = Date.now()): number | null {
+  const num = (name: string): number | null => {
+    const raw = headers.get(name)?.trim();
+    return raw && /^\d+$/.test(raw) ? Number(raw) : null;
+  };
+  const limits = (["requests", "complexity"] as const)
+    .map((k) => ({ reset: num(`x-ratelimit-${k}-reset`), remaining: num(`x-ratelimit-${k}-remaining`) }))
+    .filter((l): l is { reset: number; remaining: number | null } => l.reset !== null);
+  const spent = limits.filter((l) => l.remaining === 0);
+  if (spent.length) return Math.max(...spent.map((l) => l.reset));
+  const after = headers.get("retry-after")?.trim();
+  if (after && /^\d+$/.test(after)) return now + Number(after) * 1000;
+  const date = after ? Date.parse(after) : NaN;
+  if (Number.isFinite(date)) return date;
+  return limits.length ? Math.max(...limits.map((l) => l.reset)) : null;
+}
+
+/** An error Linear's rate limit raised (LinearRateLimited), as any caller tells it from another failure. */
+export const isRateLimited = (e: unknown): e is LinearRateLimited => e instanceof LinearRateLimited;
 
 /**
  * A client over one key. Personal API keys (`lin_api_…`) go in Authorization
@@ -54,9 +102,20 @@ export function linearClient(key: string, fetchImpl: typeof fetch = fetch, opts:
       }
       throw Object.assign(new Error(`Linear answered HTTP ${res.status}${to}: a redirect is never followed (SMD-2908)`), { status: res.status });
     }
-    if (!res.ok) throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${(await res.text()).slice(0, 300)}`);
-    const json = (await res.json()) as { data?: T | null; errors?: { message: string; path?: (string | number)[] }[] };
-    return { data: json.data ?? null, errors: json.errors ?? [] };
+    // A rate limit is said by its own error, with when Linear says to come back (SMD-4133): a caller holds off
+    // until then rather than spending the same user's hour on requests that are refused too.
+    const limited = (body: string) => new LinearRateLimited(`Linear returned HTTP ${res.status} ${res.statusText}, rate-limited: ${body.slice(0, 300)}`, rateLimitReset(res.headers));
+    if (res.status === 429) throw limited(await res.text());
+    const text = await res.text();
+    type Body = { data?: T | null; errors?: GqlResult<T>["errors"] };
+    let json: Body | null;
+    try { json = JSON.parse(text) as Body; } catch { json = null; /* not JSON: said below for a non-2xx, thrown as JSON's error for a 2xx */ }
+    // Only a list is read for the code: anything else is the body as it was (review pass 1: `.some` threw on it).
+    const errs: unknown = json?.errors;
+    if (Array.isArray(errs) && errs.some((e) => (e as { extensions?: { code?: unknown } } | null)?.extensions?.code === "RATELIMITED")) throw limited(text);
+    if (!res.ok) throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${text.slice(0, 300)}`);
+    const body: Body = json ?? (JSON.parse(text) as Body);
+    return { data: body.data ?? null, errors: body.errors ?? [] };
   };
 }
 
