@@ -27,7 +27,7 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
@@ -39,7 +39,7 @@ import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
-import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, EvidenceAppended, EvidenceCode, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
@@ -2005,6 +2005,39 @@ export const resetHint = (msg: string): string =>
   /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied"
     : "";
+
+// ── append_thought_evidence (SMD-2690 PR 3b) ─────────────────────────────────
+
+/**
+ * append_thought_evidence's reply: the entry added, or found there already,
+ * and the list's length — the thought by its id, lower-case as the brain
+ * writes it, and the client_key that named it. A refusal names what holds the
+ * list and what to do; a busy thought is other writers' edits in the way of
+ * each of the append's reads, never the caller's old read, and retryable.
+ */
+export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, EvidenceCode>): Reply {
+  return render(o, (v) => {
+    const named = v.byClientKey ? `${v.id} (client_key ${v.byClientKey})` : v.id;
+    const count = `${v.evidenceCount} evidence entr${v.evidenceCount === 1 ? "y" : "ies"}`;
+    return v.action === "appended"
+      ? `Appended the evidence to ${named}: it holds ${count}.`
+      : `${named} already holds that evidence (the same source label and excerpt): nothing written. It holds ${count}.`;
+  }, (r) => {
+    switch (r.code) {
+      case "THOUGHT_EVIDENCE_BUSY":
+        return `Not yet: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it. Retry in a moment: an entry already added is not added twice.`;
+      case "REFUSED_THOUGHT_EVIDENCE":
+        switch (r.problem) {
+          case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; a write key may prune metadata.evidence with update_thought.`;
+          case "not_list": return `Refused: ${r.id}'s metadata.evidence is not a list, so no entry can join it. Another writer set it; update_thought's metadata_patch can set it to a list (or null) first.`;
+          case "metadata_not_object": return `Refused: ${r.id}'s metadata is not an object (a raw writer's), so it holds no evidence list.`;
+          case "unstamped": return `Refused: ${r.id} has neither an updated_at nor a created_at (a raw writer's row), so an append could not be checked against another at the same moment. An update_thought that changes it stamps it; then append again.`;
+        }
+      // falls through: a problem this server does not know is said as an edit's refusal
+      default: return mutationRefusalText(r);
+    }
+  }, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), action: v.action, evidenceCount: v.evidenceCount, ...(v.updatedAt ? { updatedAt: v.updatedAt } : {}) }));
+}
 
 // ── review_supersession_proposal (SMD-3338) ──────────────────────────────────
 

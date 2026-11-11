@@ -138,6 +138,10 @@
       "scope": "write"
     },
     {
+      "name": "append_thought_evidence",
+      "scope": "write"
+    },
+    {
       "name": "set_priority_weights",
       "scope": "write"
     },

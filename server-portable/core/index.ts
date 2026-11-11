@@ -61,6 +61,7 @@ export function createCore(deps: CoreDeps) {
     updateThought: bind(ctx, writes.updateThought),
     deleteThought: bind(ctx, writes.deleteThought),
     resetCaptureStamp: bind(ctx, writes.resetCaptureStamp),
+    appendThoughtEvidence: bind(ctx, writes.appendThoughtEvidence),
     reviewSupersessionProposal: bind(ctx, writes.reviewSupersessionProposal),
     retryFailed: bind(ctx, workers.retryFailed),
     releaseStaleLeases: bind(ctx, workers.releaseStaleLeases),
