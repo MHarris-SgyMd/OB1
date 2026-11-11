@@ -8473,7 +8473,7 @@ The table's utilization is the rate over the rows `query_log` would hold for the
   - each kind drawn by a seeded hash from tickets filed 2026-09-01 to 11-09;
   - 20 of those tickets (10 of each kind) rewritten without their key by a paraphraser who saw only the titles. The harness checked each: no key, at most 25 words, no six words in a row from the title.
 - **The hits: 8 per request,** from `plan_context`'s own search (hybrid, `prefer_current` on, threshold 0, recency 0, no filter). It was called through `search_thoughts` with the same arguments, because the rehearsal found `plan_context`'s 8 s embedding window missed on every call while the canary's sleep held the model server.
-- **The truth:** two blind raters, one on Opus and one on Sonnet, labelled all 640 hits relevant or not, under SMD-2684 PR 2's rules. A request has **little** when at most 1 of its hits is relevant by both.
+- **The truth:** two blind raters, one on Opus and one on Sonnet, labelled all 640 hits relevant or not, under rules adapted from SMD-2684 PR 2's (`RATER_RULES`): the same categories, worded for any request rather than a ticket's planning, with one added edge case (a request about a product the rows never mention gets 0 on every row). A request has **little** when at most 1 of its hits is relevant by both.
 - **The candidates:**
   - `top(t)`: the best hit's similarity below t;
   - `count(f)`: at most 1 hit at similarity f or more;
@@ -8502,6 +8502,9 @@ The table's utilization is the rate over the rows `query_log` would hold for the
 - **The definition of little** ("at most 1 relevant hit of 8") decides the gold. A stricter one (no relevant hit) would move the bar.
 - **Similarity is the embedding's own scale.** A different model, or the same model at another dimension, needs its own measurement.
 - **The brain:** the canary, at one moment. The requests are tickets and one paraphraser's rewrites, not real session openers.
+- **Paraphrases and their tickets share a split only by chance.** The split halves each kind of request separately, so 11 of the 20 paraphrases sit in the other half from their source ticket. Test is then not fully independent of the choice made on dev. Without those 11, the test half is 36 requests and the bar is still met: balanced accuracy 0.871, precision 0.778.
+- **The sheets were numbered by kind** (brain tickets 1–30, other projects 31–60, paraphrases 61–80), and the raters weren't told the scheme. The batches mixed the kinds, and the harness now numbers sheets in a hashed order.
+- **The run wrote to the brain.** Each search, the warm-up and any retry are a `query_log` row on the canary, as a `plan_context` call would be.
 
 **Reproduce.**
 - `--draw` rebuilds the request file from the same Linear listings and held keys. It holds board titles, so it stays out of the repo, as do the runs, the rows, the sheets and the labels.

@@ -6,15 +6,16 @@
  * request the brain knows nothing about still gets its eight hits and no gap. SMD-4212 asks for a `little` gap, never
  * a verdict, at a bar measured on labelled requests. This measures the bar. The maintainer chose its shape on
  * 2026-11-10:
- *   - the truth is per hit: two blind raters label each of a request's hits relevant or not, under SMD-2684 PR 2's
- *     rules, with κ; a request has little when at most LITTLE_MAX of its hits are relevant by both;
- *   - the requests are N_BRAIN tickets of the brain's own projects and N_OTHER of SMD's other projects (which this
- *     brain holds nothing on), drawn by a seeded rule, plus N_PARA of them rewritten without their key by a paraphraser
- *     who sees only the titles;
+ *   - the truth is per hit: two blind raters label each of a request's hits relevant or not, under rules adapted
+ *     from SMD-2684 PR 2's (RATER_RULES), with κ; a request has little when at most LITTLE_MAX of its hits are relevant
+ *     by both;
+ *   - the requests are N_BRAIN tickets of the brain's own projects and N_OTHER of SMD's other projects (tickets the
+ *     brain doesn't hold, though it may hold notes that touch them), drawn by a seeded rule, plus 2 × N_PARA_EACH of
+ *     them rewritten without their key by a paraphraser who sees only the titles;
  *   - a few candidate signals and thresholds are fixed in advance; half the requests (dev) choose one, and the other
  *     half (test) confirm it against the bar, also fixed in advance.
  *
- * The candidates, each read from the knowledge hits plan_context returned (limit LIMIT):
+ * The candidates, each read from the hits of plan_context's knowledge search (SEARCH_TOOL, SEARCH_ARGS; limit LIMIT):
  *   top(t)    little when the best hit's similarity is below t (a hit with no similarity, a literal-only match, reads 0);
  *   count(f)  little when at most LITTLE_MAX hits have a similarity of f or more;
  *   literal   little when no hit matched an exact literal of the request (an identifier or a quoted span).
@@ -22,7 +23,8 @@
  * precision of `little`, then literal, top, count in that order, then the lower threshold.
  * The bar, on test: balanced accuracy ≥ BAR_BALANCED, precision of `little` ≥ BAR_PRECISION (a false `little` tells
  * an agent the brain lacks what it holds), and κ ≥ KAPPA_BAR over all rated hits. Similarity is the embedding's, so the
- * bar holds for the model it was measured on (EMBEDDING, read from the brain at run time) and no other.
+ * bar holds for the model it was measured on (read from the brain at run time, written to embedding.txt) and no other.
+ * Balanced accuracies within BALANCED_EPS are a tie, so float noise never decides between two equal rules.
  *
  *   bun eval-little.ts --draw <linear-page.json>… --held <keys.txt> --out <requests.json>
  *   bun eval-little.ts --paraphrase-sheet --requests <requests.json>                      # the titles for the paraphraser
@@ -33,8 +35,10 @@
  *   bun eval-little.ts --score --requests … --out <dir> --labels <r1.json> --labels <r2.json> [--json <file>]
  *   bun eval-little.ts --self-check
  *
- * The requests file holds board titles, and the runs, rows, sheets and labels the brain's text: all stay out of the
- * repo. --mcp-config is a Claude Code MCP config naming the brain `brain` (its key in an x-brain-key header): keep it
+ * --run writes to the brain: each search (the warm-up and any retry too) is a query_log row when the log is on, as a
+ * plan_context call would be. The requests file holds board titles, and the runs, rows, sheets and labels the brain's
+ * text: all stay out of the repo. Sheets are numbered in a hashed order, so a file's number says nothing about its
+ * request's kind. --mcp-config is a Claude Code MCP config naming the brain `brain` (its key in an x-brain-key header): keep it
  * 0600. --json writes keys, counts and thresholds only.
  */
 
@@ -67,6 +71,8 @@ export const BAR_PRECISION = 0.75;
 export const KAPPA_BAR = 0.6;
 export const ROW_CHARS = 1500;
 export const CANDIDATE_ORDER = ["literal", "top", "count"] as const;
+/** Two balanced accuracies closer than this are equal: 0.2 and 0.19999999999999998 are one score. */
+export const BALANCED_EPS = 1e-9;
 export type Candidate = (typeof CANDIDATE_ORDER)[number];
 
 export const PARAPHRASE_RULES = `# Paraphrasing rules (SMD-4212 PR 1)
@@ -150,16 +156,20 @@ export function drawLittle(tickets: Ticket[], held: Set<string>): { requests: Re
   return { requests, brainEligible: brainPool.length, otherEligible: otherPool.length, notHeld, otherHeld };
 }
 
+/** A ticket key of this board (team SMD), either case: not "UTF-8" or "SHA-256". */
+export const TICKET_KEY = /\bsmd-\d+\b/i;
+const TICKET_KEY_G = /\bsmd-\d+\b/gi;
+
 /** The paraphraser's lines: an opaque id (never the key) and the title with any ticket key taken out. */
 export function paraphraseLines(requests: Request[]): { line: string; id: string; title: string }[] {
-  return requests.filter((r) => r.klass === "para").map((r, i) => ({ line: `L${String(i + 1).padStart(2, "0")}`, id: r.id, title: r.title.replace(/\b[A-Z][A-Z0-9]+-\d+\b/g, "the ticket") }));
+  return requests.filter((r) => r.klass === "para").map((r, i) => ({ line: `L${String(i + 1).padStart(2, "0")}`, id: r.id, title: r.title.replace(TICKET_KEY_G, "the ticket") }));
 }
 
 /** A paraphrase's problems, empty when it keeps the rules a program can check. */
 export function paraphraseProblems(text: unknown, title: string): string[] {
   if (typeof text !== "string" || !text.trim()) return ["empty"];
   const p: string[] = [];
-  if (/\b[A-Z][A-Z0-9]+-\d+\b/.test(text)) p.push("names a ticket key");
+  if (TICKET_KEY.test(text)) p.push("names a ticket key");
   if (text.trim().split(/\s+/).length > 25) p.push("over 25 words");
   const words = (s: string) => s.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
   const tw = words(title);
@@ -196,7 +206,7 @@ export async function callTool(ep: BrainEndpoint, name: string, args: Record<str
 }
 
 export type Hit = { id: string; similarity: number | null; literal: boolean };
-export type Reply = { hits: Hit[]; vectorFailed: string | null; embedding: string | null };
+export type Reply = { hits: Hit[]; vectorFailed: string | null };
 
 /**
  * The hits whose block in plan_context's rendered text says `Contains…`: an exact literal of the request matched it,
@@ -226,7 +236,6 @@ export function readReply(v: unknown): Reply {
       return [{ id, similarity: typeof x.similarity === "number" ? x.similarity : null, literal: literal.has(id) }];
     }),
     vectorFailed: typeof k.vectorFailed === "string" ? k.vectorFailed : null,
-    embedding: null,
   };
 }
 
@@ -274,7 +283,8 @@ export function splitOf(requests: readonly Request[]): Map<string, "dev" | "test
 export function choose(rules: readonly Rule[], hits: Hit[][], gold: boolean[]): { rule: Rule; balanced: number; precision: number } {
   const scored = rules.map((rule) => { const c = confusion(hits.map((h) => littleBy(rule, h)), gold); return { rule, balanced: balanced(c), precision: precision(c) }; });
   const n = (x: number) => (Number.isNaN(x) ? -1 : x);
-  scored.sort((a, b) => n(b.balanced) - n(a.balanced) || n(b.precision) - n(a.precision)
+  const cmp = (x: number, y: number) => (Math.abs(x - y) < BALANCED_EPS ? 0 : x - y);
+  scored.sort((a, b) => cmp(n(b.balanced), n(a.balanced)) || cmp(n(b.precision), n(a.precision))
     || CANDIDATE_ORDER.indexOf(a.rule.candidate) - CANDIDATE_ORDER.indexOf(b.rule.candidate) || (a.rule.threshold ?? 0) - (b.rule.threshold ?? 0));
   return scored[0];
 }
@@ -373,6 +383,8 @@ export function sheetFor(req: Request, ids: string[], rows: Map<string, Row>): s
   });
   return out.join("\n");
 }
+/** The order sheets are numbered in: by hash, never by kind. */
+export const sheetOrder = (requests: readonly Request[]): Request[] => [...requests].sort((a, b) => byHash("sheet-order")(a.id, b.id));
 /** The sheet's heading id: a paraphrase gets an opaque one, so its key isn't shown beside a request written without it. */
 export const sheetId = (req: Request): string => (req.id.startsWith("P-") ? `request ${sha(`${SEED}|sheet-id|${req.id}`).slice(0, 8)}` : req.id);
 
@@ -386,7 +398,7 @@ export function selfCheck(): number {
   // The draw.
   const t = (id: string, project: string | null, over: Partial<Ticket> = {}): Ticket => ({ id, title: `title ${id} about SMD-9 work`, createdAt: "2026-10-01T00:00:00.000Z", project, ...over });
   const brainT = Array.from({ length: 45 }, (_, i) => t(`SMD-${100 + i}`, `${PROJECT_PREFIX} — X`));
-  const otherT = Array.from({ length: 45 }, (_, i) => t(`SMD-${300 + i}`, "Client Codebase Health"));
+  const otherT = Array.from({ length: 45 }, (_, i) => t(`SMD-${300 + i}`, "Another Project"));
   const brainOrder = brainT.map((x) => x.id).sort(byHash("brain"));
   const otherOrder = otherT.map((x) => x.id).sort(byHash("other"));
   const held = new Set([...brainT.map((x) => x.id).filter((k) => k !== brainOrder[0]), otherOrder[2]]);
@@ -398,12 +410,15 @@ export function selfCheck(): number {
   ok(d.notHeld[0] === brainOrder[0] && brain[0].key === brainOrder[1], "a brain ticket the brain doesn't hold is passed over and named");
   ok(d.otherHeld[0] === otherOrder[2] && !other.some((r) => r.key === otherOrder[2]), "an other-project ticket the brain holds is passed over and named");
   ok(d.otherEligible === 45 && !d.requests.some((r) => r.key === "SMD-999" || r.key === "SMD-998"), "no project, or a tracker, is not eligible");
+  ok(!otherEligible(t("SMD-1", "Another Project", { createdAt: "2026-08-31T23:59:59.999Z" })) && otherEligible(t("SMD-1", "Another Project", { createdAt: WINDOW.from })) && !otherEligible(t("SMD-1", "Another Project", { createdAt: WINDOW.to })), "an other-project ticket must be filed inside the window");
+  ok(!otherEligible(t("SMD-1", `${PROJECT_PREFIX} — X`)), "a brain-project ticket is not an other-project one");
   ok(para.filter((r) => brain.some((b) => b.key === r.key)).length === N_PARA_EACH && para.every((r) => r.text === null && r.id === `P-${r.key}`), "half the paraphrases are brain tickets', each waiting for its text");
   ok(JSON.stringify(drawLittle([...otherT, ...brainT].reverse(), held).requests) === JSON.stringify(d.requests), "the draw doesn't depend on the listing's order");
   const lines = paraphraseLines(d.requests);
   ok(lines.length === 2 * N_PARA_EACH && lines.every((l) => !/SMD-\d/.test(l.title) && /^L\d\d$/.test(l.line)) && lines.every((l) => !l.line.includes("SMD")), "the paraphraser sees opaque line ids and titles with their keys taken out");
   ok(paraphraseProblems("Fix the export so it keeps every row", "The export drops rows past the first page").length === 0, "a clean paraphrase passes");
-  ok(paraphraseProblems("Fix SMD-12 now", "x").includes("names a ticket key") && paraphraseProblems("", "x").includes("empty"), "a key or an empty answer is refused");
+  ok(paraphraseProblems("Fix SMD-12 now", "x").includes("names a ticket key") && paraphraseProblems("fix smd-12 now", "x").includes("names a ticket key") && paraphraseProblems("", "x").includes("empty"), "a key, in either case, or an empty answer is refused");
+  ok(paraphraseProblems("Store digests as UTF-8 and SHA-256", "x").length === 0 && paraphraseLines([{ id: "P-SMD-1", key: "SMD-1", klass: "para", title: "SMD-4 stores UTF-8", text: null }])[0].title === "the ticket stores UTF-8", "UTF-8 or SHA-256 is no ticket key, kept in a title and allowed in a paraphrase");
   ok(paraphraseProblems("we need the export drops rows past the first page fixed", "The export drops rows past the first page").some((p) => p.startsWith("copies")), "six words in a row from the title are refused");
   ok(paraphraseProblems(Array.from({ length: 26 }, () => "w").join(" "), "x").includes("over 25 words"), "more than 25 words is refused");
 
@@ -432,6 +447,23 @@ export function selfCheck(): number {
   ok(Number.isNaN(precision(confusion([false], [true]))) && near(balanced(confusion([false], [false])), 1), "precision undefined with no little said; a one-class set is its one recall");
   const ch = choose([{ candidate: "top", threshold: 0.5 }, { candidate: "literal", threshold: null }, { candidate: "top", threshold: 0.4 }], [H([0.3]), H([0.6], true)], [true, false]);
   ok(ch.rule.candidate === "literal", "a tie on balanced accuracy and precision goes to literal first");
+  // The candidate order decides against the threshold order: count(0.3) has the lower threshold, top(0.5) the earlier candidate.
+  const chOrder = choose([{ candidate: "count", threshold: 0.3 }, { candidate: "top", threshold: 0.5 }], [H([0.2]), H([0.9, 0.9])], [true, false]);
+  ok(chOrder.rule.candidate === "top", "top comes before count at a tie, whatever their thresholds");
+  // A true tie on balanced accuracy (0.75 each), where only precision can decide against the candidate order: top(0.6)
+  // finds both little requests and calls two covered ones little (precision 0.5); count(0.5) finds one and calls none
+  // wrongly (precision 1).
+  const tieHits = [H([0.2, 0.1]), H([0.55, 0.55]), H([0.5, 0.5]), H([0.58, 0.52]), H([0.9, 0.9]), H([0.9, 0.9])];
+  const tieGold = [true, true, false, false, false, false];
+  const chPrec = choose([{ candidate: "top", threshold: 0.6 }, { candidate: "count", threshold: 0.5 }], tieHits, tieGold);
+  ok(chPrec.rule.candidate === "count" && near(chPrec.balanced, 0.75) && near(chPrec.precision, 1), "a tie on balanced accuracy goes to the higher precision before the candidate order");
+  // Float noise is no score (review pass 1): with 20 little and 20 covered, top(0.6) says little for 1 little and 13
+  // covered (balanced (1/20 + 7/20)/2 = 0.19999999999999998, precision 1/14), top(0.4) for 12 covered alone (0.2,
+  // precision 0). They tie; the higher precision must win, though float order and the lower threshold favour top(0.4).
+  const fHits = [H([0.5]), ...Array.from({ length: 19 }, () => H([0.9])), ...Array.from({ length: 12 }, () => H([0.3])), H([0.5]), ...Array.from({ length: 7 }, () => H([0.9]))];
+  const fGold = [...Array.from({ length: 20 }, () => true), ...Array.from({ length: 20 }, () => false)];
+  const fCh = choose([{ candidate: "top", threshold: 0.4 }, { candidate: "top", threshold: 0.6 }], fHits, fGold);
+  ok(fCh.rule.threshold === 0.6 && near(fCh.precision, 1 / 14), "balanced accuracies within BALANCED_EPS are one score, so float noise doesn't decide");
   const ch2 = choose([{ candidate: "top", threshold: 0.5 }, { candidate: "top", threshold: 0.4 }], [H([0.3]), H([0.6])], [true, false]);
   ok(ch2.rule.threshold === 0.4, "then to the lower threshold");
   const ch3 = choose([{ candidate: "literal", threshold: null }, { candidate: "top", threshold: 0.5 }], [H([0.3]), H([0.6], true), H([0.7])], [true, false, false]);
@@ -447,7 +479,7 @@ export function selfCheck(): number {
     { id: "SMD-1", key: "SMD-1", klass: "brain", title: "t", text: "x" }, { id: "SMD-2", key: "SMD-2", klass: "brain", title: "t", text: "x" },
     { id: "SMD-3", key: "SMD-3", klass: "other", title: "t", text: "x" }, { id: "SMD-4", key: "SMD-4", klass: "other", title: "t", text: "x" },
   ];
-  const replies = new Map<string, Reply>([["SMD-1", { hits: H([0.8, 0.7]), vectorFailed: null, embedding: null }], ["SMD-2", { hits: H([0.75, 0.6]), vectorFailed: null, embedding: null }], ["SMD-3", { hits: H([0.4, 0.3]), vectorFailed: null, embedding: null }], ["SMD-4", { hits: H([0.35, 0.2]), vectorFailed: null, embedding: null }]]);
+  const replies = new Map<string, Reply>([["SMD-1", { hits: H([0.8, 0.7]), vectorFailed: null }], ["SMD-2", { hits: H([0.75, 0.6]), vectorFailed: null }], ["SMD-3", { hits: H([0.4, 0.3]), vectorFailed: null }], ["SMD-4", { hits: H([0.35, 0.2]), vectorFailed: null }]]);
   const km = Object.fromEntries(two.map((r) => [r.id, { R01: U(0), R02: U(1) }]));
   const lab: Labels = { "SMD-1": { R01: 1, R02: 1 }, "SMD-2": { R01: 1, R02: 1 }, "SMD-3": { R01: 0, R02: 0 }, "SMD-4": { R01: 1, R02: 0 } };
   const s = score(two, replies, km, lab, lab, "m@1");
@@ -456,7 +488,7 @@ export function selfCheck(): number {
   ok(s.verdict === "bar met" && s.chosen.test.confusion.tp + s.chosen.test.confusion.fn === 1, "separable requests meet the bar on test");
   const split = score(two, replies, km, lab, { ...lab, "SMD-1": { R01: 1, R02: 0 } }, null);
   ok(split.requests.find((r) => r.id === "SMD-1")!.relevant === 1 && split.requests.find((r) => r.id === "SMD-1")!.little === true, "a hit one rater calls relevant is not gold");
-  const failed = score(two, new Map([...replies, ["SMD-4", { hits: H([0.35]), vectorFailed: "deadline", embedding: null }]]), km, lab, lab, null);
+  const failed = score(two, new Map([...replies, ["SMD-4", { hits: H([0.35]), vectorFailed: "deadline" }]]), km, lab, lab, null);
   ok(failed.verdict === "no verdict" && /deadline/.test(failed.why), "a request whose embedding missed the deadline gives no verdict");
   const noRun = score(two, new Map([...replies].filter(([k]) => k !== "SMD-2")), km, lab, lab, null);
   ok(noRun.verdict === "no verdict", "a request not run gives no verdict");
@@ -473,7 +505,28 @@ export function selfCheck(): number {
   ok(!sh.includes("SMD-7") && sh.startsWith(`# ${sheetId(paraReq)}`) && /^# request [0-9a-f]{8}/.test(sh), "a paraphrase's sheet names no key");
   ok(sh.includes("[… 3 more characters]") && (sh.match(/^~~~~/gm) ?? []).length === 4 && !sh.includes(U(0)) && !/similarity|rank/i.test(sh), "a sheet cuts long rows, keeps its fences, and names no id, similarity or rank");
   ok(sheetFor(two[0], [U(0)], rowsM).startsWith("# SMD-1"), "a ticket request's sheet keeps its key");
-  ok(/^[0-9a-f]{64}$/.test(PREREGISTRATION), "the preregistration hash is taken");
+  ok(PREREGISTRATION === "703eb62defe1b2d197cf6d718d073c39fc37473f480206d3c38b4db1b29b2b39", "the preregistration hash is the one posted on SMD-4212 (comment aac12cda)");
+  // The bar needs both numbers: a rule with a high balanced accuracy and a low precision misses it.
+  const lowPrec: Request[] = Array.from({ length: 8 }, (_, i) => ({ id: `SMD-${70 + i}`, key: `SMD-${70 + i}`, klass: "other" as const, title: "t", text: "x" }));
+  const lpSplit = splitOf(lowPrec);
+  const lpTest = lowPrec.filter((r) => lpSplit.get(r.id) === "test");
+  const lpDev = lowPrec.filter((r) => lpSplit.get(r.id) === "dev");
+  // Dev: 2 little at 0.2, 2 covered at 0.9, so top(0.30) separates and is chosen. Test: 1 little at 0.2, covered at
+  // 0.25, 0.9 and 0.9: top(0.30) says little for 2 (tp 1, fp 1), balanced (1 + 2/3)/2 = 0.833 over its bar, precision
+  // 0.5 under it.
+  const lpTestSims = [0.2, 0.25, 0.9, 0.9];
+  const lpReplies = new Map<string, Reply>([...lpDev.map((r, i) => [r.id, { hits: H([i < 2 ? 0.2 : 0.9]), vectorFailed: null }] as [string, Reply]), ...lpTest.map((r, i) => [r.id, { hits: H([lpTestSims[i]]), vectorFailed: null }] as [string, Reply])]);
+  const lpKm = Object.fromEntries(lowPrec.map((r) => [r.id, { R01: U(0), R02: U(1) }]));
+  const lpLab: Labels = Object.fromEntries([...lpDev.map((r, i) => [r.id, i < 2 ? { R01: 0, R02: 0 } : { R01: 1, R02: 1 }]), ...lpTest.map((r, i) => [r.id, i < 1 ? { R01: 0, R02: 0 } : { R01: 1, R02: 1 }])]);
+  const lp = score(lowPrec, lpReplies, lpKm, lpLab, lpLab, null);
+  ok(lp.verdict === "bar not met" && lp.chosen.rule === "top(0.30)" && lp.chosen.test.balanced >= BAR_BALANCED && lp.chosen.test.precision < BAR_PRECISION, `a test precision under its bar fails, though the balanced accuracy clears its own (${lp.why})`);
+  // The search is plan_context's: core/plan.ts's runSearch call, read from its source.
+  const planSrc = readFileSync(join(import.meta.dir, "..", "server-portable", "core", "plan.ts"), "utf8");
+  const call = planSrc.match(/runSearch\(ctx, principal, \{ tool: "plan_context", (.*)\}\);/)?.[1] ?? "";
+  ok(/arm: "hybrid"/.test(call) && /threshold: 0,/.test(call) && /recencyWeight: 0,/.test(call) && /filter: \{\},/.test(call) && /preferCurrent: true/.test(call) && !/minTrust/.test(call), `plan_context's own search is hybrid, threshold 0, recency 0, no filter, prefer_current, no min_trust (${call.slice(0, 200)})`);
+  const schemaSrc = readFileSync(join(import.meta.dir, "..", "server-portable", "core", "schemas.ts"), "utf8");
+  ok(/limit: z\.number\(\)\.int\(\)\.min\(1\)\.max\(20\)\.optional\(\)\.default\(8\)\.describe\("Knowledge hits/.test(schemaSrc) && SEARCH_ARGS("q").limit === 8, "plan_context's default limit is 8, as SEARCH_ARGS asks");
+  ok(sheetOrder(two).map((r) => r.id).join() !== two.map((r) => r.id).join() || sheetOrder([...two].reverse()).map((r) => r.id).join() === sheetOrder(two).map((r) => r.id).join(), "sheets are numbered in a hashed order, not the requests' order");
 
   console.log(fails ? `\n${fails} check(s) failed` : "\nall checks passed");
   return fails;
@@ -574,9 +627,10 @@ async function main(): Promise<void> {
     const rows = new Map((JSON.parse(readFileSync(need(arg(args, "--rows"), "--rows"), "utf8")) as Row[]).map((r) => [r.id.toLowerCase(), r]));
     mkdirSync(join(dir, "sheets"), { recursive: true });
     writeFileSync(join(dir, "sheets", "RULES.md"), RATER_RULES);
-    // A paraphrase's sheet is named by its opaque id, so a rater can't pair it with its ticket by file name.
+    // A paraphrase's sheet is named by its opaque id, so a rater can't pair it with its ticket by file name; sheets
+    // are numbered in a hashed order, so a number says nothing about a request's kind (review pass 1).
     const sheetIds: Record<string, string> = {};
-    requests.forEach((r, i) => {
+    sheetOrder(requests).forEach((r, i) => {
       const name = `${String(i + 1).padStart(2, "0")}-${sheetId(r).replace(/\s+/g, "-")}.md`;
       sheetIds[sheetId(r)] = r.id;
       writeFileSync(join(dir, "sheets", name), sheetFor(r, Object.values(keyMap[r.id]), rows));
