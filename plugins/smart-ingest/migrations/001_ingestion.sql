@@ -10,8 +10,9 @@
 
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
   id               bigserial   PRIMARY KEY,
-  -- The text's sha256, hex; another job of the same text (a reprocess, or a resend after a failed job) adds -v2, -v3 …
-  input_hash       text        NOT NULL UNIQUE,
+  -- The text's sha256, hex; another job of the same text from the same key (a reprocess, or a resend after a failed
+  -- job) adds -v2, -v3 … (one key's text and another's are each its own job: a job is its creator's).
+  input_hash       text        NOT NULL,
   -- The caller's session key (source_metadata.import_key): one live job per key unless reprocess (a failed job answers no one).
   import_key       text,
   source_label     text,
@@ -22,8 +23,10 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
   dry_run          boolean     NOT NULL,
   -- What the text is, as the caller declared it (capture_thought's trust), for the execute; null for none.
   trust            text        CHECK (trust IN ('operator', 'agent', 'ingested')),
-  -- The key that sent it.
+  -- The key that sent it: the only key that lists, reads or executes it.
   created_by       text        NOT NULL,
+  -- Random: each item's capture key (client_key) is made from it and the item's id, so no other writer can name one.
+  key_seed         uuid        NOT NULL DEFAULT gen_random_uuid(),
   extracted_count  integer     NOT NULL DEFAULT 0,
   added_count      integer     NOT NULL DEFAULT 0,
   skipped_count    integer     NOT NULL DEFAULT 0,
@@ -38,11 +41,12 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
   -- The caller's source_metadata, as it sent it.
   source_metadata  jsonb       NOT NULL DEFAULT '{}'::jsonb,
   created_at       timestamptz NOT NULL DEFAULT now(),
-  completed_at     timestamptz
+  completed_at     timestamptz,
+  UNIQUE (created_by, input_hash)
 );
 
-CREATE INDEX IF NOT EXISTS ingestion_jobs_by_import_key ON ingestion_jobs (import_key, created_at DESC) WHERE import_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS ingestion_jobs_by_time ON ingestion_jobs (created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ingestion_jobs_by_import_key ON ingestion_jobs (created_by, import_key, created_at DESC) WHERE import_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ingestion_jobs_by_time ON ingestion_jobs (created_by, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS ingestion_items (
   id                  bigserial   PRIMARY KEY,

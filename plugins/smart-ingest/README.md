@@ -11,7 +11,7 @@ You send it a document: meeting notes, a journal entry, an article, an email thr
 - **skip** it: too short (under 30 characters) or rated below 3 of 5, said twice in the same document, a thought the brain holds word for word (up to case and spacing), or a duplicate of one by meaning (a cosine similarity above 0.92);
 - **add** it: nothing the brain holds is as close as 0.85;
 - **append evidence**: a thought between 0.85 and 0.92 that is at least as long; the passage the new one came from (its own text when the model gave none) is added to that thought's `metadata.evidence` (`append_thought_evidence`), labelled with the job's `source_label` (`smart_ingest` without one);
-- **create a revision**: a thought between 0.85 and 0.92 that is shorter; the new one is captured as superseding it.
+- **create a revision**: a thought between 0.85 and 0.92 that is shorter; the new one is captured as superseding it. A job whose declared `trust` is below that thought's (an `ingested` email against an operator's note) never supersedes it: the passage is appended as evidence instead (`lower_trust_than_match`).
 
 A **dry run** stores the decisions and writes nothing to the brain; `get_job` shows each one and `execute_job` carries them out. Without a dry run they are carried out at once.
 
@@ -19,18 +19,18 @@ Four operations, each an MCP tool on the brain's own connector and a route on th
 
 | Tool | Route | Scope | What it does |
 | --- | --- | --- | --- |
-| `smart_ingest_ingest` | `POST /v1/plugins/smart-ingest/jobs` | write | Extract, decide, and (without `dry_run`) carry out |
+| `smart_ingest_extract` | `POST /v1/plugins/smart-ingest/jobs` | write | Extract, decide, and (without `dry_run`) carry out |
 | `smart_ingest_execute_job` | `POST /v1/plugins/smart-ingest/jobs/{job_id}/execute` | write | Carry out a dry run's decisions |
 | `smart_ingest_list_jobs` | `GET /v1/plugins/smart-ingest/jobs` | read | The jobs, newest first, each with its status and counts; `status` narrows to one |
 | `smart_ingest_get_job` | `GET /v1/plugins/smart-ingest/jobs/{job_id}` | read | A job and its items: each decision, why, and what its execute did |
 
 **Each job counts what was done** (SMD-2154): `added_count`, `skipped_count`, `appended_count`, `revised_count`, `existed_count` and `failed_count` sum to `extracted_count`. `existed_count` is an add whose text the brain held by the time it ran (a capture since the dry run, or another job's), or evidence the thought already held: nothing was added for it. Before each add and revision the plugin looks for its text word for word among the search's first 20 hits, and writes nothing if the brain holds it; with the search unable to answer (the embedding provider down) the job pauses instead (below). A held text the look does not find (captured in the moment between the look and the capture, ranked past those 20, or in a thought the caller's key cannot read) is a re-capture, which merges this capture's metadata into that thought (its `source` among them), as any capture of known text does. A dry run's counts are what it decided.
 
-**The same text** is one job: sending it again answers that job (`existing: true`), and so does a `source_metadata.import_key` already ingested, even two sent at once. The answer's `message` says what to do with that job: `execute_job` for a dry run's. A failed job answers no one: the same call after a refusal (a `503` above all) runs again, as a new job. A job a server left extracting or executing when it stopped answers its text for good: send it with `reprocess: true`, which extracts a text again as a new job, paying for the model calls again.
+**The same text** is one job: sending it again answers that job (`existing: true`), and so does a `source_metadata.import_key` already ingested, even two sent at once. The answer's `message` says what to do with that job: `execute_job` for a dry run's. A job paused while carrying out an extract that was no dry run (a `503`, below) is carried out by the same call again. A failed job answers no one: the same call after a refusal while extracting or deciding runs again, as a new job. A job a server left extracting or executing when it stopped answers its text for good: send it with `reprocess: true`, which extracts a text again as a new job, paying for the model calls again.
 
-**Jobs are the brain's, not a key's.** Any read key lists and reads every job and its items (the model's words from each document, and the thoughts each matched); any write key executes any dry run, its captures written as that key, under its trust, while `created_by` names the key that ingested.
+**A job is its creator's** (the maintainer's call, 2026-11-11), as the core's own `job_status` is: `list_jobs`, `get_job` and `execute_job` answer only the key that made the job, and another is told there is none (`NO_SUCH_JOB`). The same text from another key is that key's own job. So every capture of a job is written as the key that sent the document, under its trust.
 
-**Who wrote it.** Each thought is captured through the core as the key that called, with `source: smart-ingest` (the old server wrote `smart_ingest`, which the core's source labels do not take: a filter on the old label finds the old thoughts alone; evidence entries keep `source: smart_ingest`) and five metadata keys: `smart_ingest_job`, `smart_ingest_item`, `extraction_type`, and the job's `source_label` and `source_type` when given. The core embeds it and extracts its own metadata (its `type`, `topics`, `people`) as it does any capture. What the extraction said beside the text (its type, importance, tags and the passage it came from) is the item's, in the plugin's table. `trust` is passed to each capture: `ingested` for outside text.
+**Who wrote it.** Each thought is captured through the core as the key that called, with `source: smart-ingest` (the old server wrote `smart_ingest`, which the core's source labels do not take: a filter on the old label finds the old thoughts alone; evidence entries keep `source: smart_ingest`) and five metadata keys: `smart_ingest_job`, `smart_ingest_item`, `extraction_type`, and the job's `source_label` and `source_type` when given. The core embeds it and extracts its own metadata (its `type`, `topics`, `people`) as it does any capture. What the extraction said beside the text (its type, importance, tags and the passage it came from) is the item's, in the plugin's table. `trust` is passed to each capture: `ingested` for outside text. Each capture carries a `client_key` made from the job's random seed and the item's id, so a job resumed after a fault is answered its own earlier capture, nothing written twice.
 
 ### Deduplication
 
@@ -71,7 +71,7 @@ One call does all of its work before it answers. Extraction is one model call pe
 
    With a chat endpoint that is not local, the egress policy decides whether the document may leave for it. Under the default (`deny`), only `OB1_EGRESS_ALLOW=plugin:smart-ingest` lets the plugin's calls out: the caller's `actor:` term does not. Add it beside any terms already there. Each capture's text is judged as any capture's is, by the caller's key ([deploy/.env.example](../../deploy/.env.example), "What may leave the box").
 2. **Recreate the services so they read it.** From `deploy/`, run `docker compose up -d migrate api mcp`, then `docker compose up -d --force-recreate --no-deps app`, each with the stack's other `-f` files. The migrator makes the plugin's role, its schema and its login role `ob1_plugins_smart_ingest`, and applies `001_ingestion.sql`. Recreating `app` signs everyone out of the GUI: its sessions live in its memory.
-3. **Check it.** The REST core's preflight, at the top of its log (`docker compose logs api`): its `plugin tables` row says the role, schema and migration are in place. Then a dry run:
+3. **Check it.** The REST core's preflight, at the top of its log (`docker compose logs api`): its `plugin tables` row says the role, schema and migration are in place. Moving from the standalone server? Copy its jobs first ("Moving from the standalone server", below): a job made before the copy can stop it. Then a dry run:
 
    ```bash
    curl -X POST "https://<your brain's host>/api/v1/plugins/smart-ingest/jobs" \
@@ -89,13 +89,13 @@ The standalone server (`integrations/smart-ingest`) kept its jobs in `public.ing
 
 | | The old server | The plugin |
 | --- | --- | --- |
-| Ingest | `POST /` (or `/smart-ingest`) | `POST /api/v1/plugins/smart-ingest/jobs`, or the `smart_ingest_ingest` tool |
+| Ingest | `POST /` (or `/smart-ingest`) | `POST /api/v1/plugins/smart-ingest/jobs`, or the `smart_ingest_extract` tool |
 | Execute a dry run | `POST /execute` with `{"job_id": n}` | `POST /api/v1/plugins/smart-ingest/jobs/{job_id}/execute` |
 | The key | its one `MCP_ACCESS_KEY`, in `x-brain-key` or as a bearer | a brain key of write scope, in `x-brain-key`, `x-access-key` or as a bearer (`Authorization: Bearer`), never on the URL |
 | The answer | the job's fields at the top level, `status: "existing"` for a text already ingested | ingest: `{existing, job: {job_id, status, …counts}, message}`; execute: `{already, job}`; a refusal is `{code, …}` at its status (a job not ready is `409`, the old `400`) |
 | `skip_classification` | taken | refused (the input is strict): every capture runs the core's metadata call |
 
-To keep the old jobs, copy them across. The block below copies every job and item, keeping their ids, so an old dry run's job can be executed by the plugin. Run it as the database owner in `psql`: on the compose stack, from `deploy/`, pipe it to `docker compose exec -T postgres psql -U postgres -d openbrain`. It is one transaction, so a refused row copies nothing, and it can be run again: a job already in the plugin's table is left as it is, with its items and counts. Run it before the plugin's first ingest: a job the plugin made holds an id, or a text, an old job may have, and that old job is then not copied; an item the plugin made holding an old item's id stops the copy, which then copies nothing.
+To keep the old jobs, copy them across. The block below copies every job and item, keeping their ids, so an old dry run's job can be executed by the plugin. Run it as the database owner in `psql`: on the compose stack, from `deploy/`, pipe it to `docker compose exec -T postgres psql -U postgres -d openbrain`. It is one transaction, so a refused row copies nothing, and it can be run again: a job already in the plugin's table is left as it is, with its items and counts. Run it before the plugin's first ingest: a job the plugin made holds an id, or a text, an old job may have, and that old job is then not copied; an item the plugin made holding an old item's id stops the copy, which then copies nothing. To copy after all, delete the plugin's own jobs first, as the database owner (`DELETE FROM plugin_smart_ingest.ingestion_jobs WHERE created_by <> 'MCP_ACCESS_KEY';`, their items with them), and run the block again.
 
 ```sql
 \set ON_ERROR_STOP on
@@ -147,7 +147,11 @@ COMMIT;
 
 - **The counts** are counted from the items this run copies, as the plugin counts them, so they sum to `extracted_count`; a job copied before, executed by the plugin since, keeps the counts its execute gave. The old server counted an execute by what its dry run decided, so an old job's `existed_count` is 0 whatever happened (SMD-2154).
 - **A job the old server left unfinished** (it stopped mid-way): one still executing is copied as a dry run's, so `execute_job` carries out its items still ready; one still extracting is copied as failed, and its text sent again is a new job. `error_message` says which.
-- **The key** that made an old job is recorded as `MCP_ACCESS_KEY`, the one key the old server held.
+- **The key** that made an old job is recorded as `MCP_ACCESS_KEY`, the one key the old server held, and a job is its creator's: hand the copied jobs to the key that will read and execute them, as the database owner:
+
+  ```sql
+  UPDATE plugin_smart_ingest.ingestion_jobs SET created_by = '<your key's name>' WHERE created_by = 'MCP_ACCESS_KEY';
+  ```
 - **What the old server spread** over each item's metadata beyond its type, importance, tags (those that are text) and passage stays in `public.ingestion_items`. The job's `source_metadata` is its metadata less `source_type`, `dry_run`, `skip_classification` and `trust`, which the plugin keeps in columns or drops.
 - **Afterwards**, the old tables and the function `public.append_thought_evidence(uuid, jsonb)` are no longer used: the core's `append_thought_evidence` operation writes evidence through the event log. `--grant` no longer grants them, but a grant made before stays until they are dropped; that function is `SECURITY DEFINER` and writes `thoughts.metadata` past the event log, so a role granted it keeps that until then (`bun migrate.ts --grant <role> --exact`, from `db/`, revokes what a role holds beyond its groups). When you no longer want the old rows, drop them as the database owner, the brain-health-monitoring view over them first:
 
@@ -159,8 +163,8 @@ COMMIT;
 
 ## Troubleshooting
 
-- **`403 FORBIDDEN`.** The key cannot write: `ingest` and `execute_job` take a write key.
-- **`404 NO_SUCH_JOB`.** No job has that id on this brain.
+- **`403 FORBIDDEN`.** The key cannot write: `extract` and `execute_job` take a write key.
+- **`404 NO_SUCH_JOB`.** No job of this key's has that id: a job is its creator's.
 - **`409 JOB_NOT_READY`.** `execute_job` carries out a dry run's job alone (`dry_run_complete`): `job_status` and `message` say which this is. Still extracting; failed (send the text again: a failed job's text is a new job); or executing, by another call, or left so by a server that stopped while it ran, which stays so (send the text again with `reprocess: true`; SMD-4217 makes a job resumable). A fault while executing leaves the job a dry run's again, so `execute_job` carries out the items still ready. A job already complete is answered as it stands (`already: true`).
 - **`422 RESTRICTED_CONTENT`.** The text holds what looks like a national id, a passport, card or account number, a key or a password (`pattern` names which). Nothing was sent to a model. Remove it and send the text again. The patterns are the old server's, and read loosely: a UUID whose first groups are all digits reads as a card number.
 - **`422 EXTRACTION_REFUSED`.** The egress gate kept the text in (`reason` names the rule): under `deny`, add `plugin:smart-ingest` to `OB1_EGRESS_ALLOW` ("Turn it on", step 1). The job is marked failed; send the text again once the term is there.
