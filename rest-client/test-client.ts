@@ -116,6 +116,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     update_thought: { id: ID, content: "new text", supersedes: null },
     delete_thought: { id: ID, detach_citations: true },
     reset_capture_stamp: { id: ID },
+    // SMD-2690 PR 3b: the thought in the path, the entry in the body.
+    append_thought_evidence: { id: ID, source_label: "a file & more?", excerpt: "the passage", source: "smart_ingest", extracted_at: "2026-11-10T09:00:00+01:00" },
     review_supersession_proposal: { id: ID, decision: "accept", direction: "older", note: "a note & more?", force: true },
     retry_failed: { work_type: "extract:x@p1" },
     release_stale_leases: { work_type: "extract:x@p1", include_live: false },

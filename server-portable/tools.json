@@ -138,6 +138,10 @@
       "scope": "write"
     },
     {
+      "name": "append_thought_evidence",
+      "scope": "write"
+    },
+    {
       "name": "review_supersession_proposal",
       "scope": "write"
     },
