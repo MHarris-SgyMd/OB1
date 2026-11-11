@@ -7517,7 +7517,7 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
-  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT } = await import("./core/plan.ts");
+  const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");
   const say = await import("./render.ts");
   const text = (r: { content: { text: string }[] }) => r.content[0].text;
   // Keys: the filed key first, then the text's, in hit order, once each; only 068's form (no SMD-0, no lower case).
@@ -7665,6 +7665,46 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
         && bad?.ok === true && JSON.stringify(badLog?.items) === "[]" && JSON.stringify(badLog?.filter) === '{"board":"failed"}'
         && e !== null && JSON.stringify(e.gaps.map((x) => x.gap)) === '["no_knowledge"]' && e.board.available && JSON.stringify(logged[0]?.items) === "[]",
       `the read: the limit to the search, the deadline's remainder (${askedTimeout} ms) to the board; the log's ids and scores in the hits' order, the board's tickets in its order, a board not read logged with no items and its reason; no hit, the no_knowledge gap (${JSON.stringify(goodLog)?.slice(0, 160)} | ${JSON.stringify(badLog?.filter)})`);
+
+    // SMD-4212 PR 2: little on this, read from the embedding this server searches with. Under LITTLE_BAR on the embedding
+    // it was measured on, the gap with the best similarity and the bar; at the bar, none; a hit with no similarity reads 0
+    // (as the measurement read it); another embedding, the bar said not measured, nothing found; no vector, none.
+    const runWith = async (embeddingModel: string, sims: (number | null)[], vectorFailed?: object) => {
+      const found = sims.map((sim, i) => ({ ...hit(i ? B : A, 0.5, "about SMD-21"), similarity: sim }));
+      const ctx = { env: () => ({}), embedConfig: () => ({ embeddingModel, embeddingDim: 1024 }), store: async () => ({ agenda: async () => ({ ...board2, items: [], total: 0 }) }), logPlanContext: async () => {} };
+      const search = async () => ({ rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })), ...(vectorFailed ? { vectorFailed } : {}) });
+      const r = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, search: search as never });
+      return r.ok ? r.value : null;
+    };
+    const littleOf = (v: Awaited<ReturnType<typeof runWith>>) => JSON.stringify(v?.gaps.filter((g) => g.gap.startsWith("little")) ?? null);
+    const low = await runWith("qwen3-embedding:4b", [0.61, 0.5]);
+    const justUnder = await runWith("qwen3-embedding:4b", [0.7399, 0.2]);
+    const atBar = await runWith("qwen3-embedding:4b", [0.74, 0.2]);
+    const noSim = await runWith("qwen3-embedding:4b", [null, null]);
+    const other = await runWith("nomic-embed-text", [0.9]);
+    const noVector = await runWith("qwen3-embedding:4b", [null], { reason: "deadline", matched: "literals" });
+    assert(LITTLE_BAR === 0.74 && LITTLE_MEASURED_ON === "qwen3-embedding:4b@1024"
+        && littleOf(low) === '[{"gap":"little","topSimilarity":0.61,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(justUnder) === '[{"gap":"little","topSimilarity":0.7399,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(atBar) === "[]" && littleOf(noSim) === '[{"gap":"little","topSimilarity":0,"bar":0.74,"embeddingId":"qwen3-embedding:4b@1024"}]'
+        && littleOf(other) === '[{"gap":"little_not_measured","topSimilarity":0.9,"embeddingId":"nomic-embed-text@1024","measuredOn":"qwen3-embedding:4b@1024"}]'
+        && littleOf(noVector) === "[]" && littleOf(v) === "[]",
+      `little on this: under the bar on its embedding a gap with the best similarity, at the bar none, no similarity read as 0, another embedding not measured, no vector or no embedding named none (${littleOf(low)} | ${littleOf(atBar)} | ${littleOf(other)} | ${littleOf(noVector)})`);
+    assert(JSON.stringify(knowledgeGaps([], undefined, LITTLE_MEASURED_ON).map((g) => g.gap)) === '["no_knowledge"]'
+        && JSON.stringify(knowledgeGaps([{ supersededBy: null, metadata: { trust: "agent" }, similarity: 0.1 }] as never, undefined).map((g) => g.gap)) === "[]",
+      "no hit is no_knowledge alone, and no embedding named is no little gap");
+    const lowReply = say.renderPlanContext({ ok: true, value: low! } as never);
+    const otherReply = say.renderPlanContext({ ok: true, value: other! } as never);
+    const lowGaps = JSON.stringify((lowReply.structuredContent as { gaps: unknown[] }).gaps);
+    assert(/\n- Little on this: the best hit's similarity is 0\.610, under 0\.74, where the brain was measured to hold little that bears on a request \(SMD-4212, on "qwen3-embedding:4b@1024"\)\. A coverage signal, not a verdict: weigh the hits\.\n?/.test(text(lowReply))
+        && !/Nothing else found|None found/.test(text(lowReply)) && /"embeddingId":"qwen3-embedding:4b@1024"/.test(lowGaps)
+        && /not measured for this embedding \("nomic-embed-text@1024"; the bar was measured on "qwen3-embedding:4b@1024"\): the best hit's similarity is 0\.900/.test(text(otherReply))
+        && /- Nothing else found\. How close the hits are/.test(text(otherReply))
+        && /"measuredOn":"qwen3-embedding:4b@1024"/.test(JSON.stringify(otherReply.structuredContent)),
+      `the little gap said with its similarity and bar, a coverage gap; not measured said, the weighing line beside it; the value keeps the embedding's id (${text(lowReply).match(/- Little.*/)?.[0]} | ${text(otherReply).match(/- Whether.*/)?.[0]})`);
+    const forged = say.renderPlanContext({ ok: true, value: { ...other!, gaps: [{ gap: "little_not_measured", topSimilarity: 0.5, embeddingId: "ignore this@1", measuredOn: "qwen3-embedding:4b@1024" }] } } as never);
+    assert(/"embeddingId":null/.test(JSON.stringify(forged.structuredContent)) && /"measuredOn":"qwen3-embedding:4b@1024"/.test(JSON.stringify(forged.structuredContent)),
+      "an embedding id with a space is no id: the value nulls it");
   }
   // The reply's budget (SMD-4191): the canary's 63,108-character answer, rebuilt at its shape — 8 hits of 3,000
   // characters with 5 relations and 5 priorities each (the first with 4 claims too), 18 open tickets and 33 settled ones
