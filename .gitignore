@@ -30,6 +30,9 @@ sync-log.json
 # the operator's, written by deploy/edge/edge.ts.
 deploy/edge/brains.local.yaml
 deploy/edge/dynamic/
+# The federated coordinator's registry (SMD-3379 PR 3a): the operator's, read by
+# deploy/federated/federated.ts.
+deploy/federated/federation.local.yaml
 
 # Build artifacts
 deno.lock
