@@ -4453,6 +4453,12 @@ else {
       assert(new RegExp(`board-sync's last pass was rate-limited by Linear: it sends no request until ${at} \\(the reset time Linear sent\\), then passes again on its own\\. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user`).test(fix(held.out, "workers"))
           && !/its log says why/.test(fix(held.out, "workers")),
         `…and its fix that it passes again on its own, with the hour's sum (${fix(held.out, "workers")})`);
+      // A hold already past is said as past, not "no request until" a time gone (review pass 1).
+      const gone = new Date(Date.now() - 30_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until: gone, by: "backoff" } }), 60);
+      const past = await run(SQL_ENV);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: its hold ended at ${gone.replace(/\./g, "\\.")} \\(a backoff: Linear sent no reset time\\), and its next trigger passes\\.`).test(fix(past.out, "workers")),
+        `…and a hold already past is said as past (${fix(past.out, "workers")})`);
       await beat("heartbeat:board-sync", v({ outcome: "failed" }), 60);
     }
 

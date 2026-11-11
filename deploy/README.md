@@ -2079,8 +2079,9 @@ user 2,500 requests an hour, and a complexity budget beside it, refilled as the
 hour goes. Every brain, agent runner and tool whose key belongs to that user
 spends the same hour, and a refused request counts too. A quiet pass is one
 request for the initiative plus one per hundred issues on the board; each fifty
-moved tickets add one, and each finding told adds one under the comment key's
-user. Each pass's log line ends
+moved tickets add one. The findings step below spends its own, under the comment
+key's user and outside the pass's count: each finding read costs two (its two
+tickets), and one told a third (the comment). Each pass's log line ends
 with its count (`done (… ms, 15 Linear requests)`). Measured 2026-11-11 on a
 board of 1,315 issues, a quiet pass was 15 requests. So, per user, per hour:
 
@@ -2099,8 +2100,10 @@ with it (`X-RateLimit-Requests-Reset`, `X-RateLimit-Complexity-Reset` or
 `Retry-After`; an hour at most). If Linear sends none, it backs off: two
 intervals, then four, doubling up to an hour. The coordinator's triggers run no
 pass meanwhile. Its heartbeat says `rate-limited by Linear … until <time>`, not
-just "failed", and preflight's `workers` row warns with the hold and this sum.
-It passes again on its own; a restart forgets the hold and asks once.
+just "failed", and preflight's `workers` row warns with the hold, the 2,500 and a
+pointer here. It passes again on its own; a restart forgets the hold and asks
+once. A held pass runs none of its steps, the release of closed tickets' claims
+and the tickets' priorities among them: they wait for the hold, an hour at most.
 
 **Telling the board what consolidation found** (SMD-2681). Set
 `LINEAR_COMMENT_API_KEY` in `deploy/.env` — a Linear key of its own that can

@@ -1675,9 +1675,12 @@ function selfCheck(): Promise<number> {
         rateLimitReset(H({ "retry-after": new Date(T + 60_000).toUTCString() }), T),
         rateLimitReset(H({ "retry-after": "soon", "x-ratelimit-requests-reset": "1e12" }), T),
         rateLimitReset(H({}), T),
+        // Neither limit exhausted: the refusal may be another limit's, so Retry-After before the hourly reset (review pass 1).
+        rateLimitReset(H({ "retry-after": "30", "x-ratelimit-requests-remaining": "40", "x-ratelimit-requests-reset": String(T + 3_000_000) }), T),
+        rateLimitReset(H({ "retry-after": "soon", "x-ratelimit-requests-remaining": "40", "x-ratelimit-requests-reset": String(T + 9) }), T),
       ];
-      ok(JSON.stringify(resets) === JSON.stringify([T + 5, T + 5, T + 9, T + 120_000, T + 60_000, null, null]),
-        `the reset is the exhausted limit's, else the later; else Retry-After's seconds or date; else none (${resets.map((r) => (r === null ? null : r - T)).join(", ")})`);
+      ok(JSON.stringify(resets) === JSON.stringify([T + 5, T + 5, T + 9, T + 120_000, T + 60_000, null, null, T + 30_000, T + 9]),
+        `the reset is the exhausted limit's, else Retry-After's seconds or date, else the later reset; else none (${resets.map((r) => (r === null ? null : r - T)).join(", ")})`);
     }
     // The client says a rate limit by its own error, with the reset, from a 429 or from a body coded RATELIMITED.
     {
@@ -1694,8 +1697,10 @@ function selfCheck(): Promise<number> {
         await outcome(answering(500, "upstream down")),
         await outcome(answering(400, { errors: [{ message: "bad query", extensions: { code: "GRAPHQL_VALIDATION_FAILED" } }] })),
         await outcome(answering(200, { data: { viewer: { id: "u" } } })),
+        // `errors` not a list is read as the body it was, not a TypeError (review pass 1).
+        await outcome(answering(200, { data: { viewer: { id: "u" } }, errors: "odd" })),
       ];
-      ok(got.join(" | ") === "limited:1800000000000 | limited:1800000000005 | limited:null | error:Linear returned HTTP 500 | error:Linear returned HTTP 400 | answered",
+      ok(got.join(" | ") === "limited:1800000000000 | limited:1800000000005 | limited:null | error:Linear returned HTTP 500 | error:Linear returned HTTP 400 | answered | answered",
         `a 429, or a body coded RATELIMITED at any status, is a rate limit with its reset; any other failure an error as before (${got.join(" | ")})`);
     }
     // …and it ends the fetch, and so the pass, where any other refusal is a batch's.
@@ -1734,12 +1739,13 @@ function selfCheck(): Promise<number> {
         alive: async () => { marks.push(`${(clock - T) / 1000}:held`); },
         limited: (m: { until: string; by: string } | null) => { marks.push(m === null ? "clear" : `until ${(Date.parse(m.until) - T) / 1000} ${m.by}`); },
       } as unknown as PassStamper;
-      const drive = async (script: (n: number) => void, triggers: number) => {
+      // The coordinator's triggers on a fixed grid, every 300 s from T; each pass spends `passMs` before its request.
+      const drive = async (script: (n: number) => void, triggers: number, passMs = 0) => {
         let n = 0;
         const lines: string[] = [];
         const code = await triggerPasses({
-          once: async () => { await gql("{ viewer { id } }"); return 0; },
-          next: async () => { n++; clock += 300_000; script(n); }, stopped: () => n >= triggers,
+          once: async () => { clock += passMs; await gql("{ viewer { id } }"); return 0; },
+          next: async () => { n++; clock = T + n * 300_000; script(n); }, stopped: () => n >= triggers,
           stamper, intervalS: 300, now: () => clock, log: (l) => lines.push(l), warn: (l) => lines.push(l),
         });
         return { code, lines };
@@ -1749,10 +1755,11 @@ function selfCheck(): Promise<number> {
       ok(sent.join(",") === "0,1200" && marks.join(" | ") === "until 1000 linear | 0:failed | 300:held | 600:held | 900:held | clear | 1200:ok | end:stopped" && first.code === 0,
         `a 429 with a reset: no request until the reset, each trigger before it stamps the hold, the first after it passes and clears it (requests at ${sent.join(",")} s; ${marks.join(" | ")})`);
       ok(first.lines.filter((l) => l.includes("no pass: rate-limited by Linear until")).length === 3 && first.lines.some((l) => /pass held: Linear returned HTTP 429/.test(l)), `the log says each held trigger and the refusal (${first.lines.join(" / ").slice(0, 200)})`);
-      // No reset sent: two periods, then four, then the pass.
+      // No reset sent: two periods, then four, then the pass — counted from the trigger, so a pass that takes time
+      // (5 s before its request) holds no extra trigger (review pass 1: from the refusal, 0, 900, 2400).
       sent.length = 0; marks.length = 0; clock = T; answer = "limit-bare";
-      await drive((n) => { if (n === 6) answer = "ok"; }, 7);
-      ok(sent.join(",") === "0,600,1800", `no reset sent: the passes back off two periods, then four (requests at ${sent.join(",")} s; ${marks.join(" | ")})`);
+      await drive((n) => { if (n === 6) answer = "ok"; }, 7, 5_000);
+      ok(sent.join(",") === "5,605,1805", `no reset sent: the passes back off two periods, then four, on the triggers' grid (requests at ${sent.join(",")} s; ${marks.join(" | ")})`);
       // At start (main's board read refused): the first trigger is held as a pass's refusal would hold it.
       sent.length = 0; marks.length = 0; clock = T; answer = "ok";
       const n0: { n: number } = { n: 0 };
@@ -2112,9 +2119,10 @@ async function main(): Promise<void> {
   const only = cli.value("only")?.split(",").map((s) => s.trim()).filter(Boolean);
 
   // Every request counted, so each pass says what it spent of the Linear user's hour (SMD-4133): 2,500 requests an hour
-  // per user, shared by every brain and tool under it — deploy/README.md's board-sync section has the sum.
+  // per user, shared by every brain and tool under it — deploy/README.md, "What a pass costs", has the sum.
   const client = linearClient(key);
   let requests = 0;
+  let firstPass = true;
   const gql: Gql = <T,>(query: string, variables?: Record<string, unknown>) => { requests++; return client<T>(query, variables); };
   const spent = () => `${requests} Linear request${requests === 1 ? "" : "s"}`;
   // One connection each: the reader and the store, serial by construction.
@@ -2244,8 +2252,10 @@ async function main(): Promise<void> {
   let resolved: Board | undefined;
   const once = async (): Promise<number> => {
     const t0 = Date.now();
-    // From zero each pass; the first counts the board read at start too, which it serves (`resolved`).
-    if (resolved === undefined) requests = 0;
+    // From zero each pass; the first counts the board read at start too, answered or refused (review pass 1: a
+    // refused one was dropped by the first pass's reset).
+    if (!firstPass) requests = 0;
+    firstPass = false;
     run = runName(SELF);
     // planBoard asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
     const readRows: ReadRows = (scanHeaders, claimed) => readTicketRows(sql, { scanHeaders, claimed });
@@ -2381,8 +2391,11 @@ export async function triggerPasses(opts: {
   // Linear's rate limit (SMD-4133): no pass, and so no request, until `hold.until`; `streak` the passes in a row it refused.
   let hold: RateHold | null = null;
   let streak = 0;
-  const limited = (e: LinearRateLimited): RateHold => {
-    const h = rateHold(e, { now: now(), intervalS: opts.intervalS, streak });
+  // `from`: the trigger that started the refused pass. A backoff counts its periods from there, on the coordinator's
+  // grid of triggers; counted from the refusal, a pass's own seconds put the trigger at two periods just inside the
+  // hold, and every backoff ran a period long (review pass 1).
+  const limited = (e: LinearRateLimited, from: number): RateHold => {
+    const h = rateHold(e, { now: from, intervalS: opts.intervalS, streak });
     streak++;
     opts.stamper?.limited?.({ until: new Date(h.until).toISOString(), by: h.by });
     warn(`  pass held: ${e.message.split("\n")[0]}`);
@@ -2391,7 +2404,7 @@ export async function triggerPasses(opts: {
   };
   if (opts.limitedAtStart) {
     code = 1;
-    hold = limited(opts.limitedAtStart);
+    hold = limited(opts.limitedAtStart, now());
     await opts.stamper?.stamp("failed");
     if (!opts.stopped()) await opts.next();
   }
@@ -2404,7 +2417,8 @@ export async function triggerPasses(opts: {
       if (!opts.stopped()) await opts.next();
       continue;
     }
-    log(`▸ ${new Date(now()).toISOString()}`);
+    const started = now();
+    log(`▸ ${new Date(started).toISOString()}`);
     try {
       code = await (opts.stamper ? opts.stamper.during(opts.once()) : opts.once());
       hold = null;
@@ -2412,7 +2426,7 @@ export async function triggerPasses(opts: {
       opts.stamper?.limited?.(null);
     } catch (e) {
       code = 1;
-      if (isRateLimited(e)) hold = limited(e);
+      if (isRateLimited(e)) hold = limited(e, started);
       else {
         // Any other failure ends a hold: the window had room for whatever request failed.
         hold = null;

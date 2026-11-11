@@ -23562,6 +23562,7 @@ if (want("37")) {
       let passes = 0;
       let heldRow: Record<string, unknown> | null = null;
       let heldWords = "";
+      let clearedRow: Record<string, unknown> | null = null;
       console.log = () => {};
       console.error = () => {};
       try {
@@ -23574,6 +23575,9 @@ if (want("37")) {
               const beat = (await readHeartbeats(hsql as never)).heartbeats.find((h) => h.worker === "board-sync");
               heldWords = beat ? heartbeatState(beat) : "no row read";
             }
+            // After the pass past the reset, before the end: the row that pass stamped (review pass 1 read it only after
+            // the end, which clears the hold whatever the pass did).
+            if (n === 3) clearedRow = await row("heartbeat:board-sync");
             clock += 300_000;
           },
           stopped: () => n >= 3, stamper: limStamper, intervalS: 300, now: () => clock,
@@ -23588,7 +23592,10 @@ if (want("37")) {
         `a rate-limited pass stamps failed with the hold: until Linear's reset, by its word; the trigger before the reset runs no pass (${JSON.stringify(heldRow)}; ${passes} passes)`);
       assert(/^alive, its last pass rate-limited by Linear: no pass, and no request, until \S+ \(in \d+ min; the reset time Linear sent\)/.test(heldWords),
         `brain_info says the hold, not just "failed" (${heldWords})`);
-      assert(after !== null && !("limited" in after) && after.outcome === "stopped", `the pass after the reset clears the hold, and the end keeps none (${JSON.stringify(after)})`);
+      const cleared = clearedRow as Record<string, unknown> | null;
+      assert(cleared !== null && !("limited" in cleared) && cleared.outcome === "ok" && cleared.ended === undefined,
+        `the pass after the reset clears the hold on the row it stamps, the process still running (${JSON.stringify(clearedRow)})`);
+      assert(after !== null && !("limited" in after) && after.outcome === "stopped", `…and the end keeps none (${JSON.stringify(after)})`);
       // A row its supervisor ends (SMD-3214) holds nothing: an ended process sends no request to hold.
       const ender = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 });
       ender.limited?.({ until: new Date(Date.now() + 600_000).toISOString(), by: "backoff" });

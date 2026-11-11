@@ -42,9 +42,11 @@ export class LinearRateLimited extends Error {
  * When a rate-limited answer says the window has room again, in epoch ms, or
  * null. Linear sends `X-RateLimit-Requests-Reset` and
  * `X-RateLimit-Complexity-Reset` (epoch ms) with their `-Remaining`: the
- * exhausted one's reset is the time, and when neither reads exhausted, the
- * later of the two. `Retry-After` (seconds, or an HTTP date) when neither is
- * sent. A value that does not read as a time is no time.
+ * exhausted one's reset is the time. When neither reads exhausted, the refusal
+ * may be another limit's, so `Retry-After` (seconds, or an HTTP date) comes
+ * next, and the later of the two resets last (review pass 1: the hourly reset
+ * first could hold a short refusal for an hour). A value that does not read as
+ * a time is no time.
  */
 export function rateLimitReset(headers: Headers, now: number = Date.now()): number | null {
   const num = (name: string): number | null => {
@@ -55,13 +57,12 @@ export function rateLimitReset(headers: Headers, now: number = Date.now()): numb
     .map((k) => ({ reset: num(`x-ratelimit-${k}-reset`), remaining: num(`x-ratelimit-${k}-remaining`) }))
     .filter((l): l is { reset: number; remaining: number | null } => l.reset !== null);
   const spent = limits.filter((l) => l.remaining === 0);
-  const from = spent.length ? spent : limits;
-  if (from.length) return Math.max(...from.map((l) => l.reset));
+  if (spent.length) return Math.max(...spent.map((l) => l.reset));
   const after = headers.get("retry-after")?.trim();
-  if (!after) return null;
-  if (/^\d+$/.test(after)) return now + Number(after) * 1000;
-  const date = Date.parse(after);
-  return Number.isFinite(date) ? date : null;
+  if (after && /^\d+$/.test(after)) return now + Number(after) * 1000;
+  const date = after ? Date.parse(after) : NaN;
+  if (Number.isFinite(date)) return date;
+  return limits.length ? Math.max(...limits.map((l) => l.reset)) : null;
 }
 
 /** An error Linear's rate limit raised (LinearRateLimited), as any caller tells it from another failure. */
@@ -109,7 +110,9 @@ export function linearClient(key: string, fetchImpl: typeof fetch = fetch, opts:
     type Body = { data?: T | null; errors?: GqlResult<T>["errors"] };
     let json: Body | null;
     try { json = JSON.parse(text) as Body; } catch { json = null; /* not JSON: said below for a non-2xx, thrown as JSON's error for a 2xx */ }
-    if (json?.errors?.some((e) => e?.extensions?.code === "RATELIMITED")) throw limited(text);
+    // Only a list is read for the code: anything else is the body as it was (review pass 1: `.some` threw on it).
+    const errs: unknown = json?.errors;
+    if (Array.isArray(errs) && errs.some((e) => (e as { extensions?: { code?: unknown } } | null)?.extensions?.code === "RATELIMITED")) throw limited(text);
     if (!res.ok) throw new Error(`Linear returned HTTP ${res.status} ${res.statusText}: ${text.slice(0, 300)}`);
     const body: Body = json ?? (JSON.parse(text) as Body);
     return { data: body.data ?? null, errors: body.errors ?? [] };
