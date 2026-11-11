@@ -5165,6 +5165,8 @@ if (want("10")) {
   let crashHangs = false;
   /** While above zero, the next probes answered find the model missing, one each, as while Ollama pulls it (review pass 1). */
   let probeMissing = 0;
+  /** A probe answered when `callScript` has this many left: the model missing, or this status — the blame probe's own answer, armed by the stub, not raced from a poll (review pass 2). */
+  const probeAtScriptLeft = new Map<number, "missing" | number>();
   /** Calls the stub is up for in flight now, and the most at once once the crashes are spent: the isolated pass ended, the next with every worker. */
   let upCallsNow = 0;
   /** "crash" for each crash and each call it was up for's thought, in order: whose call came after the last crash (review pass 1). */
@@ -5227,10 +5229,13 @@ if (want("10")) {
         // The statuses the next probes answer, in order (SMD-2636 PR 3a): a gateway's 503 while it restarts.
         const probeStatus = probeScript.shift();
         if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
-        if (probeMissing > 0) {
-          probeMissing--;
+        const planned = probeAtScriptLeft.get(callScript.length);
+        if (planned !== undefined) probeAtScriptLeft.delete(callScript.length);
+        if (probeMissing > 0 || planned === "missing") {
+          if (planned !== "missing") probeMissing--;
           return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
         }
+        if (typeof planned === "number") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: planned });
         // A key revoked while the provider was away: the wait's probe refused (SMD-2636 PR 2).
         if (probeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         if (body.model === "absent-model") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
@@ -6054,7 +6059,7 @@ if (want("10")) {
      * One follower (two workers, unless `o` says) over `texts`, seeded in order before it starts, until each is finished,
      * the follower ends, or `ms` pass; then stopped. `during` runs beside it, reading its lines.
      */
-    const followOver = async (texts: string[], ms: number, o: { workers?: number; follow?: number; timeout?: number; during?: (lines: string[]) => Promise<void> } = {}) => {
+    const followOver = async (texts: string[], ms: number, o: { workers?: number; follow?: number; timeout?: number; limit?: number; during?: (lines: string[]) => Promise<void> } = {}) => {
       const ids: string[] = [];
       for (const text of texts) ids.push(await seed(text));
       created.push(...ids);
@@ -6062,7 +6067,7 @@ if (want("10")) {
       const ac = new AbortController();
       let code = -1;
       const startedAt = Date.now();
-      const running = runExtract({ url: URL_!, env, workers: o.workers ?? 2, follow: o.follow ?? 1, timeout: o.timeout ?? 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+      const running = runExtract({ url: URL_!, env, workers: o.workers ?? 2, follow: o.follow ?? 1, timeout: o.timeout ?? 5, ...(o.limit ? { limit: o.limit } : {}), signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
         .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       let tookMs = -1;
       try {
@@ -6075,8 +6080,6 @@ if (want("10")) {
       }
       return { ids, lines, code, tookMs, claims: await Promise.all(ids.map(claimOf)) };
     };
-    /** The follower's line when a probe answers its wait. */
-    const answersAgain = (l: string) => /^ {2}the provider answers again after \d+ s; polling resumes$/.test(l);
     /** The alone lines' counts, in order: "1,2" for a suspect failed at its third outage alone. */
     const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
     const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3\), and the follower waits/;
@@ -6166,30 +6169,41 @@ if (want("10")) {
 
       // The blame probe finding the model missing is no answer, an outage alone; refused, the request's: exit 2, nothing
       // failed (review pass 1, mutants: missing read as answered, a refusal read as no answer).
+      // Its first retry alone's four calls spent (4 left), the blame probe finds the model missing; its second's (none left), refused.
       callScript.splice(0, callScript.length, ...Array<number>(12).fill(500));
-      const refusedRun = await followOver(["Hal's refused note names the pager."], 45_000, { workers: 1, during: async (lines) => {
-        if (await pollUntil(async () => lines.filter(answersAgain).length >= 1, 20_000)) probeMissing = 1;
-        if (await pollUntil(async () => lines.filter(answersAgain).length >= 2, 20_000)) probeScript.push(401);
-      } });
+      probeAtScriptLeft.set(4, "missing").set(0, 401);
+      const refusedRun = await followOver(["Hal's refused note names the pager."], 45_000, { workers: 1 });
       assert(refusedRun.code === 2 && refusedRun.claims[0]?.status === "pending" && aloneCounts(refusedRun.lines) === "1"
-          && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && probeMissing === 0 && probeScript.length === 0,
+          && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && probeAtScriptLeft.size === 0,
         `a suspect alone whose blame probe finds the model missing is in an outage alone, (1 of 3); one whose blame probe is refused stops the follower, exit 2, nothing failed (exit ${refusedRun.code}; ${refusedRun.claims[0]?.status}; alone ${aloneCounts(refusedRun.lines)})`);
       callScript.length = 0;
-      probeScript.length = 0;
-      probeMissing = 0;
+      probeAtScriptLeft.clear();
+      // Left pending by its exit 2: out of the pool, so the next row's follower claims its own thought.
+      await sql`SELECT delete_thought(${refusedRun.ids[0]}::uuid, NULL::jsonb)`;
+      created.splice(created.indexOf(refusedRun.ids[0]), 1);
+
+      // A follower of --limit 1 whose thought crashed the provider: handed back at the front, it leaves the limit's count, is
+      // retried alone and extracted — not the follower ended at its limit, the thought pending (review pass 2, cold read).
+      callScript.splice(0, callScript.length, 500, 500, 500, 500);
+      const limited = await followOver(["Kai's limit note names the pager."], 30_000, { workers: 1, limit: 1 });
+      assert(limited.claims[0]?.status === "succeeded" && callScript.length === 0,
+        `a follower of --limit 1 whose thought crashed the provider retries it alone after the outage and extracts it, not ending at its limit with it pending (${limited.claims[0]?.status}; exit ${limited.code})`);
+      callScript.length = 0;
 
       // A poison thought that hangs the provider: its deadline's probe, unanswered, begins the outage at once — no pauses
       // — while the innocent beside it pauses on the 500 it met: halted mid-pause, it joins as a suspect; retried alone,
       // the poison's own probe is the blame's, not a second (review pass 1, mutants: the after-pause join dropped; a
       // second probe, which would answer, failing it as answered).
-      const restoreLongPauses = shortenPauses(2000);
+      // The innocent's call in flight 600 ms, so the poison's arrives within it; its 500 then at ~0.6 s, pauses of 2.5 s, so
+      // the poison's 4 s deadline lands in its second pause with a second's margin each side (review pass 2).
+      const restoreLongPauses = shortenPauses(2500);
       try {
-        inFlightMs = 300;
+        inFlightMs = 600;
         crashHangs = true;
         crashProbes = 1;
         crashMarker = "crash-hang";
         crashedBy.length = 0;
-        const hang = await followOver(["Ida's crash-hang note takes the runner down.", "Jon migrated the pager rota."], 90_000, { timeout: 3 });
+        const hang = await followOver(["Ida's crash-hang note takes the runner down.", "Jon migrated the pager rota."], 120_000, { timeout: 4 });
         const [hangClaim, besideClaim] = hang.claims;
         const hangIsolated = hang.lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time/.test(l));
         assert(hangClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: .*timed out/.test(hangClaim.last_error ?? "")
@@ -6207,6 +6221,7 @@ if (want("10")) {
       crashHangs = false;
       probeMissing = 0;
       probeScript.length = 0;
+      probeAtScriptLeft.clear();
       callScript.length = 0;
       down = "503";
       outage.clear();
@@ -15847,6 +15862,8 @@ if (want("16")) {
   let judgePeakAfterCrashes = 0;
   /** "crash" for each crash and each call it was up for's prompt, in order, as [10]'s callOrder (review pass 1). */
   const judgeCallOrder: string[] = [];
+  /** A probe answered with this status when `judgeCallScript` has this many left, as [10]'s probeAtScriptLeft (review pass 2). */
+  const judgeProbeAtScriptLeft = new Map<number, number>();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
   let judgeProbes = 0;
   /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
@@ -15900,6 +15917,11 @@ if (want("16")) {
         // The statuses the next probes answer, in order (SMD-2636 PR 3a, review pass 4).
         const probeStatus = judgeProbeScript.shift();
         if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
+        const plannedStatus = judgeProbeAtScriptLeft.get(judgeCallScript.length);
+        if (plannedStatus !== undefined) {
+          judgeProbeAtScriptLeft.delete(judgeCallScript.length);
+          return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: plannedStatus });
+        }
         // A key revoked while the judge was away: the wait's probe refused (SMD-2636 PR 2).
         if (judgeProbeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -17486,7 +17508,6 @@ if (want("16")) {
     const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3\), and the follower waits/;
     /** The alone lines' counts, in order (review pass 1, as [10]'s). */
     const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
-    const answersAgain = (l: string) => /^ {2}the provider answers again after \d+ s; polling resumes$/.test(l);
     try {
       judgeInFlightMs = 1000;
       judgeCrashProbes = 1;
@@ -17529,11 +17550,11 @@ if (want("16")) {
       const held = await followOver([["The held table names the weekly lead.", "The held table names the daily lead now."]], 45_000, { workers: 1 });
       assert(held.claims[0]?.status === "succeeded" && judgeCallScript.length === 0 && !held.lines.some((l) => l.includes(held.ids[0]) && /alone in flight/.test(l)) && held.code === 0,
         `a consolidate suspect retried alone meeting 429s past the pauses is not blamed: waited out, judged (${held.claims[0]?.status}; ${judgeCallScript.length} scripted left; exit ${held.code})`);
+      // Its retry alone's four calls spent (none left), the blame probe is refused.
       judgeCallScript.splice(0, judgeCallScript.length, ...Array<number>(8).fill(500));
-      const refusedRun = await followOver([["The key table names the weekly lead.", "The key table names the daily lead now."]], 45_000, { workers: 1, during: async (lines) => {
-        if (await pollUntil(async () => lines.filter(answersAgain).length >= 1, 20_000)) judgeProbeScript.push(401);
-      } });
-      assert(refusedRun.code === 2 && refusedRun.claims[0]?.status === "pending" && aloneCounts(refusedRun.lines) === "" && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && judgeProbeScript.length === 0,
+      judgeProbeAtScriptLeft.set(0, 401);
+      const refusedRun = await followOver([["The key table names the weekly lead.", "The key table names the daily lead now."]], 45_000, { workers: 1 });
+      assert(refusedRun.code === 2 && refusedRun.claims[0]?.status === "pending" && aloneCounts(refusedRun.lines) === "" && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && judgeProbeAtScriptLeft.size === 0,
         `a consolidate suspect alone whose blame probe is refused stops the follower, exit 2, nothing failed (exit ${refusedRun.code}; ${refusedRun.claims[0]?.status}; alone ${aloneCounts(refusedRun.lines)})`);
     } finally {
       judgeCrashMarker = null;
@@ -17542,6 +17563,7 @@ if (want("16")) {
       judgeCrashProbes = 1;
       judgeCallScript.length = 0;
       judgeProbeScript.length = 0;
+      judgeProbeAtScriptLeft.clear();
       judgeDown = "503";
       judgeOutage.clear();
       restoreOutage();

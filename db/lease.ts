@@ -708,15 +708,19 @@ export async function setBack(sql: SQL, job: string, workerId: string, id: strin
 /**
  * Hand this worker's claim on `id` back to the pool at its front (SMD-2641): pending, its attempt refunded, dated just
  * before the oldest row pending or claimed under `job` — a suspect of a follower's provider outage, which the isolated
- * pass after it claims before anything else, however the pool's dates tie (a backlog pooled in one statement). False
- * when the claim is no longer this worker's.
+ * pass after it claims before anything else, however the pool's dates tie (a backlog pooled in one statement) — and
+ * never past now(), as the subject sweep's front is not: a pool the sleep scheduler dated ahead (stoppedLast) would
+ * otherwise put it behind a capture made meanwhile (review pass 2). False when the claim is no longer this worker's.
  */
 export async function setFront(sql: SQL, job: string, workerId: string, id: string): Promise<boolean> {
   const rows = (await sql`
     UPDATE thought_work_claims c
        SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0),
-           enqueued_at = LEAST(c.enqueued_at, (SELECT min(o.enqueued_at) FROM thought_work_claims o
-                                                WHERE o.work_type = ${job} AND o.status IN ('pending', 'claimed')) - interval '1 millisecond')
+           -- The oldest pending row by the claim's own index, and the oldest claimed by the status index: one min over
+           -- both statuses reads every pending row, ~200 ms at 1.5M pending (review pass 2, run-it).
+           enqueued_at = LEAST(c.enqueued_at, now(), LEAST(
+             (SELECT o.enqueued_at FROM thought_work_claims o WHERE o.work_type = ${job} AND o.status = 'pending' ORDER BY o.enqueued_at LIMIT 1),
+             (SELECT min(o.enqueued_at) FROM thought_work_claims o WHERE o.work_type = ${job} AND o.status = 'claimed')) - interval '1 millisecond')
      WHERE c.thought_id = ${id}::uuid AND c.work_type = ${job} AND c.worker_id = ${workerId} AND c.status = 'claimed'
     RETURNING 1 AS ok`) as { ok: number }[];
   return rows.length > 0;

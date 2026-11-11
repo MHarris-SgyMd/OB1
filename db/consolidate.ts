@@ -2124,11 +2124,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     /**
      * A suspect of this follower's outage handed back at the pool's front (SMD-2641, review pass 1), out of the
      * heartbeat's set first; the database refusing it, the finally returns it with this worker's leases, where it stood.
+     * Handed back, it leaves --limit's `taken`, as a set-back does: the finally gives back only the rows still held
+     * (review pass 2: a --limit follower ended at its limit, its suspects never retried).
      */
     const backFirst = async (id: string): Promise<void> => {
       hb.held.delete(id);
       const back = await setFront(sql, JOB, workerId, id).catch(() => null);
       if (back === null) hb.held.add(id);
+      else if (back && LIMIT > 0) taken.delete(id);
     };
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
@@ -2320,7 +2323,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   if ((blamed ?? outage.begin(msg, streakSuspect ? b.thought_id : undefined)) === "outage") {
                     providerStops++;
                     halt.abort();
-                    const alone = blamed === "outage" ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES})` : "";
+                    const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES})` : "";
                     err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
                     // A suspect goes back at the pool's front, for the isolated pass to claim first (review pass 1).
                     if (streakSuspect) await backFirst(b.thought_id);
