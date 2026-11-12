@@ -79,7 +79,11 @@
 --   its lock is the subject read before the row is committed (review pass
 --   1), and so does a writer still running 116's body while this file
 --   applies, its statement committed after the upgrade's closing read
---   (review pass 2). 116's one-open index stays per exact
+--   (review pass 2). A statement made before 133 whose due reference names
+--   its own pool, which writers now refuse, stays open, and the read finds
+--   no due time through it, as before: closing it would withdraw a stance
+--   its maker took, so its maker restates it (review pass 4). 116's one-open
+--   index stays per exact
 --   item: membership is a read of thought_sources and thoughts, which no
 --   index can hold.
 --
@@ -89,11 +93,13 @@
 --   does. The `priority` group (db/config.mjs) gains SELECT on
 --   thought_sources, table-wide (the maintainer, 2026-11-11: a role making
 --   these calls reads thoughts, whose content carries the source's text),
---   and this file grants it to each role holding the group's grants on
+--   and this file grants it to each role holding SELECT or INSERT on
 --   priority_assertions and SELECT on thoughts already, as 132 carried its
---   table, so no such role's calls fail on the upgrade; a role reading
---   priorities without thoughts, which could make no call on a ticket or a
---   thought before either, is given nothing (review pass 3). An entity or
+--   table, so no such role's calls fail on the upgrade: a reader's
+--   priority_history on a ticket asks the pool too (review pass 4: said as
+--   the predicate reads). A role reading priorities without thoughts, which
+--   could make no call on a ticket or a thought before either, is given
+--   nothing (review pass 3). An entity or
 --   an open item reads neither.
 --
 -- CONCURRENCY
@@ -650,9 +656,9 @@ $close$;
 -- ---------------------------------------------------------------------------
 -- Every priority call on a thought or a ticket now reads thought_sources for
 -- the pool, as 122's read did: the group (db/config.mjs) gains SELECT on it,
--- granted here to each role holding the group's grants on
--- priority_assertions and SELECT on thoughts already (132's carry), so no
--- such role's priority calls fail on the upgrade; a role without thoughts
+-- granted here to each role holding SELECT or INSERT on priority_assertions,
+-- a reader's or a writer's, and SELECT on thoughts already (132's carry), so
+-- no such role's priority calls fail on the upgrade; a role without thoughts
 -- could make no call on a ticket or a thought before, and is given nothing
 -- (review pass 3). The owner holds it already; a re-apply grants what is
 -- held, which changes nothing.
