@@ -855,10 +855,11 @@ export const SPECS = {
       "Record a deliverable: a piece of output you produced, tied to the spec it was meant to meet (`spec`, the id of the thought that states what was asked) and the checkpoint it was handed back at (`checkpoint`: a commit hash or a content fingerprint). " +
       "The output is captured as a thought, as capture_thought captures one, its derived_from the spec and its text closing with a `Checkpoint: …` line, so a new checkpoint is a new thought: reworked output is a new deliverable. " +
       "It starts unverified. Another key verifies it (verify_deliverable): neither the key that recorded it nor a key the brain records as writing its thought may move it to verified. " +
-      "The same output, spec and checkpoint again from your key changes nothing; from another key, or at another spec or checkpoint, it is refused, naming the deliverable that stands.",
+      "The same output, spec and checkpoint again from your key changes nothing and captures nothing; from another key, or at another spec or checkpoint, it is refused, naming the deliverable that stands. " +
+      "Output whose text (with its checkpoint line) is a thought already, not a deliverable, is refused (OUTPUT_EXISTS): a deliverable is always a thought this call writes. A text is matched as a thought's fingerprint matches it, ignoring letter case and runs of white space, so two checkpoints that differ only there name one deliverable.",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
-      content: z.string().min(1).refine(NO_NUL, "may not hold a NUL character").describe("The output, or a clear standalone account of it: what was produced and where it is"),
+      content: z.string().min(1).refine(NO_NUL, "may not hold a NUL character").refine((s) => s.trim() !== "", "may not be blank").describe("The output, or a clear standalone account of it: what was produced and where it is"),
       spec: UUID_ARG.describe("The id of the thought stating what was asked: the spec this output was meant to meet"),
       checkpoint: DELIVERABLE_LINE.describe("What the output was handed back at: a commit hash or a content fingerprint, at most 200 characters on one line"),
     },

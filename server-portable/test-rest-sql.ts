@@ -3198,13 +3198,23 @@ console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 13
   const cap = await rest("POST", "/v1/deliverables", { content: out, spec, checkpoint: " c0ffee1 " });
   const d = cap.body.deliverable as D;
   const id = d?.thoughtId;
+  // The thought's row and its audit as the capture left them: another key's refused repeat must touch neither (review
+  // pass 1: it merged its own tags into the thought and wrote an audit row before it was refused).
+  const rowState = async (tid: string) => JSON.stringify(await sql`SELECT updated_at, metadata, (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${tid}::uuid) AS audits FROM thoughts WHERE id = ${tid}::uuid`);
+  const captured = await rowState(id);
   const again = await mcp("capture_deliverable", { content: out, spec, checkpoint: "c0ffee1" });
   const rivalAgain = await rest("POST", "/v1/deliverables", { content: out, spec, checkpoint: "c0ffee1" }, KEYS.rival);
+  // A checkpoint that differs only in letter case names the same thought (016's fingerprint): refused, naming the one that stands.
+  const casedAgain = await rest("POST", "/v1/deliverables", { content: out, spec, checkpoint: "C0FFEE1" });
+  const capSummary = cap.body.capture as Record<string, unknown>;
   assert(cap.status === 200 && cap.body.outcome === "captured" && d.status === "unverified" && d.specRef === spec && d.checkpoint === "c0ffee1" && d.capturedBy === "writer"
-      && (cap.body.capture as { id: string }).id === id && await thoughtText(id) === `${out}\n\nCheckpoint: c0ffee1` && same(await derived(id), [spec])
-      && !again.isError && again.sc.outcome === "unchanged" && /^That deliverable is recorded already — deliverable /.test(again.text)
-      && rivalAgain.status === 409 && rivalAgain.body.code === "ALREADY_A_DELIVERABLE" && rivalAgain.body.recordedBy === "writer" && rivalAgain.body.checkpoint === "c0ffee1",
-    `a write key captures it: unverified, its thought's text closing with the checkpoint line and derived from the spec; the same again unchanged over MCP; from another key 409 naming the first (${cap.status} ${JSON.stringify(cap.body.deliverable).slice(0, 120)} | ${again.text.slice(0, 60)} | ${rivalAgain.status} ${rivalAgain.body.code})`);
+      && capSummary.id === id && capSummary.existed === false && !("chat" in capSummary) && !("tags" in capSummary) && !("embeddings" in capSummary)
+      && await thoughtText(id) === `${out}\n\nCheckpoint: c0ffee1` && same(await derived(id), [spec])
+      && !again.isError && again.sc.outcome === "unchanged" && again.sc.capture === null && /^That deliverable is recorded already — deliverable /.test(again.text)
+      && rivalAgain.status === 409 && rivalAgain.body.code === "ALREADY_A_DELIVERABLE" && rivalAgain.body.recordedBy === "writer" && rivalAgain.body.checkpoint === "c0ffee1"
+      && casedAgain.status === 409 && casedAgain.body.code === "ALREADY_A_DELIVERABLE" && casedAgain.body.checkpoint === "c0ffee1"
+      && await rowState(id) === captured,
+    `a write key captures it: unverified, its thought's text closing with the checkpoint line and derived from the spec, the capture said by its safe fields alone; the same again unchanged over MCP, capturing nothing; from another key, and at a checkpoint differing only in case, 409 naming the one that stands; the thought's row and audit untouched by them (${cap.status} ${JSON.stringify(capSummary).slice(0, 120)} | ${again.text.slice(0, 60)} | ${rivalAgain.status} ${rivalAgain.body.code} | ${casedAgain.status})`);
 
   // Verification: the maker refused, another key verifies, a move not allowed refused, the maker corrects.
   const byMaker = await rest("POST", `/v1/deliverables/${id}/verifications`, { status: "verified", method: "self-review", finding: "looks right" });
@@ -3244,13 +3254,32 @@ console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 13
       && readerCap.status === 403 && readerCap.body.code === "FORBIDDEN" && readerVer.status === 403 && hookCap.status === 403 && hookCap.body.code === "FORBIDDEN",
     `a read key's tools/list holds neither writer (the history, yes), a write key's both; a read key and a capture key are refused them 403 (${readerCap.status} ${readerVer.status} ${hookCap.status})`);
 
-  // A key that wrote the thought: another key captured the text first, so the recorder's deliverable lands on it.
-  const authored = String((await rest("POST", "/v1/thoughts", { content: "[21] the rival's own output\n\nCheckpoint: beef" }, KEYS.rival)).body.id);
-  const onAuthored = await rest("POST", "/v1/deliverables", { content: "[21] the rival's own output", spec, checkpoint: "beef" });
-  const byAuthor = await rest("POST", `/v1/deliverables/${authored}/verifications`, { status: "verified", method: "m", finding: "f" }, KEYS.rival);
-  assert(onAuthored.status === 200 && (onAuthored.body.deliverable as D).thoughtId === authored && (onAuthored.body.capture as { existed?: boolean }).existed === true
-      && byAuthor.status === 403 && byAuthor.body.code === "VERIFY_NOT_YOURS" && byAuthor.body.as === "author",
-    `the writer's capture lands on the rival's thought of the same text, and the rival, who wrote it, is refused verification as its author (${onAuthored.status} | ${byAuthor.status} ${byAuthor.body.as})`);
+  // Text that is a thought already, not a deliverable, is refused and captures nothing (the maintainer's choice, review
+  // pass 1: the capture landed on it, its derived_from never set, and the caller became the recorder of another key's
+  // thought).
+  const plain = String((await rest("POST", "/v1/thoughts", { content: "[21] the rival's own output\n\nCheckpoint: beef" }, KEYS.rival)).body.id);
+  const plainState = await rowState(plain);
+  const onPlain = await rest("POST", "/v1/deliverables", { content: "[21] the rival's own output", spec, checkpoint: "beef" });
+  assert(onPlain.status === 409 && onPlain.body.code === "OUTPUT_EXISTS" && onPlain.body.id === plain && (await rest("GET", `/v1/deliverables/${plain}`)).status === 404
+      && await rowState(plain) === plainState,
+    `output whose text is a thought already, not a deliverable, is refused 409 OUTPUT_EXISTS naming it, nothing recorded and the thought untouched (${onPlain.status} ${onPlain.body.code})`);
+
+  // A key that wrote the thought's text: the rival rewrites a deliverable's text after the writer captured it, and is
+  // refused its verification as an author; a third key would verify it.
+  const edited = String(((await rest("POST", "/v1/deliverables", { content: "[21] output the rival will rewrite", spec, checkpoint: "e1" })).body.deliverable as D).thoughtId);
+  const rewrite = await mcp("update_thought", { id: edited, content: "[21] output the rival rewrote\n\nCheckpoint: e1" }, KEYS.rival);
+  const byAuthor = await rest("POST", `/v1/deliverables/${edited}/verifications`, { status: "verified", method: "m", finding: "f" }, KEYS.rival);
+  assert(!rewrite.isError && byAuthor.status === 403 && byAuthor.body.code === "VERIFY_NOT_YOURS" && byAuthor.body.as === "author",
+    `a key that rewrote a deliverable's text is refused its verification as an author (${rewrite.text.slice(0, 60)} | ${byAuthor.status} ${byAuthor.body.as})`);
+
+  // A spec named by its client_key (SMD-3314) is resolved once, for the capture and the record alike (review pass 1:
+  // the capture took the key, the record was refused it, and the thought was left behind, every retry the same).
+  const specKey = "1715c11e-0000-4000-8000-000000000021";
+  const keyedSpec = String((await rest("POST", "/v1/thoughts", { content: "[21] a spec copied from another brain", client_key: specKey })).body.id);
+  const byKey = await rest("POST", "/v1/deliverables", { content: "[21] output against a spec named by its client_key", spec: specKey, checkpoint: "k1" });
+  const byKeyD = byKey.body.deliverable as D | undefined;
+  assert(byKey.status === 200 && byKeyD?.specRef === keyedSpec && same(await derived(byKeyD.thoughtId), [keyedSpec]),
+    `a spec named by its client_key: the deliverable meets the thought it names, and its thought derives from it (${byKey.status} ${byKeyD?.specRef === keyedSpec})`);
 
   // Refusals before and around the record: a spec naming nothing (and no thought written), the spec's own text, no deliverable.
   const missing = "00000000-0000-4000-8000-000000000021";
@@ -3260,11 +3289,27 @@ console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 13
   const isSelf = await rest("POST", "/v1/deliverables", { content: "[21] a spec that is its own output", spec: selfSpec, checkpoint: "s" });
   const [noneHist, noneVer] = [await rest("GET", `/v1/deliverables/${spec}`), await mcp("verify_deliverable", { id: spec, status: "verified", method: "m", finding: "f" }, KEYS.rival)];
   const badCheckpoint = await rest("POST", "/v1/deliverables", { content: "[21] x", spec, checkpoint: "a\tb" });
+  const blank = await rest("POST", "/v1/deliverables", { content: "   ", spec, checkpoint: "b" });
   assert(noSpec.status === 422 && noSpec.body.code === "SPEC_NOT_FOUND" && noSpec.body.spec === missing && written === 0
       && isSelf.status === 409 && isSelf.body.code === "SPEC_IS_SELF" && isSelf.body.id === selfSpec
       && noneHist.status === 404 && noneHist.body.code === "NOT_A_DELIVERABLE" && noneVer.isError && /is not a deliverable; capture_deliverable records one/.test(noneVer.text)
-      && badCheckpoint.status === 400 && badCheckpoint.body.code === "REFUSED_INPUT",
-    `refused: a spec naming nothing 422 with no thought written; the spec's own text 409; no deliverable 404 and over MCP; a checkpoint with a control character 400 by the schema (${noSpec.status} ${written} | ${isSelf.status} | ${noneHist.status} | ${badCheckpoint.status})`);
+      && badCheckpoint.status === 400 && badCheckpoint.body.code === "REFUSED_INPUT" && blank.status === 400 && blank.body.code === "REFUSED_INPUT",
+    `refused: a spec naming nothing 422 with no thought written; the spec's own text 409; no deliverable 404 and over MCP; a checkpoint with a control character, and blank output, 400 by the schema (${noSpec.status} ${written} | ${isSelf.status} | ${noneHist.status} | ${badCheckpoint.status} | ${blank.status})`);
+
+  // A record that does not land after a capture that wrote a new thought deletes it (review pass 1): here 134's
+  // record_deliverable is renamed away for the one call, as a brain whose record cannot run would answer.
+  const orphanText = "[21] output whose record fails";
+  await sql.unsafe(`ALTER FUNCTION record_deliverable(text, text, text, jsonb) RENAME TO record_deliverable_away`);
+  let failed: Answer;
+  try {
+    failed = await rest("POST", "/v1/deliverables", { content: orphanText, spec, checkpoint: "f" });
+  } finally {
+    await sql.unsafe(`ALTER FUNCTION record_deliverable_away(text, text, text, jsonb) RENAME TO record_deliverable`);
+  }
+  const left = Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE ${orphanText + "%"}`)[0] as { n: number }).n);
+  const retried = await rest("POST", "/v1/deliverables", { content: orphanText, spec, checkpoint: "f" });
+  assert(failed.status === 500 && left === 0 && retried.status === 200 && retried.body.outcome === "captured",
+    `a record that fails after a fresh capture leaves no thought behind, and the same call then captures it (${failed.status} ${left} | ${retried.status} ${retried.body.outcome})`);
 }
 
 apiServer.stop();

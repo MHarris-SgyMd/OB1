@@ -33,7 +33,7 @@ import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
-import type { CaptureDeliverableCode, CaptureDeliverableResult, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
+import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
 import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
@@ -2724,7 +2724,9 @@ const deliverableRefusal = (r: Refusal) =>
   : r.code === "SPEC_NOT_FOUND" ? `Refused: the brain holds no thought ${r.spec} to be the spec. Capture what was asked first, and pass its id.`
   : r.code === "SPEC_IS_SELF" ? `Refused: this output's text is the spec's own (thought ${r.id}), and a thought cannot be its own spec.`
   : r.code === "ALREADY_A_DELIVERABLE"
-    ? `Refused: thought ${r.id} is a deliverable already, recorded by ${oneLine(snipText(r.recordedBy, 80))}, meant to meet spec ${r.spec} at checkpoint ${quoted(r.checkpoint, 80)}. A deliverable keeps the spec, the checkpoint and the key it was recorded with; reworked output is a new deliverable at its new checkpoint.`
+    ? `Refused: thought ${r.id} is a deliverable already, recorded by ${oneLine(snipText(r.recordedBy, 80))}, meant to meet spec ${r.spec} at checkpoint ${quoted(r.checkpoint, 80)}. A deliverable keeps the spec, the checkpoint and the key it was recorded with; reworked output is a new deliverable at its new checkpoint (two checkpoints that differ only in letter case or white space name one thought).`
+  : r.code === "OUTPUT_EXISTS"
+    ? `Refused: this output's text, with its checkpoint line, is thought ${r.id} already, which is not a deliverable; a deliverable is a thought this call writes. Nothing was captured. Change the output's words or the checkpoint.`
   : r.code === "NOT_A_DELIVERABLE"
     ? r.deleted ? `Refused: deliverable ${r.id}'s thought was deleted; its events stay as history, and it takes no more verifications.` : `Refused: thought ${r.id} is not a deliverable; capture_deliverable records one.`
   : r.code === "ILLEGAL_TRANSITION"
@@ -2734,9 +2736,9 @@ const deliverableRefusal = (r: Refusal) =>
   : captureRefusal(r);
 
 /** What became of the capture's vector, when it was not made: the one fact about the thought a deliverable's reply says. */
-const captureNote = (c: Captured) =>
-  !c.embeddings.allowed ? ` Its thought was saved without a vector this time — ${oneLine(snipText(c.embeddings.reason, 200))} — and is embedded once the call is allowed.`
-  : c.vectorFailed ? ` Its thought was saved without a vector this time — the embedding provider did not answer — and is embedded once it does.`
+const captureNote = (c: CaptureSummary | null) =>
+  c?.noVector === "refused" ? " Its thought was saved without a vector: the egress policy refused the embedding call; it is embedded once the call is allowed."
+  : c?.noVector === "provider_down" ? " Its thought was saved without a vector: the embedding provider did not answer; it is embedded once it does."
   : "";
 
 export const renderCaptureDeliverable = (o: Outcome<CaptureDeliverableResult, CaptureDeliverableCode>): Reply => render(o, (v) =>

@@ -95,6 +95,7 @@ export type Refusal =
   | { code: "SPEC_NOT_FOUND"; retryable: false; spec: string } // capture_deliverable: the spec names no thought
   | { code: "SPEC_IS_SELF"; retryable: false; id: string } // capture_deliverable: the content is the spec's own text, so it landed on the spec, which cannot be its own spec
   | { code: "ALREADY_A_DELIVERABLE"; retryable: false; id: string; recordedBy: string; spec: string; checkpoint: string } // the thought is a deliverable recorded by another key, or at another spec or checkpoint
+  | { code: "OUTPUT_EXISTS"; retryable: false; id: string } // capture_deliverable: the output's text (with its checkpoint line) is a thought already, not a deliverable: a deliverable is always a thought the call wrote
   | { code: "NOT_A_DELIVERABLE"; retryable: false; id: string; deleted: boolean } // no deliverable was recorded on the thought, or its thought was deleted (deleted: its events stay as history)
   | { code: "ILLEGAL_TRANSITION"; retryable: false; id: string; from: string; to: string } // the status does not move from → to (unverified → verified or corrected, verified → corrected, corrected → verified)
   | { code: "VERIFY_NOT_YOURS"; retryable: false; id: string; as: "recorder" | "author" } // a move to verified by the key that recorded the deliverable, or a key the brain records as writing its thought
@@ -233,6 +234,7 @@ const FACTS: Facts = {
   SPEC_NOT_FOUND: (r) => ({ spec: r.spec }),
   SPEC_IS_SELF: (r) => ({ id: r.id }),
   ALREADY_A_DELIVERABLE: (r) => ({ id: r.id, recordedBy: r.recordedBy, spec: r.spec, checkpoint: r.checkpoint }),
+  OUTPUT_EXISTS: (r) => ({ id: r.id }),
   NOT_A_DELIVERABLE: (r) => ({ id: r.id, deleted: r.deleted }),
   ILLEGAL_TRANSITION: (r) => ({ id: r.id, from: r.from, to: r.to }),
   VERIFY_NOT_YOURS: (r) => ({ id: r.id, as: r.as }),

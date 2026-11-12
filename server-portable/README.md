@@ -1436,18 +1436,30 @@ it, each over REST and MCP alike:
 
 | Tool | REST | Group | Answers |
 | --- | --- | --- | --- |
-| `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}` |
+| `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}`; `capture` null when nothing was captured |
 | `verify_deliverable` | `POST /v1/deliverables/{id}/verifications` | write | `{outcome: changed, deliverable, event, from, to}` |
 | `deliverable_history` | `GET /v1/deliverables/{id}` | read | `{deliverable, events}`; `deliverable` null when its thought was deleted |
 
 - **The capture is a capture_thought.** The output is captured as any thought is (its
-  egress, embedding, chunks and tags; `capture` is capture_thought's answer), its
-  `derived_from` the spec, its text closing with a `Checkpoint: …` line. So a new
-  checkpoint is a new thought, and reworked output is a new deliverable (the
-  maintainer's definition, 2026-11-12). The writers are a write key's alone, and are
-  refused before the capture to any other key. The spec is checked by the capture: one
-  naming no thought writes nothing. Every refusal the record can answer after it lands on
-  a thought that was there already.
+  egress, embedding, chunks and tags), its `derived_from` the spec, its text closing
+  with a `Checkpoint: …` line. So a new checkpoint is a new thought, and reworked output
+  is a new deliverable (the maintainer's definition, 2026-11-12). `capture` says what the
+  capture did by capture_thought's safe fields alone (`id`, `existed`, `chunks`,
+  `contextFailures`, and `noVector`: `refused` or `provider_down`), or is null when
+  nothing was captured.
+- **Everything is asked before the capture.** The capture and the record are two
+  statements, not one transaction. So the key's scope, the spec (an id, or a thought's
+  `client_key`, resolved once for both) and the text are asked first:
+  - text that is a deliverable already is answered from the record, with nothing
+    captured: `unchanged` for its own key, spec and checkpoint, else
+    `ALREADY_A_DELIVERABLE`;
+  - text that is any other thought is refused `OUTPUT_EXISTS`, so a deliverable is
+    always a thought this call wrote (the maintainer, 2026-11-12).
+
+  A record that still fails after the capture wrote a new thought deletes that thought,
+  unless another call has recorded it meanwhile. A text is matched by the thought's
+  fingerprint, which ignores letter case and runs of white space: two checkpoints that
+  differ only there name one deliverable.
 - **A verification vouches for the output at its checkpoint,** not for the thought's
   text, which stays editable. `verified`: it meets the spec. `corrected`: the check found
   it wanting; corrected → verified is a later check overturning that finding.
@@ -1461,6 +1473,7 @@ Their refusals:
 | `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured. |
 | `SPEC_IS_SELF` | 409 | The output's text is the spec's own, so it landed on the spec. |
 | `ALREADY_A_DELIVERABLE` | 409 | The thought is a deliverable recorded by another key, or at another spec or checkpoint; it names the one that stands (`recordedBy`, `spec`, `checkpoint`). |
+| `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable. Nothing is captured. |
 | `NOT_A_DELIVERABLE` | 404 | No deliverable was recorded on the thought; `deleted` when its thought was deleted, its events kept. |
 | `ILLEGAL_TRANSITION` | 409 | The status does not move `from` → `to`. |
 | `VERIFY_NOT_YOURS` | 403 | A move to verified by the key that recorded the deliverable (`as: recorder`), or by a key the brain records as writing its thought (`as: author`). Either may mark it corrected. |
