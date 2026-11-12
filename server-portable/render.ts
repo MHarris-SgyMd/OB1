@@ -2357,7 +2357,7 @@ const onOther = (a: PriorityAssertion, asked: PriorityItem) =>
   a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
 /**
  * One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open,
- * replaced (by which), cleared, or closed when its item was deleted (migration 134).
+ * replaced (by which), cleared, or closed when its item was deleted (migration 136).
  */
 const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
   `- ${statementText(a)}${onOther(a, asked)}; ${a.closedAt === null ? "open"

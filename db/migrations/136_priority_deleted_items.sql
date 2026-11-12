@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 134: a deleted thought's or entity's priority statements close —
+-- Migration 136: a deleted thought's or entity's priority statements close —
 --                close reason `deleted`, on every delete path, by triggers; a
 --                merged entity's move onto its survivor; a sweep for what a
 --                role without the priority grants left open (SMD-3711)
@@ -70,7 +70,7 @@
 --   rebuilt wholesale, and a deleted row deletes no ticket. A ticket's own
 --   row deleted closes the statements made on it, as a thought's: they
 --   counted as the ticket's while the row stood, and the read stopped
---   counting them once it was gone, before 134 too (review pass 5, said).
+--   counting them once it was gone, before 136 too (review pass 5, said).
 --   Open items are never deleted (they are dropped, a status). A merge that
 --   clears a loser's statement because the maker's latest word on the
 --   survivor is a clear records the clear at the merge's time (review pass
@@ -107,8 +107,8 @@
 --   triggers; merge_entities replaced with its signature; the extraction
 --   group's priority grants carried. Rows change only by closing a statement
 --   whose item is gone, or by a merge's restating.
---   MINOR under FORK.md's version rules. test-schema [121], test-upgrade
---   [20by].
+--   MINOR under FORK.md's version rules. test-schema [123], test-upgrade
+--   [20ca].
 --
 -- Prerequisites
 --   016 (ob1_entities, merge_entities), 116 (priority_assertions,
@@ -134,7 +134,7 @@ BEGIN
   FOR i IN 1 .. array_length(v_need, 1) LOOP
     IF to_regprocedure(v_need[i][1]) IS NULL THEN
       RAISE EXCEPTION USING
-        MESSAGE = format('migration 134 needs %s; this schema lacks it', v_need[i][2]),
+        MESSAGE = format('migration 136 needs %s; this schema lacks it', v_need[i][2]),
         -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
         HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
         ERRCODE = 'invalid_schema_definition';
@@ -142,7 +142,7 @@ BEGIN
   END LOOP;
   IF to_regclass('priority_assertions') IS NULL OR to_regclass('ob1_entities') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 134 needs 016 and 116 (ob1_entities, priority_assertions); this schema lacks one',
+      MESSAGE = 'migration 136 needs 016 and 116 (ob1_entities, priority_assertions); this schema lacks one',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -159,7 +159,7 @@ ALTER TABLE priority_assertions ADD CONSTRAINT priority_assertions_closed
          AND (closed_by IS NULL OR close_reason = 'replaced'));
 
 COMMENT ON TABLE priority_assertions IS
-  'One statement that an item matters at a level (0 none to 5 critical), optionally by a due time, from a start time, or by another item''s due time, with a reason, made by one key at one time (docs/priority.md decision 2). Append-only: a row changes only to close its window, when its maker replaces or clears it, or (since 134) when its item is deleted. The item is (item_kind, item_key): thought, ticket, entity or item. Written through assert_priority and clear_priority; read through priority_of and priority_history. Migration 116 / SMD-3663; closed on delete, migration 134 / SMD-3711.';
+  'One statement that an item matters at a level (0 none to 5 critical), optionally by a due time, from a start time, or by another item''s due time, with a reason, made by one key at one time (docs/priority.md decision 2). Append-only: a row changes only to close its window, when its maker replaces or clears it, or (since 136) when its item is deleted. The item is (item_kind, item_key): thought, ticket, entity or item. Written through assert_priority and clear_priority; read through priority_of and priority_history. Migration 116 / SMD-3663; closed on delete, migration 136 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_priority_can_close — whether this role may close and re-project
@@ -177,7 +177,7 @@ AS $$
      AND has_table_privilege('priority_current', 'UPDATE') AND has_table_privilege('priority_current', 'DELETE')
 $$;
 COMMENT ON FUNCTION ob1_priority_can_close() IS
-  'Whether the current role holds what closing a priority statement and re-projecting its item takes: SELECT and UPDATE on priority_assertions, and SELECT, INSERT, UPDATE and DELETE on priority_current (the priority group''s). The delete triggers skip without it. Migration 134 / SMD-3711.';
+  'Whether the current role holds what closing a priority statement and re-projecting its item takes: SELECT and UPDATE on priority_assertions, and SELECT, INSERT, UPDATE and DELETE on priority_current (the priority group''s). The delete triggers skip without it. Migration 136 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_priority_close_items — close the statements on items deleted
@@ -213,7 +213,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_close_items(text, text[]) IS
-  'Closes every open priority statement on the items of kind p_kind keyed p_keys as `deleted`, re-projects each item it closed one on, and returns how many it closed. It takes no priority lock: a race with a writer''s re-projection is the drift check''s to name and the rebuild''s to repair. Its callers: the delete triggers and ob1_close_orphan_priorities. Migration 134 / SMD-3711.';
+  'Closes every open priority statement on the items of kind p_kind keyed p_keys as `deleted`, re-projects each item it closed one on, and returns how many it closed. It takes no priority lock: a race with a writer''s re-projection is the drift check''s to name and the rebuild''s to repair. Its callers: the delete triggers and ob1_close_orphan_priorities. Migration 136 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- The delete triggers
@@ -244,7 +244,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_close_deleted() IS
-  'The AFTER DELETE row triggers'' function on thoughts and ob1_entities, the item kind its argument: every open priority statement on a deleted thought or entity closes as `deleted` and its item is re-projected (ob1_priority_close_items). Skipped for a role without what closing takes (ob1_priority_can_close) and in a transaction above READ COMMITTED, which ob1_close_orphan_priorities then covers. Migration 134 / SMD-3711.';
+  'The AFTER DELETE row triggers'' function on thoughts and ob1_entities, the item kind its argument: every open priority statement on a deleted thought or entity closes as `deleted` and its item is re-projected (ob1_priority_close_items). Skipped for a role without what closing takes (ob1_priority_can_close) and in a transaction above READ COMMITTED, which ob1_close_orphan_priorities then covers. Migration 136 / SMD-3711.';
 
 CREATE OR REPLACE TRIGGER priority_close_on_thought_delete
   AFTER DELETE ON thoughts
@@ -258,7 +258,7 @@ CREATE OR REPLACE TRIGGER priority_close_on_entity_delete
 -- ---------------------------------------------------------------------------
 -- Every open statement on a thought or an entity the brain no longer holds,
 -- closed as `deleted`: what a delete by a role without the grants left, and,
--- once on this upgrade, what every delete before 134 left. A thought key that
+-- once on this upgrade, what every delete before 136 left. A thought key that
 -- is no uuid names no thought (only a raw write leaves one); a uuid's case is
 -- no matter (review pass 2: a raw upper-case key on a thought still there was
 -- read as gone).
@@ -282,7 +282,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_close_orphan_priorities() IS
-  'Closes, as `deleted`, every open priority statement on a thought or an entity the brain no longer holds, re-projecting each item, and returns how many of each it closed (thoughts_closed, entities_closed) — zeros when none is left. What a delete by a role without the priority grants leaves (the triggers skip for it); run once by migration 134 for every item deleted before it. Refuses to run outside READ COMMITTED. Migration 134 / SMD-3711.';
+  'Closes, as `deleted`, every open priority statement on a thought or an entity the brain no longer holds, re-projecting each item, and returns how many of each it closed (thoughts_closed, entities_closed) — zeros when none is left. What a delete by a role without the priority grants leaves (the triggers skip for it); run once by migration 136 for every item deleted before it. Refuses to run outside READ COMMITTED. Migration 136 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- merge_entities — 016's, the loser's statements moved onto the survivor
@@ -305,7 +305,7 @@ DECLARE
   v_have  priority_assertions;
   v_open  priority_assertions;
 BEGIN
-  -- Both rows locked first, in id order (134's review pass 4): a prune of the
+  -- Both rows locked first, in id order (136's review pass 4): a prune of the
   -- loser running beside the merge waits for it, rather than closing the
   -- loser's statements in its trigger while the merge holds them and
   -- deadlocking on the loser's row.
@@ -361,7 +361,7 @@ BEGIN
          last_seen_at  = GREATEST(last_seen_at, v_l.last_seen_at)
    WHERE id = p_survivor;
 
-  -- The loser's priority statements restated on the survivor (134): a merge
+  -- The loser's priority statements restated on the survivor (136): a merge
   -- says the two were one. Both items' locks first, in key order; a role that
   -- could not restate (INSERT, and the registry for a maker's id: review pass
   -- 2), or a transaction above READ COMMITTED, as the writers refuse one
@@ -438,7 +438,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION merge_entities(uuid, uuid) IS
-  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 134 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. A role that could not restate, or a transaction above READ COMMITTED, moves none, and the loser''s close as deleted. Both rows are locked first, in id order. The one resolution step that is a human''s to take. Migration 016; priorities, migration 134 / SMD-3711.';
+  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 136 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. A role that could not restate, or a transaction above READ COMMITTED, moves none, and the loser''s close as deleted. Both rows are locked first, in id order. The one resolution step that is a human''s to take. Migration 016; priorities, migration 136 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- The extraction group's priority grants, carried
@@ -465,7 +465,7 @@ END
 $grant$;
 
 -- ---------------------------------------------------------------------------
--- On upgrade: the statements on items deleted before 134
+-- On upgrade: the statements on items deleted before 136
 -- ---------------------------------------------------------------------------
 DO $sweep$
 BEGIN

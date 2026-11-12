@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and thirty-four (134) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and thirty-six (136) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-3711).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306), 136 SMD-3711).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2505,7 +2505,7 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
-Migration 134 closes a deleted item's priority statements (SMD-3711). Until now
+Migration 136 closes a deleted item's priority statements (SMD-3711). Until now
 deleting a thought or an entity left its statements open: `priority_current` kept
 its winner and `priority_of` answered for an item the brain no longer held.
 AFTER DELETE row triggers on `thoughts` and `ob1_entities` close every open
@@ -2515,16 +2515,102 @@ The extraction group, whose pruning is the commonest entity delete, gains what
 closing takes, granted to the roles holding it already. Any other role without the
 priority grants, or a delete above READ COMMITTED, deletes as before, the trigger
 skipping; `ob1_close_orphan_priorities()` closes what such a delete left, and runs
-once on upgrade for the items already gone. `merge_entities` restates the loser's statements
-on the survivor by the same maker, the loser's closed as replaced; where the maker's
+once on upgrade for the items already gone. `merge_entities` restates the loser's
+statements on the survivor by the same maker, the loser's closed as replaced; where
+the maker's
 latest word on the survivor is the later, it stands (a clear clears the loser's),
 and a restatement is the survivor's newest within its tier. A statement whose due
 reference names the deleted item stays open at its own level, and the read finds no
 due time through it (the maintainer's choice, 2026-11-12). A ticket is no row of its
 own, so deleting one of its rows closes that row's statements alone. A reason's text
 stays, for SMD-1723's forgetting. SMD-4241 holds an entity's re-derivation, a retype
-merge and due references to a merged entity. Needs 016, 116 and 133. test-schema [121],
-test-upgrade [20by].
+merge and due references to a merged entity. Needs 016, 116 and 133. test-schema
+[123], test-upgrade [20ca].
+
+Migration 135 makes a thought serve every ticket of its subject set
+(SMD-3306 PR 7a-3b-1): 122's `ob1_item_serves` read one ticket subject with
+`LIMIT 1` and no order, and since 130 a thought's subjects are a set, so a
+multi-ticket session served whichever the scan met first. With no ticket filed,
+a thought now serves each ticket subject standing on it, distinct, in key
+order, and `effective_priority` inherits from the best of them (the maintainer,
+2026-11-10); a filed ticket still serves alone. Needs 122 and 130; a re-apply
+is a no-op. test-schema [122], test-upgrade [20bz].
+
+Migration 134 adds deliverables (SMD-1715 PR 1). A deliverable is a unit of
+agent output tied to the spec it was meant to meet (any thought's id), with a
+checkpoint (a commit hash or a content fingerprint) and a status: unverified,
+verified or corrected. The maintainer chose (2026-11-11) three things. The
+events have their own table, `deliverable_events`, as 116's priorities and
+117's open items do. The ticket's "who is working it" on 015's
+`thought_work_claims` is dropped: that table is a worker's batch pool, so each
+event stamps its maker from the envelope instead. And the key that captured a
+deliverable does not verify it, nor does a key that wrote its thought.
+
+Two definitions, the maintainer's (2026-11-12):
+- **A verification vouches for the output at the checkpoint,** not the
+  thought's text. The thought stays editable, and the events don't follow an
+  edit. A reader comparing a content-fingerprint checkpoint with the thought's
+  own fingerprint says when they differ.
+- **`corrected` is a finding on the same output:** a verification found the
+  output at its checkpoint wanting. Corrected to verified is a later
+  verification overturning that finding, at the same checkpoint. Reworked
+  output is a new deliverable, a new thought at its new checkpoint.
+
+What it adds:
+- **The events** (a capture, then each verification) carry the whole state
+  after them and are never changed: an UPDATE, DELETE or TRUNCATE is refused by
+  trigger, for the owner too.
+- **The transitions** are checked by a trigger on every insert, a raw one too:
+  unverified to verified, unverified to corrected, verified to corrected and
+  corrected to verified, and nothing else (`ob1_deliverable_transition_ok`).
+  A verification keeps the capture's spec and checkpoint.
+- **The `deliverable` facet** on the thought is the events' projection, one
+  per thought, written by a trigger as each event lands, a raw one's too. The
+  facet validator (120's, carried with a fifth kind) admits it only when its
+  payload is `ob1_deliverable_payload`'s for the newest event, so a direct
+  UPDATE of its status is refused whether the move is allowed or not. It is
+  deleted only with its thought; the events stay as history.
+- **The writers**, `record_deliverable` and `verify_deliverable`, answer
+  refusals as values:
+  - `WRITE_SCOPE_REQUIRED` for any scope but write (116's and 117's
+    `READ_ONLY_KEY` is a read key's; a capture key is refused here too);
+  - `SPEC_NOT_FOUND`, `SPEC_IS_SELF`, `THOUGHT_NOT_FOUND`;
+  - `ALREADY_A_DELIVERABLE`: another spec or checkpoint, or another key
+    recording it, which it names;
+  - `NOT_A_DELIVERABLE`;
+  - `ILLEGAL_TRANSITION`, naming from and to;
+  - `VERIFY_NOT_YOURS`: a move to verified by the key that recorded the
+    deliverable, or by a key the brain records as writing its thought's text
+    (its capture, an edit of its content, or a capture-only key's row
+    re-captured, in `thought_audit`), by its name or its agent id. A key with
+    no agent id is known by its name alone, so one renamed since isn't
+    matched. Another write key whose byte-identical submission was
+    deduplicated onto the thought leaves no record and isn't matched either
+    (SMD-4242).
+
+  `deliverable_history` reads one. `ob1_deliverable_projection_drift` and
+  `ob1_rebuild_deliverable_projection` are 068's pattern; the rebuild counts
+  only what it wrote.
+- **Who made it.** The writers stamp each event's maker from the call's
+  envelope. A role holding INSERT on the table writes any maker it names, as
+  on 117's events, so the maker and `VERIFY_NOT_YOURS` hold through the
+  writers. The transitions hold for a raw insert too.
+- **Concurrency.** The writers, the event trigger and the facet's validator
+  lock the deliverable and refuse a transaction above READ COMMITTED. The
+  trigger draws each event's `seq` and time itself, under the lock, whatever
+  the insert brought, so a deliverable's events are numbered in the order
+  written, a raw insert's too. `seq` orders one deliverable's events; it is
+  not a cursor across deliverables. The rebuild takes the deliverables in id
+  order.
+
+The new **deliverables** grant group holds `SELECT, INSERT` on the events,
+`USAGE` on their `seq`'s sequence and `SELECT, INSERT, UPDATE` on
+`thought_facets`. A thought's author is read from `thought_audit`, the
+**capture** group's `SELECT`. Postgres grants INSERT per table, so a role
+holding the group can write any facet kind, as one holding the **structure**
+group can. The operations over REST and MCP are PR 2. Needs 042, 116, 117 and
+120; a re-apply keeps the rows. test-schema [121], test-upgrade [20by],
+test-live [49].
 
 Migration 133 makes a ticket and its own rows one item to the priority writers
 (SMD-4127), as 122's read already took them. A maker's new statement on a ticket
@@ -2907,8 +2993,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
-| | `priority_assertions` (134) | `SELECT, UPDATE` — its pruning of an unreferenced entity closes the entity's open priority statements through 134's delete trigger, which runs as this role; 116's guard lets it close a statement, never write or reopen one (SMD-3711) |
-| | `priority_current` (134) | `SELECT, INSERT, UPDATE, DELETE` — the trigger re-projects each entity it closed a statement on |
+| | `priority_assertions` (136) | `SELECT, UPDATE` — its pruning of an unreferenced entity closes the entity's open priority statements through 136's delete trigger, which runs as this role; 116's guard lets it close a statement, never write or reopen one (SMD-3711) |
+| | `priority_current` (136) | `SELECT, INSERT, UPDATE, DELETE` — the trigger re-projects each entity it closed a statement on |
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |
@@ -2932,6 +3018,9 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
 | | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
+| **deliverables** — deliverables (134, SMD-1715): a role whose clients record and verify deliverables through `record_deliverable` and `verify_deliverable`, or read them through `deliverable_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence, its KEY SHARE locks and its author (`thought_audit`) are the **capture** group's `SELECT` and `UPDATE`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `deliverable_events` (134; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; its trigger draws `seq` by `nextval`, so the sequence row below) | `SELECT, INSERT` |
+| | sequence `deliverable_events_seq_seq` (134; the trigger draws each event's `seq` itself, under the deliverable's lock, by `nextval`, which the identity's own draw does not need) | `USAGE` |
+| | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise; Postgres grants it per table, so the group writes any facet kind, as structure does) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -3756,7 +3845,7 @@ among. A ticket-shaped word counts unless
 its prefix is on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
-migration 111's `record_thought_subject` at the text the claim read, under its
+migration 130's `record_thought_subjects` at the text the claim read, under its
 rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
 no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought in its pool (migration 113, below), into which a pool's first run puts
@@ -3860,9 +3949,9 @@ name too, that finds it moved. A claim finished is the record that the thought
 was asked at its text: one the model named nothing for is not asked again until
 its text, the ticket it is filed under, or the pool's key changes
 (a switch to another key and back pools it again: a claim records no
-fingerprint), and an out-of-date subject standing on it is closed through 113's
-`close_thought_subject`, which closes it only while it is still the one read at
-the text read, so a subject a pass wrote since stands; a thought given a subject
+fingerprint), and the out-of-date subjects standing on it are closed through
+130's `close_thought_subjects`, which closes them only while they are still the
+set read at the text read, so a subject a pass wrote since stands; a thought given a subject
 elsewhere while the model was asked goes back to the pool, if the run still holds
 its claim, and the run reads what stands when it comes up. A thought the pass gave a
 current subject after it was pooled is finished unasked, so long as the rules
@@ -4111,7 +4200,11 @@ and a following run claims again after its follow or the provider's pause,
 whichever is longer, or ends at its limit, where one not following ends there,
 1; a stop before or during that hand-back ends the run there, said so. Only the
 budget's timeout is handled so: another error there, an operator's cancel among
-them, is thrown. The run's hand-back of what it holds, at its end, a lost poll
+them, is thrown. In any run, not a scheduler's alone, a thought's own write
+the server rolls back to break a deadlock (since 130 a set's close or write
+moves several keys' threads, which can deadlock at its commit) is run again, the
+answer in hand, up to three tries in all; past them it fails the thought for
+`--retry-failed`, counted and said once. The run's hand-back of what it holds, at its end, a lost poll
 or a second stop, waits up to 30 s whatever the budget, so a row held past a
 short budget leaves no claim leased to its end, and one held longer holds the
 scheduler's stop no longer than 30 s, or 60 s when the stop lands during a lost

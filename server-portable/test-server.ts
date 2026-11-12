@@ -7263,7 +7263,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && thrown(() => normalisePriorityAssertion({ ...json, due_ref: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read"
       && thrown(() => normalisePriorityAssertion({ ...json, tier_name: "boss" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
     "116's assertion read into the value's names; an outcome, code, tier or item kind 116 does not give is a fault");
-  // 134 (SMD-3711): a statement closed when its item was deleted is read, and said so in a history; a close reason no
+  // 136 (SMD-3711): a statement closed when its item was deleted is read, and said so in a history; a close reason no
   // migration writes is still a fault.
   const deletedRead = normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "deleted" }, "priority_history");
   const deletedHistory = say.renderPriorityHistory({ ok: true, value: { item: { kind: "thought", key: T }, exists: false, level: null, winner: null,
