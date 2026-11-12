@@ -7090,6 +7090,16 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   assert(/^thought 3333\S+ \(no longer in this brain; its statements are kept\): urgent \(4\), the winner urgent/.test(text(history)) && /\n- medium \(2\)[^\n]*; replaced at 2026-11-03T10:00:00\.000Z by assertion 1111\S+\n- urgent \(4\)[^\n]*; open$/.test(text(history))
       && text(unknown) === "ticket SMD-3664: no statement stands — its priority is unknown.\nNobody has stated a priority on it.",
     `priority_history: the winner, then every statement oldest first with how its window ended; an item nobody stated one on, unknown (${text(unknown)})`);
+  // A ticket and its own rows are one item (SMD-4127, migration 133): a statement on the row answers for the ticket and
+  // is said where it stands; one on the item asked is said as before.
+  const TICKET = { kind: "ticket", key: "SMD-4127" }, ROW = { kind: "thought", key: T };
+  const pooled = say.renderPriorityHistory({ ok: true, value: { item: TICKET, exists: true, level: 3, winner: stmt({ id: B, item: ROW, level: 3, tier: 3, tierName: "agent" }),
+    history: [stmt({ item: ROW, level: 5, closedAt: "2026-11-03T10:00:00.000Z", closeReason: "replaced", closedBy: B }), stmt({ id: B, item: ROW, level: 3, tier: 3, tierName: "agent" }), stmt({ item: TICKET, level: 1, dueAt: null })] } } as never);
+  const moved = say.renderSetPriority({ ok: true, value: { outcome: "asserted", assertion: stmt({ item: TICKET, level: 1, dueAt: null }), replaced: stmt({ id: B, item: ROW, level: 5 }), winner: stmt({ id: B, item: ROW, level: 3, tier: 3, tierName: "agent" }), winnerShown: true } } as never);
+  assert(/^ticket SMD-4127: high \(3\), the winner high \(3\)[^\n]* on thought 3333\S+\.\n/.test(text(pooled))
+      && /\n- critical \(5\)[^\n]* on thought 3333\S+; replaced at [^\n]*\n- high \(3\)[^\n]* on thought 3333\S+; open\n- low \(1\) by laptop[^\n]*\); open$/.test(text(pooled))
+      && /It replaces your earlier statement on thought 3333\S+, critical \(5\) \(assertion 2222\S+\)/.test(text(moved)) && /The item's winner is high \(3\)[^\n]* on thought 3333\S+\.$/.test(text(moved)),
+    `a ticket's history and a write on it say where each statement on its row stands; a statement on the ticket itself is said as before (${text(pooled).split("\n").slice(-1)[0]} | ${text(moved).slice(-70)})`);
   // Each refusal by its rule; the item, a uuid or a ticket key, kept in the value; the database's words in the text alone.
   const refusals: [string, ReturnType<typeof say.renderSetPriority>, RegExp][] = [
     ["ITEM_NOT_FOUND", say.renderSetPriority({ ok: false, refusal: { code: "ITEM_NOT_FOUND", retryable: false, which: "item", item: { kind: "ticket", key: "SMD-9401" } } } as never), /^Refused: the brain holds no ticket SMD-9401\.$/],
