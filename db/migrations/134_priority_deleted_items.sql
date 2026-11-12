@@ -18,9 +18,8 @@
 --     priority_assertions_closed is replaced with the three. closed_by stays
 --     for `replaced` alone.
 --   * TRIGGERS, AFTER DELETE FOR EACH ROW on thoughts and on ob1_entities:
---     every open statement on a deleted item closes as `deleted`, under the
---     item's priority lock, and the item is re-projected (its
---     priority_current row goes). Every delete path fires them:
+--     every open statement on a deleted item closes as `deleted`, and the
+--     item is re-projected (its priority_current row goes). Every delete path fires them:
 --     delete_thought's projector, a raw DELETE, a cascade, and the extraction
 --     passes' pruning. Row by row, each first asking whether its item has an
 --     open statement at all (review pass 2: a statement trigger's transition
@@ -84,9 +83,12 @@
 --   and commits after the trigger read leaves its statement open, for the
 --   sweep (review pass 1: locking every deleted key would take a lock per
 --   row of a bulk delete). merge_entities takes both entities' priority
---   locks, in key order, before it reads; a delete's close takes its item's
---   lock (review pass 2), a deleted thought's its own key, since its row is
---   no longer read as a ticket's.
+--   locks, in key order, before it reads. A delete's close takes no priority
+--   lock (review pass 3, reversing pass 2): held to commit, a lock per item
+--   would fill the shared lock table on a bulk delete or the upgrade's sweep,
+--   and failing a delete is not this file's to do. A close racing a writer's
+--   re-projection of the same item can leave priority_current behind, which
+--   the drift check names and ob1_rebuild_priority_projection repairs.
 --
 -- SAFETY
 --   One CHECK replaced with a wider one; four new functions and two
@@ -168,10 +170,8 @@ COMMENT ON FUNCTION ob1_priority_can_close() IS
 -- ob1_priority_close_items — close the statements on items deleted
 -- ---------------------------------------------------------------------------
 -- Every open statement on the items of one kind named, closed as `deleted`,
--- and each item it closed one on re-projected under its priority lock, as the
--- writers project (review pass 2), the locks taken in key order. The number
--- closed. A deleted thought's lock is its own key: once its row is gone it
--- is no ticket's row.
+-- and each item it closed one on re-projected. The number closed. No
+-- priority lock (review pass 3): see CONCURRENCY above.
 CREATE OR REPLACE FUNCTION ob1_priority_close_items(p_kind text, p_keys text[])
 RETURNS int
 LANGUAGE plpgsql
@@ -188,9 +188,6 @@ BEGIN
   END IF;
   v_keys := ARRAY(SELECT DISTINCT a.item_key FROM priority_assertions a
                    WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = ANY(p_keys) ORDER BY 1);
-  FOREACH k IN ARRAY v_keys LOOP
-    PERFORM ob1_priority_lock(p_kind, k);
-  END LOOP;
   v_now := clock_timestamp();
   FOREACH k IN ARRAY v_keys LOOP
     UPDATE priority_assertions a SET closed_at = v_now, close_reason = 'deleted'
@@ -203,7 +200,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_close_items(text, text[]) IS
-  'Closes every open priority statement on the items of kind p_kind keyed p_keys as `deleted`, under each item''s priority lock (taken in key order), re-projects each, and returns how many it closed. Its callers: the delete triggers and ob1_close_orphan_priorities. Migration 134 / SMD-3711.';
+  'Closes every open priority statement on the items of kind p_kind keyed p_keys as `deleted`, re-projects each item it closed one on, and returns how many it closed. It takes no priority lock: a race with a writer''s re-projection is the drift check''s to name and the rebuild''s to repair. Its callers: the delete triggers and ob1_close_orphan_priorities. Migration 134 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- The delete triggers
@@ -219,11 +216,15 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') OR NOT ob1_priority_can_close() THEN
+  -- The probe first, the full grant check only for an item with a statement
+  -- (review pass 3: six privilege lookups a deleted row, nearly none needed).
+  IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted')
+     OR NOT has_table_privilege('priority_assertions', 'SELECT') THEN
     RETURN NULL;
   END IF;
   IF EXISTS (SELECT 1 FROM priority_assertions a
-              WHERE a.closed_at IS NULL AND a.item_kind = TG_ARGV[0] AND a.item_key = OLD.id::text) THEN
+              WHERE a.closed_at IS NULL AND a.item_kind = TG_ARGV[0] AND a.item_key = OLD.id::text)
+     AND ob1_priority_can_close() THEN
     PERFORM ob1_priority_close_items(TG_ARGV[0], ARRAY[OLD.id::text]);
   END IF;
   RETURN NULL;
@@ -344,10 +345,14 @@ BEGIN
   -- The loser's priority statements restated on the survivor (134): a merge
   -- says the two were one. Both items' locks first, in key order; a role that
   -- could not restate (INSERT, and the registry for a maker's id: review pass
-  -- 2) merges as before, and the delete's trigger or the sweep closes the
-  -- loser's as deleted.
-  IF ob1_priority_can_close() AND has_table_privilege('priority_assertions', 'INSERT') AND has_table_privilege('ob1_agents', 'SELECT') THEN
-    PERFORM ob1_priority_lock('entity', k) FROM unnest(ARRAY[p_survivor::text, p_loser::text]) AS k ORDER BY k;
+  -- 2), or a transaction above READ COMMITTED, as the writers refuse one
+  -- (review pass 3), merges as before, and the delete's trigger or the sweep
+  -- closes the loser's as deleted.
+  IF current_setting('transaction_isolation') IN ('read committed', 'read uncommitted')
+     AND ob1_priority_can_close() AND has_table_privilege('priority_assertions', 'INSERT') AND has_table_privilege('ob1_agents', 'SELECT') THEN
+    -- Explicitly in key order (review pass 3), as every holder of two takes them.
+    PERFORM ob1_priority_lock('entity', LEAST(p_survivor::text, p_loser::text));
+    PERFORM ob1_priority_lock('entity', GREATEST(p_survivor::text, p_loser::text));
     v_now := clock_timestamp();
     -- In the order they were said, so a maker's later one on the loser
     -- replaces its own restated earlier one.
@@ -431,7 +436,7 @@ BEGIN
      WHERE c.oid = 'ob1_entities'::regclass AND a.grantee <> c.relowner AND a.grantee <> 0 AND a.privilege_type = 'DELETE'
   LOOP
     EXECUTE format('GRANT SELECT, UPDATE ON priority_assertions TO %1$s; GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO %1$s',
-                   CASE WHEN v_role.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_role.grantee)) END);
+                   quote_ident(pg_get_userbyid(v_role.grantee)));
   END LOOP;
 END
 $grant$;

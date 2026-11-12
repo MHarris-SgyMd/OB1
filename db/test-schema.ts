@@ -19681,9 +19681,13 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   // by its later one on the loser, restated; the agent's later word on the survivor stands over its earlier one on the loser;
   // a due reference from the loser to the survivor is dropped from the copy.
   const survivor = await entity("[121] Survivor"), loser = await entity("[121] Loser");
+  // Apart by a few milliseconds: a merge compares when each word was said, and PGlite's clock can give two calls one.
   const opOnS = await put("entity", survivor, 1, OP);
+  await Bun.sleep(5);
   const botOnL = await put("entity", loser, 2, BOT);
+  await Bun.sleep(5);
   const opOnL = await put("entity", loser, 4, OP, { ref: ["entity", survivor], reason: "the merged one" });
+  await Bun.sleep(5);
   const botOnS = await put("entity", survivor, 3, BOT);
   const merged = (await db.query<{ r: { ok: boolean; priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [survivor, loser])).rows[0].r;
   const onS = (await history("entity", survivor)).filter((h) => h.closed_at === null);
@@ -19700,7 +19704,9 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   // nothing is restated (review pass 1: the merge brought back a level the maker had withdrawn).
   const sClear = await entity("[121] Survivor cleared"), lClear = await entity("[121] Loser cleared");
   const opOnLClear = await put("entity", lClear, 4, OP);
+  await Bun.sleep(5);
   await put("entity", sClear, 3, OP);
+  await Bun.sleep(5);
   await db.query(`SELECT clear_priority('entity', $1, $2::jsonb)`, [sClear, JSON.stringify(OP)]);
   const mergedClear = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sClear, lClear])).rows[0].r;
   assert(mergedClear.priorities_moved === 0 && (await row(opOnLClear.id)).close_reason === "cleared" && (await row(opOnLClear.id)).closed_by === null
@@ -19713,6 +19719,7 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   const byName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
      VALUES ('entity', $1, 1, '[121] op', NULL, 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [sName])).rows[0].id;
   await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await Bun.sleep(5);
   const onLName = await put("entity", lName, 5, OP);
   await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sName, lName]);
   const openOnSName = (await history("entity", sName)).filter((h) => h.closed_at === null);
@@ -19726,6 +19733,7 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   const loserByName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
      VALUES ('entity', $1, 5, '[121] op', NULL, 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [lByName])).rows[0].id;
   await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await Bun.sleep(5);  // the times are what a merge compares, and PGlite's clock can give two calls one millisecond
   const onSId = await put("entity", sId, 2, OP);
   const mergedByName = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sId, lByName])).rows[0].r;
   assert(mergedByName.priorities_moved === 0 && (await row(loserByName)).close_reason === "replaced" && (await row(loserByName)).closed_by === onSId.id
@@ -19803,6 +19811,20 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   assert(rrLeft === null && (await row(onRR.id)).close_reason === "deleted",
     `a delete under REPEATABLE READ goes through, its statement left open, and the sweep closes it (${rrLeft})`);
 
+  // A merge under REPEATABLE READ restates nothing, as the writers refuse a transaction there (review pass 3); its delete's
+  // trigger skips too, and the sweep closes the loser's statement as deleted.
+  const sRR = await entity("[121] Survivor repeatable read"), lRR = await entity("[121] Loser repeatable read");
+  const onLRR = await put("entity", lRR, 4, OP);
+  let rrMerge = "";
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+    rrMerge = JSON.stringify((await tx.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sRR, lRR])).rows[0].r);
+  });
+  const rrLeftOpen = (await row(onLRR.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(/"priorities_moved":0/.test(rrMerge) && rrLeftOpen === null && (await row(onLRR.id)).close_reason === "deleted" && (await of("entity", sRR)).level === null,
+    `a merge under REPEATABLE READ goes through restating nothing; the loser's statement is left open, and the sweep closes it as deleted (${rrMerge})`);
+
   // The extraction group's own prune closes an entity's statements: its grants are what closing takes.
   const prunedByWorker = await entity("[121] pruned by the worker");
   const onWorker = await put("entity", prunedByWorker, 2, OP);
@@ -19848,6 +19870,26 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
          && sweptAgain.thoughts_closed === 0 && sweptAgain.entities_closed === 0 && await drift() === 0,
     `a role granted capture and server alone deletes a thought as before, its statement left open; the sweep closes it as deleted, and a second finds nothing (${roleDelete}, ${JSON.stringify(swept)})`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // A role that may read the statements but not close them (SELECT alone on the assertions) deletes as before too: the
+  // full check, past the cheap one, skips it (review pass 3).
+  const READER = "ob1_test_priority_reader";
+  await db.exec(`CREATE ROLE ${READER} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${READER}`, ...grantStatements(READER, { groups: ["capture", "server"] }), `GRANT SELECT ON priority_assertions TO ${READER}`]) await db.exec(st);
+  const readerGone = await thoughtAs("[121] deleted by a role that reads priorities");
+  const onReaderGone = await put("thought", readerGone, 2, OP);
+  let readerDelete = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${READER}`);
+      readerDelete = JSON.stringify((await tx.query<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, $2::jsonb) AS r`, [readerGone, JSON.stringify({ name: "[121] op" })])).rows[0].r.ok);
+    });
+  } catch (e) { readerDelete = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const readerLeft = (await row(onReaderGone.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(readerDelete === "true" && readerLeft === null && (await row(onReaderGone.id)).close_reason === "deleted",
+    `a role reading the statements but unable to close them deletes as before, its statement left for the sweep (${readerDelete})`);
+  await db.exec(`DROP OWNED BY ${READER}; DROP ROLE ${READER}`);
 
   // The CHECK: `deleted` closes with no closed_by; any other reason refused.
   const still = await thoughtAs("[121] a note that stays");
