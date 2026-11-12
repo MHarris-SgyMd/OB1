@@ -82,7 +82,8 @@
 --   (review pass 2). A statement made before 133 whose due reference names
 --   its own pool, which writers now refuse, stays open, and the read finds
 --   no due time through it, as before: closing it would withdraw a stance
---   its maker took, so its maker restates it (review pass 4). 116's one-open
+--   its maker took, so its maker restates it (review pass 4). A check that
+--   finds each of these is SMD-4239. 116's one-open
 --   index stays per exact
 --   item: membership is a read of thought_sources and thoughts, which no
 --   index can hold.
