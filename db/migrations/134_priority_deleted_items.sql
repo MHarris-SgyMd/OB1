@@ -17,11 +17,17 @@
 --   * CLOSE REASON `deleted`, beside replaced and cleared:
 --     priority_assertions_closed is replaced with the three. closed_by stays
 --     for `replaced` alone.
---   * TRIGGERS, AFTER DELETE FOR EACH STATEMENT on thoughts and on
---     ob1_entities: every open statement on a deleted item closes as
---     `deleted`, and each item is re-projected (its priority_current row
---     goes). Every delete path fires them: delete_thought's projector, a raw
---     DELETE, a cascade, and the extraction passes' pruning.
+--   * TRIGGERS, AFTER DELETE FOR EACH ROW on thoughts and on ob1_entities:
+--     every open statement on a deleted item closes as `deleted`, under the
+--     item's priority lock, and the item is re-projected (its
+--     priority_current row goes). Every delete path fires them:
+--     delete_thought's projector, a raw DELETE, a cascade, and the extraction
+--     passes' pruning. Row by row, each first asking whether its item has an
+--     open statement at all (review pass 2: a statement trigger's transition
+--     table copied every deleted row whole, a thought's vector included, to
+--     read its id). A delete in a transaction above READ COMMITTED skips, as
+--     every priority writer refuses one, and leaves it to the sweep: a
+--     delete that never touched a priority must not start failing on one.
 --   * THE EXTRACTION GROUP, whose pruning of unreferenced entities is the
 --     commonest entity delete, gains what closing takes (the maintainer,
 --     review pass 1): SELECT and UPDATE on priority_assertions, and SELECT,
@@ -78,7 +84,9 @@
 --   and commits after the trigger read leaves its statement open, for the
 --   sweep (review pass 1: locking every deleted key would take a lock per
 --   row of a bulk delete). merge_entities takes both entities' priority
---   locks, in key order, before it reads.
+--   locks, in key order, before it reads; a delete's close takes its item's
+--   lock (review pass 2), a deleted thought's its own key, since its row is
+--   no longer read as a ticket's.
 --
 -- SAFETY
 --   One CHECK replaced with a wider one; four new functions and two
@@ -160,67 +168,76 @@ COMMENT ON FUNCTION ob1_priority_can_close() IS
 -- ob1_priority_close_items — close the statements on items deleted
 -- ---------------------------------------------------------------------------
 -- Every open statement on the items of one kind named, closed as `deleted`,
--- and each item it closed one on re-projected. The number closed.
+-- and each item it closed one on re-projected under its priority lock, as the
+-- writers project (review pass 2), the locks taken in key order. The number
+-- closed. A deleted thought's lock is its own key: once its row is gone it
+-- is no ticket's row.
 CREATE OR REPLACE FUNCTION ob1_priority_close_items(p_kind text, p_keys text[])
 RETURNS int
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_now  timestamptz := clock_timestamp();
+  v_now  timestamptz;
   v_keys text[];
-  v_n    int;
+  v_n    int := 0;
+  v_c    int;
   k      text;
 BEGIN
   IF p_keys IS NULL OR cardinality(p_keys) = 0 THEN
     RETURN 0;
   END IF;
-  WITH closed AS (
+  v_keys := ARRAY(SELECT DISTINCT a.item_key FROM priority_assertions a
+                   WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = ANY(p_keys) ORDER BY 1);
+  FOREACH k IN ARRAY v_keys LOOP
+    PERFORM ob1_priority_lock(p_kind, k);
+  END LOOP;
+  v_now := clock_timestamp();
+  FOREACH k IN ARRAY v_keys LOOP
     UPDATE priority_assertions a SET closed_at = v_now, close_reason = 'deleted'
-     WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = ANY(p_keys)
-    RETURNING a.item_key)
-  SELECT count(*)::int, array_agg(DISTINCT c.item_key ORDER BY c.item_key) INTO v_n, v_keys FROM closed c;
-  IF v_n > 0 THEN
-    FOREACH k IN ARRAY v_keys LOOP
-      PERFORM ob1_priority_project(p_kind, k);
-    END LOOP;
-  END IF;
+     WHERE a.closed_at IS NULL AND a.item_kind = p_kind AND a.item_key = k;
+    GET DIAGNOSTICS v_c = ROW_COUNT;
+    v_n := v_n + v_c;
+    PERFORM ob1_priority_project(p_kind, k);
+  END LOOP;
   RETURN v_n;
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_close_items(text, text[]) IS
-  'Closes every open priority statement on the items of kind p_kind keyed p_keys as `deleted`, re-projects each item it closed one on, and returns how many it closed. Its callers: the delete triggers and ob1_close_orphan_priorities. Migration 134 / SMD-3711.';
+  'Closes every open priority statement on the items of kind p_kind keyed p_keys as `deleted`, under each item''s priority lock (taken in key order), re-projects each, and returns how many it closed. Its callers: the delete triggers and ob1_close_orphan_priorities. Migration 134 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- The delete triggers
 -- ---------------------------------------------------------------------------
 -- One function for both tables: the item kind is the trigger's argument
--- (review pass 1: by table name, a renamed table would close nothing), the
--- rows the transition table every trigger below names `gone`. Skipped for a
--- role that could not close a statement: the delete is not this file's to
--- refuse, and the sweep closes what it left.
+-- (review pass 1: by table name, a renamed table would close nothing).
+-- Skipped for a role that could not close a statement, and in a transaction
+-- above READ COMMITTED (review pass 2): the delete is not this file's to
+-- refuse, and the sweep closes what it left. An item with no open statement,
+-- nearly every one, costs one index probe.
 CREATE OR REPLACE FUNCTION ob1_priority_close_deleted()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF NOT ob1_priority_can_close() THEN
+  IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') OR NOT ob1_priority_can_close() THEN
     RETURN NULL;
   END IF;
-  PERFORM ob1_priority_close_items(TG_ARGV[0], ARRAY(SELECT g.id::text FROM gone g));
+  IF EXISTS (SELECT 1 FROM priority_assertions a
+              WHERE a.closed_at IS NULL AND a.item_kind = TG_ARGV[0] AND a.item_key = OLD.id::text) THEN
+    PERFORM ob1_priority_close_items(TG_ARGV[0], ARRAY[OLD.id::text]);
+  END IF;
   RETURN NULL;
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_close_deleted() IS
-  'The AFTER DELETE statement triggers'' function on thoughts and ob1_entities, the item kind its argument: every open priority statement on a deleted thought or entity closes as `deleted` and its item is re-projected (ob1_priority_close_items). Skipped for a role without the priority group''s grants (ob1_priority_can_close), which ob1_close_orphan_priorities then covers. Migration 134 / SMD-3711.';
+  'The AFTER DELETE row triggers'' function on thoughts and ob1_entities, the item kind its argument: every open priority statement on a deleted thought or entity closes as `deleted` and its item is re-projected (ob1_priority_close_items). Skipped for a role without what closing takes (ob1_priority_can_close) and in a transaction above READ COMMITTED, which ob1_close_orphan_priorities then covers. Migration 134 / SMD-3711.';
 
 CREATE OR REPLACE TRIGGER priority_close_on_thought_delete
   AFTER DELETE ON thoughts
-  REFERENCING OLD TABLE AS gone
-  FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_close_deleted('thought');
+  FOR EACH ROW EXECUTE FUNCTION ob1_priority_close_deleted('thought');
 CREATE OR REPLACE TRIGGER priority_close_on_entity_delete
   AFTER DELETE ON ob1_entities
-  REFERENCING OLD TABLE AS gone
-  FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_close_deleted('entity');
+  FOR EACH ROW EXECUTE FUNCTION ob1_priority_close_deleted('entity');
 
 -- ---------------------------------------------------------------------------
 -- ob1_close_orphan_priorities — the sweep
@@ -228,7 +245,9 @@ CREATE OR REPLACE TRIGGER priority_close_on_entity_delete
 -- Every open statement on a thought or an entity the brain no longer holds,
 -- closed as `deleted`: what a delete by a role without the grants left, and,
 -- once on this upgrade, what every delete before 134 left. A thought key that
--- is no uuid names no thought (only a raw write leaves one).
+-- is no uuid names no thought (only a raw write leaves one); a uuid's case is
+-- no matter (review pass 2: a raw upper-case key on a thought still there was
+-- read as gone).
 CREATE OR REPLACE FUNCTION ob1_close_orphan_priorities()
 RETURNS TABLE (thoughts_closed int, entities_closed int)
 LANGUAGE plpgsql
@@ -240,11 +259,11 @@ BEGIN
   thoughts_closed := ob1_priority_close_items('thought', ARRAY(
     SELECT DISTINCT a.item_key FROM priority_assertions a
      WHERE a.closed_at IS NULL AND a.item_kind = 'thought'
-       AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = CASE WHEN a.item_key ~ c_uuid THEN a.item_key::uuid END)));
+       AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = CASE WHEN a.item_key ~* c_uuid THEN a.item_key::uuid END)));
   entities_closed := ob1_priority_close_items('entity', ARRAY(
     SELECT DISTINCT a.item_key FROM priority_assertions a
      WHERE a.closed_at IS NULL AND a.item_kind = 'entity'
-       AND NOT EXISTS (SELECT 1 FROM ob1_entities e WHERE e.id = CASE WHEN a.item_key ~ c_uuid THEN a.item_key::uuid END)));
+       AND NOT EXISTS (SELECT 1 FROM ob1_entities e WHERE e.id = CASE WHEN a.item_key ~* c_uuid THEN a.item_key::uuid END)));
   RETURN NEXT;
 END;
 $$;
@@ -269,6 +288,7 @@ DECLARE
   v_maker uuid;
   v_loser priority_assertions;
   v_have  priority_assertions;
+  v_open  priority_assertions;
 BEGIN
   SELECT * INTO v_s FROM ob1_entities WHERE id = p_survivor;
   IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'SURVIVOR_NOT_FOUND'); END IF;
@@ -323,26 +343,39 @@ BEGIN
 
   -- The loser's priority statements restated on the survivor (134): a merge
   -- says the two were one. Both items' locks first, in key order; a role that
-  -- could not restate merges as before, and the delete's trigger or the
-  -- sweep closes the loser's as deleted.
-  IF ob1_priority_can_close() AND has_table_privilege('priority_assertions', 'INSERT') THEN
+  -- could not restate (INSERT, and the registry for a maker's id: review pass
+  -- 2) merges as before, and the delete's trigger or the sweep closes the
+  -- loser's as deleted.
+  IF ob1_priority_can_close() AND has_table_privilege('priority_assertions', 'INSERT') AND has_table_privilege('ob1_agents', 'SELECT') THEN
     PERFORM ob1_priority_lock('entity', k) FROM unnest(ARRAY[p_survivor::text, p_loser::text]) AS k ORDER BY k;
     v_now := clock_timestamp();
+    -- In the order they were said, so a maker's later one on the loser
+    -- replaces its own restated earlier one.
     FOR v_loser IN SELECT * FROM priority_assertions x
                     WHERE x.closed_at IS NULL AND x.item_kind = 'entity' AND x.item_key = p_loser::text
-                    ORDER BY x.seq LOOP
+                    ORDER BY x.asserted_at, x.seq LOOP
       -- The maker as the writers match one: its agent id, a by-name
       -- statement taking the id the registry gives its name now.
       v_maker := COALESCE(v_loser.maker_agent_id, (SELECT g.canonical_agent_id FROM ob1_agents g WHERE g.label = v_loser.maker_name));
-      -- Its latest word on the survivor, open or closed.
+      -- Its latest word on the survivor, by when it was said: a statement's
+      -- asserted_at (a restatement keeps its original's), a clear's
+      -- closed_at (review pass 2: by seq, an earlier merge's restatement read
+      -- as later than the maker's statement on another loser, and a clear
+      -- counted from when its statement was made).
       SELECT * INTO v_have FROM priority_assertions y
        WHERE y.item_kind = 'entity' AND y.item_key = p_survivor::text AND ob1_priority_is_maker(y, v_loser.maker_name, v_maker)
-       ORDER BY y.seq DESC LIMIT 1;
-      IF v_have.id IS NOT NULL AND v_have.seq > v_loser.seq THEN
-        -- The maker's later word on the survivor stands: a statement replaces
-        -- the loser's, a clear clears it.
-        IF v_have.closed_at IS NULL THEN
-          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_have.id WHERE id = v_loser.id;
+       ORDER BY GREATEST(y.asserted_at, CASE WHEN y.close_reason = 'cleared' THEN y.closed_at END) DESC, y.seq DESC
+       LIMIT 1;
+      IF v_have.id IS NOT NULL
+         AND GREATEST(v_have.asserted_at, CASE WHEN v_have.close_reason = 'cleared' THEN v_have.closed_at END) > v_loser.asserted_at THEN
+        -- The maker's later word on the survivor stands: its open statement
+        -- replaces the loser's, and with none open, its clear clears it.
+        SELECT * INTO v_open FROM priority_assertions y
+         WHERE y.closed_at IS NULL AND y.item_kind = 'entity' AND y.item_key = p_survivor::text
+           AND ob1_priority_is_maker(y, v_loser.maker_name, v_maker)
+         ORDER BY y.seq DESC LIMIT 1;
+        IF v_open.id IS NOT NULL THEN
+          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_open.id WHERE id = v_loser.id;
         ELSE
           UPDATE priority_assertions SET closed_at = v_now, close_reason = 'cleared' WHERE id = v_loser.id;
         END IF;
@@ -385,8 +418,9 @@ COMMENT ON FUNCTION merge_entities(uuid, uuid) IS
 -- What closing takes, granted to each role holding DELETE on ob1_entities
 -- already (the extraction group's), as 132 carried its table: its pruning of
 -- unreferenced entities is the commonest entity delete, and without them the
--- trigger skips it (the maintainer, review pass 1). The owner holds them
--- already; a re-apply grants what is held, which changes nothing.
+-- trigger skips it (the maintainer, review pass 1). Never to PUBLIC (review
+-- pass 2): a closing grant is a role's. The owner holds them already; a
+-- re-apply grants what is held, which changes nothing.
 DO $grant$
 DECLARE
   v_role record;
@@ -394,7 +428,7 @@ BEGIN
   FOR v_role IN
     SELECT DISTINCT a.grantee
       FROM pg_class c, aclexplode(c.relacl) AS a
-     WHERE c.oid = 'ob1_entities'::regclass AND a.grantee <> c.relowner AND a.privilege_type = 'DELETE'
+     WHERE c.oid = 'ob1_entities'::regclass AND a.grantee <> c.relowner AND a.grantee <> 0 AND a.privilege_type = 'DELETE'
   LOOP
     EXECUTE format('GRANT SELECT, UPDATE ON priority_assertions TO %1$s; GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO %1$s',
                    CASE WHEN v_role.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_role.grantee)) END);

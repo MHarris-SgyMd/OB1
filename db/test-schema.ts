@@ -19599,7 +19599,7 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
     `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} â†’ ${closedAfter})`);
 }
 
-console.log("\n[121] Migration 134: a deleted item's priority statements close â€” close reason `deleted`, by AFTER DELETE statement triggers on thoughts and ob1_entities, on delete_thought, a raw DELETE and a prune alike, each item re-projected; a statement whose due reference names the deleted item kept open; merge_entities restating the loser's statements on the survivor, the maker's later one there standing; a role without the priority grants deletes as before and the sweep closes what it left; on upgrade the statements on items already gone closed; the CHECK holding closed_by to `replaced`; a re-apply a no-op (SMD-3711)");
+console.log("\n[121] Migration 134: a deleted item's priority statements close â€” close reason `deleted`, by AFTER DELETE row triggers on thoughts and ob1_entities, on delete_thought, a raw DELETE and a prune alike, each item re-projected; a statement whose due reference names the deleted item kept open; merge_entities restating the loser's statements on the survivor, the maker's later one there standing; a role without the priority grants deletes as before and the sweep closes what it left; on upgrade the statements on items already gone closed; the CHECK holding closed_by to `replaced`; a re-apply a no-op (SMD-3711)");
 {
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; reason: string | null; due_ref: { kind: string; key: string } | null; asserted_at: string;
     maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
@@ -19633,16 +19633,17 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
     (await db.query<{ close_reason: string | null; closed_by: string | null }>(`SELECT close_reason, closed_by::text FROM priority_assertions WHERE id = $1::uuid`, [id])).rows[0];
   const failure = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
 
-  // The shape: four functions and merge_entities say 134; two statement-level AFTER DELETE triggers.
+  // The shape: four functions and merge_entities say 134; two row-level AFTER DELETE triggers (review pass 2: a statement
+  // trigger's transition table copied every deleted row whole).
   const fns = (await db.query<{ n: string; c: string | null }>(
     `SELECT p.proname AS n, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
       WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_can_close', 'ob1_priority_close_items', 'ob1_priority_close_deleted', 'ob1_close_orphan_priorities', 'merge_entities') ORDER BY 1`)).rows;
   const triggers = (await db.query<{ t: string; r: string }>(
     `SELECT t.tgname AS t, c.relname AS r FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
-      WHERE t.tgname IN ('priority_close_on_thought_delete', 'priority_close_on_entity_delete') AND (t.tgtype & 1) = 0 AND (t.tgtype & 8) = 8 ORDER BY 1`)).rows;
+      WHERE t.tgname IN ('priority_close_on_thought_delete', 'priority_close_on_entity_delete') AND (t.tgtype & 1) = 1 AND (t.tgtype & 8) = 8 ORDER BY 1`)).rows;
   assert(fns.length === 5 && fns.every((f) => /[Mm]igration 134 \/ SMD-3711/.test(f.c ?? "")) && JSON.stringify(triggers.map((t) => `${t.t}:${t.r}`))
            === JSON.stringify(["priority_close_on_entity_delete:ob1_entities", "priority_close_on_thought_delete:thoughts"]),
-    `five functions name 134; a statement-level AFTER DELETE trigger on thoughts and on ob1_entities (${fns.map((f) => f.n).join(", ")}; ${triggers.map((t) => t.t).join(", ")})`);
+    `five functions name 134; a row-level AFTER DELETE trigger on thoughts and on ob1_entities (${fns.map((f) => f.n).join(", ")}; ${triggers.map((t) => t.t).join(", ")})`);
 
   // The ticket's Verify: a thought with an open statement deleted through delete_thought â€” priority_of answers unknown, the
   // history shows it closed `deleted`, no projection row and no drift; another thought's statement taking its due time
@@ -19731,6 +19732,29 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
          && (await history("entity", sId)).filter((h) => h.closed_at === null).length === 1 && await drift() === 0,
     `a loser's by-name statement is the maker whose id the registry gives that name: its later statement on the survivor stands, the loser's replaced by it (${JSON.stringify(mergedByName)})`);
 
+  // Two merges in turn: the maker's level on the second loser, said later than its level on the first, replaces the first's
+  // restatement (review pass 2: by seq, the restatement read as the later word).
+  const sTwo = await entity("[121] Survivor of two"), l0 = await entity("[121] First loser"), l1 = await entity("[121] Second loser");
+  await put("entity", l0, 2, OP); await Bun.sleep(5); await put("entity", l1, 5, OP);
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sTwo, l0]);
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sTwo, l1]);
+  const openOnTwo = (await history("entity", sTwo)).filter((h) => h.closed_at === null);
+  assert(openOnTwo.length === 1 && openOnTwo[0]?.level === 5 && await drift() === 0,
+    `two merges in turn leave the maker's later word, 5 from the second loser, on the survivor, not the first loser's restated 2 (${openOnTwo.map((h) => h.level).join(", ")})`);
+
+  // A clear counts from when it was made: the maker stated on the survivor, then on the loser, then cleared the survivor â€”
+  // the clear is its latest word, so the loser's is cleared too.
+  const sLate = await entity("[121] Survivor cleared late"), lLate = await entity("[121] Loser before the clear");
+  // Apart by a few milliseconds: the times are what is compared, and PGlite's clock can give two calls one millisecond.
+  await put("entity", sLate, 3, OP);
+  await Bun.sleep(5);
+  const onLLate = await put("entity", lLate, 4, OP);
+  await Bun.sleep(5);
+  await db.query(`SELECT clear_priority('entity', $1, $2::jsonb)`, [sLate, JSON.stringify(OP)]);
+  const mergedLate = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sLate, lLate])).rows[0].r;
+  assert(mergedLate.priorities_moved === 0 && (await row(onLLate.id)).close_reason === "cleared" && (await of("entity", sLate)).level === null,
+    `a clear on the survivor made after the maker's statement on the loser clears it, though the statement it cleared was older (${JSON.stringify(mergedLate)})`);
+
   // A role that may close but not restate (no INSERT on the assertions) merges as before; the delete's trigger closes the
   // loser's as deleted.
   const NOINSERT = "ob1_test_no_insert";
@@ -19747,6 +19771,37 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   } catch (e) { noInsertMerge = `raised: ${(e as Error).message.split("\n")[0]}`; }
   assert(/"ok":true/.test(noInsertMerge) && /"priorities_moved":0/.test(noInsertMerge) && (await row(onLNo.id)).close_reason === "deleted" && await drift() === 0,
     `a role holding the extraction group's grants, which close but do not write, merges as before; the loser's statement closes as deleted (${noInsertMerge})`);
+
+  // A role holding the priority and extraction groups but no SELECT on the registry merges as before (review pass 2: the
+  // maker's id is read from ob1_agents, which the gate did not ask).
+  const NOREG = "ob1_test_no_registry";
+  await db.exec(`CREATE ROLE ${NOREG} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOREG}`, ...grantStatements(NOREG, { groups: ["extraction", "priority"] })]) await db.exec(st);
+  const sReg = await entity("[121] Survivor no registry"), lReg = await entity("[121] Loser no registry");
+  const onLReg = await put("entity", lReg, 3, OP);
+  let noRegMerge = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOREG}`);
+      noRegMerge = JSON.stringify((await tx.query<{ r: { ok: boolean; priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sReg, lReg])).rows[0].r);
+    });
+  } catch (e) { noRegMerge = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(/"ok":true/.test(noRegMerge) && /"priorities_moved":0/.test(noRegMerge) && (await row(onLReg.id)).close_reason === "deleted",
+    `a role without SELECT on the registry merges as before, its loser's statement closed as deleted (${noRegMerge})`);
+  await db.exec(`DROP OWNED BY ${NOREG}; DROP ROLE ${NOREG}`);
+
+  // A delete under REPEATABLE READ skips, as every priority writer refuses one there, and leaves its statement for the sweep.
+  const rr = await thoughtAs("[121] deleted under repeatable read");
+  const onRR = await put("thought", rr, 2, OP);
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[121] op" })]);
+    await tx.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [rr]);
+  });
+  const rrLeft = (await row(onRR.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(rrLeft === null && (await row(onRR.id)).close_reason === "deleted",
+    `a delete under REPEATABLE READ goes through, its statement left open, and the sweep closes it (${rrLeft})`);
 
   // The extraction group's own prune closes an entity's statements: its grants are what closing takes.
   const prunedByWorker = await entity("[121] pruned by the worker");
@@ -19811,15 +19866,16 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
        VALUES ($1, $2, 2, '[121] raw', false, 4, now()) RETURNING id::text`, [kind, key])).rows[0].id;
   const orphans = [await raw("thought", "11111111-2222-4333-8444-555555555121"), await raw("entity", "11111111-2222-4333-8444-555555555122"), await raw("thought", "not-a-uuid-121")];
   const living = await raw("thought", still);
+  const upper = await raw("thought", still.toUpperCase());
   await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
   await reapply(file.slice(0, 4));
   const reasons = await Promise.all(orphans.map(async (id) => (await row(id)).close_reason));
   const closedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)).rows[0].n;
   const before = await closedCount();
   await reapply(file.slice(0, 4));
-  assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(kept.id)).close_reason === null
+  assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(upper)).close_reason === null && (await row(kept.id)).close_reason === null
          && await closedCount() === before && await drift() === 0,
-    `on upgrade the statements on a thought and an entity gone before 134, and on a thought key that is no uuid, close as deleted; a living thought's stay open; a re-apply closes nothing more (${reasons.join(", ")})`);
+    `on upgrade the statements on a thought and an entity gone before 134, and on a thought key that is no uuid, close as deleted; a living thought's stay open, keyed in upper case too; a re-apply closes nothing more (${reasons.join(", ")})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

@@ -2508,7 +2508,7 @@ server proposes its own items as it lands.
 Migration 134 closes a deleted item's priority statements (SMD-3711). Until now
 deleting a thought or an entity left its statements open: `priority_current` kept
 its winner and `priority_of` answered for an item the brain no longer held.
-AFTER DELETE statement triggers on `thoughts` and `ob1_entities` close every open
+AFTER DELETE row triggers on `thoughts` and `ob1_entities` close every open
 statement on a deleted item with a new close reason, `deleted`, and re-project it:
 `delete_thought`, a raw DELETE, a cascade and the extraction passes' pruning alike.
 The extraction group, whose pruning is the commonest entity delete, gains what

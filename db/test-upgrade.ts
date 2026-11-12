@@ -6245,6 +6245,18 @@ console.log("\n[20by] Migration 134: onto a populated brain at the file before i
   assert(await reason(onLater) === "deleted" && merged.priorities_moved === 1 && await reason(onL) === "replaced" && onS.length === 1 && onS[0].level === 4 && await drift() === 0,
     `after it a delete_thought closes its thought's statement as deleted, and a merge restates the loser's on the survivor (${JSON.stringify(merged)})`);
 
+  // A delete's close takes the item's priority lock, as the writers project under it (review pass 2): held until commit.
+  const locked = await thought("upgrade 134: a note whose delete takes its lock");
+  await put("thought", locked, 3);
+  const lockHeld = await sql.begin(async (tx) => {
+    await tx`SELECT delete_thought(${locked}::uuid, (${OP}::text)::jsonb)`;
+    const held = ((await tx`SELECT ((l.classid::bigint << 32) | l.objid::bigint)::text AS k FROM pg_locks l
+        WHERE l.locktype = 'advisory' AND l.pid = pg_backend_pid()`) as { k: string }[]).map((r) => r.k);
+    const want = ((await tx`SELECT hashtextextended('ob1:priority:thought:' || ${locked}, 0)::text AS k`)[0] as { k: string }).k;
+    return held.includes(want);
+  });
+  assert(lockHeld, `a delete_thought closing its thought's statement holds that thought's priority lock until commit`);
+
   // A role holding the capture and server groups alone deletes as before, on Postgres's own privileges; the sweep closes
   // what it left.
   const ROLE = "ob1_upgrade_134_nopriority";
