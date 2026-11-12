@@ -1453,6 +1453,10 @@ export type PriorityAnswer = {
   assertion: PriorityAssertion | null;
   replaced: PriorityAssertion | null;
   winner: PriorityAssertion | null;
+  /** The item named, as 116 keys it (migration 137, SMD-4238); null from a brain before 137. */
+  item: PriorityItem | null;
+  /** Every statement the call closed, newest first (migration 137); null from a brain before 137, which named the newest alone. */
+  closed: PriorityAssertion[] | null;
 };
 /**
  * One item's record, read in one statement: the rule's winner (ob1_priority_winner), its level, and every statement
@@ -1779,11 +1783,17 @@ export function normalisePriorityAnswer(r: unknown, what: string): PriorityAnswe
     throw new Error(`${what} answered no envelope this server reads`);
   }
   const one = (v: unknown) => (v === null || v === undefined ? null : normalisePriorityAssertion(v, what));
+  // 137's keys: absent from a brain before it, and any other shape a fault.
+  const item = o.item === undefined ? null : priorityItemOf(o.item);
+  if (o.item !== undefined && !item) throw new Error(`${what} answered an item this server cannot read`);
+  if (o.closed !== undefined && !Array.isArray(o.closed)) throw new Error(`${what} answered a closed list this server cannot read`);
   return {
     outcome: o.outcome as PriorityAnswer["outcome"],
     code: (o.code ?? null) as PriorityRefusalCode | null,
     message: typeof o.message === "string" ? o.message : null,
     assertion: one(o.assertion), replaced: one(o.replaced), winner: one(o.winner),
+    item,
+    closed: o.closed === undefined ? null : (o.closed as unknown[]).map((a) => normalisePriorityAssertion(a, what)),
   };
 }
 

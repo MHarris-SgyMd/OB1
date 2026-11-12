@@ -18,13 +18,18 @@ import type { Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
 
 /**
- * set_priority's value: what was stated, the maker's statement it replaced, and the item's winner. `winnerShown` is
- * false for a capture-only key, which 116 never shows the winner (another key's statement): its null says nothing.
+ * set_priority's value: the item named, what was stated, every statement of the maker's it closed (`closed`, newest
+ * first: a ticket and its own rows are one item, so there may be more than one, each on its own item; SMD-4238) and
+ * the newest of them (`replaced`), and the item's winner. `winnerShown` is false for a capture-only key, which 116
+ * never shows the winner (another key's statement): its null says nothing.
  */
-export type SetPriorityResult = { outcome: "asserted" | "unchanged"; assertion: PriorityAssertion; replaced: PriorityAssertion | null; winner: PriorityAssertion | null; winnerShown: boolean };
+export type SetPriorityResult = { outcome: "asserted" | "unchanged"; item: PriorityItem; assertion: PriorityAssertion; replaced: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null; winnerShown: boolean };
 export type SetPriorityCode = "ITEM_NOT_FOUND" | "ITEM_NOT_YOURS" | "REFUSED_PRIORITY_INPUT" | "READ_ONLY_KEY" | "PRIORITY_UNATTRIBUTED";
-/** clear_priority's value: the caller's statement it closed (none: it had none open), and the winner after, as set_priority's. */
-export type ClearPriorityResult = { outcome: "cleared" | "nothing_to_clear"; assertion: PriorityAssertion | null; winner: PriorityAssertion | null; winnerShown: boolean };
+/**
+ * clear_priority's value: the item named, every statement of the caller's it closed (`closed`, newest first; none: it
+ * had none open) and the newest of them (`assertion`), and the winner after, as set_priority's.
+ */
+export type ClearPriorityResult = { outcome: "cleared" | "nothing_to_clear"; item: PriorityItem; assertion: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null; winnerShown: boolean };
 export type ClearPriorityCode = "REFUSED_PRIORITY_INPUT" | "READ_ONLY_KEY" | "PRIORITY_UNATTRIBUTED";
 /** priority_history's value: the item as 116 normalised it, its winner and level (null: unknown, not low), and every statement in the order written. */
 export type PriorityHistoryResult = PriorityRecord;
@@ -111,7 +116,12 @@ export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"
   }));
   if (a instanceof PriorityRefused) return argumentRefused(ctx, a, input);
   if ((a.outcome === "asserted" || a.outcome === "unchanged") && a.assertion) {
-    return ok({ outcome: a.outcome, assertion: a.assertion, replaced: a.replaced, winner: a.winner, winnerShown: scope === "write" });
+    // A brain before 137 names neither: the statement is always written on the item named, and it named the newest
+    // statement it closed alone.
+    return ok({
+      outcome: a.outcome, item: a.item ?? a.assertion.item, assertion: a.assertion, replaced: a.replaced,
+      closed: a.closed ?? (a.replaced ? [a.replaced] : []), winner: a.winner, winnerShown: scope === "write",
+    });
   }
   if (a.outcome === "refused") return refusedBy(ctx, a, principal, input);
   throw new Error("assert_priority answered an outcome this server does not read");
@@ -127,7 +137,12 @@ export async function clearPriority(ctx: Ctx, principal: Principal, input: Input
   // registry last saw it is found by neither id (review pass 3: "nothing to clear" for a statement still open).
   const away = a.outcome === "nothing_to_clear" ? unattributed(principal) : null;
   if (away) return away;
-  if (a.outcome === "cleared" || a.outcome === "nothing_to_clear") return ok({ outcome: a.outcome, assertion: a.assertion, winner: a.winner, winnerShown: scope === "write" });
+  if (a.outcome === "cleared" || a.outcome === "nothing_to_clear") {
+    // A brain before 137 names neither: the item is keyed by 116's own function, read for it alone, and the newest
+    // statement closed was the only one named.
+    const item = a.item ?? (await (await ctx.store()).priorityItem(input.kind, input.key)).item;
+    return ok({ outcome: a.outcome, item, assertion: a.assertion, closed: a.closed ?? (a.assertion ? [a.assertion] : []), winner: a.winner, winnerShown: scope === "write" });
+  }
   if (a.outcome === "refused" && a.code === "READ_ONLY_KEY") return readOnly(principal);
   throw new Error("clear_priority answered an outcome this server does not read");
 }

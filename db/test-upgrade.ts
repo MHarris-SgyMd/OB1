@@ -762,12 +762,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // widens priority_assertions' close CHECK with `deleted`, adds the delete
   // triggers on thoughts and ob1_entities, the sweep and its helpers, and
   // replaces 016's merge_entities, refusing by name without 016, 116 or 133
-  // ([20ca]) — all recorded by the
+  // ([20ca]); 137 replaces 133's two writers, their answers naming the item
+  // and every statement closed, and adds ob1_priority_closed_json, refusing
+  // by name without 116, 122 or 133 ([20cb]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 107, `030 is among the last one hundred and seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 108, `030 is among the last one hundred and eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6370,6 +6372,64 @@ console.log("\n[20ca] Migration 136: onto a populated brain at the file before i
   const closedBefore = await closed();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the136 });
   assert(await closed() === closedBefore && await reason(onLiving) === null, `a re-apply is a no-op: nothing more closed (${closedBefore})`);
+  await sql.close();
+}
+
+console.log("\n[20cb] Migration 137: onto a populated brain at the file before it — refused by name without 133's ob1_priority_lock_key, nothing made; then applied: a key's two statements left open at 136 on a ticket and its row, a clear naming the ticket lists both, newest first, and names the ticket; a set closing two lists both; a re-apply a no-op (SMD-4238)");
+{
+  const the137 = MIGRATIONS.find((f) => /^\d{3}_priority_replies_name_every_close\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the137 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const OP = JSON.stringify({ name: "upgrade-op", via: "open-brain", scope: "write" });
+  type Answer = { outcome: string; item?: { kind: string; key: string }; closed?: { id: string; item: { kind: string } }[]; assertion: { id: string } | null; replaced?: { id: string } | null };
+  // A ticket as board-sync writes it: its own row, a linear source row (053).
+  const ticketRow = async (issue: string) => {
+    const content = `upgrade 137: ${issue}`;
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog" })}::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    return id;
+  };
+  // A key's statement written raw, as a late row or a by-name statement leaves two open in one pool.
+  const raw = async (kind: string, key: string, level: number) =>
+    String((await sql`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+      VALUES (${kind}, ${key}, ${level}::smallint, 'upgrade-op', (SELECT canonical_agent_id FROM ob1_agents WHERE label = 'upgrade-op'), 'operator', 'operator', 'write', false, 1, clock_timestamp()) RETURNING id`)[0].id);
+  const clear = async (kind: string, key: string) => ((await sql`SELECT clear_priority(${kind}, ${key}, (${OP}::text)::jsonb) AS r`)[0] as { r: Answer }).r;
+  const put = async (kind: string, key: string, level: number) =>
+    ((await sql`SELECT assert_priority(${kind}, ${key}, ${level}::int, NULL, NULL, NULL, NULL, NULL, false, (${OP}::text)::jsonb) AS r`)[0] as { r: Answer }).r;
+
+  // At 136: a key's two statements open in one pool, on the ticket and its row; the clear names the newest alone.
+  const row = await ticketRow("SMD-9997");
+  await raw("ticket", "SMD-9997", 1);
+  const onRow = await raw("thought", row, 5);
+  const at136 = await clear("ticket", "SMD-9997");
+
+  // Without 133's ob1_priority_lock_key: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_priority_lock_key(text, text) RENAME TO ob1_priority_lock_key_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_priority_lock_key_away(text, text) RENAME TO ob1_priority_lock_key`;
+  const made = async () => (await sql`SELECT to_regprocedure('ob1_priority_closed_json(uuid[])') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 137 needs 133 \(ob1_priority_lock_key\); this schema lacks it/.test(without) && !(await made()),
+    `without 133's ob1_priority_lock_key the file is refused by name; nothing made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });
+  const t1 = await raw("ticket", "SMD-9997", 2);
+  const r1 = await raw("thought", row, 4);
+  const both = await clear("ticket", "smd-9997");
+  const t2 = await raw("ticket", "SMD-9997", 3);
+  const r2 = await raw("thought", row, 2);
+  const setBoth = await put("thought", row, 1);
+  assert(at136.outcome === "cleared" && at136.closed === undefined && at136.item === undefined && at136.assertion?.id === onRow
+         && both.outcome === "cleared" && both.item?.kind === "ticket" && both.item?.key === "SMD-9997" && both.closed?.map((c) => c.id).join() === `${r1},${t1}`
+         && setBoth.outcome === "asserted" && setBoth.closed?.map((c) => c.id).join() === `${r2},${t2}` && setBoth.replaced?.id === r2 && await made(),
+    `applied: a clear naming the ticket lists the key's statements on the row and the ticket, newest first, and names the ticket as 116 keys it; a set lists both it closed (at 136 the clear named the newest alone: ${JSON.stringify(Object.keys(at136))})`);
+
+  // A re-apply is a no-op: the writers answer as before.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });
+  const again = await clear("thought", row);
+  assert(again.outcome === "cleared" && again.closed?.map((c) => c.id).join() === setBoth.assertion?.id && again.item?.key === row,
+    `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
   await sql.close();
 }
 

@@ -1302,10 +1302,14 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   same statement again is `unchanged`, nothing written. The reply names what it
   replaced and the item's winner, the lowest tier's newest statement. A ticket and
   its own board-sync rows are one item (SMD-4127, migration 133): a statement on
-  either replaces the caller's on the other, and the winner is the two's.
+  either replaces the caller's on the other, and the winner is the two's. The reply
+  names the item asked (`item`) and every statement it replaced (`closed`, newest
+  first, each on its own item; SMD-4238, migration 137); `replaced` is the newest.
 - **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
   the caller's own statement, never another key's, and names the winner after. On a
-  ticket or one of its rows it closes the caller's statements on both.
+  ticket or one of its rows it closes the caller's statements on both, and the reply
+  names the item asked (`item`) and every statement closed (`closed`, newest first;
+  `assertion` is the newest).
 - **`priority_history`** (`GET /v1/priorities/{kind}/{key}`, read scope): the winner
   and its level (null: unknown, not low), and every statement in the order written,
   each with its maker, tier, reason and how its window closed. A ticket's history and
