@@ -19763,6 +19763,22 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close â
   assert(mergedLate.priorities_moved === 0 && (await row(onLLate.id)).close_reason === "cleared" && (await of("entity", sLate)).level === null,
     `a clear on the survivor made after the maker's statement on the loser clears it, though the statement it cleared was older (${JSON.stringify(mergedLate)})`);
 
+  // A maker's by-name and by-id statements on the loser are restated in turn, the later replacing the earlier:
+  // priorities_moved counts the one left standing (review pass 5).
+  const sPair = await entity("[121] Survivor of a pair"), lPair = await entity("[121] Loser with a pair");
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 2, '[121] op', NULL, 'operator', 'operator', 'write', false, 1, now())`, [lPair]);
+  // Both raw: assert_priority would close the by-name one as the key's own.
+  await Bun.sleep(5);
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 4, '[121] op', (SELECT canonical_agent_id FROM ob1_agents WHERE label = '[121] op'), 'operator', 'operator', 'write', false, 1, now())`, [lPair]);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  const pairOpen = (await history("entity", lPair)).filter((h) => h.closed_at === null).length;
+  const mergedPair = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sPair, lPair])).rows[0].r;
+  const openOnPair = (await history("entity", sPair)).filter((h) => h.closed_at === null);
+  assert(pairOpen === 2 && mergedPair.priorities_moved === 1 && openOnPair.length === 1 && openOnPair[0]?.level === 4 && await drift() === 0,
+    `a maker's by-name and by-id statements on the loser leave one restatement on the survivor, the later, and priorities_moved says one (${JSON.stringify(mergedPair)})`);
+
   // A role that may close but not restate (no INSERT on the assertions) merges as before; the delete's trigger closes the
   // loser's as deleted.
   const NOINSERT = "ob1_test_no_insert";

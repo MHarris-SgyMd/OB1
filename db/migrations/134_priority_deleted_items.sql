@@ -68,7 +68,12 @@
 --   NOT CHANGED. Tickets: a ticket is no row of its own, its head is
 --   rebuilt wholesale, and a deleted row deletes no ticket; that row's own
 --   statements close as a thought's. Open items are never deleted (they are
---   dropped, a status). A TRUNCATE fires no delete trigger, and leaves its
+--   dropped, a status). A ticket's own row deleted closes the statements made
+--   on it, which counted as the ticket's while it stood; the read stopped
+--   counting them once the row was gone, before 134 too (review pass 5,
+--   said). A merge that clears a loser's statement because the maker's
+--   latest word on the survivor is a clear records the clear at the merge's
+--   time (review pass 5, said). A TRUNCATE fires no delete trigger, and leaves its
 --   items' statements to the sweep. A reason's text stays: removing it is forgetting,
 --   SMD-1723's, which relaxes 116's guard for it. Filed as SMD-4241 from
 --   review pass 1: an entity that extraction re-derives (pruned, then made
@@ -287,6 +292,7 @@ DECLARE
   v_mentions int;
   v_edges int;
   v_moved int := 0;
+  v_restated uuid[] := '{}';
   v_now timestamptz;
   v_id uuid;
   v_maker uuid;
@@ -408,9 +414,13 @@ BEGIN
                 CASE WHEN v_loser.due_ref_kind = 'entity' AND v_loser.due_ref_key = p_survivor::text THEN NULL ELSE v_loser.due_ref_key END,
                 v_loser.reason, v_loser.inferred, v_loser.maker_name, v_loser.maker_agent_id, v_loser.maker_kind, v_loser.maker_trust,
                 v_loser.maker_scope, v_loser.maker_source, v_loser.tier, v_loser.asserted_at);
-        v_moved := v_moved + 1;
+        v_restated := v_restated || v_id;
       END IF;
     END LOOP;
+    -- The restatements still standing: a maker's by-name and by-id statements
+    -- on the loser are restated in turn, the later replacing the earlier
+    -- (review pass 5: counted each, priorities_moved said two for one).
+    v_moved := (SELECT count(*)::int FROM priority_assertions WHERE id = ANY(v_restated) AND closed_at IS NULL);
     PERFORM ob1_priority_project('entity', p_loser::text);
     PERFORM ob1_priority_project('entity', p_survivor::text);
   END IF;
