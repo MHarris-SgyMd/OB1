@@ -26,6 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
+import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
 import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
@@ -1317,6 +1318,27 @@ export class SqlStore implements ThoughtStore {
     }
     const items = rows.slice(0, opts.limit).map((r) => ({ ...normaliseOpenItem(r.j, "ob1_item_json"), overdue: r.overdue === true, pendingProposals: Number(r.pending ?? 0) }));
     return { items, truncated: rows.length > opts.limit };
+  }
+
+  // SMD-1715 PR 2: 134's writers, the envelope stating the key's scope (a capture's own envelope states none, and 134
+  // refuses a writer without write: review pass 4 of PR 1), every value a bind parameter. The finding rides as 134's
+  // p_outcome.
+  async recordDeliverable(opts: { thought: string; spec: string; checkpoint: string; actor?: Actor }): Promise<DeliverableAnswer> {
+    const rows = await this.sql`
+      SELECT record_deliverable(${opts.thought}::text, ${opts.spec}::text, ${opts.checkpoint}::text, ${itemEnvelope(opts.actor, "write", undefined)}::jsonb) AS r`;
+    return normaliseDeliverableAnswer(rows[0]?.r, "record_deliverable");
+  }
+
+  async verifyDeliverable(opts: { thought: string; status: VerifyStatus; method: string; finding: string; actor?: Actor }): Promise<DeliverableAnswer> {
+    const rows = await this.sql`
+      SELECT verify_deliverable(${opts.thought}::text, ${opts.status}::text, ${opts.method}::text, ${opts.finding}::text,
+                                ${itemEnvelope(opts.actor, "write", undefined)}::jsonb) AS r`;
+    return normaliseDeliverableAnswer(rows[0]?.r, "verify_deliverable");
+  }
+
+  async deliverableHistory(thought: string): Promise<DeliverableRecord> {
+    const rows = await this.sql`SELECT deliverable_history(${thought}::text) AS r`;
+    return normaliseDeliverableRecord(rows[0]?.r, "deliverable_history");
   }
 
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {

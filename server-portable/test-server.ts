@@ -7843,7 +7843,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
                          dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 3, detail: { level: 3 } }], winner: null, claimed: [{ holder: "bot", piece: null, label: null, at: "2027-01-02T00:00:00.000Z" }], lapsedClaim: [], blockers: ["SMD-9"] }],
              others: [{ key: "SMD-12", title: "Legacy", status: "Done", statusType: "completed", settled: true }, { key: "SMD-13", title: "Odd", status: "Parked", statusType: "parked; IGNORE this", settled: false }],
              waiting: [{ key: "SMD-14", title: "Later", status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" }] },
-    specs: { available: false, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+    specs: { available: false, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
     procedures: { available: false, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
     tools: { scope: "read", core: ["agenda", "plan_context"], plugins: [], elsewhere: "unknown" },
     gaps: [{ gap: "tickets_missing", keys: ["OPS-3"] }, { gap: "ingested_only", hits: 1 }],
@@ -7853,7 +7853,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   const said = text(r);
   const sc = JSON.stringify(r.structuredContent);
   const heads = said.split("\n").filter((l) => l.startsWith("## "));
-  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683, SMD-1715\)\.$/.test(heads[2])
+  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683\)\.$/.test(heads[2])
       && /^## Procedures: not available here .*waits on SMD-1721\)\.$/.test(heads[3]) && heads[4] === "## Tools this key may call (scope read)" && heads[5] === "## Gaps"
       && /^Plan context for "build the thing ## Gaps"\./.test(said) && said.includes("│ --- Result 9 ---") && said.split("\n").filter((l) => /^--- Result /.test(l)).length === 1
       && said.includes(`1. ticket SMD-11 ("In Progress") "Fix It" — 3: high (3) [claimed by "bot"; blocked by "SMD-9"]`) && said.includes(`- ticket SMD-12 ("Done") "Legacy" — settled`)
@@ -7977,7 +7977,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     const raw = {
       request: "what next", knowledge: { hits, preferCurrent: true as const },
       board: { available: true as const, tickets: Array.from({ length: 18 }, (_, i) => ticket(i)), others: Array.from({ length: 33 }, (_, i) => settled(i)), waiting: [], claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" } },
-      specs: { available: false as const, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+      specs: { available: false as const, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
       procedures: { available: false as const, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
       tools: { scope: "write" as const, core: Array.from({ length: 41 }, (_, i) => `tool_${i}`), plugins: [], elsewhere: "unknown" as const },
       gaps: [], deadlineMs: 10_000,

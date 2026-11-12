@@ -90,6 +90,14 @@ export type Refusal =
   | { code: "CONFIRM_NOT_YOURS"; retryable: false; item: string } // a capture-only key may dismiss a proposed item, never confirm it
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
   // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
+  // Deliverables (134, SMD-1715 PR 2): the writers' refusals. NOT_FOUND above answers a thought deleted under a capture.
+  | { code: "WRITE_SCOPE_REQUIRED"; retryable: false; key: string } // a key without write scope reaching a deliverable writer — met by the core's own callers alone (the manifest gives no other key the writers)
+  | { code: "SPEC_NOT_FOUND"; retryable: false; spec: string } // capture_deliverable: the spec names no thought
+  | { code: "SPEC_IS_SELF"; retryable: false; id: string } // capture_deliverable: the content is the spec's own text, so it landed on the spec, which cannot be its own spec
+  | { code: "ALREADY_A_DELIVERABLE"; retryable: false; id: string; recordedBy: string; spec: string; checkpoint: string } // the thought is a deliverable recorded by another key, or at another spec or checkpoint
+  | { code: "NOT_A_DELIVERABLE"; retryable: false; id: string; deleted: boolean } // no deliverable was recorded on the thought, or its thought was deleted (deleted: its events stay as history)
+  | { code: "ILLEGAL_TRANSITION"; retryable: false; id: string; from: string; to: string } // the status does not move from → to (unverified → verified or corrected, verified → corrected, corrected → verified)
+  | { code: "VERIFY_NOT_YOURS"; retryable: false; id: string; as: "recorder" | "author" } // a move to verified by the key that recorded the deliverable, or a key the brain records as writing its thought
   | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
   | { code: "ORDER_UNAVAILABLE"; retryable: false } // order due on a brain before migration 129 (SMD-4192), whose agenda has the priority order alone
   // A read's own priority weights (SMD-4193): the agenda's and search_thoughts'. `rule`: the database refused them by
@@ -221,6 +229,13 @@ const FACTS: Facts = {
   PROPOSAL_DECIDED: (r) => ({ proposal: r.proposal, decision: r.decision }),
   PROPOSAL_YOURS: (r) => ({ proposal: r.proposal }),
   CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
+  WRITE_SCOPE_REQUIRED: none,
+  SPEC_NOT_FOUND: (r) => ({ spec: r.spec }),
+  SPEC_IS_SELF: (r) => ({ id: r.id }),
+  ALREADY_A_DELIVERABLE: (r) => ({ id: r.id, recordedBy: r.recordedBy, spec: r.spec, checkpoint: r.checkpoint }),
+  NOT_A_DELIVERABLE: (r) => ({ id: r.id, deleted: r.deleted }),
+  ILLEGAL_TRANSITION: (r) => ({ id: r.id, from: r.from, to: r.to }),
+  VERIFY_NOT_YOURS: (r) => ({ id: r.id, as: r.as }),
   CLAIMS_UNREADABLE: none,
   ORDER_UNAVAILABLE: none,
   // The weights it names, from the known names alone: the database's words ride the text.

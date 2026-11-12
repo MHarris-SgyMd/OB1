@@ -2522,7 +2522,7 @@ console.log("\n[17b] plan_context through both doors (migration 126, SMD-2684): 
     `the board: the named tickets in agenda order, the High before the started one, which is listed with its status; the Done one beside, settled; the unknown key a gap (${keysShown.join(" ")} | ${JSON.stringify(b?.others)} | ${JSON.stringify(gaps)})`);
   const specs = r.body.specs as { available: boolean; waitsOn: string[] }, procs = r.body.procedures as { available: boolean; waitsOn: string[] };
   const tools = r.body.tools as { scope: string; core: string[] };
-  assert(specs?.available === false && same(specs.waitsOn, ["SMD-2683", "SMD-1715"]) && procs?.available === false && same(procs.waitsOn, ["SMD-1721"])
+  assert(specs?.available === false && same(specs.waitsOn, ["SMD-2683"]) && procs?.available === false && same(procs.waitsOn, ["SMD-1721"])
       && tools?.scope === "write" && tools.core.includes("plan_context") && tools.core.includes("capture_thought"),
     `specs and procedures not available, naming the tickets they wait on; the tools a write key may call (${JSON.stringify(specs)} | ${tools?.core.length})`);
   // One record through both doors: MCP's reply is the REST answer rendered.
@@ -3184,6 +3184,87 @@ console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_IN
   } finally {
     await sql`SELECT set_agent_kind('rival', 'agent')`;
   }
+}
+
+console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 134): a write key captures output against a spec — a thought whose text closes with its checkpoint line and whose derived_from is the spec, unverified; the same again from its key unchanged, from another key refused naming the first; its maker refused verification and a key that wrote its thought too, another key verifies, a move not allowed refused naming it, the maker corrects; the history any key reads, the finding named apart from the call's outcome; a read key sees neither writer (the ticket's Verify) and a capture key may call neither; a spec naming nothing refused before any thought is written, the spec's own text refused, a thought that is no deliverable refused");
+{
+  type D = { thoughtId: string; specRef: string; checkpoint: string; status: string; capturedBy: string; verification: { method: string; finding: string; by: string } | null };
+  const spec = String((await rest("POST", "/v1/thoughts", { content: "[21] the spec: ship the widget, with its tests passing" })).body.id);
+  const out = "[21] shipped the widget: src/widget.ts and its tests";
+  const thoughtText = async (id: string) => String(((await sql`SELECT content FROM thoughts WHERE id = ${id}::uuid`)[0] as { content: string }).content);
+  const derived = async (id: string) => ((await sql`SELECT derived_from FROM thoughts WHERE id = ${id}::uuid`)[0] as { derived_from: unknown }).derived_from;
+
+  // The capture: over REST by the writer, the same again over MCP (unchanged), the same from another key refused.
+  const cap = await rest("POST", "/v1/deliverables", { content: out, spec, checkpoint: " c0ffee1 " });
+  const d = cap.body.deliverable as D;
+  const id = d?.thoughtId;
+  const again = await mcp("capture_deliverable", { content: out, spec, checkpoint: "c0ffee1" });
+  const rivalAgain = await rest("POST", "/v1/deliverables", { content: out, spec, checkpoint: "c0ffee1" }, KEYS.rival);
+  assert(cap.status === 200 && cap.body.outcome === "captured" && d.status === "unverified" && d.specRef === spec && d.checkpoint === "c0ffee1" && d.capturedBy === "writer"
+      && (cap.body.capture as { id: string }).id === id && await thoughtText(id) === `${out}\n\nCheckpoint: c0ffee1` && same(await derived(id), [spec])
+      && !again.isError && again.sc.outcome === "unchanged" && /^That deliverable is recorded already — deliverable /.test(again.text)
+      && rivalAgain.status === 409 && rivalAgain.body.code === "ALREADY_A_DELIVERABLE" && rivalAgain.body.recordedBy === "writer" && rivalAgain.body.checkpoint === "c0ffee1",
+    `a write key captures it: unverified, its thought's text closing with the checkpoint line and derived from the spec; the same again unchanged over MCP; from another key 409 naming the first (${cap.status} ${JSON.stringify(cap.body.deliverable).slice(0, 120)} | ${again.text.slice(0, 60)} | ${rivalAgain.status} ${rivalAgain.body.code})`);
+
+  // Verification: the maker refused, another key verifies, a move not allowed refused, the maker corrects.
+  const byMaker = await rest("POST", `/v1/deliverables/${id}/verifications`, { status: "verified", method: "self-review", finding: "looks right" });
+  const byMakerM = await mcp("verify_deliverable", { id, status: "verified", method: "self-review", finding: "looks right" });
+  const byRival = await mcp("verify_deliverable", { id, status: "verified", method: "review and the test run", finding: "all twelve tests pass" }, KEYS.rival);
+  const twice = await rest("POST", `/v1/deliverables/${id}/verifications`, { status: "verified", method: "again", finding: "still passes" }, KEYS.rival);
+  const corrected = await rest("POST", `/v1/deliverables/${id}/verifications`, { status: "corrected", method: "rerun", finding: "one test was skipped, not passed" });
+  const v = byRival.sc.deliverable as D | undefined;
+  assert(byMaker.status === 403 && byMaker.body.code === "VERIFY_NOT_YOURS" && byMaker.body.as === "recorder" && byMakerM.isError && /^Refused: your key recorded this deliverable, so another key verifies it/.test(byMakerM.text)
+      && !byRival.isError && byRival.sc.from === "unverified" && byRival.sc.to === "verified" && v?.verification?.finding === "all twelve tests pass" && v?.verification?.by === "rival"
+      && twice.status === 409 && twice.body.code === "ILLEGAL_TRANSITION" && twice.body.from === "verified" && twice.body.to === "verified"
+      && corrected.status === 200 && corrected.body.from === "verified" && corrected.body.to === "corrected",
+    `its maker is refused 403 (as the recorder, and MCP says so); another key verifies it over MCP, the finding named apart; verified again 409 naming the move; the maker corrects (${byMaker.status} ${byMaker.body.as} | ${byRival.text.slice(0, 80)} | ${twice.status} | ${corrected.status})`);
+
+  // The history: any key reads it, every event with its finding.
+  const hist = await rest("GET", `/v1/deliverables/${id}`, undefined, KEYS.reader);
+  const histM = await mcp("deliverable_history", { id }, KEYS.reader);
+  type E = { event: string; status: string; finding: string | null; maker: { name: string } };
+  const events = (hist.body.events ?? []) as E[];
+  assert(hist.status === 200 && (hist.body.deliverable as D).status === "corrected" && events.map((e) => `${e.event}:${e.status}:${e.maker.name}`).join(" ") === "captured:unverified:writer verification:verified:rival verification:corrected:writer"
+      && events[1].finding === "all twelve tests pass" && !("outcome" in (events[1] as object)) && !histM.isError && /Every event, oldest first \(3\):/.test(histM.text),
+    `a read key reads the history over both doors: three events in order, the finding named apart from any outcome (${hist.status} ${events.map((e) => e.status).join(",")})`);
+
+  // The ticket's Verify: a read key sees neither writer, and is refused them; a capture key may call neither.
+  const listed = async (key: string) => {
+    const r = await fetch(MCP, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    return ((b.result?.tools ?? []) as { name: string }[]).map((x) => x.name);
+  };
+  const readerTools = await listed(KEYS.reader), writerTools = await listed(KEYS.writer);
+  const [readerCap, readerVer, hookCap] = [await rest("POST", "/v1/deliverables", { content: "[21] a reader's output", spec, checkpoint: "r" }, KEYS.reader),
+    await rest("POST", `/v1/deliverables/${id}/verifications`, { status: "verified", method: "m", finding: "f" }, KEYS.reader),
+    await rest("POST", "/v1/deliverables", { content: "[21] a hook's output", spec, checkpoint: "h" }, KEYS.hook)];
+  assert(!readerTools.includes("capture_deliverable") && !readerTools.includes("verify_deliverable") && readerTools.includes("deliverable_history")
+      && writerTools.includes("capture_deliverable") && writerTools.includes("verify_deliverable")
+      && readerCap.status === 403 && readerCap.body.code === "FORBIDDEN" && readerVer.status === 403 && hookCap.status === 403 && hookCap.body.code === "FORBIDDEN",
+    `a read key's tools/list holds neither writer (the history, yes), a write key's both; a read key and a capture key are refused them 403 (${readerCap.status} ${readerVer.status} ${hookCap.status})`);
+
+  // A key that wrote the thought: another key captured the text first, so the recorder's deliverable lands on it.
+  const authored = String((await rest("POST", "/v1/thoughts", { content: "[21] the rival's own output\n\nCheckpoint: beef" }, KEYS.rival)).body.id);
+  const onAuthored = await rest("POST", "/v1/deliverables", { content: "[21] the rival's own output", spec, checkpoint: "beef" });
+  const byAuthor = await rest("POST", `/v1/deliverables/${authored}/verifications`, { status: "verified", method: "m", finding: "f" }, KEYS.rival);
+  assert(onAuthored.status === 200 && (onAuthored.body.deliverable as D).thoughtId === authored && (onAuthored.body.capture as { existed?: boolean }).existed === true
+      && byAuthor.status === 403 && byAuthor.body.code === "VERIFY_NOT_YOURS" && byAuthor.body.as === "author",
+    `the writer's capture lands on the rival's thought of the same text, and the rival, who wrote it, is refused verification as its author (${onAuthored.status} | ${byAuthor.status} ${byAuthor.body.as})`);
+
+  // Refusals before and around the record: a spec naming nothing (and no thought written), the spec's own text, no deliverable.
+  const missing = "00000000-0000-4000-8000-000000000021";
+  const noSpec = await rest("POST", "/v1/deliverables", { content: "[21] output against no spec", spec: missing, checkpoint: "n" });
+  const written = Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE '[21] output against no spec%'`)[0] as { n: number }).n);
+  const selfSpec = String((await rest("POST", "/v1/thoughts", { content: "[21] a spec that is its own output\n\nCheckpoint: s" })).body.id);
+  const isSelf = await rest("POST", "/v1/deliverables", { content: "[21] a spec that is its own output", spec: selfSpec, checkpoint: "s" });
+  const [noneHist, noneVer] = [await rest("GET", `/v1/deliverables/${spec}`), await mcp("verify_deliverable", { id: spec, status: "verified", method: "m", finding: "f" }, KEYS.rival)];
+  const badCheckpoint = await rest("POST", "/v1/deliverables", { content: "[21] x", spec, checkpoint: "a\tb" });
+  assert(noSpec.status === 422 && noSpec.body.code === "SPEC_NOT_FOUND" && noSpec.body.spec === missing && written === 0
+      && isSelf.status === 409 && isSelf.body.code === "SPEC_IS_SELF" && isSelf.body.id === selfSpec
+      && noneHist.status === 404 && noneHist.body.code === "NOT_A_DELIVERABLE" && noneVer.isError && /is not a deliverable; capture_deliverable records one/.test(noneVer.text)
+      && badCheckpoint.status === 400 && badCheckpoint.body.code === "REFUSED_INPUT",
+    `refused: a spec naming nothing 422 with no thought written; the spec's own text 409; no deliverable 404 and over MCP; a checkpoint with a control character 400 by the schema (${noSpec.status} ${written} | ${isSelf.status} | ${noneHist.status} | ${badCheckpoint.status})`);
 }
 
 apiServer.stop();

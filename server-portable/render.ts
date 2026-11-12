@@ -33,6 +33,8 @@ import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
+import type { CaptureDeliverableCode, CaptureDeliverableResult, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
+import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
@@ -2702,3 +2704,57 @@ export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Rep
       ...v.items.map((i) => `- ${itemLine(i)}${i.overdue ? " (overdue)" : ""}${i.pendingProposals ? ` (${i.pendingProposals} close${i.pendingProposals === 1 ? "" : "s"} proposed)` : ""}`),
     ].join("\n"),
   itemRefusal, AS_JSON);
+
+
+// ── Deliverables (SMD-1715 PR 2, migration 134) ──────────────────────────────
+// Each reply's value is its JSON (AS_JSON), as the items' are: a verification's method and finding, and a capture's
+// tags, are data a reader of the value needs. In the text they are words a key gave, quoted on one line.
+
+/** One deliverable: its thought, status, spec and checkpoint, who recorded it. */
+const deliverableLine = (d: Deliverable) =>
+  `deliverable ${d.thoughtId}, ${d.status}: meant to meet spec ${d.specRef}, at checkpoint ${quoted(d.checkpoint, 80)}, recorded by ${oneLine(snipText(d.capturedBy, 80))} at ${d.capturedAt}`;
+const verificationLine = (v: DeliverableVerification) =>
+  `checked by ${oneLine(snipText(v.by, 80))} at ${v.at} (${quoted(v.method, 80)}): ${quoted(v.finding)}`;
+const deliverableEventLine = (e: DeliverableEvent) =>
+  `- ${e.at} ${e.event === "captured" ? "recorded" : `set ${e.status}`} by ${oneLine(snipText(e.maker.name, 80))}`
+  + `${e.event === "verification" ? ` (${quoted(e.method ?? "", 80)}): ${quoted(e.finding ?? "")}` : ""}`;
+const deliverableRefusal = (r: Refusal) =>
+  r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a deliverable is recorded and verified by a write key alone.`
+  : r.code === "NOT_FOUND" ? `Refused: thought ${r.id} was deleted before it could be recorded as a deliverable.`
+  : r.code === "SPEC_NOT_FOUND" ? `Refused: the brain holds no thought ${r.spec} to be the spec. Capture what was asked first, and pass its id.`
+  : r.code === "SPEC_IS_SELF" ? `Refused: this output's text is the spec's own (thought ${r.id}), and a thought cannot be its own spec.`
+  : r.code === "ALREADY_A_DELIVERABLE"
+    ? `Refused: thought ${r.id} is a deliverable already, recorded by ${oneLine(snipText(r.recordedBy, 80))}, meant to meet spec ${r.spec} at checkpoint ${quoted(r.checkpoint, 80)}. A deliverable keeps the spec, the checkpoint and the key it was recorded with; reworked output is a new deliverable at its new checkpoint.`
+  : r.code === "NOT_A_DELIVERABLE"
+    ? r.deleted ? `Refused: deliverable ${r.id}'s thought was deleted; its events stay as history, and it takes no more verifications.` : `Refused: thought ${r.id} is not a deliverable; capture_deliverable records one.`
+  : r.code === "ILLEGAL_TRANSITION"
+    ? `Refused: deliverable ${r.id} does not move ${r.from} → ${r.to}. The moves allowed are unverified → verified or corrected, verified → corrected, and corrected → verified.`
+  : r.code === "VERIFY_NOT_YOURS"
+    ? `Refused: your key ${r.as === "author" ? "is one the brain records as writing this deliverable's thought" : "recorded this deliverable"}, so another key verifies it (deliverable ${r.id}). You may mark it corrected.`
+  : captureRefusal(r);
+
+/** What became of the capture's vector, when it was not made: the one fact about the thought a deliverable's reply says. */
+const captureNote = (c: Captured) =>
+  !c.embeddings.allowed ? ` Its thought was saved without a vector this time — ${oneLine(snipText(c.embeddings.reason, 200))} — and is embedded once the call is allowed.`
+  : c.vectorFailed ? ` Its thought was saved without a vector this time — the embedding provider did not answer — and is embedded once it does.`
+  : "";
+
+export const renderCaptureDeliverable = (o: Outcome<CaptureDeliverableResult, CaptureDeliverableCode>): Reply => render(o, (v) =>
+  v.outcome === "captured"
+    ? `Recorded ${deliverableLine(v.deliverable)}. Another key verifies it (verify_deliverable).${captureNote(v.capture)}`
+    : `That deliverable is recorded already — ${deliverableLine(v.deliverable)} — so nothing was written.`,
+  deliverableRefusal, AS_JSON);
+
+export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, VerifyDeliverableCode>): Reply => render(o, (v) =>
+  `Set it ${v.to} (it was ${v.from}): ${deliverableLine(v.deliverable)}${v.deliverable.verification ? `; ${verificationLine(v.deliverable.verification)}` : ""}.`,
+  deliverableRefusal, AS_JSON);
+
+export const renderDeliverableHistory = (o: Outcome<DeliverableHistoryResult, DeliverableHistoryCode>): Reply => render(o, (v) =>
+  [
+    v.deliverable
+      ? `${deliverableLine(v.deliverable)}${v.deliverable.verification ? `; last ${verificationLine(v.deliverable.verification)}` : "; not checked yet"}.`
+      : `Deliverable ${v.events[0]?.thoughtId ?? "?"}: its thought was deleted, and its events stay as history.`,
+    `Every event, oldest first (${v.events.length}):`,
+    ...v.events.map(deliverableEventLine),
+  ].join("\n"),
+  deliverableRefusal, AS_JSON);
