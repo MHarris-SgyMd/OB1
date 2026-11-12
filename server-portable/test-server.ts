@@ -7114,10 +7114,10 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   const setBoth = say.renderSetPriority({ ok: true, value: { outcome: "asserted", item: TICKET, assertion: stmt({ id: "55555555-5555-4555-8555-555555555555", item: TICKET, level: 2, dueAt: null }),
     replaced: onRow5, closed: [onRow5, onTicket1], winner: null, winnerShown: false } } as never);
   const nothingOnRow = say.renderClearPriority({ ok: true, value: { outcome: "nothing_to_clear", item: TICKET, assertion: null, closed: [], winner: rival, winnerShown: true } } as never);
-  assert(/^Cleared your 2 statements on ticket SMD-4127, critical \(5\) on thought 3333\S+ \(assertion 1111\S+\); low \(1\) \(assertion 2222\S+\); they stay in the history\. The item's winner is high \(3\)[^\n]* by codex[^\n]* on thought 3333\S+\.$/.test(text(clearedBoth))
+  assert(/^Cleared your 2 statements on ticket SMD-4127 — critical \(5\) on thought 3333\S+ \(assertion 1111\S+\); low \(1\) \(assertion 2222\S+\) — which stay in the history\. The item's winner is high \(3\)[^\n]* by codex[^\n]* on thought 3333\S+\.$/.test(text(clearedBoth))
       && /^Cleared your statement on ticket SMD-4127, critical \(5\) on thought 3333\S+ \(assertion 1111\S+\); it stays in the history\. No statement/.test(text(clearedRow))
       && /^Set ticket SMD-4127 to medium \(2\)/.test(text(setBoth))
-      && /\. It replaces your 2 earlier statements, critical \(5\) on thought 3333\S+ \(assertion 1111\S+\); low \(1\) \(assertion 2222\S+\), which stay in the history\.$/.test(text(setBoth))
+      && /\. It replaces your 2 earlier statements — critical \(5\) on thought 3333\S+ \(assertion 1111\S+\); low \(1\) \(assertion 2222\S+\) — which stay in the history\.$/.test(text(setBoth))
       && /^You have no statement open on ticket SMD-4127: nothing to clear\. The item's winner is high \(3\)[^\n]* by codex[^\n]* on thought 3333\S+\.$/.test(text(nothingOnRow))
       && (clearedBoth.structuredContent as { closed: { id: string }[]; item: { key: string } }).closed.map((c) => c.id).join() === `${A},${B}`
       && (clearedBoth.structuredContent as { item: { key: string } }).item.key === "SMD-4127",

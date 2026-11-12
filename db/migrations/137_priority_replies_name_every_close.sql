@@ -31,6 +31,12 @@
 --     pass 1: 133 locked the newest read, which such a delete may have
 --     closed, so `replaced` could name one the call never closed).
 --
+--   NOT CHANGED. A set that checked its item exists before a delete
+--   committed still writes its statement on the deleted item, which
+--   ob1_close_orphan_priorities() closes: 136's choice, kept (the
+--   maintainer, review pass 2). A re-check after the lock would narrow the
+--   gap, not close it: a delete landing after the re-check leaves the same.
+--
 -- SAFETY
 --   Two functions replaced with their signatures and return types; one new
 --   STABLE SQL function. No table, grant or row changes. The answers only
@@ -123,6 +129,7 @@ DECLARE
   v_closed   uuid[] := '{}';
   v_ref_kind text;
   v_ref_key  text;
+  v_open     int;
   v_reason   text   := ob1_work_claim_text(p_reason, 1000, 'a reason');
   v_who      record;
   v_now      timestamptz;
@@ -232,15 +239,18 @@ BEGIN
   -- priority lock, so it may have closed one of v_own since it was read; a
   -- row lock waited on returns the closed row, which the closing UPDATE
   -- below then skips, and `replaced` would name a statement this call never
-  -- closed (or the `unchanged` test compare against one no longer open).
+  -- closed. How many of v_own are still open is counted after the lock, for
+  -- the `unchanged` test (review pass 2: the count read before it made a
+  -- restatement of the one left open a write).
   SELECT * INTO v_old FROM priority_assertions a
    WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
    ORDER BY a.seq DESC LIMIT 1
    FOR UPDATE;
+  SELECT count(*)::int INTO v_open FROM priority_assertions a WHERE a.id = ANY(v_own) AND a.closed_at IS NULL;
 
   -- The same statement again, on the item named, is no change (116's review
   -- passes 1 and 4); the same words on another item of the pool move it.
-  IF cardinality(v_own) = 1 AND v_old.item_kind = v_item.kind AND v_old.item_key = v_item.key
+  IF v_open = 1 AND v_old.item_kind = v_item.kind AND v_old.item_key = v_item.key
      AND (v_old.level, v_old.due_at, v_old.not_before, v_old.due_ref_kind, v_old.due_ref_key, v_old.reason, v_old.inferred, v_old.tier,
           v_old.maker_name, v_old.maker_agent_id, v_old.maker_kind, v_old.maker_trust, v_old.maker_scope, v_old.maker_source)
          IS NOT DISTINCT FROM (p_level::smallint, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false), v_tier,

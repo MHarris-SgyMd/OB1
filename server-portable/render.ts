@@ -2372,7 +2372,9 @@ const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean 
   : ` The item's winner is ${statementText(v.winner)}${onOther(v.winner, asked)}.`;
 /**
  * The statements a write closed, newest first: each its level, where it stood if not on the item named (a ticket and
- * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238).
+ * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238). Two or more are
+ * set between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read as one
+ * more item).
  */
 const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
   closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");
@@ -2392,7 +2394,7 @@ export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>
     ? `Your statement on ${itemText(v.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.item)}`
     : `Set ${itemText(v.item)} to ${statementText(v.assertion)}.${
       v.closed.length === 1 ? ` It replaces your earlier statement, ${closedList(v.closed, v.item)}, which stays in the history.`
-      : v.closed.length > 1 ? ` It replaces your ${v.closed.length} earlier statements, ${closedList(v.closed, v.item)}, which stay in the history.`
+      : v.closed.length > 1 ? ` It replaces your ${v.closed.length} earlier statements — ${closedList(v.closed, v.item)} — which stay in the history.`
       : ""}${winnerText(v, v.assertion.id, v.item)}`,
   priorityRefusal, AS_JSON);
 
@@ -2400,7 +2402,7 @@ export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorit
   v.closed.length === 1
     ? `Cleared your statement on ${itemText(v.item)}, ${closedList(v.closed, v.item)}; it stays in the history.${winnerText(v, null, v.item)}`
     : v.closed.length > 1
-    ? `Cleared your ${v.closed.length} statements on ${itemText(v.item)}, ${closedList(v.closed, v.item)}; they stay in the history.${winnerText(v, null, v.item)}`
+    ? `Cleared your ${v.closed.length} statements on ${itemText(v.item)} — ${closedList(v.closed, v.item)} — which stay in the history.${winnerText(v, null, v.item)}`
     : `You have no statement open on ${itemText(v.item)}: nothing to clear.${winnerText(v, null, v.item)}`,
   priorityRefusal, AS_JSON);
 
