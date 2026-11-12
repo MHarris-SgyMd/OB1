@@ -70,11 +70,12 @@
  * model not served there is the start's refusal, `model`). Mid-pass, whose
  * each thought's error is: a database error's, followClassify's; a provider
  * error's, worker-bootstrap.ts's `fault`, as extract's and consolidate's are
- * (SMD-2636 PR 3b). The thought's — recorded failed — only when it names the
+ * (SMD-2636 PR 3b). The thought's — recorded failed — when it names the
  * thought (its length, the egress gate, its data, or any database error not
- * named below — a guard, an invariant) or the provider answers the probe's
+ * named below — a guard, an invariant), when the provider answers the probe's
  * constant text right after a call that met a deadline with no answer, or a
- * 4xx or redirect no rule reads (a content filter's 400). The probe out too
+ * 4xx or redirect no rule reads (a content filter's 400), or as a suspect
+ * blamed alone (below). The probe out too
  * is an outage, the thought a suspect. The database's state: it waits (the database gone:
  * the worker stops, recording nothing), a moment's (a deadlock, a lock,
  * resources, a read-only transaction: the thought back unrecorded; at a pool, that pool deferred to
@@ -1246,12 +1247,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * holder is in fact still alive releases into a row that is no longer its own,
    * hears false, and says so — the path an expired lease always had. Returns how
    * many, for the caller to print once the transaction it ran in has committed.
+   * `behind`: dated now, not where it was first pooled — behind the suspects an
+   * isolated drain retries at the pool's front (SMD-2641 PR 2, review pass 1:
+   * a succeeded row moved back kept its old date, stood ahead of them, and its
+   * claim ended the isolation before they were retried).
    */
-  async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<number> {
+  async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>, behind = false): Promise<number> {
     const [{ n }] = await tx`
       WITH retried AS (
         UPDATE thought_work_claims
-           SET ${tx.unsafe(REQUEUE_SET_SQL)}
+           SET ${tx.unsafe(REQUEUE_SET_SQL)}${behind ? tx`, enqueued_at = GREATEST(enqueued_at, now())` : tx``}
          WHERE work_type = ${JOB} AND (${where}) RETURNING 1)
       SELECT count(*)::int AS n FROM retried`;
     return Number(n);
@@ -1889,7 +1894,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // is subsumed. The succeeded rows are the data rule's, on every run: back
       // to the pool when their thought is not at the target, and only then.
       const restarted = record ? await requeue(tx, staleUnderThisJob()) : 0;
-      const movedSinceDone = await requeue(tx, doneButNotAtTarget());
+      // While the last outage's suspects are retried, behind them (review pass 1).
+      const movedSinceDone = await requeue(tx, doneButNotAtTarget(), !!FOLLOW && outage.isolating());
       const retriedFailed = first && retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
       // After the data rule, so a caveat row whose thought moved is counted once.
       const retriedFallbacks = first && retryFallbacks ? await requeue(tx, withCaveat()) : 0;
