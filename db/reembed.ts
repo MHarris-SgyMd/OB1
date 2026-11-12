@@ -70,11 +70,12 @@
  * model not served there is the start's refusal, `model`). Mid-pass, whose
  * each thought's error is: a database error's, followClassify's; a provider
  * error's, worker-bootstrap.ts's `fault`, as extract's and consolidate's are
- * (SMD-2636 PR 3b). The thought's — recorded failed — only when it names the
+ * (SMD-2636 PR 3b). The thought's — recorded failed — when it names the
  * thought (its length, the egress gate, its data, or any database error not
- * named below — a guard, an invariant) or the provider answers the probe's
+ * named below — a guard, an invariant), when the provider answers the probe's
  * constant text right after a call that met a deadline with no answer, or a
- * 4xx or redirect no rule reads (a content filter's 400). The probe out too
+ * 4xx or redirect no rule reads (a content filter's 400), or as a suspect
+ * blamed alone (below). The probe out too
  * is an outage, the thought a suspect. The database's state: it waits (the database gone:
  * the worker stops, recording nothing), a moment's (a deadlock, a lock,
  * resources, a read-only transaction: the thought back unrecorded; at a pool, that pool deferred to
@@ -85,10 +86,13 @@
  * the provider's: an outage, the thought back in the pool unrecorded and the
  * row waiting mid-pass while the follower probes, under the subject of the
  * thought that began it when the egress gate refuses the probe's own.
- * Backpressure (429, 503, the model loading) makes no suspect; any other
- * 5xx, a 408 or no connection makes the thought in hand one, recorded
- * failed as its own if it fails again right after a probe answered. Each
- * says the provider "is not answering".
+ * Each says the provider "is not answering". Backpressure (429, 503, the
+ * model loading) makes no suspect; any other 5xx, a 408 or no connection
+ * makes the thought in hand one. After the outage the suspects are retried
+ * one at a time, one worker, each handed back at the pool's front (SMD-2641
+ * PR 2): one that fails again alone is recorded failed as its own when a
+ * probe made at once answers, or at its third outage alone with none
+ * answering.
  * No pauses come first, as extract's do; an outage that begins again within
  * a minute and a poll interval of the probe answering, no thought settled
  * since, carries on the last one's schedule, so a limit the probe passes and
@@ -490,13 +494,13 @@ import {
 import { createEmbedder, isRedirect, PROVIDER_ERROR_CHARS, ProviderError, providerDown, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
-import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, isOut, modelMissing, probedFault, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, waitOutProvider, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { ALONE_OUTAGES, blanketGate, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, isOut, modelMissing, probedFault, ProviderOutage, throughOutage, Unreturned, waitAtStart, waitForDatabase, waitOutProvider, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, callWaitsFor, setBack, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, callWaitsFor, setBack, setFront, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
@@ -1243,12 +1247,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * holder is in fact still alive releases into a row that is no longer its own,
    * hears false, and says so — the path an expired lease always had. Returns how
    * many, for the caller to print once the transaction it ran in has committed.
+   * `behind`: dated now, not where it was first pooled — behind the suspects an
+   * isolated drain retries at the pool's front (SMD-2641 PR 2, review pass 1:
+   * a succeeded row moved back kept its old date, stood ahead of them, and its
+   * claim ended the isolation before they were retried).
    */
-  async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<number> {
+  async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>, behind = false): Promise<number> {
     const [{ n }] = await tx`
       WITH retried AS (
         UPDATE thought_work_claims
-           SET ${tx.unsafe(REQUEUE_SET_SQL)}
+           SET ${tx.unsafe(REQUEUE_SET_SQL)}${behind ? tx`, enqueued_at = GREATEST(enqueued_at, now())` : tx``}
          WHERE work_type = ${JOB} AND (${where}) RETURNING 1)
       SELECT count(*)::int AS n FROM retried`;
     return Number(n);
@@ -1774,10 +1782,17 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * A follower's provider outage (worker-bootstrap.ts's ProviderOutage,
    * SMD-2679 PR 4a-2b): while `reason` is set the workers stop after the row
    * in hand — it goes back to the pool unrecorded — and the follower probes
-   * until the provider answers. A row that draws a provider error again right
-   * after a probe answered is recorded failed, as its own.
+   * until the provider answers. Isolated (SMD-2641 PR 2, as extract's and
+   * consolidate's since PR 1): after an outage its suspects are retried one
+   * at a time, and one that errs again alone is blamed only on a probe made at
+   * once — answered, its own; no answer, an outage alone, the third its own.
    */
-  const outage = new ProviderOutage();
+  const outage = new ProviderOutage(undefined, undefined, true);
+  /**
+   * This drain retries the last outage's suspects (SMD-2641 PR 2, ProviderOutage's `isolating`): one worker, one thought
+   * a claim, the pool's order, and it ends once none is left to retry, the next poll at once with every worker.
+   */
+  let isolated = false;
   /** The provider refused the request itself mid-pass under --follow — a key, credit, a wrong width: every worker stops, nothing is marked failed, and the run ends refused `provider` (extract-entities.ts's configError). */
   let configError = null as string | null;
   /** The probe found no answer at a follower's start: waited out after the start's other checks, so a refusal of the configuration is not held behind it (extract-entities.ts's startOut). */
@@ -1879,7 +1894,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // is subsumed. The succeeded rows are the data rule's, on every run: back
       // to the pool when their thought is not at the target, and only then.
       const restarted = record ? await requeue(tx, staleUnderThisJob()) : 0;
-      const movedSinceDone = await requeue(tx, doneButNotAtTarget());
+      // While the last outage's suspects are retried, behind them (SMD-2641 PR 2, review pass 1).
+      const movedSinceDone = await requeue(tx, doneButNotAtTarget(), !!FOLLOW && outage.isolating());
       const retriedFailed = first && retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
       // After the data rule, so a caveat row whose thought moved is counted once.
       const retriedFallbacks = first && retryFallbacks ? await requeue(tx, withCaveat()) : 0;
@@ -2234,8 +2250,22 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       onLost: (ids) => { if (!hardStopped) errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`); },
       onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
     });
+    /**
+     * A suspect of this follower's outage handed back at the pool's front (SMD-2641 PR 2, lease.ts's setFront), out of
+     * the heartbeat's set first; the database refusing it, the finally returns it with this worker's leases, where it
+     * stood.
+     */
+    const backFirst = async (id: string): Promise<void> => {
+      hb.held.delete(id);
+      if ((await setFront(sql, JOB, workerId, id).catch(() => null)) === null) hb.held.add(id);
+    };
     try {
       while (!stopping && !haltedByProvider && configError === null && outage.reason === null) {
+        // The last outage's suspects all retried (SMD-2641 PR 2): the isolated drain ends, the next poll at once with every worker.
+        if (isolated && !outage.isolating()) {
+          pollNow = true;
+          return;
+        }
         // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
         // here holding no claim, and a stop while it waits ends it.
         if (ADMIT) {
@@ -2258,8 +2288,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             }
           }
           batch = (await sql`
-            SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${BATCH}, ${TTL})`) as { thought_id: string; attempt: number }[];
+            SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${isolated ? 1 : BATCH}, ${TTL})`) as { thought_id: string; attempt: number }[];
           if (batch.length === 0) return;
+          // A thought no suspect, its suspects at the pool's front: none is left there to retry (SMD-2641 PR 2).
+          if (isolated) for (const b of batch) outage.claimed(b.thought_id);
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           const rows = (await sql`
@@ -2317,14 +2349,49 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 // thought goes back unrecorded, or the request's and every worker stops.
                 const verdict = followClassify(e);
                 const rowSubject: EgressSubject = { kind: "re-embed", metadata: row.metadata ?? undefined, content: row.content };
-                /** The thought back to the pool unrecorded, and the follower waits for the provider: an outage begun or joined, the thought a suspect or not. */
-                const sendBack = (why: string, suspect: boolean): "outage" | "thought" => {
-                  if (outage.begin(why, suspect ? b.thought_id : undefined) === "thought") return "thought";
+                /**
+                 * The thought back to the pool unrecorded, and the follower waits for the provider: an outage begun or
+                 * joined, the thought a suspect or not, a suspect handed back at the pool's front. A suspect retried
+                 * alone that errs again (SMD-2641 PR 2) is blamed only on a probe made at once, or the one just made
+                 * (`probedOut`), as part of the call in hand: answered, "answered", its own; refused, the request's,
+                 * every worker stopped ("stop"); no answer, an outage it was alone at, and at the ALONE_OUTAGES-th
+                 * "alone", its own, the outage begun with no suspect. The call aborted meanwhile: "setBack".
+                 */
+                const sendBack = async (why: string, suspect: boolean, probedOut = false): Promise<"outage" | "answered" | "alone" | "stop" | "setBack"> => {
+                  let blamed: "outage" | "answered" | "alone" | null = null;
+                  if (suspect && outage.blames(b.thought_id)) {
+                    const p = probedOut ? null : await withCallWaits(callWaits, () => embedProbe(AbortSignal.any([onStop.signal, drainEnds.signal, entry.abort.signal]), probeGate.allowed ? probeSubject : rowSubject));
+                    if (entry.aborted) return "setBack";
+                    if (stopping) return "stop";
+                    if (p?.state === "refused") {
+                      stopRefused(p.why);
+                      return "stop";
+                    }
+                    blamed = outage.blame(b.thought_id, why, p?.state === "up");
+                    if (blamed === "answered") return "answered";
+                    if (blamed === "alone") {
+                      outage.begin(why);
+                      drainEnds.abort();
+                      outageSubject ??= rowSubject;
+                      return "alone";
+                    }
+                  } else {
+                    outage.begin(why, suspect ? b.thought_id : undefined);
+                  }
                   drainEnds.abort();
                   outageSubject ??= rowSubject;
-                  err(`  ${workerId}: the embedding provider is not answering (${cutMarked(why, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
+                  const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the probe after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES} before it is recorded failed)` : "";
+                  err(`  ${workerId}: the embedding provider is not answering (${cutMarked(why, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
+                  if (suspect) await backFirst(b.thought_id);
                   return "outage";
                 };
+                /** A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone. */
+                const blamedFailure = (sent: "answered" | "alone"): Outcome => ({
+                  outcome: "failed",
+                  error: sent === "answered"
+                    ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
+                    : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
+                });
                 /**
                  * The request refused itself: every row would fail the same way. Stop every worker, mark nothing, and
                  * say what to fix (extract-entities.ts's configError). A refusal the probe found says the probe's words
@@ -2341,7 +2408,6 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 if (verdict === "db-end") throw e;
                 // Re-embed has no pauses: a fault to pause for is an outage at once, as before.
                 const read = verdict === "db-wait" || verdict === "db-moment" ? null : fault(e);
-                const again = `provider error again right after the provider answered a probe, so this thought's: ${msg}`;
                 if (read?.act === "thought") {
                   outcome = { outcome: "failed", error: msg };
                 } else if (stopping) {
@@ -2355,11 +2421,12 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   stopRefused();
                   return;
                 } else if (read.act === "pause" || read.act === "outage" || outage.reason !== null) {
-                  // Another worker's outage is joined unprobed, as extract's is (SMD-2636 PR 3a, review pass 1).
-                  // A suspect that fails again right after the provider answered a probe is recorded failed, so it
-                  // does not cycle through the pool for ever.
-                  if (sendBack(msg, read.suspect) === "outage") return;
-                  outcome = { outcome: "failed", error: again };
+                  // Another worker's outage is joined unprobed, as extract's is (SMD-2636 PR 3a, review pass 1). A
+                  // suspect retried alone that errs again is blamed on a probe (SMD-2641 PR 2), so a thought that
+                  // brings the provider down every time does not cycle through the pool for ever.
+                  const sent = await sendBack(msg, read.suspect);
+                  if (sent === "outage" || sent === "stop") return;
+                  outcome = sent === "setBack" ? { outcome: "setBack" } : blamedFailure(sent);
                 } else {
                   // `probe`: a deadline with no answer, a 4xx or redirect no rule reads, an error of no known kind.
                   // The probe's answer decides (probedFault): answered, the thought's (a content filter's); refused,
@@ -2382,10 +2449,13 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                     // Handed back: a stop, another worker's refusal (its words kept, not this probe's), the record moved.
                     return;
                   } else if (act === "outage") {
-                    // A suspect: an input that brings the provider down, with a code no rule names, is recorded at its
-                    // next (review pass 5). Another worker's outage cut the probe short: joined, in this call's words.
-                    if (sendBack(isOut(probe) && !drainEnd.aborted ? probe.why : msg, true) === "outage") return;
-                    outcome = { outcome: "failed", error: again };
+                    // A suspect: an input that brings the provider down, with a code no rule names (review pass 5).
+                    // Another worker's outage cut the probe short: joined, in this call's words. Retried alone, this
+                    // probe is the blame's, unanswered (SMD-2641 PR 2).
+                    const outOwn = isOut(probe) && !drainEnd.aborted;
+                    const sent = await sendBack(outOwn ? probe.why : msg, true, outOwn);
+                    if (sent === "outage" || sent === "stop") return;
+                    outcome = sent === "setBack" ? { outcome: "setBack" } : blamedFailure(sent);
                   } else {
                     stopRefused(probe.state === "refused" ? probe.why : undefined);
                     return;
@@ -2567,7 +2637,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     // later probe short (SMD-2636 PR 3b, review pass 4: renewed under the admit gate alone, it cycled a thought).
     drainEnds = new AbortController();
     if (ADMIT) gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
-    const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
+    // The last outage's suspects, while any is left to retry (SMD-2641 PR 2): one worker, one thought a claim.
+    isolated = !!FOLLOW && outage.isolating();
+    if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the drain goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a probe made at once`);
+    const ends = await Promise.allSettled(Array.from({ length: isolated ? 1 : WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
       drainEnds.abort();
       throw e;
