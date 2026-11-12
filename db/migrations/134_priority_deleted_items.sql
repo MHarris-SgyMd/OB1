@@ -22,23 +22,37 @@
 --     `deleted`, and each item is re-projected (its priority_current row
 --     goes). Every delete path fires them: delete_thought's projector, a raw
 --     DELETE, a cascade, and the extraction passes' pruning.
---   * A ROLE WITHOUT THE PRIORITY GRANTS (the extraction worker's, say)
---     deletes as before: the trigger asks ob1_priority_can_close() and, when
---     the role could not close a statement, skips, so no delete fails for
---     this file. What it leaves open, ob1_close_orphan_priorities() closes:
---     every open statement on a thought or an entity the brain no longer
---     holds. It runs once here, for items already gone, and after that when
---     an operator calls it.
+--   * THE EXTRACTION GROUP, whose pruning of unreferenced entities is the
+--     commonest entity delete, gains what closing takes (the maintainer,
+--     review pass 1): SELECT and UPDATE on priority_assertions, and SELECT,
+--     INSERT, UPDATE and DELETE on priority_current. This file grants them to
+--     each role holding DELETE on ob1_entities already. 116's guard lets such
+--     a role close a statement, never write or reopen one.
+--   * A ROLE WITHOUT THOSE GRANTS deletes as before: the trigger asks
+--     ob1_priority_can_close() and, when the role could not close a
+--     statement, skips, so no delete fails for this file. What it leaves
+--     open, ob1_close_orphan_priorities() closes: every open statement on a
+--     thought or an entity the brain no longer holds. It runs once here, for
+--     items already gone, and after that when an operator calls it.
 --   * merge_entities (016's, carried) moves the loser's statements onto the
 --     survivor before the loser is deleted: a merge says the two were one.
 --     Each open statement on the loser is restated on the survivor — the same
 --     maker, level, times, reason, flag, tier and asserted_at — and the
---     loser's closes as replaced by it; where the maker's own statement on
---     the survivor is the later written, that one stands and the loser's
---     closes as replaced by it. A due reference naming the survivor is
---     dropped from the copy (an item's may not name itself). Its answer
---     gains `priorities_moved`. A role without the grants merges as before,
---     and the trigger or the sweep closes the loser's as `deleted`.
+--     loser's closes as replaced by it, as does the maker's own earlier open
+--     statement on the survivor. Where the maker's latest word on the
+--     survivor is the later written, it stands: an open statement replaces
+--     the loser's, a clear clears it (review pass 1: a clear was overlooked
+--     and the merge brought back a level the maker had withdrawn). A maker is
+--     as the writers match one (116's is_maker: its agent id, a by-name
+--     statement taking the id the registry gives its name). A due reference
+--     naming the survivor is dropped from the copy (an item's may not name
+--     itself). Its answer gains `priorities_moved`. A restatement is written
+--     last, so within its tier it is the survivor's newest, and may outrank
+--     another maker's statement written there after the original (the
+--     maintainer, review pass 1: kept, merges being an operator's step). A
+--     role that could not restate (no INSERT on priority_assertions) merges
+--     as before, and the trigger or the sweep closes the loser's as
+--     `deleted`.
 --   * A due reference naming the deleted item is left as it is: its
 --     statement keeps its own level, and the read finds no due time through
 --     a missing reference (the maintainer: closing it would withdraw a level
@@ -48,18 +62,28 @@
 --   rebuilt wholesale, and a deleted row deletes no ticket; that row's own
 --   statements close as a thought's. Open items are never deleted (they are
 --   dropped, a status). A reason's text stays: removing it is forgetting,
---   SMD-1723's, which relaxes 116's guard for it.
+--   SMD-1723's, which relaxes 116's guard for it. Filed as SMD-4241 from
+--   review pass 1: an entity that extraction re-derives (pruned, then made
+--   again under a new id) closes as deleted rather than following its name; a
+--   merge leaves other statements' due references naming the loser, which
+--   then read no due time; 056's apply_entity_type_gate merges a retyped
+--   entity inline, so its statements close rather than move.
 --
 -- CONCURRENCY
 --   The triggers update only open rows (closed_at IS NULL), so a writer
---   closing the same statement first leaves them nothing to do; a writer
+--   closing the same statement first leaves them nothing to do. A writer
 --   asserting on an item being deleted is refused ITEM_NOT_FOUND once the
---   delete commits, or wrote first and is closed by it. merge_entities takes
---   both entities' priority locks, in key order, before it reads.
+--   delete commits, or committed before the trigger's statement and is
+--   closed by it; one that checked existence before the delete committed
+--   and commits after the trigger read leaves its statement open, for the
+--   sweep (review pass 1: locking every deleted key would take a lock per
+--   row of a bulk delete). merge_entities takes both entities' priority
+--   locks, in key order, before it reads.
 --
 -- SAFETY
 --   One CHECK replaced with a wider one; four new functions and two
---   triggers; merge_entities replaced with its signature. Rows change only
+--   triggers; merge_entities replaced with its signature; the extraction
+--   group's priority grants carried. Rows change only
 --   by closing a statement whose item is gone, or by a merge's restating.
 --   MINOR under FORK.md's version rules. test-schema [121], test-upgrade
 --   [20by].
@@ -169,9 +193,11 @@ COMMENT ON FUNCTION ob1_priority_close_items(text, text[]) IS
 -- ---------------------------------------------------------------------------
 -- The delete triggers
 -- ---------------------------------------------------------------------------
--- One function for both tables, by the transition table every trigger below
--- names `gone`. Skipped for a role that could not close a statement: the
--- delete is not this file's to refuse, and the sweep closes what it left.
+-- One function for both tables: the item kind is the trigger's argument
+-- (review pass 1: by table name, a renamed table would close nothing), the
+-- rows the transition table every trigger below names `gone`. Skipped for a
+-- role that could not close a statement: the delete is not this file's to
+-- refuse, and the sweep closes what it left.
 CREATE OR REPLACE FUNCTION ob1_priority_close_deleted()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -180,25 +206,21 @@ BEGIN
   IF NOT ob1_priority_can_close() THEN
     RETURN NULL;
   END IF;
-  IF TG_TABLE_NAME = 'thoughts' THEN
-    PERFORM ob1_priority_close_items('thought', ARRAY(SELECT g.id::text FROM gone g));
-  ELSIF TG_TABLE_NAME = 'ob1_entities' THEN
-    PERFORM ob1_priority_close_items('entity', ARRAY(SELECT g.id::text FROM gone g));
-  END IF;
+  PERFORM ob1_priority_close_items(TG_ARGV[0], ARRAY(SELECT g.id::text FROM gone g));
   RETURN NULL;
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_close_deleted() IS
-  'The AFTER DELETE statement triggers'' function on thoughts and ob1_entities: every open priority statement on a deleted thought or entity closes as `deleted` and its item is re-projected (ob1_priority_close_items). Skipped for a role without the priority group''s grants (ob1_priority_can_close), which ob1_close_orphan_priorities then covers. Migration 134 / SMD-3711.';
+  'The AFTER DELETE statement triggers'' function on thoughts and ob1_entities, the item kind its argument: every open priority statement on a deleted thought or entity closes as `deleted` and its item is re-projected (ob1_priority_close_items). Skipped for a role without the priority group''s grants (ob1_priority_can_close), which ob1_close_orphan_priorities then covers. Migration 134 / SMD-3711.';
 
 CREATE OR REPLACE TRIGGER priority_close_on_thought_delete
   AFTER DELETE ON thoughts
   REFERENCING OLD TABLE AS gone
-  FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_close_deleted();
+  FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_close_deleted('thought');
 CREATE OR REPLACE TRIGGER priority_close_on_entity_delete
   AFTER DELETE ON ob1_entities
   REFERENCING OLD TABLE AS gone
-  FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_close_deleted();
+  FOR EACH STATEMENT EXECUTE FUNCTION ob1_priority_close_deleted('entity');
 
 -- ---------------------------------------------------------------------------
 -- ob1_close_orphan_priorities — the sweep
@@ -244,6 +266,7 @@ DECLARE
   v_moved int := 0;
   v_now timestamptz;
   v_id uuid;
+  v_maker uuid;
   v_loser priority_assertions;
   v_have  priority_assertions;
 BEGIN
@@ -299,27 +322,39 @@ BEGIN
    WHERE id = p_survivor;
 
   -- The loser's priority statements restated on the survivor (134): a merge
-  -- says the two were one. Both items' locks first, in key order; a role
-  -- without the grants merges as before, and the delete's trigger or the
+  -- says the two were one. Both items' locks first, in key order; a role that
+  -- could not restate merges as before, and the delete's trigger or the
   -- sweep closes the loser's as deleted.
-  IF ob1_priority_can_close() THEN
+  IF ob1_priority_can_close() AND has_table_privilege('priority_assertions', 'INSERT') THEN
     PERFORM ob1_priority_lock('entity', k) FROM unnest(ARRAY[p_survivor::text, p_loser::text]) AS k ORDER BY k;
     v_now := clock_timestamp();
     FOR v_loser IN SELECT * FROM priority_assertions x
                     WHERE x.closed_at IS NULL AND x.item_kind = 'entity' AND x.item_key = p_loser::text
                     ORDER BY x.seq LOOP
+      -- The maker as the writers match one: its agent id, a by-name
+      -- statement taking the id the registry gives its name now.
+      v_maker := COALESCE(v_loser.maker_agent_id, (SELECT g.canonical_agent_id FROM ob1_agents g WHERE g.label = v_loser.maker_name));
+      -- Its latest word on the survivor, open or closed.
       SELECT * INTO v_have FROM priority_assertions y
-       WHERE y.closed_at IS NULL AND y.item_kind = 'entity' AND y.item_key = p_survivor::text AND y.maker_key = v_loser.maker_key;
+       WHERE y.item_kind = 'entity' AND y.item_key = p_survivor::text AND ob1_priority_is_maker(y, v_loser.maker_name, v_maker)
+       ORDER BY y.seq DESC LIMIT 1;
       IF v_have.id IS NOT NULL AND v_have.seq > v_loser.seq THEN
-        -- The maker's later word on the survivor stands.
-        UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_have.id WHERE id = v_loser.id;
+        -- The maker's later word on the survivor stands: a statement replaces
+        -- the loser's, a clear clears it.
+        IF v_have.closed_at IS NULL THEN
+          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_have.id WHERE id = v_loser.id;
+        ELSE
+          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'cleared' WHERE id = v_loser.id;
+        END IF;
       ELSE
         v_id := gen_random_uuid();
-        -- The maker's earlier one on the survivor, if any, and the loser's
-        -- close as replaced by the restatement; closed first, as 116's one
-        -- open statement per item and maker holds.
-        UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
-         WHERE id = v_loser.id OR id = v_have.id;
+        -- The maker's open statements on the survivor, and the loser's, close
+        -- as replaced by the restatement; closed first, as 116's one open
+        -- statement per item and maker holds.
+        UPDATE priority_assertions y SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
+         WHERE y.id = v_loser.id
+            OR (y.closed_at IS NULL AND y.item_kind = 'entity' AND y.item_key = p_survivor::text
+                AND ob1_priority_is_maker(y, v_loser.maker_name, v_maker));
         INSERT INTO priority_assertions (id, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
                                          maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
         VALUES (v_id, 'entity', p_survivor::text, v_loser.level, v_loser.due_at, v_loser.not_before,
@@ -342,7 +377,30 @@ END;
 $$;
 
 COMMENT ON FUNCTION merge_entities(uuid, uuid) IS
-  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 134 the loser''s open priority statements are restated on the survivor by the same maker (the loser''s closed as replaced by the restatement, or by the maker''s later statement already on the survivor), counted as priorities_moved; a role without the priority grants moves none, and the loser''s close as deleted. The one resolution step that is a human''s to take. Migration 016; priorities, migration 134 / SMD-3711.';
+  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 134 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. A role that could not restate moves none, and the loser''s close as deleted. The one resolution step that is a human''s to take. Migration 016; priorities, migration 134 / SMD-3711.';
+
+-- ---------------------------------------------------------------------------
+-- The extraction group's priority grants, carried
+-- ---------------------------------------------------------------------------
+-- What closing takes, granted to each role holding DELETE on ob1_entities
+-- already (the extraction group's), as 132 carried its table: its pruning of
+-- unreferenced entities is the commonest entity delete, and without them the
+-- trigger skips it (the maintainer, review pass 1). The owner holds them
+-- already; a re-apply grants what is held, which changes nothing.
+DO $grant$
+DECLARE
+  v_role record;
+BEGIN
+  FOR v_role IN
+    SELECT DISTINCT a.grantee
+      FROM pg_class c, aclexplode(c.relacl) AS a
+     WHERE c.oid = 'ob1_entities'::regclass AND a.grantee <> c.relowner AND a.privilege_type = 'DELETE'
+  LOOP
+    EXECUTE format('GRANT SELECT, UPDATE ON priority_assertions TO %1$s; GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO %1$s',
+                   CASE WHEN v_role.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_role.grantee)) END);
+  END LOOP;
+END
+$grant$;
 
 -- ---------------------------------------------------------------------------
 -- On upgrade: the statements on items deleted before 134

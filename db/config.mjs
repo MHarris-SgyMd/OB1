@@ -2543,6 +2543,14 @@ export const ROLE_GRANTS = Object.freeze({
     // stop through 093's functions (an upsert, so UPDATE too), deleted at a
     // succeeded release. Without it the worker keeps nothing and says so once.
     Object.freeze({ table: "extraction_progress", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "093" }),
+    // An entity's priority statements, closed when the pass prunes it (134,
+    // SMD-3711): the delete trigger runs as this role, closing each open
+    // statement on a deleted entity and re-projecting it. 116's guard lets the
+    // role close a statement, never write or reopen one. Without these the
+    // trigger skips, and the statements stay open for
+    // ob1_close_orphan_priorities().
+    Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "134" }),
+    Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "134" }),
   ]),
   // A structured pass — sync-linear.ts, the ingest adapters' structure step
   // (ingest-structure.ts) — additionally records the thought's source row and

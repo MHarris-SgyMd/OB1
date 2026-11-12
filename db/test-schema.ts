@@ -19695,6 +19695,84 @@ console.log("\n[121] Migration 134: a deleted item's priority statements close �
          && (await history("entity", loser)).every((h) => h.close_reason === "replaced") && await current("entity", survivor) === 4 && await drift() === 0,
     `a merge restates the operator's later statement on the loser on the survivor (level, reason, asserted_at kept, its due reference to the survivor dropped), closing the loser's and its earlier one on the survivor as replaced by it; the agent's later statement on the survivor stands, its earlier one on the loser replaced by it; priorities_moved 1, no drift (${JSON.stringify(merged)})`);
 
+  // The maker's latest word on the survivor is a clear made after its statement on the loser: the loser's is cleared, and
+  // nothing is restated (review pass 1: the merge brought back a level the maker had withdrawn).
+  const sClear = await entity("[121] Survivor cleared"), lClear = await entity("[121] Loser cleared");
+  const opOnLClear = await put("entity", lClear, 4, OP);
+  await put("entity", sClear, 3, OP);
+  await db.query(`SELECT clear_priority('entity', $1, $2::jsonb)`, [sClear, JSON.stringify(OP)]);
+  const mergedClear = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sClear, lClear])).rows[0].r;
+  assert(mergedClear.priorities_moved === 0 && (await row(opOnLClear.id)).close_reason === "cleared" && (await row(opOnLClear.id)).closed_by === null
+         && (await of("entity", sClear)).level === null && await drift() === 0,
+    `where the maker cleared its statement on the survivor after stating one on the loser, the merge clears the loser's and restates nothing (${JSON.stringify(mergedClear)})`);
+
+  // A maker's statement on the survivor made by name before its key had an id is that maker's: the restatement replaces it
+  // too, one open statement left (review pass 1: matched by maker_key the merge left two).
+  const sName = await entity("[121] Survivor by name"), lName = await entity("[121] Loser by id");
+  const byName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 1, '[121] op', NULL, 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [sName])).rows[0].id;
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  const onLName = await put("entity", lName, 5, OP);
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sName, lName]);
+  const openOnSName = (await history("entity", sName)).filter((h) => h.closed_at === null);
+  assert(openOnSName.length === 1 && openOnSName[0]?.level === 5 && (await row(byName)).close_reason === "replaced" && (await row(byName)).closed_by === openOnSName[0]?.id
+         && (await row(onLName.id)).closed_by === openOnSName[0]?.id && await drift() === 0,
+    `the maker's by-name statement on the survivor is its own: the restatement replaces it and the loser's, one open statement left (${openOnSName.map((h) => h.level).join(", ")})`);
+
+  // The other way round: the loser's statement made by name before the key had an id, the survivor's by id — the registry
+  // gives the name its id, so the survivor's later one stands and the loser's closes as replaced by it.
+  const sId = await entity("[121] Survivor by id"), lByName = await entity("[121] Loser by name");
+  const loserByName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 5, '[121] op', NULL, 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [lByName])).rows[0].id;
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  const onSId = await put("entity", sId, 2, OP);
+  const mergedByName = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sId, lByName])).rows[0].r;
+  assert(mergedByName.priorities_moved === 0 && (await row(loserByName)).close_reason === "replaced" && (await row(loserByName)).closed_by === onSId.id
+         && (await history("entity", sId)).filter((h) => h.closed_at === null).length === 1 && await drift() === 0,
+    `a loser's by-name statement is the maker whose id the registry gives that name: its later statement on the survivor stands, the loser's replaced by it (${JSON.stringify(mergedByName)})`);
+
+  // A role that may close but not restate (no INSERT on the assertions) merges as before; the delete's trigger closes the
+  // loser's as deleted.
+  const NOINSERT = "ob1_test_no_insert";
+  await db.exec(`CREATE ROLE ${NOINSERT} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOINSERT}`, ...grantStatements(NOINSERT, { groups: ["capture", "extraction"] })]) await db.exec(st);
+  const sNo = await entity("[121] Survivor no insert"), lNo = await entity("[121] Loser no insert");
+  const onLNo = await put("entity", lNo, 3, OP);
+  let noInsertMerge = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOINSERT}`);
+      noInsertMerge = JSON.stringify((await tx.query<{ r: { ok: boolean; priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sNo, lNo])).rows[0].r);
+    });
+  } catch (e) { noInsertMerge = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(/"ok":true/.test(noInsertMerge) && /"priorities_moved":0/.test(noInsertMerge) && (await row(onLNo.id)).close_reason === "deleted" && await drift() === 0,
+    `a role holding the extraction group's grants, which close but do not write, merges as before; the loser's statement closes as deleted (${noInsertMerge})`);
+
+  // The extraction group's own prune closes an entity's statements: its grants are what closing takes.
+  const prunedByWorker = await entity("[121] pruned by the worker");
+  const onWorker = await put("entity", prunedByWorker, 2, OP);
+  let workerDelete = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOINSERT}`);
+      await tx.query(`DELETE FROM ob1_entities WHERE id = $1::uuid`, [prunedByWorker]);
+      workerDelete = "deleted";
+    });
+  } catch (e) { workerDelete = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(workerDelete === "deleted" && (await row(onWorker.id)).close_reason === "deleted" && await current("entity", prunedByWorker) === null && await drift() === 0,
+    `an extraction-group role's prune of an entity closes its statement in the trigger (${workerDelete})`);
+  await db.exec(`DROP OWNED BY ${NOINSERT}; DROP ROLE ${NOINSERT}`);
+
+  // The carry: a role holding DELETE on ob1_entities before 134 is granted what closing takes by it.
+  const OLDX = "ob1_test_extraction_old";
+  await db.exec(`CREATE ROLE ${OLDX} NOLOGIN; GRANT DELETE ON ob1_entities TO ${OLDX}`);
+  const heldX = async () => (await db.query<{ g: boolean }>(`SELECT has_table_privilege('${OLDX}', 'priority_assertions', 'UPDATE') AND has_table_privilege('${OLDX}', 'priority_current', 'DELETE') AS g`)).rows[0].g;
+  const xBefore = await heldX();
+  await reapply(file.slice(0, 4));
+  const xAfter = await heldX();
+  assert(!xBefore && xAfter, `a role holding DELETE on ob1_entities before 134 is granted UPDATE on the assertions and the projection's writes by it (${xBefore} → ${xAfter})`);
+  await db.exec(`DROP OWNED BY ${OLDX}; DROP ROLE ${OLDX}`);
+
   // A role without the priority grants deletes as before; its delete leaves the statement open, and the sweep closes it.
   const ROLE = "ob1_test_no_priority";
   await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);

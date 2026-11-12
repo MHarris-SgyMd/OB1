@@ -2511,15 +2511,19 @@ its winner and `priority_of` answered for an item the brain no longer held.
 AFTER DELETE statement triggers on `thoughts` and `ob1_entities` close every open
 statement on a deleted item with a new close reason, `deleted`, and re-project it:
 `delete_thought`, a raw DELETE, a cascade and the extraction passes' pruning alike.
-A role without the priority grants deletes as before, the trigger skipping;
+The extraction group, whose pruning is the commonest entity delete, gains what
+closing takes, granted to the roles holding it already. Any other role without the
+priority grants deletes as before, the trigger skipping;
 `ob1_close_orphan_priorities()` closes what such a delete left, and runs once on
 upgrade for the items already gone. `merge_entities` restates the loser's statements
 on the survivor by the same maker, the loser's closed as replaced; where the maker's
-own statement on the survivor is the later, it stands. A statement whose due
+latest word on the survivor is the later, it stands (a clear clears the loser's),
+and a restatement is the survivor's newest within its tier. A statement whose due
 reference names the deleted item stays open at its own level, and the read finds no
 due time through it (the maintainer's choice, 2026-11-12). A ticket is no row of its
 own, so deleting one of its rows closes that row's statements alone. A reason's text
-stays, for SMD-1723's forgetting. Needs 016, 116 and 133. test-schema [121],
+stays, for SMD-1723's forgetting. SMD-4241 holds an entity's re-derivation, a retype
+merge and due references to a merged entity. Needs 016, 116 and 133. test-schema [121],
 test-upgrade [20by].
 
 Migration 133 makes a ticket and its own rows one item to the priority writers
@@ -2903,6 +2907,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
+| | `priority_assertions` (134) | `SELECT, UPDATE` — its pruning of an unreferenced entity closes the entity's open priority statements through 134's delete trigger, which runs as this role; 116's guard lets it close a statement, never write or reopen one (SMD-3711) |
+| | `priority_current` (134) | `SELECT, INSERT, UPDATE, DELETE` — the trigger re-projects each entity it closed a statement on |
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |

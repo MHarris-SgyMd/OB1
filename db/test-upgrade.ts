@@ -6216,6 +6216,12 @@ console.log("\n[20by] Migration 134: onto a populated brain at the file before i
   await sql`SELECT merge_entities(${s133}::uuid, ${l133}::uuid)`;
   const at133 = [await reason(onDoomed), await reason(onL133)];
 
+  // A role granted the extraction group before 134 (DELETE on ob1_entities), which the file grants what closing takes.
+  await sql.unsafe(`CREATE ROLE ob1_upgrade_134_extraction NOLOGIN; GRANT DELETE ON ob1_entities TO ob1_upgrade_134_extraction`);
+  const closes = async () => ((await sql`SELECT has_table_privilege('ob1_upgrade_134_extraction', 'priority_assertions', 'UPDATE')
+      AND has_table_privilege('ob1_upgrade_134_extraction', 'priority_current', 'DELETE') AS c`)[0] as { c: boolean }).c;
+  const closesBefore = await closes();
+
   // Without 133's ob1_priority_lock_key: refused by name, nothing made.
   await sql`ALTER FUNCTION ob1_priority_lock_key(text, text) RENAME TO ob1_priority_lock_key_away`;
   const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the134 }).then(() => "applied", (e: Error) => e.message);
@@ -6227,6 +6233,8 @@ console.log("\n[20by] Migration 134: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the134 });
   assert(JSON.stringify(at133) === "[null,null]" && await reason(onDoomed) === "deleted" && await reason(onL133) === "deleted" && await reason(onLiving) === null && await drift() === 0,
     `applied: the statements a thought deleted and an entity merged away at 133 left open close as deleted; a living thought's stays open; no drift (at 133: ${JSON.stringify(at133)})`);
+  assert(!closesBefore && await closes(), `the file grants a role holding DELETE on ob1_entities (the extraction group's) what closing takes`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_134_extraction; DROP ROLE ob1_upgrade_134_extraction`);
 
   // After it: a delete_thought closes its thought's; a merge restates the loser's on the survivor.
   const later = await thought("upgrade 134: a note deleted after"), onLater = await put("thought", later, 5);
