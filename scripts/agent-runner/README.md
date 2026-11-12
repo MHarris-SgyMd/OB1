@@ -219,6 +219,15 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
 
+## The live run (`live-run.ts`)
+
+The executor runs one ticket end to end with the real clients — the capstone of cut 2c. Two modes, so the money path is never the default:
+
+* `--plan --ticket SMD-NNNN`: loads the config and keys, takes the ticket (its full fields fetched from Linear, Verify and the named ids parsed, checked for a character that doesn't show), provisions the runner's bare repository (a local clone of the main checkout, fetched each run), and prints what a run would do. No session, no claim, no Linear write, no spend.
+* `--execute --ticket SMD-NNNN --claude <path> --sha256 <hex> --version <x.y.z>`: the real run. It refuses a ticket not labelled `agent-ready`, checks the probe stamp (so the profile is as-probed — run the mock probes on this Claude Code first), then assembles the real `RunDeps` and `LiveDeps` and runs `liveRun`: claim on stable, move to In Progress, the worker and review sessions on the pinned Claude Code (the Anthropic key through `apiKeyHelper`), the gate, the release and the hand-back to Backlog. Up to about $13, with no PR (cut 3 publishes). The branch stays in the bare repository; the run's record stays under `runs/<run>/`.
+
+The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
+
 ## Cuts still to come
 
 Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. Driving real sessions end to end needs a model (cut 2c).
