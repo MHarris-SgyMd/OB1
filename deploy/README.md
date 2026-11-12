@@ -396,7 +396,19 @@ free:
 coordinator holds the brain's one connection, and its passes ask through it.
 While the broker is away, a call waits a few seconds for it, then runs on the
 brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
-back. The api's calls join in SMD-3379 PR 3b-2.
+back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
+
+- **One coordinator per key.** A second coordinator on the same key — one run
+  by hand from a checkout with the brain's environment, say — makes the
+  broker log "two relays speak on its key at once", and each reconnect may
+  count a call twice for a moment.
+- **Where to look.** The coordinator's `slot relay:` lines say when the broker
+  answers, is lost, or refused the key (a 401, naming `OB1_SLOT_BROKER_KEY`);
+  the broker's log says each brain's connections, a socket ended for not
+  answering, and a server over its slots.
+- **What 3b-1 does not cover.** The api's calls, live and background, are not
+  yet the broker's (SMD-3379 PR 3b-2): until then only each server's
+  `reserve` keeps room for live calls.
 
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's

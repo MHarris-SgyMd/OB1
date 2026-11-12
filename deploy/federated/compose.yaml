@@ -12,7 +12,8 @@
 #
 #   bun --no-env-file deploy/federated/federated.ts up
 #
-# Until SMD-3379 PR 3b no brain asks it.
+# A brain asks it through its coordinator (SMD-3379 PR 3b-1): its deploy/.env
+# sets OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY.
 name: ob1-federated
 
 x-logging: &logging

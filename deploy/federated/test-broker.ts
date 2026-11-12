@@ -71,10 +71,10 @@ async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
   return true;
 }
 
-async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>, orphanMs = 0): Promise<void> {
+async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>, keepMs = 0): Promise<void> {
   const lines: string[] = [];
   // A closed socket's grants given back at once unless a row asks otherwise: [13] reads the keeping itself.
-  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), orphanMs });
+  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), keepMs });
   try { await fn(b, lines); } finally { await b.stop(); }
 }
 
@@ -641,7 +641,7 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   // On a clock the test moves: canary alone at work for ten minutes; stable, partitioned meanwhile, comes back with a
   // call running (held) and asks — it starts level with canary, not at its old, lower score, so the two alternate.
   let t = 1_000_000;
-  const b = startBroker(registry({ slots: 2, reserve: 0 }), { port: 0, log: () => {}, now: () => t, orphanMs: 0 });
+  const b = startBroker(registry({ slots: 2, reserve: 0 }), { port: 0, log: () => {}, now: () => t, keepMs: 0 });
   try {
     const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
     ask(c, "c0", "background"); await c.next("go", "c0");
@@ -773,26 +773,16 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
 await withBroker(registry({ slots: 1, reserve: 0, idle: 8 }), async (b) => {
   // A socket that stops answering (a raw client, no pongs) with an ask queued: no grant goes into it once it has been
   // silent half its idle_s, and it is ended at idle_s, whatever the broker sends it.
-  const net = await import("node:net");
-  const frame = (text: string) => { const body = Buffer.from(text), mask = Buffer.from([1, 2, 3, 4]); return Buffer.concat([Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]), mask, Buffer.from(body.map((x, i) => x ^ mask[i % 4]))]); };
   const c = await connect(b, KEYS.canary);
   ask(c, "c0", "background"); await c.next("go", "c0");
-  const raw = net.connect(b.port, "127.0.0.1");
-  let got = "";
-  let closed = false;
-  raw.on("data", (d: Buffer) => { got += d.toString("latin1"); });
-  raw.on("close", () => { closed = true; });
-  raw.on("error", () => {});
-  await new Promise<void>((r) => raw.on("connect", () => r()));
-  raw.write(`GET /v1/slots HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-brain-key: ${KEYS.third}\r\n\r\n`);
-  await until(() => got.includes(" 101 "), 3000);
-  raw.write(frame(JSON.stringify({ op: "ask", id: "q", base: BASE, model: "qwen3:8b", cls: "background" })));
+  const raw = await rawBrain(b, KEYS.third);
+  raw.send({ op: "ask", id: "q", base: BASE, model: "qwen3:8b", cls: "background" });
   await until(() => pool(b).waiting.third === 1, 2000);
   ask(c, "c1", "background"); await c.next("queued", "c1");
   await sleep(4500);
   done(c, "c0");
   ok(!!(await c.next("go", "c1", 1500)), "the slot freed goes past the silent socket's older ask to the brain that answers");
-  ok(await until(() => closed, 6000) && !pool(b).waiting.third, "and the silent socket is ended at idle_s, its ask withdrawn", pool(b));
+  ok(await until(() => raw.closed(), 6000) && !pool(b).waiting.third, "and the silent socket is ended at idle_s, its ask withdrawn", pool(b));
   raw.destroy();
   await c.close();
 });
@@ -848,7 +838,7 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
   // Slot time charged only to a socket's last sign of life: a grant into a socket that then went dead, the test's clock
   // moved 100 s on before it ends, charges its brain nothing past its last frame.
   let t = 1_000_000;
-  const b = startBroker(registry({ slots: 2, reserve: 0, idle: 30 }), { port: 0, log: () => {}, now: () => t, orphanMs: 0 });
+  const b = startBroker(registry({ slots: 2, reserve: 0, idle: 30 }), { port: 0, log: () => {}, now: () => t, keepMs: 0 });
   try {
     const old = await rawBrain(b, KEYS.third);
     old.send({ op: "ask", id: "g", base: BASE, model: "qwen3:8b", cls: "background" });
@@ -904,6 +894,22 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
   ok(dead.closed() && performance.now() - t1 < 5000, `a pending probe is not reset by later opens: the dead socket ended within ~2 s of the first (${Math.round(performance.now() - t1)} ms)`, performance.now() - t1);
   for (const o of opened) await o.close();
   old.destroy(); dead.destroy(); await s.close(); await c.close();
+}, 5000);
+
+await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b, lines) => {
+  // A coordinator swapped behind a half-open socket is no second coordinator: the old socket, not answering its new
+  // one's probe, is not counted toward twins, and its grant is given back as the probe ends it.
+  const old = await rawBrain(b, KEYS.third);
+  old.send({ op: "synced", id: "X" });
+  old.send({ op: "ask", id: "X:g", base: BASE, model: "qwen3:8b", cls: "background" });
+  await until(() => old.saw("go"), 2000);
+  const c = await connect(b, KEYS.canary);
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  const s = await connect(b, KEYS.third);
+  s.send({ op: "synced", id: "Y" });
+  ok(!!(await c.next("go", "c1", 4500)), "the old socket probed out, its grant goes on");
+  ok(!lines.some((l) => /two relays speak/.test(l)), "and the swap is not taken for two coordinators", lines);
+  old.destroy(); await s.close(); await c.close();
 }, 5000);
 
 section("[14] the base is the brain's, read the same way");

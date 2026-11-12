@@ -283,9 +283,14 @@ section("[8] a broker frozen, a bad frame, a refused key, `off`");
   // nothing for idle_s, and the waiting call runs on its own share after the grace.
   const brokerFile = resolve(import.meta.dir, "../deploy/federated/broker.ts");
   const regFile = join(DIR, "frozen.yaml");
-  const port = 18_400 + Math.floor(Math.random() * 400);
-  writeFileSync(regFile, `broker:\n  port: ${port}\n  idle_s: 8\n  warm_s: 0\nservers:\n  ollama:\n    bases: [${BASE}]\n    slots: 1\n    reserve: 0\nbrains:\n  stable:\n    key: "${hashKey(KEYS.stable)}"\n`);
-  const bp = Bun.spawn([process.execPath, "--no-env-file", brokerFile, "--registry", regFile], { stdio: ["ignore", "ignore", "inherit"] });
+  writeFileSync(regFile, `broker:\n  idle_s: 8\n  warm_s: 0\nservers:\n  ollama:\n    bases: [${BASE}]\n    slots: 1\n    reserve: 0\nbrains:\n  stable:\n    key: "${hashKey(KEYS.stable)}"\n`);
+  // A port of the broker's own choosing (--port 0), read from its start line: no collision with another suite's.
+  const bp = Bun.spawn([process.execPath, "--no-env-file", brokerFile, "--registry", regFile, "--port", "0"], { stdio: ["ignore", "pipe", "inherit"] });
+  let started = "";
+  const reader = (bp.stdout as ReadableStream<Uint8Array>).getReader();
+  void (async () => { for (;;) { const r = await reader.read(); if (r.done) return; started += new TextDecoder().decode(r.value); } })();
+  await until(() => /serving on port \d+/.test(started), 8000);
+  const port = Number(/serving on port (\d+)/.exec(started)?.[1] ?? 0);
   const logs: string[] = [];
   const relay = startRelay({ url: `ws://127.0.0.1:${port}/v1/slots`, key: KEYS.stable, log: (l) => logs.push(l), reconnectMs: { first: 50, max: 200 } });
   try {
@@ -524,7 +529,7 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
       c.cmd({ cmd: "end", id: "wait" });
       await c.wait("ended", "wait");
       // The link cut again, the call ending while it is down (no reconnect for 1 s): the broker keeps its grant, and the
-      // relay's synced on its next socket gives it back at once, not at ORPHAN_MS.
+      // relay's synced on its next socket gives it back at once, not at KEEP_MS.
       a.cmd({ cmd: "call", id: "run2" }); await a.wait("run", "run2");
       c.cmd({ cmd: "call", id: "wait2" }); await c.wait("waiting", "wait2");
       refuse = true;
@@ -537,7 +542,7 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
       const back = performance.now();
       ok(await c.wait("run", "wait2", 4000), "a grant kept for a call that ended while the link was down is given back once the relay is back");
       const tookMs = performance.now() - back;
-      ok(tookMs < 2500, `at once, on the relay's synced, not at ORPHAN_MS (${Math.round(tookMs)} ms)`, tookMs);
+      ok(tookMs < 2500, `at once, on the relay's synced, not at KEEP_MS (${Math.round(tookMs)} ms)`, tookMs);
       c.cmd({ cmd: "end", id: "wait2" });
       await kill(a); await kill(c);
     } finally { await relay.stop(); await other.stop(); proxy.stop(true); }
@@ -600,6 +605,38 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   port.detach();
   await relay.stop();
 });
+
+{
+  // A stand-in broker: its hello names one base and it never answers an ask, or names none and answers each ask "no
+  // server". The relay answers a base outside the list itself, at once; and turns a broker's "no server" into own.
+  let listed = true;
+  const fake = Bun.serve({ port: 0, fetch: (req, srv) => srv.upgrade(req) ? undefined : new Response(null, { status: 400 }), websocket: {
+    open(ws) { ws.send(JSON.stringify({ op: "hello", boot: "fake", idle_s: 30, max_waiting: 1024, ...(listed ? { servers: [{ name: "o", bases: [BASE], slots: 1 }] } : {}) })); },
+    message(ws, msg) { const m = JSON.parse(String(msg)); if (!listed && m.op === "ask") ws.send(JSON.stringify({ op: "no", id: m.id, why: "server" })); },
+  }, hostname: "127.0.0.1" });
+  const port0 = fake.port;
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+  try {
+    await upOf(relay);
+    const port = relay.port("probe");
+    const got: { slot: string; id: string }[] = [];
+    port.attach((m) => got.push(m));
+    port.onMessage({ slot: "ask", id: "u", base: "https://api.example.invalid/v1", model: "m", cls: "background" });
+    ok(await until(() => got.some((m) => m.slot === "own" && m.id === "u"), 200), "a base outside the broker's list is its own share at once, from the relay, asked of no broker", got);
+    port.onMessage({ slot: "ask", id: "big", base: BASE, model: "m".repeat(5000), cls: "background" });
+    ok(await until(() => got.some((m) => m.slot === "own" && m.id === "big"), 200) && relay.state().broker === "up", "a frame too big for the broker (a 5 kB model) is answered own, never sent, the socket kept", { got, s: relay.state() });
+    await relay.stop();
+    listed = false;
+    const r2 = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+    await upOf(r2);
+    const p2 = r2.port("probe");
+    const got2: { slot: string; id: string }[] = [];
+    p2.attach((m) => got2.push(m));
+    p2.onMessage({ slot: "ask", id: "n", base: BASE, model: "m", cls: "background" });
+    ok(await until(() => got2.some((m) => m.slot === "own" && m.id === "n"), 1000), "a broker that lists no bases and answers no server: own", got2);
+    await r2.stop();
+  } finally { await fake.stop(true); }
+}
 
 {
   // A refused key met only after an outage was said: named all the same.
