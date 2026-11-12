@@ -92,7 +92,7 @@ export type Refusal =
   // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
   // Deliverables (134, SMD-1715 PR 2): the writers' refusals. NOT_FOUND above answers a thought deleted under a capture.
   | { code: "WRITE_SCOPE_REQUIRED"; retryable: false; key: string } // a key without write scope reaching a deliverable writer — met by the core's own callers alone (the manifest gives no other key the writers)
-  | { code: "SPEC_NOT_FOUND"; retryable: false; spec: string } // capture_deliverable: the spec names no thought
+  | { code: "SPEC_NOT_FOUND"; retryable: false; spec: string; left?: string } // capture_deliverable: the spec names no thought; left: the thought a fresh capture wrote before the record found the spec gone, which stays, named by no deliverable
   | { code: "SPEC_IS_SELF"; retryable: false; id: string } // capture_deliverable: the content is the spec's own text, so it landed on the spec, which cannot be its own spec
   | { code: "ALREADY_A_DELIVERABLE"; retryable: false; id: string; recordedBy: string; spec: string; checkpoint: string } // the thought is a deliverable recorded by another key, or at another spec or checkpoint
   | { code: "OUTPUT_EXISTS"; retryable: false; id: string } // capture_deliverable: the output's text (with its checkpoint line) is a thought already, not a deliverable: a deliverable is always a thought the call wrote
@@ -231,7 +231,7 @@ const FACTS: Facts = {
   PROPOSAL_YOURS: (r) => ({ proposal: r.proposal }),
   CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
   WRITE_SCOPE_REQUIRED: none,
-  SPEC_NOT_FOUND: (r) => ({ spec: r.spec }),
+  SPEC_NOT_FOUND: (r) => ({ spec: r.spec, ...(r.left ? { left: r.left } : {}) }),
   SPEC_IS_SELF: (r) => ({ id: r.id }),
   ALREADY_A_DELIVERABLE: (r) => ({ id: r.id, recordedBy: r.recordedBy, spec: r.spec, checkpoint: r.checkpoint }),
   OUTPUT_EXISTS: (r) => ({ id: r.id }),

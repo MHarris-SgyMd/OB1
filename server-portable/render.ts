@@ -2721,7 +2721,7 @@ const deliverableEventLine = (e: DeliverableEvent) =>
 const deliverableRefusal = (r: Refusal) =>
   r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a deliverable is recorded and verified by a write key alone.`
   : r.code === "NOT_FOUND" ? `Refused: thought ${r.id} was deleted before it could be recorded as a deliverable.`
-  : r.code === "SPEC_NOT_FOUND" ? `Refused: the brain holds no thought ${r.spec} to be the spec. Capture what was asked first, and pass its id.`
+  : r.code === "SPEC_NOT_FOUND" ? `Refused: the brain holds no thought ${r.spec} to be the spec. Capture what was asked first, and pass its id.${r.left ? ` The output was captured before the spec was found gone, as thought ${r.left}, which stays and names no deliverable: delete it if it is not wanted.` : ""}`
   : r.code === "SPEC_IS_SELF" ? `Refused: this output's text is the spec's own (thought ${r.id}), and a thought cannot be its own spec.`
   : r.code === "ALREADY_A_DELIVERABLE"
     ? `Refused: thought ${r.id} is a deliverable already, recorded by ${oneLine(snipText(r.recordedBy, 80))}, meant to meet spec ${r.spec} at checkpoint ${quoted(r.checkpoint, 80)}. A deliverable keeps the spec, the checkpoint and the key it was recorded with; reworked output is a new deliverable at its new checkpoint (two checkpoints that differ only in letter case or white space name one thought).`
@@ -2744,7 +2744,7 @@ const captureNote = (c: CaptureSummary | null) =>
 export const renderCaptureDeliverable = (o: Outcome<CaptureDeliverableResult, CaptureDeliverableCode>): Reply => render(o, (v) =>
   v.outcome === "captured"
     ? `Recorded ${deliverableLine(v.deliverable)}. Another key verifies it (verify_deliverable).${captureNote(v.capture)}`
-    : `That deliverable is recorded already — ${deliverableLine(v.deliverable)} — so nothing was written.`,
+    : `That deliverable is recorded already — ${deliverableLine(v.deliverable)} — so ${v.capture === null ? "nothing was written" : "nothing was recorded; this call's capture landed on its thought"}.`,
   deliverableRefusal, AS_JSON);
 
 export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, VerifyDeliverableCode>): Reply => render(o, (v) =>

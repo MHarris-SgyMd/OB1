@@ -3296,8 +3296,10 @@ console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 13
       && badCheckpoint.status === 400 && badCheckpoint.body.code === "REFUSED_INPUT" && blank.status === 400 && blank.body.code === "REFUSED_INPUT",
     `refused: a spec naming nothing 422 with no thought written; the spec's own text 409; no deliverable 404 and over MCP; a checkpoint with a control character, and blank output, 400 by the schema (${noSpec.status} ${written} | ${isSelf.status} | ${noneHist.status} | ${badCheckpoint.status} | ${blank.status})`);
 
-  // A record that does not land after a capture that wrote a new thought deletes it (review pass 1): here 134's
-  // record_deliverable is renamed away for the one call, as a brain whose record cannot run would answer.
+  // A record that does not land after a fresh capture leaves the thought, never deleted (review pass 2: a delete could
+  // take a thought another key had just been told was stored), and the same call again records it: the thought is
+  // this key's, derived from this spec, and no deliverable names it. Here 134's record_deliverable is renamed away for
+  // the one call, as a brain whose record cannot run would answer. Another key's same call is refused OUTPUT_EXISTS.
   const orphanText = "[21] output whose record fails";
   await sql.unsafe(`ALTER FUNCTION record_deliverable(text, text, text, jsonb) RENAME TO record_deliverable_away`);
   let failed: Answer;
@@ -3306,10 +3308,23 @@ console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 13
   } finally {
     await sql.unsafe(`ALTER FUNCTION record_deliverable_away(text, text, text, jsonb) RENAME TO record_deliverable`);
   }
-  const left = Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE content LIKE ${orphanText + "%"}`)[0] as { n: number }).n);
+  const leftIds = ((await sql`SELECT id::text AS id FROM thoughts WHERE content LIKE ${orphanText + "%"}`) as { id: string }[]).map((r) => r.id);
+  const leftByRival = await rest("POST", "/v1/deliverables", { content: orphanText, spec, checkpoint: "f" }, KEYS.rival);
   const retried = await rest("POST", "/v1/deliverables", { content: orphanText, spec, checkpoint: "f" });
-  assert(failed.status === 500 && left === 0 && retried.status === 200 && retried.body.outcome === "captured",
-    `a record that fails after a fresh capture leaves no thought behind, and the same call then captures it (${failed.status} ${left} | ${retried.status} ${retried.body.outcome})`);
+  const otherSpec = String((await rest("POST", "/v1/thoughts", { content: "[21] another spec" })).body.id);
+  const againOtherSpec = await rest("POST", "/v1/deliverables", { content: orphanText, spec: otherSpec, checkpoint: "f" });
+  assert(failed.status === 500 && leftIds.length === 1
+      && leftByRival.status === 409 && leftByRival.body.code === "OUTPUT_EXISTS" && leftByRival.body.id === leftIds[0]
+      && retried.status === 200 && retried.body.outcome === "captured" && (retried.body.deliverable as D).thoughtId === leftIds[0] && retried.body.capture === null
+      && againOtherSpec.status === 409 && againOtherSpec.body.code === "ALREADY_A_DELIVERABLE",
+    `a record that fails after a fresh capture leaves the thought; another key's same call is refused OUTPUT_EXISTS, and the same key's records it, capturing nothing (${failed.status} ${leftIds.length} | ${leftByRival.status} ${leftByRival.body.code} | ${retried.status} ${retried.body.outcome} | ${againOtherSpec.status})`);
+
+  // A key's own leftover recorded only against the spec it was captured from: a thought of the key's text derived from
+  // another spec (or none) is not its leftover for this one.
+  const ownPlain = String((await rest("POST", "/v1/thoughts", { content: "[21] the writer's own plain output\n\nCheckpoint: p" })).body.id);
+  const onOwnPlain = await rest("POST", "/v1/deliverables", { content: "[21] the writer's own plain output", spec, checkpoint: "p" });
+  assert(onOwnPlain.status === 409 && onOwnPlain.body.code === "OUTPUT_EXISTS" && onOwnPlain.body.id === ownPlain,
+    `the key's own thought of the same text, derived from no spec, is not a leftover: refused OUTPUT_EXISTS (${onOwnPlain.status} ${onOwnPlain.body.code})`);
 }
 
 apiServer.stop();

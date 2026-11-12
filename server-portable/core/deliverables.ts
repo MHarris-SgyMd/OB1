@@ -10,16 +10,23 @@
 // checkpoint is a new thought (the maintainer's definition of 2026-11-12: a
 // deliverable's checkpoint never changes, and reworked output is a new
 // deliverable). The two are two statements, not one transaction (134's header
-// speaks of one; the capture path is many statements), so everything that can
-// be asked before the capture is asked first — the key's scope, the spec, and
-// whether the text is a thought already — and a record that still fails after
-// a capture that wrote a new thought deletes that thought (review pass 1).
+// speaks of one; the capture path is many statements — one transaction is
+// SMD-4248). So the key's scope, the spec and whether the text is a thought
+// already are asked before the capture, and asked again of the thought the
+// capture lands on, which another call may have written meanwhile.
 //
-// A deliverable is always a thought this call wrote: text that is a thought
-// already is refused (OUTPUT_EXISTS), unless it is a deliverable, which is
-// answered from 134 with nothing captured (the maintainer, 2026-11-12). The
-// text is held by its fingerprint (016), which ignores letter case and runs of
-// white space, so two checkpoints that differ only there name one thought.
+// A deliverable is a thought this call's key wrote, derived from its spec
+// (the maintainer, 2026-11-12). Text that is a thought already is answered by
+// what that thought is: a deliverable from 134, writing nothing (unchanged for
+// its own key, spec and checkpoint, else ALREADY_A_DELIVERABLE); a thought
+// this key captured from this spec that no deliverable names — a record that
+// did not land after it — recorded now; any other refused OUTPUT_EXISTS.
+// Nothing is ever deleted: a record that does not land after a fresh capture
+// leaves the thought, the refusal naming it, and the same call again records
+// it (review pass 2: a delete could take a thought another key had just been
+// told was stored). The text is held by its fingerprint (016), which ignores
+// letter case and runs of white space, so two checkpoints that differ only
+// there name one thought.
 
 import type { Principal } from "../auth.ts";
 import type { DeliverableAnswer } from "../deliverables.ts";
@@ -65,16 +72,20 @@ const id = (s: string) => s.trim().toLowerCase();
  * again, since 134 answers it in words alone; VERIFY_NOT_YOURS says which rule refused, by its words' close (they
  * open with the key's own name, which the server does not choose).
  */
-async function refusedBy(ctx: Ctx, a: DeliverableAnswer, principal: Principal, thought: string, spec = "") {
+async function refusedBy(ctx: Ctx, a: DeliverableAnswer, principal: Principal, thought: string, spec = "", left?: string) {
   switch (a.code) {
     case "WRITE_SCOPE_REQUIRED": return writeScopeRequired(principal);
     case "THOUGHT_NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id: thought });
-    case "SPEC_NOT_FOUND": return refuse({ code: "SPEC_NOT_FOUND", retryable: false, spec });
+    // `left`: the thought a fresh capture wrote before the record was refused, which stays (review pass 2).
+    case "SPEC_NOT_FOUND": return refuse({ code: "SPEC_NOT_FOUND", retryable: false, spec, ...(left ? { left } : {}) });
     case "SPEC_IS_SELF": return refuse({ code: "SPEC_IS_SELF", retryable: false, id: thought });
     case "ALREADY_A_DELIVERABLE": {
-      const d = (await (await ctx.store()).deliverableHistory(thought)).deliverable;
-      if (!d) throw new Error("record_deliverable answered ALREADY_A_DELIVERABLE for a thought with no deliverable");
-      return refuse({ code: "ALREADY_A_DELIVERABLE", retryable: false, id: thought, recordedBy: d.capturedBy, spec: d.specRef, checkpoint: d.checkpoint });
+      // From the capture event, which outlives its thought: the thought deleted since 134 answered leaves no
+      // deliverable standing, and its events say what was recorded (review pass 2: that read threw, a 500).
+      const h = await (await ctx.store()).deliverableHistory(thought);
+      const c = h.events.find((e) => e.event === "captured");
+      if (!c) throw new Error("record_deliverable answered ALREADY_A_DELIVERABLE for a thought no deliverable was recorded on");
+      return refuse({ code: "ALREADY_A_DELIVERABLE", retryable: false, id: thought, recordedBy: c.maker.name, spec: c.specRef, checkpoint: c.checkpoint });
     }
     case "NOT_A_DELIVERABLE": return refuse({ code: "NOT_A_DELIVERABLE", retryable: false, id: thought, deleted: /thought was deleted\b/.test(a.message ?? "") });
     case "ILLEGAL_TRANSITION": return refuse({ code: "ILLEGAL_TRANSITION", retryable: false, id: thought, from: a.from ?? "", to: a.to ?? "" });
@@ -83,58 +94,55 @@ async function refusedBy(ctx: Ctx, a: DeliverableAnswer, principal: Principal, t
   throw new Error("a deliverable call answered refused without a code this server reads");
 }
 
+/**
+ * A thought that holds the deliverable's text already — found before the capture, or landed on by it — answered by what
+ * it is. A deliverable: 134's answer, which writes nothing (unchanged for its own key, spec and checkpoint, else
+ * ALREADY_A_DELIVERABLE). A thought this key captured, derived from this spec, that no deliverable names — a record
+ * that did not land after a capture of the key's own — recorded now. Any other thought: OUTPUT_EXISTS, recording
+ * nothing (the maintainer, 2026-11-12). `summary` is what this call's capture did, when it made one.
+ */
+async function onExisting(ctx: Ctx, principal: Principal, thought: string, spec: string, named: string, checkpoint: string, summary: CaptureSummary | null): Promise<Outcome<CaptureDeliverableResult, CaptureDeliverableCode>> {
+  const store = await ctx.store();
+  if (thought === spec) return refuse({ code: "SPEC_IS_SELF", retryable: false, id: thought });
+  if ((await store.deliverableHistory(thought)).events.length === 0) {
+    const [by, from] = await Promise.all([store.captureActorOf(thought), store.derivedFromOf(thought)]);
+    const ownKey = by !== null && (by.actorName === principal.name || (by.agentId !== null && by.agentId === principal.agentId));
+    if (!ownKey || !from?.includes(spec)) return refuse({ code: "OUTPUT_EXISTS", retryable: false, id: thought });
+  }
+  const a = await store.recordDeliverable({ thought, spec, checkpoint, actor: actorOf(ctx, principal) });
+  if ((a.outcome === "captured" || a.outcome === "unchanged") && a.deliverable) return ok({ outcome: a.outcome, deliverable: a.deliverable, event: a.event, capture: summary });
+  if (a.outcome === "refused") return (await refusedBy(ctx, a, principal, thought, named)) as Outcome<never, CaptureDeliverableCode>;
+  throw new Error("record_deliverable answered an outcome this server does not read");
+}
+
 export async function captureDeliverable(ctx: Ctx, principal: Principal, input: Input<"capture_deliverable">): Promise<Outcome<CaptureDeliverableResult, CaptureDeliverableCode>> {
   // Asked first, so a key 134 would refuse captures nothing (review pass 4 of PR 1: the refusal came after the thought).
   if (principal.scope !== "write") return writeScopeRequired(principal);
   const store = await ctx.store();
-  const actor = actorOf(ctx, principal);
   // The spec as the capture would read it — an id, or a thought's client_key (SMD-3314) — resolved once and passed to
   // both, so the record never meets a name the capture took (review pass 1: a client_key captured, then refused).
   const named = id(input.spec);
   const spec = (await store.thoughtsNamed([named])).get(named);
   if (!spec) return refuse({ code: "SPEC_NOT_FOUND", retryable: false, spec: named });
   const text = deliverableText(input.content, input.checkpoint);
-  // Text that is a thought already is never captured onto (review pass 1: a re-capture merged a rival's tags into a
-  // deliverable before its refusal, and one onto a plain thought left its derived_from unset). A deliverable is
-  // answered from 134, which writes nothing for it: unchanged for its own key, spec and checkpoint, else
-  // ALREADY_A_DELIVERABLE. Any other thought is refused OUTPUT_EXISTS.
+  // Text that is a thought already is never captured onto (review pass 1: a re-capture merged another key's tags into
+  // a deliverable before its refusal): answered by what that thought is.
   const held = (await store.keyAtText(text))?.id;
-  if (held !== undefined) {
-    if (held === spec) return refuse({ code: "SPEC_IS_SELF", retryable: false, id: held });
-    if ((await store.deliverableHistory(held)).events.length === 0) return refuse({ code: "OUTPUT_EXISTS", retryable: false, id: held });
-    const again = await store.recordDeliverable({ thought: held, spec, checkpoint: input.checkpoint, actor });
-    if (again.outcome === "unchanged" && again.deliverable) return ok({ outcome: "unchanged", deliverable: again.deliverable, event: again.event, capture: null });
-    if (again.outcome === "refused") return (await refusedBy(ctx, again, principal, held, spec)) as Outcome<never, CaptureDeliverableCode>;
-    throw new Error(`record_deliverable answered ${again.outcome} for a thought that is a deliverable already`);
-  }
+  if (held !== undefined) return onExisting(ctx, principal, held, spec, named, input.checkpoint, null);
   const c = await capture(ctx, principal, { content: text, derived_from: [spec] });
   if (!c.ok) {
     // upsert_thought refuses a derived_from naming no thought before it writes: the spec, deleted since it was read.
     if (c.refusal.code === "DERIVED_FROM_MISSING") return refuse({ code: "SPEC_NOT_FOUND", retryable: false, spec: named });
     return c as Outcome<never, CaptureDeliverableCode>;
   }
-  const thought = c.value.id;
-  // A record that does not land after a capture that wrote a new thought deletes that thought, so no capture is left
-  // as a thought no deliverable names: the spec deleted between them, another key recording the thought first, a
-  // server role without the deliverables group. A text that was there already (another call's, landed meanwhile) is
-  // left as it was, and so is a thought another call has since recorded as its deliverable: two identical calls racing
-  // past the check above both capture, one writing the thought and the other landing on it, and the second may record
-  // it first.
-  const undo = async () => {
-    if (c.value.existed !== false) return;
-    const recorded = await store.deliverableHistory(thought).then((h) => h.events.length > 0, () => true);
-    if (!recorded) await store.deleteThought({ id: thought, actor }).catch(() => undefined);
-  };
-  let a: DeliverableAnswer;
-  try {
-    a = await store.recordDeliverable({ thought, spec, checkpoint: input.checkpoint, actor });
-  } catch (e) {
-    await undo();
-    throw e;
-  }
-  if ((a.outcome === "captured" || a.outcome === "unchanged") && a.deliverable) return ok({ outcome: a.outcome, deliverable: a.deliverable, event: a.event, capture: summaryOf(c.value) });
-  await undo();
-  if (a.outcome === "refused") return (await refusedBy(ctx, a, principal, thought, named)) as Outcome<never, CaptureDeliverableCode>;
+  const summary = summaryOf(c.value);
+  // The capture landed on a thought that was there by then — another call's, written while this one's model calls
+  // ran — so it is answered as the one found before would have been: never recorded onto blindly (review pass 2).
+  if (c.value.existed !== false) return onExisting(ctx, principal, c.value.id, spec, named, input.checkpoint, summary);
+  const a = await store.recordDeliverable({ thought: c.value.id, spec, checkpoint: input.checkpoint, actor: actorOf(ctx, principal) });
+  if ((a.outcome === "captured" || a.outcome === "unchanged") && a.deliverable) return ok({ outcome: a.outcome, deliverable: a.deliverable, event: a.event, capture: summary });
+  // A record refused after this call's own fresh capture leaves the thought, named: the same call again records it.
+  if (a.outcome === "refused") return (await refusedBy(ctx, a, principal, c.value.id, named, c.value.id)) as Outcome<never, CaptureDeliverableCode>;
   throw new Error("record_deliverable answered an outcome this server does not read");
 }
 

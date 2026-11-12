@@ -1448,18 +1448,25 @@ it, each over REST and MCP alike:
   `contextFailures`, and `noVector`: `refused` or `provider_down`), or is null when
   nothing was captured.
 - **Everything is asked before the capture.** The capture and the record are two
-  statements, not one transaction. So the key's scope, the spec (an id, or a thought's
-  `client_key`, resolved once for both) and the text are asked first:
-  - text that is a deliverable already is answered from the record, with nothing
-    captured: `unchanged` for its own key, spec and checkpoint, else
-    `ALREADY_A_DELIVERABLE`;
-  - text that is any other thought is refused `OUTPUT_EXISTS`, so a deliverable is
-    always a thought this call wrote (the maintainer, 2026-11-12).
+  statements, not one transaction (one transaction is SMD-4248). So the key's scope and
+  the spec (an id, or a thought's `client_key`, resolved once for both) are asked first.
+  Text that is a thought already, found before the capture or landed on by it, is
+  answered by what that thought is:
+  - a deliverable: 134's answer, writing nothing (`unchanged` for its own key, spec and
+    checkpoint, else `ALREADY_A_DELIVERABLE`);
+  - a thought this key captured from this spec that no deliverable names (a record that
+    did not land after an earlier call): recorded now;
+  - any other thought: `OUTPUT_EXISTS` (the maintainer, 2026-11-12).
 
-  A record that still fails after the capture wrote a new thought deletes that thought,
-  unless another call has recorded it meanwhile. A text is matched by the thought's
-  fingerprint, which ignores letter case and runs of white space: two checkpoints that
-  differ only there name one deliverable.
+  Nothing is deleted. A record refused after a fresh capture leaves the thought; a
+  `SPEC_NOT_FOUND` names it (`left`), and a failed record leaves it for the same call to
+  record again. A text is matched by the thought's fingerprint, which ignores letter case
+  and runs of white space: two checkpoints that differ only there name one deliverable.
+- **What remains for SMD-4248:**
+  - another key capturing the same text while this call's model calls run has its row
+    merged into by this call's capture, before this call is refused;
+  - a thought left as above keeps its capture's side effects (proposed open items, an
+    inferred priority).
 - **A verification vouches for the output at its checkpoint,** not for the thought's
   text, which stays editable. `verified`: it meets the spec. `corrected`: the check found
   it wanting; corrected → verified is a later check overturning that finding.
@@ -1470,10 +1477,10 @@ Their refusals:
 
 | Code | Status | When |
 | --- | --- | --- |
-| `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured. |
+| `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured, unless the spec was deleted between the capture and the record: `left` then names the thought, which stays. |
 | `SPEC_IS_SELF` | 409 | The output's text is the spec's own, so it landed on the spec. |
 | `ALREADY_A_DELIVERABLE` | 409 | The thought is a deliverable recorded by another key, or at another spec or checkpoint; it names the one that stands (`recordedBy`, `spec`, `checkpoint`). |
-| `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable. Nothing is captured. |
+| `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable, and not this key's own leftover from this spec. Nothing is recorded. |
 | `NOT_A_DELIVERABLE` | 404 | No deliverable was recorded on the thought; `deleted` when its thought was deleted, its events kept. |
 | `ILLEGAL_TRANSITION` | 409 | The status does not move `from` → `to`. |
 | `VERIFY_NOT_YOURS` | 403 | A move to verified by the key that recorded the deliverable (`as: recorder`), or by a key the brain records as writing its thought (`as: author`). Either may mark it corrected. |

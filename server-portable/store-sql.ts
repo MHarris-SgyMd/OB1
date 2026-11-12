@@ -1341,6 +1341,13 @@ export class SqlStore implements ThoughtStore {
     return normaliseDeliverableRecord(rows[0]?.r, "deliverable_history");
   }
 
+  async derivedFromOf(id: string): Promise<string[] | null> {
+    if (!UUID_RE.test(id)) return null;
+    const rows = await this.sql`SELECT derived_from FROM thoughts WHERE id = ${id}::uuid` as { derived_from: unknown }[];
+    const d = rows[0]?.derived_from;
+    return Array.isArray(d) ? d.filter((x): x is string => typeof x === "string").map((x) => x.toLowerCase()) : null;
+  }
+
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {
     // SMD-3338: one transaction, under 029's lock — the CLI's own decision
     // (proposal-review.ts). The audit rows name the actor as its envelope does.
