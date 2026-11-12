@@ -183,8 +183,8 @@ function lineAround(breaks: readonly number[], i: number, j: number, end: number
  * The model read a tag, not what the writer says of their own work: v1 did so on 10 of the 38 level reads it made on
  * session summaries. readAnswer marks such a level, and only an agent-kind writer's is dropped (forWriter, the
  * maintainer's choice after review pass 2): syntax cannot tell another ticket's label from a person's own "Fix SMD-12
- * (urgent)" or "Done, urgent: call mom". A ticket's own export ("SMD-944 · Status: Todo · Priority: High") keeps its
- * "Priority:" field, whatever precedes it.
+ * (urgent)" or "Done, urgent: call mom". A ticket's own export ("SMD-944 · Status: Todo · Priority: High": a text that
+ * opens with a key and names no other) keeps its "Priority:" field.
  */
 export function citedIn(phrase: string, text: string): boolean {
   const { kept, lower, breaks } = linesOf(text);
@@ -193,6 +193,10 @@ export function citedIn(phrase: string, text: string): boolean {
   const edge = (c: string | undefined) => c === undefined || !/[\p{L}\p{N}]/u.test(c);
   const at: number[] = [];
   for (let i = lower.indexOf(p); i !== -1; i = lower.indexOf(p, i + 1)) if (edge(lower[i - 1]) && edge(lower[i + p.length])) at.push(i);
+  // One ticket's own record: the text opens with a key and names no other (review pass 4: an agent quoting board lines
+  // "SMD-12 · Priority: High" cites, where a ticket's own export keeps its field).
+  const keys = new Set([...kept.matchAll(TICKET_KEY)].filter((m) => !NOT_TICKETS.has(m[1])).map((m) => m[0]));
+  const ownRecord = keys.size === 1 && /^\W{0,3}[A-Z][A-Z0-9]{1,9}-\d{1,6}\b/.test(kept);
   return at.length > 0 && at.every((i) => {
     const [lineStart, nextBreak] = lineAround(breaks, i, i + p.length, kept.length);
     const said = kept.slice(i, i + p.length);
@@ -202,12 +206,13 @@ export function citedIn(phrase: string, text: string): boolean {
     let cut = 0;
     for (const m of lineBefore.matchAll(/[.!?;]\s/g)) cut = m.index! + m[0].length;
     const clauseBefore = lineBefore.slice(cut);
-    // A ticket's own "Priority:" field, as an export lists it at a line's start or after "·" or "|", is the text's own;
-    // "Filed SMD-4300 (Priority: High)" cites another's (review pass 3).
-    if (/^priority\b/i.test(said) ? /(^|[·|])\s*$/.test(lineBefore) : /(^|[·|])\s*priority\s*:?\s*$/i.test(lineBefore)) return false;
-    // A ticket's key, then "is", "to" or "at" (or nothing) and a capitalised level: "SMD-12 is High", "Moved SMD-12 to
-    // High", "SMD-3670's priority is Medium", "SMD-12 High" (review pass 3); "SMD-12 is urgent" stays the writer's own.
-    const keyThen = /\b([A-Z][A-Z0-9]{1,9})-\d{1,6}(?:'s)?(?:\s+priority)?(?:\s+(?:is|was|stays|to|at|as)(?:\s+now)?)?\s+$/.exec(clauseBefore);
+    // A ticket's own "Priority:" field is the text's own when the text is that ticket's record ("SMD-944 · Status: Todo ·
+    // Priority: High", "SMD-944 — Fix login (Priority: High)"); in any other text it cites (review passes 3 and 4).
+    if (ownRecord && (/^priority\b/i.test(said) || /\bpriority\s*:?\s*$/i.test(clauseBefore))) return false;
+    // A ticket's key, then up to four words of a board move or none, and a capitalised level: "SMD-12 is High", "Moved
+    // SMD-12 to High", "SMD-4300 was set to High", "SMD-12 → High", "Filed SMD-4300 with priority High", "SMD-12 High"
+    // (review passes 3 and 4); "SMD-12 is urgent" stays the writer's own.
+    const keyThen = /\b([A-Z][A-Z0-9]{1,9})-\d{1,6}(?:'s)?(?:\s+(?:priority|is|was|been|stays|now|to|at|as|has|with|set|bumped|raised|lowered|moved|marked|changed|updated|→|->)){0,4}\s+$/.exec(clauseBefore);
     if (keyThen && !NOT_TICKETS.has(keyThen[1]) && /^(None|Low|Medium|High|Urgent|Critical)\b/.test(said)) return true;
     const keyEnd = lastKeyEnd(clauseBefore);
     if (keyEnd >= 0 && clauseBefore.length - keyEnd <= 60 && /[(\[,:·—–-]\s*$/.test(clauseBefore)) return true;
@@ -248,6 +253,10 @@ const FLOOR_AFTER = /^[\s,)]*(at the earliest|at earliest|earliest(?!\s+possible
 const FLOOR_SAID = /\b(at the earliest|at earliest|at the soonest|(no sooner|no earlier|not earlier|not sooner) than)\b|\bor later\b(?!\s+(?:if|when|should|depending))/;
 const FLOOR_OPENS = /^(starting|starts|beginning|from|only after|after)\b/;
 const DEADLINE_WORD = /\b(by|before|until|till|due|no later than)\b/;
+/** A phrase that opens with its own deadline word stays a deadline after "starts" or "from" ("the migration starts by Monday"; review pass 4). */
+const DEADLINE_OPENS = /^(by|before|until|till|no later than)\b/;
+/** "a week from", "the day after", "three days from": a count from the time, a deadline's anchor rather than a start (review pass 4). */
+const COUNTED_FROM = /\b(day|days|week|weeks|month|months|year|years|fortnight)\s+(from|after)\s+$/;
 
 /** Whether a floor lead in a stretch holds: no condition ahead of it; `atEnd` when it must end the stretch. */
 function floorLead(s: string, atEnd: boolean): boolean {
@@ -278,13 +287,15 @@ export function flooredIn(phrase: string, text: string): boolean {
   const t = folded(text), p = folded(phrase);
   const at = wholeWordAt(phrase, text);
   if (at.length === 0) return false;
-  if (floorLead(p, false) || FLOOR_SAID.test(p) || (FLOOR_OPENS.test(p) && !DEADLINE_WORD.test(p))) return true;
+  const saidFloor = floorLead(p, false) || FLOOR_SAID.test(p) || (FLOOR_OPENS.test(p) && !DEADLINE_WORD.test(p));
   return at.every((i) => {
     const before = t.slice(Math.max(0, i - 60), i), after = t.slice(i + p.length, i + p.length + 30);
+    // A floor the phrase states itself, unless a condition comes just ahead of it ("if it can't happen before 11-03, escalate").
+    if (saidFloor) return !CONDITION_BEFORE.test(before);
     const open = FLOOR_LEAD_OPEN.exec(before);
     return floorLead(before, true)
       || (open !== null && /^(before|until|till)\b/.test(p) && !CONDITION_BEFORE.test(before.slice(0, open.index)))
-      || FLOOR_THAN.test(before) || FLOOR_FROM.test(before) || FLOOR_AFTER.test(after);
+      || FLOOR_THAN.test(before) || (FLOOR_FROM.test(before) && !DEADLINE_OPENS.test(p) && !COUNTED_FROM.test(before)) || FLOOR_AFTER.test(after);
   });
 }
 

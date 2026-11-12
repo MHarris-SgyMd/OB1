@@ -106,6 +106,19 @@ export function outcomeOf(got: Inferred | null, threw: unknown, said: readonly s
   return { got };
 }
 
+/**
+ * One run line: the call as the capture would state it for the text's writer. The population is actor_kind agent alone
+ * (CAPTURES_SQL), so a marked half is dropped as the capture drops an agent's (forWriter).
+ */
+export function runLineOf(t: Text, got: Inferred | null, ms: number, model: string, source: string): RunLine {
+  const at = new Date(t.at);
+  return {
+    id: t.id, at: t.at, writer: t.writer, call: callOf(forWriter(got, "agent"), at),
+    level_phrase: got?.level?.phrase ?? null, due_phrase: got?.due?.phrase ?? null,
+    ms, prompt_version: INFER_PROMPT_VERSION, model, infer_hash: source,
+  };
+}
+
 /** A run's lines checked: no id twice, one prompt version (this one), one model where recorded, and the whole population when given. */
 export function checkRunLines(lines: readonly RunLine[], population: readonly { id: string }[] | null): string[] {
   const problems: string[] = [];
@@ -271,12 +284,7 @@ async function run(out: string): Promise<void> {
       console.error(`${t.id}: left out (${outcome.fault.slice(0, 160)})`);
       continue;
     }
-    const line: RunLine = {
-      // The population is actor_kind agent alone (CAPTURES_SQL), so a cited level is dropped as the capture drops an agent's.
-      id: t.id, at: t.at, writer: t.writer, call: callOf(forWriter(outcome.got, "agent"), at),
-      level_phrase: outcome.got?.level?.phrase ?? null, due_phrase: outcome.got?.due?.phrase ?? null,
-      ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION, model, infer_hash: source,
-    };
+    const line = runLineOf(t, outcome.got, Math.round(performance.now() - t0), model, source);
     appendFileSync(path, JSON.stringify(line) + "\n", { mode: 0o600 });
     if ((j + 1) % 50 === 0) console.log(`${j + 1} of ${todo.length}`);
   }
@@ -382,7 +390,7 @@ export function reportLines(f: Fixture, current: string = registrationHash()): s
  * gold's levels and days the run reads, and each call where the gold reads nothing, by writer, id and phrase (the run
  * file's own, so this prints private text: run it in a terminal, never in CI).
  */
-export function devLines(f: Fixture, lines: readonly RunLine[]): string[] {
+export function devLines(f: Fixture, lines: readonly RunLine[], current: string = inferHash()): string[] {
   const { items, problems } = fromFixture(f);
   if (problems.length) return ["the fixture is not sound:", ...problems.map((p) => `  ${p}`)];
   const runOf = new Map(lines.map((l) => [l.id, l]));
@@ -403,6 +411,7 @@ export function devLines(f: Fixture, lines: readonly RunLine[]): string[] {
   });
   return [
     `development check, prompt v${lines[0]?.prompt_version} over the ${items.length} frozen items (no verdict: they were drawn from v${f.prompt_version}'s calls)`,
+    `the run's inference source ${lines[0]?.infer_hash ?? "unrecorded"}${lines[0]?.infer_hash === current ? ", the current one" : `, not the current ${current}: re-run it to score this tree`}`,
     `level reads the gold agrees with  ${pct(s.level)}`,
     `due reads the gold agrees with    ${pct(s.due)}`,
     `High where the gold reads none    ${pct(s.highOnNone)}`,
@@ -673,16 +682,29 @@ function selfCheck(): void {
   // The development check.
   const devRun = (call: (i: Item) => Call, phrase = "QQ") => Object.entries(fx.items).map(([iid]) => ({ ...rl(0), id: iid, writer: "w",
     call: call(fromFixture(fx).items.find((x) => x.id === iid)!), level_phrase: phrase, due_phrase: phrase, prompt_version: 2 }));
-  const asGold = devLines(fx, devRun((i) => ({ level: i.gold.levels[0] ?? null, due: i.gold.dues[0] ?? null, byRule: null })));
+  const asGold = devLines(fx, devRun((i) => ({ level: i.gold.levels[0] ?? null, due: i.gold.dues[0] ?? null, byRule: null })), "abc");
   assert(asGold[0].startsWith("development check, prompt v2 over the 60 frozen items (no verdict") && asGold.includes("items where the run reads a half the gold doesn't: 0 (a level on 0, a due day on 0)"), "a run reading exactly the gold strays nowhere, and says it is no verdict");
   assert(asGold.some((l) => /^level reads the gold agrees with  1\.000 \(23 of 23\)/.test(l)) && asGold.some((l) => /^the gold's due days read          13 of 13$/.test(l)), "it scores each half over the run's calls and counts the gold's reads");
-  const allHigh = devLines(fx, devRun(() => ({ level: 3, due: null, byRule: null })));
+  const allHigh = devLines(fx, devRun(() => ({ level: 3, due: null, byRule: null })), "abc");
   assert(allHigh.some((l) => /^High where the gold reads none    0\.617 \(37 of 60\)/.test(l)) && allHigh.includes("items where the run reads a half the gold doesn't: 37 (a level on 37, a due day on 0)") && allHigh.includes("the gold's levels read            3 of 23"), "a run reading High everywhere strays on every item the gold reads no level in");
   assert(allHigh.some((l) => /^  level 3 on (session_hook|claude_code) [0-9a-f]{8}: "QQ"$/.test(l)), "each stray names its writer, id and phrase");
-  const bothHalves = devLines(fx, devRun(() => ({ level: 3, due: 5, byRule: null })));
+  const bothHalves = devLines(fx, devRun(() => ({ level: 3, due: 5, byRule: null })), "abc");
   assert(bothHalves.includes("items where the run reads a half the gold doesn't: 57 (a level on 37, a due day on 47)"),
     "an item the run reads both halves of, where the gold reads neither, counts once, each half apart");
   assert(devLines(fx, devRun(() => C(null)).slice(1))[0].startsWith("the run lacks 1 of the fixture's 60"), "a run short of the fixture is refused");
+  // The run's source named, and a run from another draft of the inference said to be one (review pass 4).
+  const sourced = (hash: string | undefined) => devRun(() => C(null)).map((l) => ({ ...l, infer_hash: hash }));
+  assert(devLines(fx, sourced("abc"), "abc")[1] === "the run's inference source abc, the current one"
+      && devLines(fx, sourced("old"), "abc")[1] === "the run's inference source old, not the current abc: re-run it to score this tree"
+      && devLines(fx, sourced(undefined), "abc")[1] === "the run's inference source unrecorded, not the current abc: re-run it to score this tree",
+    "the development check names the run's inference source, and says when it is not the tree's");
+  // A run line states a call as the capture states an agent's: a marked half is dropped (forWriter).
+  const textAt = { id: id(1), at: tue.toISOString(), writer: "session-hook", text: "x" };
+  const citedLine = runLineOf(textAt, { level: { value: 2, word: "medium", phrase: "Medium", cited: true }, due: { day: "2026-11-06", phrase: "by Friday", by: "rule", floored: true } }, 5, "m", "h");
+  const plainLine = runLineOf(textAt, { level: { value: 3, word: "high", phrase: "High" }, due: { day: "2026-11-06", phrase: "by Friday", by: "rule" } }, 5, "m", "h");
+  assert(JSON.stringify(citedLine.call) === JSON.stringify({ level: null, due: null, byRule: null }) && citedLine.level_phrase === "Medium"
+      && JSON.stringify(plainLine.call) === JSON.stringify({ level: 3, due: 3, byRule: true }) && plainLine.infer_hash === "h" && plainLine.model === "m" && plainLine.prompt_version === INFER_PROMPT_VERSION,
+    "a run line drops a cited level and a floored day as the capture does for an agent, and keeps an unmarked call");
   assert(!reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("verdict"), "a fixture labelled under another registration gets no verdict");
   assert(!reportLines({ ...fx, registration: registrationDigits("eeeeeeeeeeeeeeee") }, "eeeeeeeeeeeeeeee").at(-1)!.startsWith("verdict"), "a fixture and a rules file moved together, away from the pinned registration, get no verdict");
 
