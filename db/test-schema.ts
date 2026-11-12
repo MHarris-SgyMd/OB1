@@ -20399,7 +20399,7 @@ console.log("\n[124] Migration 137: a priority write names every statement it cl
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
   type Answer = { outcome: string; code: string | null; assertion: Assertion | null; replaced?: Assertion | null; winner: Assertion | null; item?: { kind: string; key: string }; closed?: Assertion[] };
   const file = files.find((f) => /^\d{3}_priority_replies_name_every_close\.sql$/.test(f)) ?? "no NNN_priority_replies_name_every_close.sql";
-  // [120] re-applies 133 and restores the shipped writers after; applied again here first, as a brain at 137 has it.
+  // Applied again first, as each section's own file is: the rows below hold 137's writers whatever ran before.
   await reapply(file.slice(0, 4));
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[124] op', 'operator'), ('[124] bot', 'agent')`);
   const OP = { name: "[124] op", scope: "write" }, BOT = { name: "[124] bot", scope: "write" }, READER = { name: "[124] op", scope: "read" };

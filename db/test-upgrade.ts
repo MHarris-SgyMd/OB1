@@ -6375,7 +6375,7 @@ console.log("\n[20ca] Migration 136: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cb] Migration 137: onto a populated brain at the file before it — refused by name without 133's ob1_priority_lock_key, nothing made; then applied: a key's two statements left open at 136 on a ticket and its row, a clear naming the ticket lists both, newest first, and names the ticket; a set closing two lists both; a re-apply a no-op (SMD-4238)");
+console.log("\n[20cb] Migration 137: onto a populated brain at the file before it — refused by name without 133's ob1_priority_lock_key, nothing made; then applied: a key's two statements left open at 136 on a ticket and its row, a clear naming the ticket lists both, newest first, and names the ticket; a set closing two lists both; a set racing a delete that closed the key's statement replaces nothing; a re-apply a no-op (SMD-4238)");
 {
   const the137 = MIGRATIONS.find((f) => /^\d{3}_priority_replies_name_every_close\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6424,6 +6424,31 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
          && both.outcome === "cleared" && both.item?.kind === "ticket" && both.item?.key === "SMD-9997" && both.closed?.map((c) => c.id).join() === `${r1},${t1}`
          && setBoth.outcome === "asserted" && setBoth.closed?.map((c) => c.id).join() === `${r2},${t2}` && setBoth.replaced?.id === r2 && await made(),
     `applied: a clear naming the ticket lists the key's statements on the row and the ticket, newest first, and names the ticket as 116 keys it; a set lists both it closed (at 136 the clear named the newest alone: ${JSON.stringify(Object.keys(at136))})`);
+
+  // A delete racing a set (review pass 1): another session deletes a thought, its trigger closing the key's statement
+  // there as deleted, uncommitted; the set reads that statement open, then waits on its row lock. Once the delete
+  // commits, the statement is no longer open: the set replaces nothing and lists nothing, rather than naming a
+  // statement it never closed as `replaced`.
+  const raced = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 137: a note deleted under a set') RETURNING id`)[0].id);
+  const onRaced = (await put("thought", raced, 2)).assertion!.id;
+  const other = new SQL({ url: URL_, max: 1 });
+  let racing: Promise<Answer> = Promise.resolve({ outcome: "never ran", assertion: null });
+  await other.begin(async (tx) => {
+    await tx`SELECT delete_thought(${raced}::uuid, (${OP}::text)::jsonb)`;
+    racing = put("thought", raced, 4);
+    // Probed only once the set waits on the statement's row lock, never on a guess at its timing.
+    let waiting = false;
+    for (let i = 0; i < 200 && !waiting; i++) {
+      waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple')`)[0].n) > 0;
+      if (!waiting) await Bun.sleep(50);
+    }
+    if (!waiting) throw new Error("[20cb] the set never waited on the deleted statement's row lock within 10 s");
+  });
+  const raceAnswer = await racing;
+  await other.close();
+  const racedReason = ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${onRaced}::uuid`)[0] as { close_reason: string | null }).close_reason;
+  assert(raceAnswer.outcome === "asserted" && raceAnswer.replaced === null && JSON.stringify(raceAnswer.closed) === "[]" && racedReason === "deleted",
+    `a set racing a delete that closed the key's statement replaces nothing and lists nothing: the statement is the delete's, closed as deleted (${raceAnswer.outcome}, replaced ${JSON.stringify(raceAnswer.replaced ?? null)?.slice(0, 40)}, ${racedReason})`);
 
   // A re-apply is a no-op: the writers answer as before.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });

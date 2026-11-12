@@ -26,7 +26,10 @@
 --     ob1_priority_json renders each, newest first.
 --   * `closed` holds what the call's own UPDATE closed. A statement that a
 --     delete closed between the call's read and its write (136's trigger
---     takes no priority lock) is not among them.
+--     takes no priority lock) is not among them, and assert_priority's
+--     `replaced` is the newest statement still open when locked (review
+--     pass 1: 133 locked the newest read, which such a delete may have
+--     closed, so `replaced` could name one the call never closed).
 --
 -- SAFETY
 --   Two functions replaced with their signatures and return types; one new
@@ -35,8 +38,11 @@
 --   test-upgrade [20cb].
 --
 -- Prerequisites
---   116 (priority_assertions, ob1_priority_json), 133 (the writers across
---   a ticket's pool: ob1_priority_open, ob1_priority_lock_key). Applied by
+--   What the carried bodies call: 115 (ob1_work_claim_text), 116
+--   (priority_assertions, ob1_priority_json and the writers' helpers), 117
+--   (ob1_item_lock, ob1_envelope_plugin, ob1_priority_owns_item), 122
+--   (ob1_priority_open) and 133 (ob1_priority_lock, ob1_priority_lock_key,
+--   ob1_priority_winner, ob1_priority_project). Applied by
 --   `bun db/migrate.ts`. Re-applied: the functions are replaced as they
 --   were.
 -- =============================================================================
@@ -46,9 +52,22 @@
 DO $qc$
 DECLARE
   v_need text[][] := ARRAY[
+    ARRAY['ob1_work_claim_text(text, integer, text)', '115 (ob1_work_claim_text)'],
+    ARRAY['ob1_priority_item(text, text)', '116 (ob1_priority_item)'],
+    ARRAY['ob1_priority_item_exists(text, text)', '116 (ob1_priority_item_exists)'],
+    ARRAY['ob1_priority_isolation(text)', '116 (ob1_priority_isolation)'],
+    ARRAY['ob1_priority_tier(boolean, boolean, text)', '116 (ob1_priority_tier)'],
     ARRAY['ob1_priority_json(priority_assertions)', '116 (ob1_priority_json)'],
+    ARRAY['ob1_priority_is_maker(priority_assertions, text, uuid)', '116 (ob1_priority_is_maker)'],
+    ARRAY['ob1_priority_actor(jsonb, text)', '116 (ob1_priority_actor)'],
+    ARRAY['ob1_item_lock(uuid)', '117 (ob1_item_lock)'],
+    ARRAY['ob1_envelope_plugin(text)', '117 (ob1_envelope_plugin)'],
+    ARRAY['ob1_priority_owns_item(text, text, uuid, text)', '117 (ob1_priority_owns_item)'],
+    ARRAY['ob1_priority_open(text, text)', '122 (ob1_priority_open)'],
     ARRAY['ob1_priority_lock_key(text, text)', '133 (ob1_priority_lock_key)'],
-    ARRAY['ob1_priority_open(text, text)', '122 (ob1_priority_open)']];
+    ARRAY['ob1_priority_lock(text, text)', '133 (ob1_priority_lock)'],
+    ARRAY['ob1_priority_winner(text, text)', '133 (ob1_priority_winner)'],
+    ARRAY['ob1_priority_project(text, text)', '133 (ob1_priority_project)']];
   i int;
 BEGIN
   FOR i IN 1 .. array_length(v_need, 1) LOOP
@@ -209,8 +228,13 @@ BEGIN
   -- The newest is v_old.
   v_own := ARRAY(SELECT o.id FROM ob1_priority_open(v_item.kind, v_item.key) o
                   WHERE ob1_priority_is_maker(o, v_who.name, v_who.agent_id));
+  -- Still open when locked (review pass 1): 136's delete trigger takes no
+  -- priority lock, so it may have closed one of v_own since it was read; a
+  -- row lock waited on returns the closed row, which the closing UPDATE
+  -- below then skips, and `replaced` would name a statement this call never
+  -- closed (or the `unchanged` test compare against one no longer open).
   SELECT * INTO v_old FROM priority_assertions a
-   WHERE a.id = ANY(v_own)
+   WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
    ORDER BY a.seq DESC LIMIT 1
    FOR UPDATE;
 
@@ -228,9 +252,9 @@ BEGIN
       'item', v_named, 'closed', '[]'::jsonb);
   END IF;
 
-  -- Every one this call closes, kept for the answer. v_old is held FOR UPDATE,
-  -- so it is among them; another of v_own that a delete closed meanwhile
-  -- (136's trigger takes no priority lock) is not.
+  -- Every one this call closes, kept for the answer. v_old is held FOR UPDATE
+  -- and was open when locked, so it is among them; another of v_own that a
+  -- delete closed meanwhile is not.
   IF v_old.id IS NOT NULL THEN
     WITH c AS (
       UPDATE priority_assertions a SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
