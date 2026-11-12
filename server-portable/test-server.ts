@@ -7263,6 +7263,14 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && thrown(() => normalisePriorityAssertion({ ...json, due_ref: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read"
       && thrown(() => normalisePriorityAssertion({ ...json, tier_name: "boss" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
     "116's assertion read into the value's names; an outcome, code, tier or item kind 116 does not give is a fault");
+  // 136 (SMD-3711): a statement closed when its item was deleted is read, and said so in a history; a close reason no
+  // migration writes is still a fault.
+  const deletedRead = normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "deleted" }, "priority_history");
+  const deletedHistory = say.renderPriorityHistory({ ok: true, value: { item: { kind: "thought", key: T }, exists: false, level: null, winner: null,
+    history: [stmt({ closedAt: "2026-11-12T10:00:00.000Z", closeReason: "deleted" })] } } as never);
+  assert(deletedRead.closeReason === "deleted" && /\n- urgent \(4\)[^\n]*; closed at 2026-11-12T10:00:00\.000Z, when its item was deleted$/.test(text(deletedHistory))
+      && thrown(() => normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "forgotten" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
+    `a statement closed when its item was deleted is read and said so in the history; a reason no migration writes is a fault (${text(deletedHistory).split("\n").slice(-1)[0]})`);
   const problems = ["not an item kind: 'x' (thought, ticket, entity or item)", "not a entity id: 'x' (a uuid)", "not a ticket key: 'x'", "a priority level is 0 (none) to 5 (critical); 9 is not", "not_before is after due_at: the item could not start before it is due",
     "a due reference takes both a kind and a key, or neither", "an item's due reference may not name itself", "a reason is at most 1000 characters; this one has 1001", "assert_priority: a maker's key name is at most 200 characters; this one has 201", "something else"].map(priorityProblemOf);
   assert(problems.join(",") === "kind,key,key,level,not_before,due_ref,due_ref,reason,key_name,other", `a 22023's words name their argument (${problems.join(",")})`);

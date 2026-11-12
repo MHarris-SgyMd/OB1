@@ -1439,7 +1439,7 @@ export type PriorityAssertion = {
   tierName: "operator" | "source" | "agent" | "inferred";
   assertedAt: string;
   closedAt: string | null;
-  closeReason: "replaced" | "cleared" | null;
+  closeReason: "replaced" | "cleared" | "deleted" | null;
   closedBy: string | null;
 };
 /** The refusal codes 116's writers answer with. */
@@ -1578,7 +1578,7 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
   // with a null in its place (review pass 3). The tier's name is 116's own (tier_name), held to the four.
   if (!o || !m || typeof o.id !== "string" || !item || typeof o.level !== "number" || typeof m.name !== "string" || ![1, 2, 3, 4].includes(tier)
       || !TIER_NAMES.has(o.tier_name as string) || o.asserted_at === null || o.asserted_at === undefined || (refGiven && !dueRef)
-      || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared")) {
+      || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared" && o.close_reason !== "deleted")) {
     throw new Error(`${what} answered an assertion this server cannot read`);
   }
   return {
