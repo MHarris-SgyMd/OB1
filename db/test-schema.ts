@@ -4780,7 +4780,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   // nothing does now.
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  assert(schemaFiles.length >= 12 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064, 12 after SMD-2690 made agent-memory a plugin; the set otherwise grows), the four with prerequisites among them`);
+  assert(schemaFiles.length >= 11 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064, 12 after SMD-2690 made agent-memory a plugin, 11 after it made smart-ingest one; the set otherwise grows), the four with prerequisites among them`);
 
   // The rule check-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
@@ -4851,7 +4851,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedSeqs = new Set(grantedSequences(["community"]));
   const serialSeqs = seqs.filter((s) => !s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
   const identitySeqs = seqs.filter((s) => s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
-  assert(serialSeqs.length === 6 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
+  assert(serialSeqs.length === 4 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
     `the community group names exactly the bigserial sequences the files created (${serialSeqs.length}: ${serialSeqs.sort().join(", ")})`);
   assert(identitySeqs.length === 1 && identitySeqs.join() === "thought_audit_seq_seq" && identitySeqs.every((s) => !listedSeqs.has(s)),
     `…and not the one identity column's — 050's thought_audit.seq, the table schemas/thought-audit shares (wiki-pages' was the other until SMD-1812 moved it into core, where [59] measures 064's) (${identitySeqs.join(", ")})`);
@@ -4898,8 +4898,8 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
-  // measurement db/README.md and ROLE_GRANTS.community cite for why six
-  // sequences are listed and the seventh is not.
+  // measurement db/README.md and ROLE_GRANTS.community cite for why four
+  // sequences are listed and the fifth is not.
   const present = new Set(presence.map((r) => r.name));
   const statements = grantStatements("ob1_community", { groups: ["community"], present });
   const tableGrants = statements.filter((s) => !/ ON (SEQUENCE|FUNCTION) /.test(s));
@@ -4920,11 +4920,11 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
          notHeld.length === listedSeqs.size * 2 + listedFns.length && notHeld.every((r) => r.kind === "sequence" || r.kind === "function") &&
          partial.filter((r) => r.kind === "table" || r.kind === "view").every((r) => r.held),
     `grantVerifySql reports one row per privilege (${partial.length}): with tables and view granted it holds every table, view and schema privilege and none of the ${notHeld.length} sequence and function ones`);
-  const serialOnly = await asRole(`INSERT INTO ingestion_jobs DEFAULT VALUES`);
-  assert(serialOnly.code === "42501" && /sequence ingestion_jobs_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
+  const serialOnly = await asRole(`INSERT INTO consolidation_log DEFAULT VALUES`);
+  assert(serialOnly.code === "42501" && /sequence consolidation_log_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
   const stillDenied = [...(await insertCodes())].filter(([, r]) => r.code === "42501").map(([t]) => t).sort();
-  assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "ingestion_items", "ingestion_jobs", "thought_edges"]),
-    `exactly the six bigserial tables are still refused (${stillDenied.join(", ")})`);
+  assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "thought_edges"]),
+    `exactly the four bigserial tables are still refused (${stillDenied.join(", ")})`);
   for (const s of restGrants) await cdb.exec(s);
   const full = await verify();
   assert(full.every((r) => r.held), `…and with the whole group granted every privilege is held (${full.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none missing"})`);
@@ -7399,8 +7399,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   // auth.uid(), GRANTs TO service_role or authenticated, one REFERENCES
   // auth.users and three `EXECUTE 'GRANT …'` strings. A third PGlite:
   // ops-views.sql reads columns enhanced-thoughts adds to `thoughts`, and its
-  // three guarded views exist only over smart-ingest's and entity-extraction's
-  // tables, so the community files go first and all eight views are measured.
+  // two guarded views exist only over entity-extraction's tables, so the
+  // community files go first and all seven views are measured.
   const contribFiles = CONTRIB_SCHEMA_FILES;
   const extensionSchemas = readdirSync(join(CONTRIB_DIR, "extensions"), { withFileTypes: true })
     .filter((d) => d.isDirectory() && existsSync(join(CONTRIB_DIR, "extensions", d.name, "schema.sql"))).map((d) => `extensions/${d.name}/schema.sql`).sort();
@@ -7459,7 +7459,7 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   const objects = grantedObjects([...GROUPS]);
   const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
   const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
-  assert(presence.length === objects.length && objects.length === 28 && absent.length === 0, `every object the recipes group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  assert(presence.length === objects.length && objects.length === 27 && absent.length === 0, `every object the recipes group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
   const listedTables = new Set(grantedTables([...GROUPS]));
   const listedViews = new Set(grantedViews([...GROUPS]));
   const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
@@ -7469,8 +7469,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   assert(newTables.every((t) => !grantedTables(["community"]).includes(t)) && !(ROLE_GRANT_GROUPS as readonly string[]).includes("extensions") && Object.hasOwn(RETIRED_GRANT_GROUPS, "extensions"),
     "…none of them a community table under another name, and the extensions group out of ROLE_GRANT_GROUPS and in RETIRED_GRANT_GROUPS since SMD-2311 (test-preflight asserts --groups refusing it)");
   const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
-  assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
-    `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
+  assert(newViews.length === 14 && listedViews.size === 14 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 7 && lintViews.length === 7,
+    `…and exactly the fourteen views — seven ops_* (the ingestion summary retired with schemas/smart-ingest, SMD-2690) and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
   const newSeqs = [...(await seqsNow())].filter((s) => !baseSeqs.has(s));
   const newLocked = [...(await lockedFnsNow())].filter((f) => !baseLocked.has(f));
   assert(newSeqs.length === 0 && grantedSequences([...GROUPS]).length === 0, `no sequence was created (every id is a uuid or text), so the groups list none (${newSeqs.join(", ") || "none"})`);
@@ -7500,7 +7500,7 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   assert(before.length === 0, `ungranted, the role's INSERT into every listed table and SELECT from every listed view is refused with 42501 (${listedTables.size + listedViews.size} objects; exceptions: ${before.join(", ") || "none"})`);
   const present = new Set(presence.map((r) => r.name));
   const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
-  assert(statements.length === 28 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
+  assert(statements.length === 27 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
          statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
     `--grant's statements for the recipes group: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
   for (const s of statements) await xdb.exec(s);

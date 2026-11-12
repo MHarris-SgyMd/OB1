@@ -300,6 +300,7 @@ free_rows() {
   nodb .                 scripts/agent-runner/run-check.ts --self-check
   nodb .                 scripts/agent-runner/claims-check.ts --self-check
   nodb .                 scripts/agent-runner/board-check.ts --self-check
+  nodb .                 scripts/agent-runner/setup.ts --self-check
   nodb .                 .github/ci/test-counts-page.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts
@@ -323,6 +324,7 @@ free_rows() {
   nodb evals              eval-transitive-freshness.ts --self-check
   nodb evals              eval-stated-status.ts --self-check
   nodb evals              eval-priority.ts --self-check
+  nodb evals              eval-inferred-priority.ts --self-check
   nodb evals              board-replay.ts --self-check
   nodb evals              eval-plan-context.ts --self-check
   nodb evals              eval-little.ts --self-check

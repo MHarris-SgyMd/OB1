@@ -775,6 +775,13 @@ export const SUSPECT_WINDOW_MS = 15 * 60_000;
 export const SUSPECT_WINDOW = { ms: SUSPECT_WINDOW_MS };
 
 /**
+ * The outages a suspect retried alone must be in hand at, each probe after it unanswered, before it is its own (SMD-2641,
+ * the maintainer's N of 2026-11-10): a provider that crashes on a timer must land on the same lone suspect three times
+ * to fail it, as a poison thought does every time; one crash fails nothing.
+ */
+export const ALONE_OUTAGES = 3;
+
+/**
  * A --follow worker's provider outage (SMD-2599): why it began, and the
  * thoughts in hand when it did. While `reason` is set the pass stops after
  * the thought in hand and the follower probes; `end()` clears it when a probe
@@ -787,12 +794,28 @@ export const SUSPECT_WINDOW = { ms: SUSPECT_WINDOW_MS };
  * calls run longer gives: a thought another process finished meanwhile, and
  * an edit re-queued hours later, meets a later outage as any other thought
  * does (review pass 1).
+ *
+ * **Isolated** (`isolate`, SMD-2641; extract's and consolidate's followers, the maintainer's rules of 2026-11-10): with
+ * several workers that rule is a race — a poison thought's crash fails the innocent thought beside it as often as
+ * itself — and a provider that crashes on a timer fails whichever suspect it meets first after the window opens. So,
+ * once a probe answers, the follower retries the outage's suspects one at a time (`isolating`: one worker, a batch of
+ * one, the pool's order, each suspect handed back at its front), and a suspect that errs again alone is blamed only on
+ * a probe made at once (`blames`, then `blame`): answered, the provider is up while this thought fails — its own; no
+ * answer, an outage it was alone at, and at the ALONE_OUTAGES-th its own. A new outage while isolating keeps the suspects not yet retried; isolation ends as
+ * each settles (finished, or recorded failed), when the isolated pass claims a thought none of them (`claimed`: they go
+ * back at the pool's front, so those left are behind the backlog — edited, set back — or elsewhere: another process
+ * holds them, or they were deleted), or past the window.
+ * Alone means alone in this follower: under the sleep scheduler extraction, consolidation and the subject sweep share
+ * the chat endpoint, each with its own outage, so another pass's poison can crash the provider under a suspect alone.
  */
 export class ProviderOutage {
   reason: string | null = null;
   private endedAt = 0;
-  /** Thoughts in hand at the latest outage; a new outage clears them, so an earlier one's are no longer "right after". */
-  private suspects = new Set<string>();
+  /**
+   * Thoughts in hand at the latest outage, each with the outages it was alone at since (isolated only); a new outage
+   * clears them, so an earlier one's are no longer "right after" — but not one that begins while isolating.
+   */
+  private suspects = new Map<string, number>();
 
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
   constructor(
@@ -803,20 +826,90 @@ export class ProviderOutage {
      * (consolidation's beside the sweep, PR 6b-2's review pass 3).
      */
     private readonly windowMs: number | (() => number) = SUSPECT_WINDOW.ms,
+    /** Retry an outage's suspects one at a time, and blame one only on a probe (SMD-2641): the class's docblock. */
+    private readonly isolate = false,
   ) {}
 
-  /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
+  private window(): number {
+    return typeof this.windowMs === "number" ? this.windowMs : this.windowMs();
+  }
+
+  /**
+   * Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". Isolated,
+   * never "thought": a suspect alone is blamed through `blames` and `blame`, before any begin.
+   */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= (typeof this.windowMs === "number" ? this.windowMs : this.windowMs())) {
+    if (!this.isolate && thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.window()) {
       this.suspects.delete(thoughtId);
       return "thought";
     }
     if (this.reason === null) {
-      this.suspects.clear();
+      // A pass isolating the last outage's suspects keeps those not yet retried (SMD-2641).
+      if (!this.isolating()) this.suspects.clear();
       this.reason = reason;
     }
-    if (thoughtId !== undefined) this.suspects.add(thoughtId);
+    if (thoughtId !== undefined && !this.suspects.has(thoughtId)) this.suspects.set(thoughtId, 0);
     return "outage";
+  }
+
+  /**
+   * Whether the follower's next pass isolates (SMD-2641): the last outage left suspects, its probe answered within the
+   * window — one worker, a batch of one, until each settles. Past the window they are suspects no longer.
+   */
+  isolating(): boolean {
+    if (!this.isolate || this.reason !== null || this.suspects.size === 0) return false;
+    if (this.now() - this.endedAt > this.window()) {
+      this.suspects.clear();
+      return false;
+    }
+    return true;
+  }
+
+  /** Whether `thoughtId`'s error, in an isolated pass, is a suspect's again, alone: the caller probes at once and says what it found (`blame`), not `begin`. */
+  blames(thoughtId: string): boolean {
+    return this.isolating() && this.suspects.has(thoughtId);
+  }
+
+  /**
+   * A suspect alone that erred again, by the probe made at once (SMD-2641): `answered`, the provider up while this
+   * thought fails — "answered", its own; no answer, an outage it was alone at, begun over `reason` — "outage" — or, at
+   * the ALONE_OUTAGES-th, "alone": its own. A suspect still, with its count, until the caller's record of it settles it
+   * (`settled`): one the database keeps from its record is retried alone again (review pass 1). Past the window by the
+   * time the probe ends, an outage as any thought's, its count begun again (review pass 1: the lapsed suspects were
+   * isolated again for a fresh window).
+   */
+  blame(thoughtId: string, reason: string, answered: boolean): "outage" | "answered" | "alone" {
+    if (!this.blames(thoughtId)) {
+      this.begin(reason, thoughtId);
+      return "outage";
+    }
+    if (answered) return "answered";
+    const alone = (this.suspects.get(thoughtId) ?? 0) + 1;
+    this.suspects.set(thoughtId, alone);
+    if (alone >= ALONE_OUTAGES) return "alone";
+    this.reason = reason;
+    return "outage";
+  }
+
+  /**
+   * An isolated pass claimed `thoughtId` (SMD-2641). Its suspects go back at the pool's front (lease.ts's setFront), so
+   * a thought claimed that is none of them means none is left there: moved behind the backlog (edited, or set back by
+   * the sleep scheduler's abortInHand), held by another process, or deleted. The isolation ends, rather than taking
+   * the backlog one thought at a time for the rest of the window (review pass 1). Ending early fails nothing: outside
+   * isolation no thought is blamed, and one that errs again is a suspect again.
+   */
+  claimed(thoughtId: string): void {
+    if (!this.suspects.has(thoughtId)) this.suspects.clear();
+  }
+
+  /** The suspects an isolated pass is retrying: its line's count. */
+  get suspected(): number {
+    return this.suspects.size;
+  }
+
+  /** The outages `thoughtId` was alone at, its probe unanswered (`blame`): the worker's line says it. */
+  aloneAt(thoughtId: string): number {
+    return this.suspects.get(thoughtId) ?? 0;
   }
 
   /** Where the last outage's probe schedule ended, and the caller's count of work that got past the provider when it did: resumeFrom's. */
