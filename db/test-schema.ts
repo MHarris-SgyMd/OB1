@@ -19416,6 +19416,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     "ob1_deliverable_payload(uuid)", "ob1_deliverable_event_check()", "ob1_deliverable_facet_kept()", "ob1_deliverable_id(text, text)", "ob1_deliverable_actor(jsonb, text)",
     "ob1_deliverable_refused(text, text)", "ob1_deliverable_event_json(deliverable_events)", "ob1_deliverable_json(uuid)",
     "ob1_deliverable_event(uuid, text, text, uuid, text, text, text, record)", "ob1_deliverable_project(uuid)", "ob1_deliverable_is_maker(deliverable_events, text, uuid)",
+    "ob1_deliverable_is_author(uuid, text, uuid)",
     "record_deliverable(text, text, text, jsonb)", "verify_deliverable(text, text, text, text, jsonb)", "deliverable_history(text)",
     "ob1_deliverable_projection_drift()", "ob1_rebuild_deliverable_projection()"];
   const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
@@ -19430,7 +19431,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     facetTrigger: facetTrig === "thought_facets_deliverable_kept:11",
     facetIndex: /UNIQUE INDEX thought_facets_deliverable_uniq ON public\.thought_facets USING btree \(thought_id\) WHERE \(kind = 'deliverable'::text\)/.test(facetIdx),
     commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 133 \/ SMD-1715\./.test(f.c ?? "")),
-    stable: ["ob1_deliverable_payload(uuid)", "deliverable_history(text)", "ob1_deliverable_projection_drift()", "ob1_deliverable_json(uuid)"].every((f) => vol[f] === "s"),
+    stable: ["ob1_deliverable_payload(uuid)", "deliverable_history(text)", "ob1_deliverable_projection_drift()", "ob1_deliverable_json(uuid)", "ob1_deliverable_is_author(uuid,text,uuid)"].every((f) => vol[f] === "s"),
     definers: ["record_deliverable", "verify_deliverable", "deliverable_history", "ob1_deliverable_projection_drift", "ob1_rebuild_deliverable_projection", "thought_facets_validate"].every((f) => lastDefinerOf(f) === file),
     sentinels: [/ob1:deliverable-facet-is-the-projection/, /ob1:subject-facet/, /ob1:link-facet/, /ob1:thread-edge/].every((r) => r.test(validator)) && /ob1:deliverable-transitions-on-the-event/.test(checkSrc)
       && /ob1:deliverable-maker-from-the-envelope/.test(await src("ob1_deliverable_actor(jsonb, text)")),
@@ -19505,6 +19506,33 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
          && (await facet(out))?.seq === reverified.event?.seq,
     `verify_deliverable: a thought with no capture NOT_A_DELIVERABLE; the maker's move to verified refused VERIFY_NOT_YOURS by name and by agent id; unverified -> unverified, verified -> verified and verified -> unverified refused ILLEGAL_TRANSITION naming from and to; a read key READ_ONLY_KEY; a bad status, method or outcome raised 22023; another key verifies, the maker corrects, another verifies again (${JSON.stringify([byMaker.code, byMakerRenamed.code, toSame.code, ok.outcome, back.code, corrected.outcome, reverified.outcome])})`);
 
+  // The author: record_deliverable takes any thought, so the key that wrote it is refused its verification beside the
+  // key that recorded it (review pass 2, the maintainer's choice), and may still correct it.
+  const AUTHOR = { name: "[120] author", scope: "write" }, THIRD = { name: "[120] third", scope: "write" };
+  const authored = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, NULL::vector) AS r`,
+    ["[120] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
+  const byRecorder = await rec(authored, spec, "a17", CHECKER);
+  const byAuthor = await ver(authored, "verified", AUTHOR);
+  const authorCorrects = await ver(authored, "corrected", AUTHOR);
+  const byThird = await ver(authored, "verified", THIRD);
+  assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[120\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
+         && authorCorrects.outcome === "changed" && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
+    `the key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS; it may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, byThird.outcome])})`);
+
+  // A seq the insert brings is not the one it keeps: the trigger draws each event's under the lock (review pass 2: a raw
+  // insert's OVERRIDING SYSTEM VALUE named a seq above every later event's, and pass 1's stale-seq refusal then refused
+  // every verification after it, for good).
+  const offeredFor = await thought("[120] an output a raw seq is offered for");
+  await rec(offeredFor, spec, "5eq", MAKER);
+  const offered = await failure(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at, seq)
+    OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, now(), 9000000000000000000)`, [offeredFor, spec]);
+  const offeredSeqs = (await q<{ s: string }>(`SELECT seq::text AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s);
+  const afterOffer = await ver(offeredFor, "verified", CHECKER).catch((e: Error) => ({ outcome: `raised ${e.message.split("\n")[0]}` }) as R);
+  const offeredStatuses = (await q<{ s: string }>(`SELECT status AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s).join(" ");
+  assert(offered === "taken" && offeredSeqs.length === 2 && offeredSeqs.every((s) => s !== "9000000000000000000" && BigInt(s) < 9000000000000000000n)
+         && afterOffer.outcome === "changed" && offeredStatuses === "unverified corrected verified",
+    `a raw insert's own seq is replaced by one drawn under the lock, so the verification after it is taken and the events read in the order written (${offered.slice(0, 60)}; ${offeredSeqs.join(",")}; ${afterOffer.outcome}; ${offeredStatuses})`);
+
   // Below the tools: a raw write is held to the same rules.
   const before = JSON.stringify(await facet(out));
   const raw = {
@@ -19574,11 +19602,11 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   assert(drifted.length === 1 && drifted[0].thought_id === out && drifted[0].problem === "differs" && rebuilt === 1 && after.length === 0 && JSON.stringify(await facet(out)) === before,
     `a facet written with the validator off reads as drift (differs); the rebuild makes it the events' projection again (${JSON.stringify(drifted)}, ${rebuilt})`);
 
-  // The deliverables grant group: with capture and server it records, verifies and reads; it cannot change an event;
+  // The deliverables grant group: with capture alone beside it, it records, verifies and reads; it cannot change an event;
   // without it, refused naming the table.
   const ROLE = "ob1_test_deliverables";
   await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
-  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server", "deliverables"] })]) await db.exec(st);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "deliverables"] })]) await db.exec(st);
   const asRole = async (body: (tx: { query: typeof db.query }) => Promise<unknown>) => {
     try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
     catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
@@ -19596,7 +19624,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
   assert(roleUse.code === "" && roleUse.r === "captured,changed" && roleUpdate.code === "42501"
          && roleWithout.code === "42501" && /permission denied for table deliverable_events/.test(roleWithout.message ?? ""),
-    `a role granted capture, server and deliverables records, verifies and reads a deliverable; it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
+    `a role granted capture and deliverables alone records, verifies and reads a deliverable (the author read and the seq drawn by the group's grants); it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
 
   // The thought deleted: the facet goes with it, the events stay as history; no more verifications; not drift.
   const events = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);

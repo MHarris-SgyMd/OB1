@@ -2681,7 +2681,12 @@ export const ROLE_GRANTS = Object.freeze({
   // deliverable calls, naming the table, and nothing else.
   deliverables: Object.freeze([
     Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "133" }),
+    // The trigger draws each event's seq under the deliverable's lock, by nextval, which an identity's implicit draw
+    // does not need (review pass 2).
+    Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "133" }),
     Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
+    // A thought's author, for VERIFY_NOT_YOURS: the capture group holds INSERT there alone.
+    Object.freeze({ table: "thought_audit",      privileges: Object.freeze(["SELECT"]), since: "008" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`

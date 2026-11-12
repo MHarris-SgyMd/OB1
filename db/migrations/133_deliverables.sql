@@ -68,9 +68,11 @@
 --        verification: {outcome: changed | refused, deliverable, event, from,
 --        to}. Refused READ_ONLY_KEY, NOT_A_DELIVERABLE (no capture, or its
 --        thought deleted), ILLEGAL_TRANSITION (naming from and to), and
---        VERIFY_NOT_YOURS: a move to verified by the key that captured it, by
---        its name or its agent id, failing closed as 117's PROPOSAL_YOURS. A
---        move to corrected is any write key's, its maker's included.
+--        VERIFY_NOT_YOURS: a move to verified by the key that recorded the
+--        deliverable or the key that wrote its thought (the thought's first
+--        capture in thought_audit, 082's reading), by its name or its agent
+--        id, failing closed as 117's PROPOSAL_YOURS. A move to corrected is
+--        any write key's, its maker's included.
 --      * deliverable_history(thought) — {deliverable, events}, the events in
 --        the order written; deliverable NULL for a thought with none, or one
 --        deleted. STABLE, no actor.
@@ -80,12 +82,12 @@
 --      the validator take a transaction advisory lock on the thought
 --      (ob1:deliverable:<id>) before they read its events, and raise above
 --      READ COMMITTED (116's ob1_priority_isolation), so two verifications of
---      one deliverable queue and the second reads the first's status. An
---      event's seq is drawn before its trigger runs, so a raw insert that
---      waited on the lock while another event was written is refused 40001,
---      to be made again: its seq would sort it below the event it follows.
---      The projector locks the thought FOR KEY SHARE, so a delete in flight
---      is waited out.
+--      one deliverable queue and the second reads the first's status. The
+--      trigger draws each event's seq under the lock, whatever the insert
+--      brought, so a deliverable's events are numbered in the order written,
+--      a raw insert's too. The projector locks the thought FOR KEY SHARE, so
+--      a delete in flight is waited out. The rebuild takes the deliverables
+--      in id order, so two rebuilds queue rather than deadlock.
 --
 -- NOT HERE
 --   * The operations over REST and MCP, capture_deliverable and
@@ -100,8 +102,11 @@
 --
 -- PRIVILEGES
 --   The `deliverables` group (db/config.mjs ROLE_GRANTS): SELECT and INSERT
---   on deliverable_events (the trigger refuses the rest); SELECT, INSERT and
---   UPDATE on thought_facets (the projection is written and replaced). The
+--   on deliverable_events (the trigger refuses the rest), and USAGE on its
+--   seq's sequence (the trigger draws each event's seq itself); SELECT,
+--   INSERT and UPDATE on thought_facets (the projection is written and
+--   replaced); SELECT on thought_audit (a thought's author, for
+--   VERIFY_NOT_YOURS: the capture group holds INSERT there alone). The
 --   thoughts' existence and their KEY SHARE locks are the capture group's
 --   SELECT and UPDATE. Soft: a role without the group is refused the
 --   deliverable calls, naming the table, and nothing else; the server first
@@ -109,7 +114,7 @@
 --
 -- SAFETY
 --   One new table, its indexes, four triggers (three on it, one on
---   thought_facets), a unique index on thought_facets, twenty new functions,
+--   thought_facets), a unique index on thought_facets, twenty-one new functions,
 --   and 120's validator replaced with one kind more; no row is changed, and
 --   the validator's other branches are as 120 wrote them. MINOR under
 --   FORK.md's version rules.
@@ -309,14 +314,19 @@ BEGIN
   PERFORM ob1_priority_isolation('a deliverable event');
   PERFORM ob1_deliverable_lock(NEW.thought_id);
   SELECT * INTO p FROM deliverable_events WHERE thought_id = NEW.thought_id ORDER BY seq DESC LIMIT 1;
-  -- The identity seq is drawn before a BEFORE trigger runs, so an insert that
-  -- waited on the lock holds a seq below an event written meanwhile, and would
-  -- sort under it: the move it makes would read as older than the one it
-  -- follows (review pass 1). The writers lock before they insert and never
-  -- meet it; a raw insert that does is refused, to be made again.
-  IF p.seq > NEW.seq THEN
-    RAISE EXCEPTION USING ERRCODE = 'serialization_failure',
-      MESSAGE = format('deliverable %s took event %s while this insert, numbered %s, waited for its lock: make the insert again, after reading its status anew', NEW.thought_id, p.seq, NEW.seq);
+  -- The seq is drawn here, under the lock, whatever the insert brought: the
+  -- identity's own is drawn before a BEFORE trigger runs, so an insert that
+  -- waited on the lock held one below an event written meanwhile and sorted
+  -- under it (review pass 1), and OVERRIDING SYSTEM VALUE let a raw insert
+  -- name any seq at all, one above every later event's (review pass 2). Drawn
+  -- under the deliverable's lock, a deliverable's events are numbered in the
+  -- order they were written. The identity's sequence needs USAGE for this
+  -- (the deliverables group). ob1:deliverable-seq-under-the-lock
+  NEW.seq := nextval(pg_get_serial_sequence('deliverable_events', 'seq'));
+  IF p.seq >= NEW.seq THEN
+    -- Cannot happen while every event's seq is drawn here: said, not trusted.
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('deliverable %s''s newest event is %s, at or past the seq %s drawn under its lock', NEW.thought_id, p.seq, NEW.seq);
   END IF;
   IF NEW.event = 'captured' THEN
     IF p.id IS NOT NULL THEN
@@ -357,7 +367,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_event_check() IS
-  'BEFORE INSERT on deliverable_events, under READ COMMITTED alone (0A000 above it) and the deliverable''s lock: an insert whose seq, drawn before the lock was waited on, is below the newest event''s is refused 40001, to be made again; a capture is a thought''s first event, of a thought that exists, citing a spec_ref that exists (both locked FOR KEY SHARE); every later event is a verification of a thought still there, keeping the capture''s spec_ref and checkpoint, its status one allowed move from the newest event''s (ob1_deliverable_transition_ok). check_violation naming what was refused, for the writers'' inserts and a raw one alike. Migration 133 / SMD-1715.';
+  'BEFORE INSERT on deliverable_events, under READ COMMITTED alone (0A000 above it) and the deliverable''s lock: its seq drawn here, after the lock, whatever the insert brought (the identity''s, or OVERRIDING SYSTEM VALUE''s), so a deliverable''s events are numbered in the order written; a capture is a thought''s first event, of a thought that exists, citing a spec_ref that exists (both locked FOR KEY SHARE); every later event is a verification of a thought still there, keeping the capture''s spec_ref and checkpoint, its status one allowed move from the newest event''s (ob1_deliverable_transition_ok). check_violation naming what was refused, for the writers'' inserts and a raw one alike. Migration 133 / SMD-1715.';
 
 DROP TRIGGER IF EXISTS deliverable_events_transitions ON deliverable_events;
 CREATE TRIGGER deliverable_events_transitions
@@ -885,7 +895,29 @@ AS $$
          OR COALESCE(c.actor_agent_id IS NOT NULL AND c.actor_agent_id = p_agent, false)
 $$;
 COMMENT ON FUNCTION ob1_deliverable_is_maker(deliverable_events, text, uuid) IS
-  'True when the call may be the key that captured the deliverable (c, its capture event): the same key name, or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses. Migration 133 / SMD-1715.';
+  'True when the call may be the key that captured the deliverable (c, its capture event): the same key name, or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses, beside ob1_deliverable_is_author. Migration 133 / SMD-1715.';
+
+-- Whether the call is the key that wrote the deliverable's thought: its first
+-- capture in thought_audit (082's ob1_capturer_of reading, which the name
+-- joins), by the name or the agent id, failing closed as the maker's rule.
+-- record_deliverable takes any thought, so the key that recorded a
+-- deliverable need not be its author: both are refused its verification
+-- (review pass 2, the maintainer's choice). Never NULL; false for a thought
+-- whose first capture names no one.
+CREATE OR REPLACE FUNCTION ob1_deliverable_is_author(p_thought uuid, p_name text, p_agent uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE((SELECT COALESCE(a.actor_name = p_name, false)
+                          OR COALESCE(a.canonical_agent_id IS NOT NULL AND a.canonical_agent_id = p_agent, false)
+                     FROM thought_audit a
+                    WHERE a.thought_id = p_thought AND a.action = 'capture'
+                    ORDER BY a.created_at ASC, a.id ASC
+                    LIMIT 1), false)
+$$;
+COMMENT ON FUNCTION ob1_deliverable_is_author(uuid, text, uuid) IS
+  'True when the call may be the key that wrote the thought p_thought: its first capture row in thought_audit (082''s reading) names the same key name or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses, beside ob1_deliverable_is_maker. Migration 133 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 6. The writers
@@ -1006,13 +1038,18 @@ BEGIN
       format('%s captured deliverable %s, so another key verifies it; its maker may mark it corrected', v_who.name, v_thought))
       || jsonb_build_object('from', l.status, 'to', v_status);
   END IF;
+  IF v_status = 'verified' AND ob1_deliverable_is_author(v_thought, v_who.name, v_who.agent_id) THEN
+    RETURN ob1_deliverable_refused('VERIFY_NOT_YOURS',
+      format('%s wrote the thought deliverable %s is, so another key verifies it; its author may mark it corrected', v_who.name, v_thought))
+      || jsonb_build_object('from', l.status, 'to', v_status);
+  END IF;
   e := ob1_deliverable_event(v_thought, 'verification', v_status, l.spec_ref, l.checkpoint, v_method, v_outcome, v_who);
   RETURN jsonb_build_object('outcome', 'changed', 'deliverable', ob1_deliverable_project(v_thought), 'event', ob1_deliverable_event_json(e),
                             'from', l.status, 'to', v_status);
 END;
 $$;
 COMMENT ON FUNCTION verify_deliverable(text, text, text, text, jsonb) IS
-  'One verification of a deliverable (SMD-1715): how it was checked (p_method, 1 to 200 characters) and what was found (p_outcome, 1 to 4000), moving its status to p_status (verified or corrected) by an allowed move. Returns {outcome: changed | refused, deliverable, event, from, to}: refused READ_ONLY_KEY (an envelope stating no write scope), NOT_A_DELIVERABLE (no capture, or its thought deleted), ILLEGAL_TRANSITION (with from and to) or VERIFY_NOT_YOURS (a move to verified by the key that captured it, by name or agent id; with from and to). A malformed id, status, method or outcome raises 22023, an envelope naming nobody 42501, a transaction above READ COMMITTED 0A000. Migration 133 / SMD-1715.';
+  'One verification of a deliverable (SMD-1715): how it was checked (p_method, 1 to 200 characters) and what was found (p_outcome, 1 to 4000), moving its status to p_status (verified or corrected) by an allowed move. Returns {outcome: changed | refused, deliverable, event, from, to}: refused READ_ONLY_KEY (an envelope stating no write scope), NOT_A_DELIVERABLE (no capture, or its thought deleted), ILLEGAL_TRANSITION (with from and to) or VERIFY_NOT_YOURS (a move to verified by the key that recorded the deliverable or wrote its thought, by name or agent id; with from and to). A malformed id, status, method or outcome raises 22023, an envelope naming nobody 42501, a transaction above READ COMMITTED 0A000. Migration 133 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 7. The read, the drift check and the rebuild
@@ -1060,16 +1097,20 @@ DECLARE
   v_thought uuid;
   v_n       integer := 0;
 BEGIN
-  FOR v_thought IN SELECT DISTINCT d.thought_id FROM ob1_deliverable_projection_drift() d WHERE d.problem <> 'no events' LOOP
+  -- In id order, so two rebuilds take the deliverables' locks in one order and
+  -- queue rather than deadlock; counted only where the projector wrote, not
+  -- for a thought deleted while it waited (review pass 2).
+  FOR v_thought IN SELECT DISTINCT d.thought_id FROM ob1_deliverable_projection_drift() d WHERE d.problem <> 'no events' ORDER BY 1 LOOP
     PERFORM ob1_deliverable_lock(v_thought);
-    PERFORM ob1_deliverable_project(v_thought);
-    v_n := v_n + 1;
+    IF ob1_deliverable_project(v_thought) IS NOT NULL THEN
+      v_n := v_n + 1;
+    END IF;
   END LOOP;
   RETURN v_n;
 END;
 $$;
 COMMENT ON FUNCTION ob1_rebuild_deliverable_projection() IS
-  'Makes every drifted deliverable facet current from its events (ob1_deliverable_project, under each deliverable''s lock) and returns how many it wrote. A facet with no events is left for the operator: the validator admits none, so one is a raw write with the trigger off. Migration 133 / SMD-1715.';
+  'Makes every drifted deliverable facet current from its events (ob1_deliverable_project, under each deliverable''s lock, taken in id order) and returns how many it wrote, not counting a thought deleted while it waited. A facet with no events is left for the operator: the validator admits none, so one is a raw write with the trigger off. Migration 133 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 8. The catalog's copy of the vocabulary
