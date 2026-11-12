@@ -5,7 +5,8 @@
 // two backlogged brains split them (SMD-3034's host rule, the ticket's Verify 4). A brain asks it through its coordinator
 // (PR 3b-1); while it is down, or for a base it does not broker, a brain keeps its own share (PR 2's semaphore).
 //
-//   bun --no-install --no-env-file broker.ts --registry PATH [--host ADDRESS]   serve (127.0.0.1 unless --host)
+//   bun --no-install --no-env-file broker.ts --registry PATH [--host ADDRESS] [--port N]
+//                                                 serve (127.0.0.1 unless --host; the registry's port unless --port)
 //   bun broker.ts --self-check                                                 the registry's reading, on fixtures
 //
 // Self-contained — no import but Bun's and node's own — since the federated project (deploy/federated/compose.yaml)
@@ -266,7 +267,7 @@ export type Snapshot = Record<string, { live: number; background: number; waitin
 export type Broker = { port: number; stop(): Promise<void>; snapshot(): Snapshot };
 
 /** Starts serving the registry's brains. `port` 0 takes a free one (a test's). */
-export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number; keepMs?: number } = {}): Broker {
+export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number; keepMs?: number; twinLapseMs?: number } = {}): Broker {
   const log = opts.log ?? ((line: string) => console.log(`slots: ${line}`));
   /** The broker's clock, in ms: performance.now() unless a test hands it one it moves itself. */
   const clock = opts.now ?? (() => performance.now());
@@ -278,6 +279,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   for (const s of reg.servers) for (const b of s.bases) serverOf.set(b, s);
   let nextConn = 1;
   const keepMs = opts.keepMs ?? KEEP_MS;
+  const twinLapseMs = opts.twinLapseMs ?? TWIN_LAPSE_MS;
   const idleMs = reg.idleS * 1000;
   /** Each brain's kept grants by id, at most MAX_HELD a brain (the oldest given back past it: review pass 3, a brain
    *  reconnecting fast left 81,920 and 108 MB), each closed socket's freed by one timer. */
@@ -295,14 +297,16 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const speaking = new Set([...connsBy[b]].map((c) => c.syncedPrefix).filter((x): x is string => !!x));
     // Twins only by sockets alive by the probe: a coordinator swapped behind a half-open socket is no second coordinator
     // (review pass 7: its old socket, not yet probed out, marked the brain twins for the broker's life). The mark lapses
-    // TWIN_LAPSE_MS after two live relays were last seen, so a misconfiguration put right does not pin the brain.
+    // TWIN_LAPSE_MS after two live relays were last seen — looked for each tick of the broker's liveness, not only at
+    // a socket's event (review pass 8: twins steady 60 s lapsed at one's close, its grant given back, 2 calls on 1 slot)
+    // — so a misconfiguration put right does not pin the brain.
     const live = new Set([...connsBy[b]].filter((c) => !(c.probedAt !== undefined && c.heardAt < c.probedAt)).map((c) => c.syncedPrefix).filter((x): x is string => !!x));
     const now = performance.now();
     if (live.size > 1) {
       if (!twins[b]) log(`brain ${reg.brains[b].name}: two relays speak on its key at once — two coordinators share it, a misconfiguration; each keeps its own grants, and each reconnect may count a call twice for a moment`);
       twins[b] = true;
       twinsSeen[b] = now;
-    } else if (twins[b] && now - twinsSeen[b] >= TWIN_LAPSE_MS) twins[b] = false;
+    } else if (twins[b] && now - twinsSeen[b] >= twinLapseMs) twins[b] = false;
     return speaking;
   };
   /** A kept grant given back, if it is still kept. */
@@ -630,7 +634,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
           const t = setTimeout(() => { keepTimers.delete(t); const mine = keptBy[conn.brainAt]; for (const [oid, o] of [...mine]) if (o.token === token) freeKept(conn.brainAt, oid); }, keepMs);
           keepTimers.add(t);
         }
-        sayConn(conn.brainAt, "close", `brain ${conn.brain.name} disconnected (socket ${conn.id})${all.length ? `, withdrawing ${asks.length} ask${asks.length === 1 ? "" : "s"}${grants.length ? ` and ${keep ? "keeping" : "giving back"} ${grants.length} grant${grants.length === 1 ? "" : "s"}${keep ? ` ${keepMs / 1000} s for its return` : ""}` : ""}` : ""}`);
+        sayConn(conn.brainAt, "close", `brain ${conn.brain.name} disconnected (socket ${conn.id})${all.length ? `, withdrawing ${asks.length} ask${asks.length === 1 ? "" : "s"}${kept ? ` and keeping ${kept} grant${kept === 1 ? "" : "s"} ${keepMs / 1000} s for its return` : ""}${grants.length > kept ? ` and giving back ${grants.length - kept} grant${grants.length - kept === 1 ? "" : "s"}` : ""}` : ""}`);
       },
     },
   });
@@ -651,6 +655,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       }
       if (now - c.heardAt > idleMs / 3) c.ping?.();
     }
+    for (let b = 0; b < twins.length; b++) if (twins[b]) noteTwins(b);
     for (const p of [...pools.values()]) pump(p);
   }, Math.max(100, Math.min(1000, idleMs / 4)));
   // The lease's backstop: a grant held past lease_s is taken back, and its socket told.

@@ -206,7 +206,11 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     brokered = Array.isArray(m.servers) ? new Set(m.servers.flatMap((sv) => (Array.isArray(sv?.bases) ? sv.bases : []).map((x: string) => normalisedBase(x)))) : null;
     // Every call running — a grant, or a call on its own share — counted again; then the parked asks, their time carried.
     let held = 0;
-    for (const [relayId, e] of entries) if (e.kind === "grant" || e.kind === "own") { e.on = epoch; sock.send(JSON.stringify({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls })); held++; }
+    // A base the hello does not list is the pass's own share, nothing to count there: an ask parked before the list was
+    // known answered own, a call running on one not named (review pass 8: each told `no server`, each new socket).
+    const unlisted = (e: Entry) => !!brokered && !brokered.has(normalisedBase(e.base));
+    for (const [relayId, e] of [...entries]) if (e.kind === "parked" && unlisted(e)) { forget(relayId); tell(e, "own"); }
+    for (const [relayId, e] of entries) if ((e.kind === "grant" || e.kind === "own") && !unlisted(e)) { e.on = epoch; sock.send(JSON.stringify({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls })); held++; }
     // Every call it runs named: any grant the broker kept for it beyond these is given back now (review pass 3).
     sock.send(JSON.stringify({ op: "synced", id: nonce }));
     // Each pass told the broker is back: a call still waiting on its own share asks again (review pass 4: a deep backlog
@@ -378,8 +382,9 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           }
           if (mine.has(f.id)) { if (f.slot === "ask") send?.({ slot: "own", id: f.id }); return; }
           // A base the broker does not broker (its hello's list): its own share at once, and nothing to count there
-          // (review pass 7: an ask, a `no server`, then a held and another `no server`, each call).
-          if (open && brokered && !brokered.has(normalisedBase(f.base))) { if (f.slot === "ask" && f.cls === "background") send?.({ slot: "own", id: f.id }); return; }
+          // (review pass 7: an ask, a `no server`, then a held and another `no server`, each call); the last hello's list
+          // while the broker is away, rather than the grace (review pass 8).
+          if (brokered && !brokered.has(normalisedBase(f.base))) { if (f.slot === "ask" && f.cls === "background") send?.({ slot: "own", id: f.id }); return; }
           const relayId = `${nonce}:${child}:${++next}`;
           const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now() - (f.slot === "ask" && f.waited_s ? f.waited_s * 1000 : 0), on: -1, askedAt: 0, told: false };
           if (f.slot === "running") {

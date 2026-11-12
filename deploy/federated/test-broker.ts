@@ -71,10 +71,10 @@ async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
   return true;
 }
 
-async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>, keepMs = 0): Promise<void> {
+async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>, keepMs = 0, twinLapseMs?: number): Promise<void> {
   const lines: string[] = [];
   // A closed socket's grants given back at once unless a row asks otherwise: [13] reads the keeping itself.
-  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), keepMs });
+  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), keepMs, twinLapseMs });
   try { await fn(b, lines); } finally { await b.stop(); }
 }
 
@@ -873,6 +873,22 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b, lines) => {
   ok(pool(b).background === 1 && !c.seen("go", "c1"), "and its held takes it back, the call counted once", pool(b));
   await a2.close(); await z.close(); await c.close();
 }, 5000);
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b, lines) => {
+  // Twins steady past the mark's lapse are still twins: the broker looks each tick, not only at a socket's event, so
+  // one's close keeps its grant and its held counts the call once (review pass 8: lapsed at the close, 2 calls on 1 slot).
+  const a = await connect(b, KEYS.stable), z = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  a.send({ op: "synced", id: "A" }); z.send({ op: "synced", id: "Z" });
+  ask(a, "A:1", "background"); await a.next("go", "A:1");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await sleep(2500);
+  await a.close();
+  ok(!(await c.next("go", "c1", 500)), "twins steady past the lapse: one's close still keeps its grant");
+  const a2 = await connect(b, KEYS.stable);
+  a2.send({ op: "held", id: "A:1", base: BASE, model: "qwen3:8b", cls: "background" }); await a2.next("go", "A:1");
+  ok(pool(b).background === 1 && !c.seen("go", "c1") && lines.filter((l) => /two relays speak/.test(l)).length === 1, "and its held takes it back, counted once, the twins said once", { p: pool(b), lines });
+  await a2.close(); await z.close(); await c.close();
+}, 5000, 1500);
 
 await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
   // A socket the probe found dead gives its grants back at once, not after the keeping.

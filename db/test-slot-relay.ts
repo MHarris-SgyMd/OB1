@@ -609,10 +609,14 @@ await withBroker(registry({ slots: 1 }), async (b) => {
 {
   // A stand-in broker: its hello names one base and it never answers an ask, or names none and answers each ask "no
   // server". The relay answers a base outside the list itself, at once; and turns a broker's "no server" into own.
-  let listed = true;
-  const fake = Bun.serve({ port: 0, fetch: (req, srv) => srv.upgrade(req) ? undefined : new Response(null, { status: 400 }), websocket: {
-    open(ws) { ws.send(JSON.stringify({ op: "hello", boot: "fake", idle_s: 30, max_waiting: 1024, ...(listed ? { servers: [{ name: "o", bases: [BASE], slots: 1 }] } : {}) })); },
-    message(ws, msg) { const m = JSON.parse(String(msg)); if (!listed && m.op === "ask") ws.send(JSON.stringify({ op: "no", id: m.id, why: "server" })); },
+  let listed = true, away = false;
+  const UNLISTED = "https://api.example.invalid/v1";
+  const heard: { op: string; base?: string }[] = [];
+  const socks = new Set<{ close(): void }>();
+  const fake = Bun.serve({ port: 0, fetch: (req, srv) => away ? new Response(null, { status: 503 }) : srv.upgrade(req) ? undefined : new Response(null, { status: 400 }), websocket: {
+    open(ws) { socks.add(ws); ws.send(JSON.stringify({ op: "hello", boot: "fake", idle_s: 30, max_waiting: 1024, ...(listed ? { servers: [{ name: "o", bases: [BASE], slots: 1 }] } : {}) })); },
+    message(ws, msg) { const m = JSON.parse(String(msg)); heard.push(m); if (!listed && m.op === "ask") ws.send(JSON.stringify({ op: "no", id: m.id, why: "server" })); },
+    close(ws) { socks.delete(ws); },
   }, hostname: "127.0.0.1" });
   const port0 = fake.port;
   const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
@@ -621,11 +625,39 @@ await withBroker(registry({ slots: 1 }), async (b) => {
     const port = relay.port("probe");
     const got: { slot: string; id: string }[] = [];
     port.attach((m) => got.push(m));
-    port.onMessage({ slot: "ask", id: "u", base: "https://api.example.invalid/v1", model: "m", cls: "background" });
+    port.onMessage({ slot: "ask", id: "u", base: UNLISTED, model: "m", cls: "background" });
     ok(await until(() => got.some((m) => m.slot === "own" && m.id === "u"), 200), "a base outside the broker's list is its own share at once, from the relay, asked of no broker", got);
     port.onMessage({ slot: "ask", id: "big", base: BASE, model: "m".repeat(5000), cls: "background" });
     ok(await until(() => got.some((m) => m.slot === "own" && m.id === "big"), 200) && relay.state().broker === "up", "a frame too big for the broker (a 5 kB model) is answered own, never sent, the socket kept", { got, s: relay.state() });
+    // The broker away: the last hello's list still answers an unlisted base at once, not after the grace (review pass 8).
+    away = true;
+    for (const w of [...socks]) w.close();
+    await until(() => relay.state().broker !== "up", 2000);
+    port.onMessage({ slot: "ask", id: "u2", base: UNLISTED, model: "m", cls: "background" });
+    ok(await until(() => got.some((m) => m.slot === "own" && m.id === "u2"), 200), "the broker away, an unlisted base is its own share at once by the last hello's list", { got, s: relay.state() });
+    away = false;
+    await upOf(relay);
     await relay.stop();
+    // Before any hello the list is unknown: an unlisted ask parks and a call on one runs; at the hello the ask is
+    // answered own and neither reaches the broker (review pass 8: each told `no server`, the running one each socket).
+    away = true;
+    const r3 = startRelay({ url: `ws://127.0.0.1:${fake.port}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+    const p3 = r3.port("probe");
+    const got3: { slot: string; id: string }[] = [];
+    p3.attach((m) => got3.push(m));
+    p3.onMessage({ slot: "ask", id: "p", base: UNLISTED, model: "m", cls: "background" });
+    p3.onMessage({ slot: "running", id: "q", base: UNLISTED, model: "m", cls: "background" });
+    await sleep(100);
+    const before = got3.filter((m) => m.slot === "own").length;
+    away = false;
+    await upOf(r3);
+    ok(before === 0 && await until(() => got3.some((m) => m.slot === "own" && m.id === "p"), 500), "an unlisted ask parked before the hello is answered own at it", { before, got3 });
+    await sleep(200);
+    ok(!heard.some((m) => m.base === UNLISTED), "and no unlisted call reaches the broker, asked or held", heard.filter((m) => m.base === UNLISTED));
+    p3.onMessage({ slot: "done", id: "q" });
+    await sleep(100);
+    ok(!heard.some((m) => m.op === "done"), "nor its done", heard.filter((m) => m.op === "done"));
+    await r3.stop();
     listed = false;
     const r2 = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
     await upOf(r2);
