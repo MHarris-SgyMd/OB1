@@ -2963,7 +2963,7 @@ console.log("\n[16g] The read side of trust: the By: line's trust, the ingested 
   const capped = renderSearchThoughts({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", base: "http://p/v1", provider: longWords } } as never, false);
   const shownWords = /It said: (.*)$/.exec(capped.content[0].text)?.[1] ?? "";
   // Quoted, so they read as the provider's and never as the server's own sentence (review pass 4).
-  const unquoted = JSON.parse(shownWords) as string;
+  const unquoted = (() => { try { return JSON.parse(shownWords) as string; } catch { return ""; } })();
   assert(unquoted.length > 0 && unquoted.length <= 201 && unquoted.startsWith('{"error":"xxx'), `a refusal's provider words are quoted and cut to 200 characters (${unquoted.length})`);
   // A refusal code a renderer's FACTS does not know is said as itself, not thrown (review pass 4: an older mcp beside a newer api).
   const { refusalValue } = await import("./core/refusal.ts");
