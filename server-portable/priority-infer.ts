@@ -171,8 +171,10 @@ function lineAround(breaks: readonly number[], i: number, j: number, end: number
 /**
  * Whether every place the text holds the level phrase is a label cited for another item (SMD-4226), in a shape that
  * cites, never by nearness alone:
- * - a ticket key earlier in the same clause, its words ending in "(", "[", ",", ":", "·" or a dash just before the
- *   phrase ("SMD-1768 (Medium)", "SMD-2742 — Medium, Release Engineering", "SMD-2368, `platform`, High");
+ * - a ticket key earlier in the same clause, within 60 characters, its words ending in "(", "[", ",", ":", "·" or a
+ *   dash just before the phrase ("SMD-1768 (Medium)", "SMD-2742 — Medium, Release Engineering", "SMD-2368, `platform`, High");
+ * - a key, then up to four words of a board move or none, before a capitalised level ("SMD-12 is High", "SMD-4300 was
+ *   set to High", "SMD-12 → High");
  * - a key beside the level inside the phrase ("SMD-2627 (Medium):");
  * - a table's cell on a row that holds a key ("| SMD-1 | … | Medium |");
  * - on a line that holds a key, a board status before or after the level ("Backlog, Low", "High, Todo in cycle 21");
@@ -184,7 +186,7 @@ function lineAround(breaks: readonly number[], i: number, j: number, end: number
  * session summaries. readAnswer marks such a level, and only an agent-kind writer's is dropped (forWriter, the
  * maintainer's choice after review pass 2): syntax cannot tell another ticket's label from a person's own "Fix SMD-12
  * (urgent)" or "Done, urgent: call mom". A ticket's own export ("SMD-944 · Status: Todo · Priority: High": a text that
- * opens with a key and names no other) keeps its "Priority:" field.
+ * opens with a key and names no other) keeps its "Priority:" field; in any other text such a field cites.
  */
 export function citedIn(phrase: string, text: string): boolean {
   const { kept, lower, breaks } = linesOf(text);
@@ -249,9 +251,11 @@ const FLOOR_THAN = /\b(no sooner|no earlier|not earlier|not sooner) than\s*$/;
 const FLOOR_FROM = /\b(starting|starts|beginning|begins|from|only after|after)\s+$/;
 /** The words that make a time a floor when they follow it ("tomorrow at the earliest", "the 12th onwards"); not "or later if …" or "earliest possible", which keep the deadline. */
 const FLOOR_AFTER = /^[\s,)]*(at the earliest|at earliest|earliest(?!\s+possible)|or later(?!\s+(?:if|when|should|depending))|at the soonest|onwards|onward)\b/;
-/** The floor's words inside a quoted phrase; an opening "from" or "after" only when the phrase names no "by", "before" or "until" ("from now until Friday" is a deadline). */
+/** The floor's words inside a quoted phrase ("at the earliest", "no sooner than", "or later" but not "or later if …"). */
 const FLOOR_SAID = /\b(at the earliest|at earliest|at the soonest|(no sooner|no earlier|not earlier|not sooner) than)\b|\bor later\b(?!\s+(?:if|when|should|depending))/;
+/** A quoted phrase that opens with the start of something ("starting Monday", "after Friday"): a floor unless it names a deadline word of its own ("from now until Friday"). */
 const FLOOR_OPENS = /^(starting|starts|beginning|from|only after|after)\b/;
+/** A deadline word anywhere in a quoted phrase. */
 const DEADLINE_WORD = /\b(by|before|until|till|due|no later than)\b/;
 /** A phrase that opens with its own deadline word stays a deadline after "starts" or "from" ("the migration starts by Monday"; review pass 4). */
 const DEADLINE_OPENS = /^(by|before|until|till|no later than)\b/;
@@ -273,10 +277,13 @@ function floorLead(s: string, atEnd: boolean): boolean {
  * read in the floor's own construction:
  * - a negation, then a verb of something starting, then "before", "until" or "till" ("can't happen before 11-03",
  *   "doesn't open until Monday", "isn't ready until Monday", "nothing ships until Friday"), or "not until" / "not
- *   before" with nothing between — before the phrase, inside it, or split across them, and with no condition ahead;
+ *   before" with nothing between — before the phrase, inside it, or split across them;
  * - "no sooner than" or "no earlier than" before it;
- * - "starting", "from" or "(only) after" just before it, or opening it with no "by", "before" or "until" of its own;
+ * - "starting", "from" or "(only) after" just before it, unless the phrase opens with "by", "before" or "until" ("the
+ *   migration starts by Monday") or the word counts from the time ("a week from Friday", "the day after tomorrow");
+ *   or opening it with no deadline word of its own;
  * - "at the earliest", "earliest", "or later", "at the soonest" or "onwards" after it, or those inside it.
+ * No condition may come just ahead of it ("if it can't happen before 11-03, escalate"), however much the model quoted.
  * A negated deadline stays one ("isn't due until Friday", "don't need it until Friday", "not later than 15 November",
  * "if it's not paid before the 15th"), as do "start by Monday", "by Friday, or later if blocked" and "earliest
  * possible". readAnswer marks the due day, and only an agent-kind writer's is dropped (forWriter, the maintainer's

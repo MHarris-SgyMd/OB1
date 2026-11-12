@@ -3066,7 +3066,7 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["Medium", "SMD-12 (Medium) is done, and the release notes went out. Medium is how much the garden matters now", false],
   ];
   const citedWrong = citedCases.filter(([p, t, want]) => citedIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
-  assert(citedWrong.length === 0, `a label cited for another item is read only in a shape that cites: a key's clause ending in "(", "," or a dash, a key beside the level, a table row with a key, a board status, a rank among items; the writer's own level stands, a "Priority:" field, a name, a flight or a standard's number beside it included (wrong: ${citedWrong.join("; ")})`);
+  assert(citedWrong.length === 0, `a label cited for another item is read only in a shape that cites: a key's clause ending in "(", "[", ",", ":", "·" or a dash, a board move from a key to a capitalised level, a key beside the level, a table row with a key, a board status or field, a level just before a key, a rank among items, another ticket's "Priority:" field; the writer's own level stands, a ticket's own export, a name, a flight or a standard's number beside it included (wrong: ${citedWrong.join("; ")})`);
   const citedRead = readAnswer({ level: "medium", level_phrase: "SMD-2627 (Medium):" }, "Next: SMD-2627 (Medium): the gate.", TUE);
   const citedDue = readAnswer({ level: "low", level_phrase: "Backlog, Low", due_phrase: "by Friday" }, "SMD-2719 is Backlog, Low now; I'll file it by Friday", TUE);
   assert(citedRead.level?.cited === true && citedRead.level.value === 2
@@ -3151,7 +3151,7 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["Friday", "Friday at the soonest", true],
   ];
   const flooredWrong = flooredCases.filter(([p, t, want]) => flooredIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
-  assert(flooredWrong.length === 0, `a floor is read in its own construction — a negation then "before", "until" or "till", "no sooner than", "at the earliest" or "or later" — and a deadline with a negation elsewhere stands ("not later than", "can't wait past", "do not miss") (wrong: ${flooredWrong.join("; ")})`);
+  assert(flooredWrong.length === 0, `a floor is read in its own construction — a negated start ("can't happen before", "doesn't open until"), a bare "not until", "no sooner than", "starting" or "after" before it, "at the earliest" or "onwards" after it — and a negated deadline stands ("isn't due until", "not later than", "can't wait past", "start by", "a week from", "if it can't happen before …") (wrong: ${flooredWrong.join("; ")})`);
   const flooredRead = readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE);
   const notLater = readAnswer({ level: "urgent", level_phrase: "Urgent", due_phrase: "15 November", due_date: "2026-11-15" }, "Urgent: tax payment due not later than 15 November", TUE);
   assert(flooredRead.due?.floored === true && flooredRead.level?.value === 3 && notLater.due?.day === "2026-11-15" && notLater.due.floored === undefined,
