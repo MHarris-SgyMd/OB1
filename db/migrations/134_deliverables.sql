@@ -88,12 +88,15 @@
 --        to}. Refused WRITE_SCOPE_REQUIRED, NOT_A_DELIVERABLE (no capture, or its
 --        thought deleted), ILLEGAL_TRANSITION (naming from and to), and
 --        VERIFY_NOT_YOURS: a move to verified by the key that recorded the
---        deliverable or a key that wrote its thought's text (its capture, an
---        update changing its content, or 082's re-capture, in thought_audit),
---        by its name or its agent id, as 117's PROPOSAL_YOURS. A key with no
+--        deliverable or a key the brain records as writing its thought's text
+--        (its capture, an update changing its content, or a capture-only
+--        key's row re-captured, 082/092's `recaptured`, in thought_audit), by
+--        its name or its agent id, as 117's PROPOSAL_YOURS. A key with no
 --        agent id is known by its name alone, so such a key renamed since is
---        not matched. A move to corrected is any write key's, its maker's
---        included.
+--        not matched. Another write key whose byte-identical submission the
+--        capture deduplicated onto the thought leaves no record, and is not
+--        matched either (SMD-4242; the maintainer, 2026-11-12). A move to
+--        corrected is any write key's, its maker's included.
 --      * deliverable_history(thought) — {deliverable, events}, the events in
 --        the order written; deliverable NULL for a thought with none, or one
 --        deleted. STABLE, no actor.
@@ -947,8 +950,11 @@ COMMENT ON FUNCTION ob1_deliverable_is_maker(deliverable_events, text, uuid) IS
 -- first capture alone missed a key that rewrote the text after another
 -- captured it (review pass 3). record_deliverable takes any thought, so the
 -- key that recorded a deliverable need not be its author: both are refused
--- its verification (review pass 2, the maintainer's choice). Never NULL; a
--- row naming no one matches no one.
+-- its verification (review pass 2, the maintainer's choice). A write key
+-- whose identical submission the capture deduplicated onto a write key's
+-- thought leaves no audit row (092 notes only a capture-only key's row
+-- re-captured), so it is not matched here (SMD-4242). Never NULL; a row
+-- naming no one matches no one.
 CREATE OR REPLACE FUNCTION ob1_deliverable_is_author(p_thought uuid, p_name text, p_agent uuid)
 RETURNS boolean
 LANGUAGE sql

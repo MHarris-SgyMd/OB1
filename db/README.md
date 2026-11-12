@@ -2549,10 +2549,13 @@ What it adds:
   - `NOT_A_DELIVERABLE`;
   - `ILLEGAL_TRANSITION`, naming from and to;
   - `VERIFY_NOT_YOURS`: a move to verified by the key that recorded the
-    deliverable, or by a key that wrote its thought's text (its capture, an
-    edit of its content, or a re-capture, in `thought_audit`), by its name or
-    its agent id. A key with no agent id is known by its name alone, so one
-    renamed since isn't matched.
+    deliverable, or by a key the brain records as writing its thought's text
+    (its capture, an edit of its content, or a capture-only key's row
+    re-captured, in `thought_audit`), by its name or its agent id. A key with
+    no agent id is known by its name alone, so one renamed since isn't
+    matched. Another write key whose byte-identical submission was
+    deduplicated onto the thought leaves no record and isn't matched either
+    (SMD-4242).
 
   `deliverable_history` reads one. `ob1_deliverable_projection_drift` and
   `ob1_rebuild_deliverable_projection` are 068's pattern; the rebuild counts
