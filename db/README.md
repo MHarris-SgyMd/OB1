@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and thirty-four (134) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and thirty-five (135) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2505,6 +2505,15 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 135 makes a thought serve every ticket of its subject set
+(SMD-3306 PR 7a-3b-1): 122's `ob1_item_serves` read one ticket subject with
+`LIMIT 1` and no order, and since 130 a thought's subjects are a set, so a
+multi-ticket session served whichever the scan met first. With no ticket filed,
+a thought now serves each ticket subject standing on it, distinct, in key
+order, and `effective_priority` inherits from the best of them (the maintainer,
+2026-11-10); a filed ticket still serves alone. Needs 122 and 130; a re-apply
+is a no-op. test-schema [122], test-upgrade [20bz].
+
 Migration 134 adds deliverables (SMD-1715 PR 1). A deliverable is a unit of
 agent output tied to the spec it was meant to meet (any thought's id), with a
 checkpoint (a commit hash or a content fingerprint) and a status: unverified,
@@ -3813,7 +3822,7 @@ among. A ticket-shaped word counts unless
 its prefix is on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
-migration 111's `record_thought_subject` at the text the claim read, under its
+migration 130's `record_thought_subjects` at the text the claim read, under its
 rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
 no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought in its pool (migration 113, below), into which a pool's first run puts
@@ -3917,9 +3926,9 @@ name too, that finds it moved. A claim finished is the record that the thought
 was asked at its text: one the model named nothing for is not asked again until
 its text, the ticket it is filed under, or the pool's key changes
 (a switch to another key and back pools it again: a claim records no
-fingerprint), and an out-of-date subject standing on it is closed through 113's
-`close_thought_subject`, which closes it only while it is still the one read at
-the text read, so a subject a pass wrote since stands; a thought given a subject
+fingerprint), and the out-of-date subjects standing on it are closed through
+130's `close_thought_subjects`, which closes them only while they are still the
+set read at the text read, so a subject a pass wrote since stands; a thought given a subject
 elsewhere while the model was asked goes back to the pool, if the run still holds
 its claim, and the run reads what stands when it comes up. A thought the pass gave a
 current subject after it was pooled is finished unasked, so long as the rules
@@ -4168,7 +4177,11 @@ and a following run claims again after its follow or the provider's pause,
 whichever is longer, or ends at its limit, where one not following ends there,
 1; a stop before or during that hand-back ends the run there, said so. Only the
 budget's timeout is handled so: another error there, an operator's cancel among
-them, is thrown. The run's hand-back of what it holds, at its end, a lost poll
+them, is thrown. In any run, not a scheduler's alone, a thought's own write
+the server rolls back to break a deadlock (since 130 a set's close or write
+moves several keys' threads, which can deadlock at its commit) is run again, the
+answer in hand, up to three tries in all; past them it fails the thought for
+`--retry-failed`, counted and said once. The run's hand-back of what it holds, at its end, a lost poll
 or a second stop, waits up to 30 s whatever the budget, so a row held past a
 short budget leaves no claim leased to its end, and one held longer holds the
 scheduler's stop no longer than 30 s, or 60 s when the stop lands during a lost
