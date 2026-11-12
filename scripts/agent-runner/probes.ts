@@ -11,6 +11,8 @@
  *   bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version <x.y.z> \
  *     [--state <dir>] [--only <name,…>] [--main-checkout <path>]
  *   bun scripts/agent-runner/probes.ts --self-check     # the guard, the profile, the launcher and the mock on fixtures, offline
+ *   bun …/probes.ts --brief-probe --claude <path> --sha256 <hex> --version <x.y.z> --anthropic-key <file> [--state <dir>] [--main-checkout <path>]
+ *                                                       # the brief probe (cut 2c): one real-model worker session (≈$1), apart from the offline sweep and its stamp
  *
  * --state defaults to ~/.local/share/open-brain/agent-runner. Each run's sessions live in probes/<time>/ there, and
  * their records stay (settings, guard logs, streams); clones and temp directories are removed. When every probe
@@ -28,6 +30,8 @@ import { START_FLAGS, shownText, type Role } from "./guard.ts";
 import { callId, requestText, startMock, type Mock, type Step } from "./mock-api.ts";
 import { guardLog, profileHashes, settingsFor, settingsText, type SessionLimits, type SessionPaths } from "./profile.ts";
 import { fileSha256, runSession, type Pinned, type SessionOutcome } from "./session.ts";
+import { buildBrief, type BriefTicket } from "./brief.ts";
+import { branchFor } from "./record.ts";
 
 /** The stand-in key the probes' sessions print through apiKeyHelper, and the mock takes alone. Not a secret. */
 export const PROBE_KEY = "probe-stand-in-key-not-a-secret";
@@ -530,8 +534,15 @@ export const PROBES: Probe[] = [
   },
 ];
 
-/** Probes the design lists that these sessions can't make: they need the brief (cut 2b) and a model (cut 2c). */
-export const DEFERRED = [{ name: "brief-step-1", what: "a session given the brief gets past CLAUDE.md step 1 (needs the brief and a model: cut 2c)" }];
+/**
+ * The brief probe's name (docs/agent-runner.md: "a session given the brief gets past CLAUDE.md step 1, instead of
+ * stopping because it can't run `git fetch`, `gh` or `list_claims`"). It is the one probe that needs a model, so it
+ * runs as the `--brief-probe` mode (runBriefProbe, below) — a bounded real-model session, apart from the offline sweep
+ * and its stamp — not as one of PROBES.
+ */
+export const BRIEF_PROBE = "brief-step-1";
+/** Probes the design lists that these sessions still can't make offline. The brief probe (BRIEF_PROBE) now runs as `--brief-probe`, so none remain purely deferred. */
+export const DEFERRED: { name: string; what: string }[] = [];
 
 const BOT = "Agent Runner Probe";
 const BOT_EMAIL = "probe@agent-runner.invalid";
@@ -778,6 +789,7 @@ async function probeMain(opts: ProbeOpts): Promise<number> {
       console.log(`  ${result.pass ? "✓" : "✗"} ${probe.name}: ${probe.what}${result.pass ? "" : `\n      ${result.why}`}`);
     }
     for (const d of DEFERRED) console.log(`  · ${d.name}: ${d.what}`);
+    console.log(`  · ${BRIEF_PROBE}: a session given the brief gets past CLAUDE.md step 1 — needs a model: run it with --brief-probe --anthropic-key <file> (up to $${BRIEF_LIMITS.maxBudgetUsd})`);
     for (const n of notes) console.log(`  note: ${n}`);
   } finally {
     rmSync(canary.dir, { recursive: true, force: true });
@@ -799,7 +811,108 @@ async function probeMain(opts: ProbeOpts): Promise<number> {
   return failed ? 1 : 0;
 }
 
-const KNOWN: Record<string, "value" | "flag"> = { "--claude": "value", "--sha256": "value", "--version": "value", "--state": "value", "--only": "value", "--main-checkout": "value", "--self-check": "flag", "--help": "flag" };
+/**
+ * A clean, legitimate, trivial ticket for the brief probe. It is clean (ticketProblem passes), self-contained (one
+ * file, no network, no service), and its one change is an edit — so a worker that gets past CLAUDE.md step 1 edits
+ * NOTES.md in the clone, which is the signal the probe reads.
+ */
+export const BRIEF_TICKET: BriefTicket = {
+  identifier: "SMD-1",
+  title: "Add a note line to NOTES.md",
+  description: "In NOTES.md at the repository root, add one new bullet line reading \"- Noted by the brief probe.\" as the last bullet under the \"## Notes\" heading. Change nothing else, and add no other file.",
+  verify: ["NOTES.md ends with the new bullet under \"## Notes\".", "No other file is changed."],
+  named: [],
+};
+
+/**
+ * The brief probe runs the worker at the runner's real model and effort (decision 4: `claude-opus-5-5` at `xhigh`),
+ * not the mock probes' cheap `low` — so it tests the session a real ticket's worker gets, where the effort shapes how
+ * the model reads the brief against CLAUDE.md step 1. The budget and turn caps are a safe ceiling for the trivial task,
+ * which costs well under them; the real worker's own ceiling is $10 (docs, "Limits").
+ */
+const BRIEF_LIMITS: SessionLimits = { model: "claude-opus-5-5", effort: "xhigh", maxTurns: 20, maxBudgetUsd: 2 };
+
+/** Whether a file tool's input writes a path under the clone root. */
+function editsUnder(input: unknown, root: string): boolean {
+  const fp = (input as { file_path?: unknown } | null)?.file_path;
+  return typeof fp === "string" && (fp === root || fp.startsWith(`${root}/`));
+}
+
+/**
+ * Whether the worker got past CLAUDE.md step 1, or why not. Past step 1 = it reached the task and edited the clone (an
+ * Edit or Write under the clone root), rather than stopping because it couldn't run `git fetch`, `gh` or `list_claims`
+ * (docs/agent-runner.md). The reason shows the session's own text with control characters escaped (shownText); it is a
+ * local diagnostic for the maintainer's console and the run's record, and never reaches Linear or the brain.
+ */
+export function briefVerdict(out: SessionOutcome, root: string): string | null {
+  if (out.ended === "refused") return `the session was refused before it ran: ${shownText(out.why, 200)}`;
+  if (out.ended === "init") return `the session's init was rejected (the profile or model was wrong): ${shownText(out.why, 200)}`;
+  if (out.calls.some((c) => (c.name === "Edit" || c.name === "Write") && editsUnder(c.input, root))) return null;
+  return `the worker made no Edit or Write in the clone, so it did not reach the task (expected cause: a stall at CLAUDE.md step 1 — it couldn't run git fetch, gh or list_claims; its report says the actual reason). It ended ${out.ended} (${shownText(out.why, 120)}); its report: ${shownText(out.report, 300)}`;
+}
+
+type BriefOpts = { claude: string; sha256: string; version: string; state: string; mainCheckout: string; install: string; git: string; anthropicKey: string };
+
+/**
+ * The brief probe (BRIEF_PROBE): one real-model worker session, given the real brief for BRIEF_TICKET, under the real
+ * profile with the real repo CLAUDE.md in its config directory — so CLAUDE.md step 1 (the claim ceremony that tells a
+ * session to run `git fetch`, `gh` or `list_claims`) is actually there to get past, not a stand-in. It spends (the
+ * worker's $1 budget and 12 turns), so it is its own mode, not part of the offline sweep or its stamp. It passes when
+ * the worker edits the clone (it reached the task) and fails when it stops at step 1. The clone and temp directory are
+ * removed; the session's record (stream, settings, guard log) and a brief-probe.json verdict stay.
+ */
+async function runBriefProbe(opts: BriefOpts): Promise<number> {
+  const pinned: Pinned = { path: opts.claude, sha256: opts.sha256, version: opts.version };
+  const run = join(opts.state, "brief-probe", new Date().toISOString().replace(/[:.]/g, "-"));
+  const tmp = `/private/tmp/obr-${hex(4)}`;
+  // Setup and the session are one try: a throw anywhere (a failed clone, a refused session) still cleans the clone and
+  // the temp directory. The record (run/record, with the verdict) is kept — the finally removes only the clone and tmp.
+  try {
+    mkdirSync(tmp, { mode: 0o700 });
+    for (const d of ["root", "record", "config"]) mkdirSync(join(run, d), { recursive: true, mode: 0o700 });
+    const home = homedir();
+    const gitConfigPath = join(run, "gitconfig");
+    writeFileSync(gitConfigPath, `[user]\n\tname = ${BOT}\n\temail = ${BOT_EMAIL}\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n`, { mode: 0o644 });
+    const gitConfig = realpathSync(gitConfigPath);
+    const configDir = realpathSync(join(run, "config"));
+    // The real repo's CLAUDE.md, so the worker meets the actual "Claim your work" step 1 and must get past it.
+    writeFileSync(join(configDir, "CLAUDE.md"), readFileSync(join(opts.mainCheckout, "CLAUDE.md")));
+    const root = realpathSync(join(run, "root"));
+    const branch = branchFor(BRIEF_TICKET.identifier, BRIEF_TICKET.title);
+    const g = (args: string[]): string => {
+      const r = Bun.spawnSync(["/usr/bin/git", ...args], { cwd: root, env: { PATH: "/usr/bin:/bin", HOME: home, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: "1" }, stdout: "pipe", stderr: "pipe" });
+      if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString().trim()}`);
+      return r.stdout.toString();
+    };
+    g(["init", "-q", "-b", branch]);
+    writeFileSync(join(root, "NOTES.md"), "# Project notes\n\n## Notes\n\n- An existing note.\n");
+    writeFileSync(join(root, "README.md"), "A brief-probe repository.\n");
+    g(["add", "-A"]);
+    g(["commit", "-q", "-m", `[core] Brief probe base (${BRIEF_TICKET.identifier})`]);
+    const base = g(["rev-parse", "HEAD"]).trim();
+    const paths: SessionPaths = {
+      install: opts.install, bun: process.execPath, git: opts.git, root, tmp: realpathSync(tmp),
+      record: realpathSync(join(run, "record")), configDir, keyFile: opts.anthropicKey, gitConfig, home,
+    };
+    const brief = buildBrief({ ticket: BRIEF_TICKET, clonePath: root, branch, base, claimId: "brief-probe-no-claim", bundlePath: join(paths.tmp, "branch.bundle") });
+    console.log(`brief probe: a real ${BRIEF_LIMITS.model} worker session at ${BRIEF_LIMITS.effort} on Claude Code ${pinned.version}, up to $${BRIEF_LIMITS.maxBudgetUsd} and ${BRIEF_LIMITS.maxTurns} turns; records in ${paths.record}`);
+    const out = await runSession({
+      role: "worker", paths, limits: BRIEF_LIMITS, pinned, prompt: brief,
+      settings: settingsText("worker", paths), timeLimitMs: 300_000, user: userInfo().username, uid: process.getuid?.() ?? 0,
+    });
+    const why = briefVerdict(out, root);
+    const cost = typeof out.result?.totalCostUsd === "number" ? ` $${out.result.totalCostUsd.toFixed(2)}` : "";
+    const turns = typeof out.result?.numTurns === "number" ? `, ${out.result.numTurns} turns` : "";
+    writeFileSync(join(paths.record, "brief-probe.json"), `${JSON.stringify({ probe: BRIEF_PROBE, pass: why === null, why, costUsd: out.result?.totalCostUsd ?? null, numTurns: out.result?.numTurns ?? null, ended: out.ended, calls: out.calls.map((c) => c.name) }, null, 2)}\n`);
+    console.log(`  ${why === null ? "✓" : "✗"} ${BRIEF_PROBE}: a session given the brief gets past CLAUDE.md step 1${cost}${turns}${why === null ? "" : `\n      ${why}`}`);
+    return why === null ? 0 : 1;
+  } finally {
+    rmSync(join(run, "root"), { recursive: true, force: true });
+    if (tmp.startsWith("/private/tmp/obr-")) rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+const KNOWN: Record<string, "value" | "flag"> = { "--claude": "value", "--sha256": "value", "--version": "value", "--state": "value", "--only": "value", "--main-checkout": "value", "--brief-probe": "flag", "--anthropic-key": "value", "--self-check": "flag", "--help": "flag" };
 
 /** `--name value` or `--name=value`; a flag takes none; anything unknown is refused. */
 export function parseArgs(argv: string[]): Record<string, string | true> | { error: string } {
@@ -831,6 +944,7 @@ export async function main(argv: string[], execArgv: string[]): Promise<number> 
   if (opts["--self-check"]) return (await import("./probes-check.ts")).selfCheck();
   if (opts["--help"]) {
     console.log("bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version <x.y.z> [--state <dir>] [--only <a,b>] [--main-checkout <path>] | --self-check");
+    console.log("  add --brief-probe --anthropic-key <file> to run the brief probe (cut 2c): one real-model worker session (≈$1), apart from the offline sweep");
     return 0;
   }
   if (!START_FLAGS.every((f) => execArgv.includes(f))) {
@@ -875,6 +989,19 @@ export async function main(argv: string[], execArgv: string[]): Promise<number> 
   if (git === null) {
     console.error("no git in the active developer directory (xcode-select -p): install the Command Line Tools");
     return 2;
+  }
+  if (opts["--brief-probe"]) {
+    if (typeof opts["--anthropic-key"] !== "string") {
+      console.error("--brief-probe needs --anthropic-key <file>: the runner's 0600 Anthropic key (apiKeyHelper reads it; its value is never printed)");
+      return 2;
+    }
+    const keyFile = resolved("--anthropic-key", opts["--anthropic-key"] as string, true);
+    if (typeof keyFile === "number") return keyFile;
+    if ((statSync(keyFile).mode & 0o077) !== 0) {
+      console.error(`the Anthropic key file must be owner-only (chmod 600): ${shownText(keyFile)}`);
+      return 2;
+    }
+    return runBriefProbe({ git, claude, sha256: opts["--sha256"] as string, version: opts["--version"] as string, state: realpathSync(state), mainCheckout, install, anthropicKey: keyFile });
   }
   return probeMain({
     git,
