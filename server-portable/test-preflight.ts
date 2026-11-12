@@ -3341,6 +3341,11 @@ else {
       assert(/!  open items\s+the server's role holds no open_item_events INSERT, open_items INSERT, open_items UPDATE, open_items DELETE, open_item_close_proposals INSERT, open_item_close_proposals UPDATE: the open-item writers \(open_item, update_item, set_item_status, propose_item_close and decide_item_close\) fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups items/.test(missingBoth.out),
              "…and the items group it lacks is a warning naming each write, the open-item writers alone failing for it");
+      // 134's deliverables group (SMD-1715 PR 2): soft too — the writes it lacks named, its sequence's USAGE among them
+      // (the event trigger draws each seq by nextval), the two writers alone failing; the read holds by the SELECTs.
+      assert(/!  deliverables\s+the server's role holds no deliverable_events INSERT, deliverable_events_seq_seq USAGE, thought_facets INSERT, thought_facets UPDATE: capture_deliverable and verify_deliverable fail naming the table, and nothing else does/.test(missingBoth.out)
+             && /--grant <role> --groups deliverables/.test(missingBoth.out),
+             `…and the deliverables group it lacks is a warning naming each write and the sequence, the two writers alone failing for it (${missingBoth.out.split("\n").find((l) => /!  deliverables\s/.test(l))?.trim().slice(0, 220)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
