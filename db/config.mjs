@@ -2721,12 +2721,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "openbrain_agents",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ table: "agent_memory_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ function: "lookup_agent_memory_key(text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/per-agent-identity" }),
-    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC, and takes Daemonic Brain's uuid thought id — SMD-2128)
-    Object.freeze({ table: "ingestion_jobs",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ table: "ingestion_items", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ sequence: "ingestion_jobs_id_seq",  privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ sequence: "ingestion_items_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ function: "append_thought_evidence(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
     // schemas/entity-extraction (upstream's `entities`/`edges`, not 016's ob1_* tables; three bigserial ids;
     // `thought_entities` is the one name the two share — on a migrated brain the file's IF NOT EXISTS
     // leaves 016's table, so this row is `extraction`'s privileges exactly — a row issued on every
@@ -2770,13 +2764,12 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "classification_outcomes", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
     Object.freeze({ table: "capture_thresholds",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
     Object.freeze({ table: "ab_comparisons",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
-    // recipes/brain-health-monitoring/ops-views.sql (eight views; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then)
+    // recipes/brain-health-monitoring/ops-views.sql (seven views; the last two exist only where schemas/entity-extraction is applied, and are skipped until then; the ingestion summary retired with schemas/smart-ingest, SMD-2690)
     Object.freeze({ view: "ops_source_volume_24h",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_recent_thoughts",         privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_enrichment_gaps",         privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_type_distribution",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_sensitivity_distribution", privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
-    Object.freeze({ view: "ops_ingestion_summary",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_stalled_entity_queue",    privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_graph_coverage",          privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     // recipes/chatgpt-conversation-import (user_id a plain nullable uuid now; upstream's referenced auth.users)

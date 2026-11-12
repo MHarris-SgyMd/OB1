@@ -101,6 +101,17 @@ export function createCore(deps: CoreDeps) {
      * caller's key for the plugin. ctx.model.chat is this, bound to its call.
      */
     pluginChat: (who: ModelCaller, req: ModelRequest): Promise<ModelAnswer> => pluginChat(ctx.embedConfig(), who, req),
+    /**
+     * The trust a capture by this key, declaring `declared`, is stamped with
+     * (SMD-2690 PR 4): the store's trustCeiling, the database's own rule.
+     * ctx.caller.trust is this, bound to its caller. A store without it (a
+     * suite's fake) says so when a plugin asks.
+     */
+    trustOf: async (who: { agentId?: string; name: string }, declared: string | null): Promise<string | null> => {
+      const store = await ctx.store();
+      if (!store.trustCeiling) throw new Error(`a key's trust needs the SQL store; this brain runs the ${store.kind} store`);
+      return store.trustCeiling(who.agentId ?? null, who.name, declared);
+    },
     /** The longest one capture's model calls may run under this brain's settings, in seconds: what a webhook's id lease is sized from (SMD-2768). */
     captureSeconds: (): number => writes.captureCallSeconds(ctx.embedConfig(), resolveJevConfig(ctx.env())),
     /** The vector mender's loop (SMD-2889): both servers start one at boot, under OB1_VECTOR_MEND_INTERVAL. */

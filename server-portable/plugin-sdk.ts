@@ -45,8 +45,18 @@ export type PluginOutcome<T> = { ok: true; value: T } | { ok: false; refusal: Pl
 /** A core operation's input, as its caller writes it: before the schema fills defaults. */
 export type CoreInput<K extends ToolName> = z.input<z.ZodObject<(typeof SPECS)[K]["inputSchema"]>>;
 
-/** Who called, as a plugin may read it: the key's name, its scope and its stable agent id. */
-export type Caller = { readonly name: string; readonly scope: PluginScope; readonly agentId?: string };
+/** The trust words, lowest first (046's ladder, ob1_trust_ceiling's). */
+export type Trust = "ingested" | "agent" | "operator";
+
+/**
+ * Who called, as a plugin may read it: the key's name, its scope and its
+ * stable agent id; and `trust(declared?)`, the trust a thought this caller
+ * captures, declaring `declared`, is stamped with (SMD-2690 PR 4) — the
+ * database's own rule, the declaration capped at the key's kind, the kind
+ * when none is declared, null for an unclassified key that declares none.
+ * What to weigh before writing over another's thought.
+ */
+export type Caller = { readonly name: string; readonly scope: PluginScope; readonly agentId?: string; trust(declared?: Trust | null): Promise<Trust | null> };
 
 /** A core call's refusal from the gate, before the core: the caller's key may not call that operation. */
 export type CallForbidden = { ok: false; refusal: { code: "FORBIDDEN"; retryable: false; needs: string } };

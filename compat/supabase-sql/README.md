@@ -117,8 +117,8 @@ cd compat/supabase-sql && bun run test
 it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `integrations/test-writes.ts` then drives the servers
-that need the model provider stubbed (the two consolidation workers,
-smart-ingest): the migrated
+that need the model provider stubbed (the two consolidation workers; smart-ingest
+until SMD-2690 made it a plugin): the migrated
 files this shim is judged by.
 
 ## What is supported

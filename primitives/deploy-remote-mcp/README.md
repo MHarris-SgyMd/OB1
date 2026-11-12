@@ -1,6 +1,6 @@
 # Run a Vendored Server
 
-A guide to running a vendored recipe or integration server: one process under [Bun](https://bun.sh) against your brain's Postgres, beside the brain, on its own port and with its own access keys. These are the HTTP APIs, workers and webhook receivers under `recipes/` and `integrations/` that a recipe or integration README tells you to run. The brain itself is the compose stack in [`SETUP.md`](../../SETUP.md), its one deployment (SMD-2288); this guide does not run it, and new operations on the brain are a plugin ([`plugins/README.md`](../../plugins/README.md)), not a server here.
+A guide to running a vendored recipe or integration server: one process under [Bun](https://bun.sh) against your brain's Postgres, beside the brain, on its own port and with its own access keys. These are the workers under `recipes/` and `integrations/` that a recipe or integration README tells you to run (the last HTTP APIs and webhook receivers became plugins with SMD-2690). The brain itself is the compose stack in [`SETUP.md`](../../SETUP.md), its one deployment (SMD-2288); this guide does not run it, and new operations on the brain are a plugin ([`plugins/README.md`](../../plugins/README.md)), not a server here.
 
 Each server is one HTTP process reached by URL: never a stdio process a client spawns, and never a `claude_desktop_config.json` entry. None of them speaks MCP. An agent reaches the brain through the brain's own connector ([Remote MCP Connection](../remote-mcp/)); these servers are called by a schedule, by a service's webhook or by another server.
 
@@ -20,14 +20,13 @@ Every vendored server's README names the file to run and the environment it read
 | Server file | `integrations/<name>/index.ts` or `recipes/<name>/<file>.ts` |
 | Port | `8787` (any free port; `PORT` unset means 8000, the stack's published port, which podman's `gvproxy` may hold too) |
 | Listen address | every address, unset; `OB1_LISTEN_HOST` names one IP address instead (`127.0.0.1` keeps the server to this machine). A value that is not one, or a link-local one, stops the server at start, in words; one this host does not have stops it with Bun's own error, `Is port N in use?` on macOS, EADDRNOTAVAIL on Linux (SMD-3323) |
-| Environment | `SUPABASE_URL` (the Postgres connection string: the shim keeps the variable's name), `MCP_ACCESS_KEYS` (the editorial-policy auditor reads `AUDITOR_ACCESS_KEYS`; smart-ingest, the single raw `MCP_ACCESS_KEY`), and whatever else the README lists (`OPENROUTER_API_KEY`, …) |
+| Environment | `SUPABASE_URL` (the Postgres connection string: the shim keeps the variable's name), `MCP_ACCESS_KEYS` (the editorial-policy auditor reads `AUDITOR_ACCESS_KEYS`), and whatever else the README lists (`OPENROUTER_API_KEY`, …) |
 
 These servers run this way, and `integrations/test-auth.ts` starts each one so in CI:
 
 | Server | Kind | Called by |
 |--------|------|-----------|
-| [`integrations/smart-ingest`](../../integrations/smart-ingest/) | HTTP API | a client that sends a document to split into thoughts |
-| [`integrations/entity-extraction-worker`](../../integrations/entity-extraction-worker/) | worker | a schedule, or smart-ingest after a write |
+| [`integrations/entity-extraction-worker`](../../integrations/entity-extraction-worker/) | worker | a schedule |
 | [`integrations/consolidation-workers`](../../integrations/consolidation-workers/) (`bio`, `metadata-norm`) | workers | a schedule |
 | [`recipes/editorial-policy`](../../recipes/editorial-policy/) (`auditor/index.ts`) | worker | a weekly schedule |
 
@@ -35,7 +34,7 @@ These servers run this way, and `integrations/test-auth.ts` starts each one so i
 
 ## Step 1: Apply the Server's Tables
 
-Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/smart-ingest` for smart-ingest, `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your brain's database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
+Each server's README names the schemas it needs, under its prerequisites or in its first step: `schemas/knowledge-graph` for the extraction and consolidation workers, `schemas/enhanced-thoughts` for most of them, and the auditor its recipe's own `recipes/editorial-policy/schema.sql`. Run each against your brain's database, as the README says: `psql "$DATABASE_URL" -f schemas/<name>/schema.sql`, nothing first (no `auth.*` stub, no Supabase role: SMD-1810). With the compose stack, run it inside the database's container, `podman compose -f deploy/compose.yaml exec -T postgres psql -U postgres openbrain < schemas/<name>/schema.sql`, which needs neither a published port nor psql on the host.
 
 The server in Step 4 does need to reach the database from the host, so the stack must have come up with `-f deploy/compose.host-ports.yaml` (`deploy/README.md`, "What is reachable from where"); `SUPABASE_URL` is then `postgres://postgres:<POSTGRES_PASSWORD>@127.0.0.1:5432/openbrain`.
 
@@ -88,8 +87,6 @@ MCP_ACCESS_KEYS=cron:write:paste-the-hash-here,dashboard:read:paste-another-hash
 ```
 
 A request carries the key in an `x-brain-key` or `x-access-key` header, as `Authorization: Bearer <key>`, or as `?key=` on the URL. A wrong key in any of them is refused with a 401.
-
-> **smart-ingest is the exception.** It predates the hashed list (change 67) and holds one raw key, `MCP_ACCESS_KEY`, compared constant-time by its own check, with no scope: the key may do everything the server does. It reads it from an `x-brain-key` header or as `Authorization: Bearer <key>` alone. Its README says so.
 
 > The older single raw key still works (`MCP_ACCESS_KEY`, the auditor's `AUDITOR_ACCESS_KEY`): one key for every caller, with write scope, compared by digest. Move to `MCP_ACCESS_KEYS` when you next touch the environment; both may be set at once.
 

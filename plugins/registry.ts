@@ -14,5 +14,6 @@ import jobHunt from "./job-hunt/index.ts";
 import mealPlanning from "./meal-planning/index.ts";
 import professionalCrm from "./professional-crm/index.ts";
 import readwise from "./readwise/index.ts";
+import smartIngest from "./smart-ingest/index.ts";
 
-export const PLUGINS: readonly PluginManifest[] = [agentMemory, example, familyCalendar, homeMaintenance, householdKnowledge, jobHunt, mealPlanning, professionalCrm, readwise];
+export const PLUGINS: readonly PluginManifest[] = [agentMemory, example, familyCalendar, homeMaintenance, householdKnowledge, jobHunt, mealPlanning, professionalCrm, readwise, smartIngest];
