@@ -2513,14 +2513,16 @@ them all; the same statement again is `unchanged` only on the item it names. Unt
 now `clear_priority('ticket', …)` left the maker's older statement on the row
 standing, and the read showed it again. `priority_history`, `priority_of` and the
 writers' winner read the ticket and its rows together, each statement naming its
-own item. `ob1_priority_lock` takes the ticket's lock for a row, so writers on the
-two wait on each other. `priority_current` stays keyed by the exact item, as its
+own item. A due reference into the item's own pool is refused as one naming the
+item itself. `ob1_priority_lock` takes the ticket's lock for a row, so writers on
+the two wait on each other. `priority_current` stays keyed by the exact item, as its
 drift check computes it, and the writers re-project every item whose statement
 they closed. On upgrade, where one maker already holds two or more open statements
-across a ticket and its rows, each older one closes as replaced by the newest,
-which the read already counted alone. The priority group gains `SELECT` on
-`thought_sources`, granted to the roles holding it already. Needs 116, 117 and
-122. test-schema [120], test-upgrade [20bx].
+across a ticket and its rows, each older one closes as replaced by the newest, a
+statement made by name before the key had an id counted as that key's. The
+priority group gains `SELECT` on `thought_sources`, granted to the roles that hold
+`priority_assertions` grants and `SELECT` on `thoughts` already. Needs 053, 115,
+116, 117 and 122. test-schema [120], test-upgrade [20bx].
 
 Migration 132 adds the operator's priority weights (SMD-4193 PR 2), which every
 read takes as its defaults: `priority_weight_settings`, one standing row at most,

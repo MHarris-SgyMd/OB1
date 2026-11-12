@@ -83,8 +83,7 @@
 --   its own pool, which writers now refuse, stays open, and the read finds
 --   no due time through it, as before: closing it would withdraw a stance
 --   its maker took, so its maker restates it (review pass 4). A check that
---   finds each of these is SMD-4239. 116's one-open
---   index stays per exact
+--   finds each of these is SMD-4239. 116's one-open index stays per exact
 --   item: membership is a read of thought_sources and thoughts, which no
 --   index can hold.
 --
@@ -100,14 +99,13 @@
 --   priority_history on a ticket asks the pool too (review pass 4: said as
 --   the predicate reads). A role reading priorities without thoughts, which
 --   could make no call on a ticket or a thought before either, is given
---   nothing (review pass 3). An entity or
---   an open item reads neither.
+--   nothing (review pass 3). An entity or an open item reads neither.
 --
 -- CONCURRENCY
 --   One lock per pool, the subject's: two writers on one ticket's pool wait
 --   on each other whichever item each names, and a writer never holds two
---   pools' locks. The rebuild holds many, taken in their subjects' order,
---   so two rebuilds take them in one order and cannot deadlock either.
+--   pools' locks. The rebuild holds many, taken in their keys' order, so
+--   two rebuilds take them in one order and cannot deadlock either.
 --
 -- SAFETY
 --   Two new functions; eight replaced with their signatures (ob1_priority_lock
@@ -116,7 +114,8 @@
 --   version rules. test-schema [120], test-upgrade [20bx].
 --
 -- Prerequisites
---   053 (thought_sources), 116 (priority_assertions and its helpers), 117
+--   053 (thought_sources), 115 (ob1_work_claim_text), 116
+--   (priority_assertions and its helpers), 117
 --   (assert_priority's open items: ob1_item_lock, ob1_envelope_plugin,
 --   ob1_priority_owns_item), 122 (ob1_priority_subject, ob1_priority_open,
 --   ob1_ticket_rows, ob1_ticket_row_of, ob1_priority_counted). Applied by
@@ -311,9 +310,9 @@ BEGIN
   PERFORM ob1_priority_isolation('ob1_rebuild_priority_projection()');
   written := 0;
   deleted := 0;
-  -- Item by item under each item's pool's lock, the subjects in key order:
-  -- one order for every rebuild, and a writer holds one pool's lock alone.
-  -- Each locked by the key it was sorted by, read once (review pass 3).
+  -- Item by item under its pool's lock, the pools in their keys' order and
+  -- each locked by the key it was sorted by, read once (review passes 1 and
+  -- 3): one order for every rebuild, and a writer holds one pool's lock alone.
   FOR r IN SELECT d.item_kind, d.item_key, ob1_priority_lock_key(d.item_kind, d.item_key) AS lock_key
              FROM (SELECT DISTINCT x.item_kind, x.item_key FROM ob1_priority_projection_drift() x) d
             ORDER BY 3, 1, 2 LOOP
@@ -585,7 +584,7 @@ BEGIN
       CROSS JOIN LATERAL ob1_priority_item(e.v->>'kind', e.v->>'key') AS n
      ORDER BY n.kind, n.key, e.ord)
   -- One statement, so one snapshot: the pool's winner (ob1_priority_winner,
-  -- the rule's one copy) first, as 116 answered, then the rest of its open
+  -- the pool rule's one copy) first, as 116 answered, then the rest of its open
   -- statements in the rule's order; the level the winner's.
   SELECT q.kind, q.key, w.level, CASE WHEN w.id IS NOT NULL THEN ob1_priority_json(w) END, l.list
     FROM asked q
@@ -613,16 +612,17 @@ COMMENT ON FUNCTION priority_history(text, text) IS
   'Every assertion on one item''s pool — a ticket and its own rows are one item (ob1_priority_pool_items) — closed ones included, in the order written (seq), as a jsonb array, each naming its own item: the record of who said it mattered and when that stopped. Raises on a malformed item. Migration 116 / SMD-3663; over the pool, migration 133 / SMD-4127.';
 
 COMMENT ON FUNCTION ob1_priority_counted(text, text, boolean) IS
-  'The open assertion a composed read counts for a normalised item: 116''s rule (the lowest tier, then the later written) over its pool (ob1_priority_open: a ticket and its rows as one), each maker''s newest statement alone, tier 4 (inferred) left out unless p_inferred (docs/priority.md decision 5). All NULL for none. Since 133 the writers close a maker''s statements across the pool, so a maker holds two only where a thought became a ticket''s row after both were made. Migration 122 / SMD-3667; migration 133 / SMD-4127.';
+  'The open assertion a composed read counts for a normalised item: 116''s rule (the lowest tier, then the later written) over its pool (ob1_priority_open: a ticket and its rows as one), each maker''s newest statement alone, tier 4 (inferred) left out unless p_inferred (docs/priority.md decision 5). All NULL for none. Since 133 the writers close a maker''s statements across the pool, so a maker holds two only in the cases 133''s header names (a thought recorded as a ticket''s row after both were made, and the races beside it). Migration 122 / SMD-3667; migration 133 / SMD-4127.';
 
 -- ---------------------------------------------------------------------------
 -- On upgrade: a maker's older statements across one pool closed
 -- ---------------------------------------------------------------------------
 -- Where one maker holds two or more open statements across a ticket and its
 -- own rows, each older one closes as replaced by its newest; each item is
--- re-projected. A maker as the writers match one (116's is_maker): its agent
--- id, a by-name statement taking the id the registry gives its name now. A
--- re-apply finds nothing left to close.
+-- re-projected. A pool is its key, ob1_priority_lock_key's; a ticket's is
+-- 'ticket:<key>'. A maker as the writers match one (116's is_maker): its
+-- agent id, a by-name statement taking the id the registry gives its name
+-- now. A re-apply finds nothing left to close.
 DO $close$
 DECLARE
   r     record;
@@ -633,17 +633,15 @@ BEGIN
       SELECT a.id, a.seq, a.item_kind, a.item_key,
              COALESCE(COALESCE(a.maker_agent_id, (SELECT g.canonical_agent_id FROM ob1_agents g WHERE g.label = a.maker_name))::text,
                       'name:' || a.maker_name) AS maker,
-             CASE WHEN a.item_kind = 'ticket' THEN a.item_key ELSE ob1_ticket_row_of(a.item_key::uuid) END AS ticket
+             ob1_priority_lock_key(a.item_kind, a.item_key) AS pool
         FROM priority_assertions a
-       WHERE a.closed_at IS NULL
-         AND (a.item_kind = 'ticket'
-              OR (a.item_kind = 'thought' AND a.item_key ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))),
+       WHERE a.closed_at IS NULL AND a.item_kind IN ('ticket', 'thought')),
     ranked AS (
       SELECT o.*, first_value(o.id) OVER w AS newest, row_number() OVER w AS rn
         FROM open o
-       WHERE o.ticket IS NOT NULL
-      WINDOW w AS (PARTITION BY o.ticket, o.maker ORDER BY o.seq DESC))
-    SELECT k.id, k.newest, k.item_kind, k.item_key FROM ranked k WHERE k.rn > 1 ORDER BY k.ticket, k.seq
+       WHERE o.pool LIKE 'ticket:%'
+      WINDOW w AS (PARTITION BY o.pool, o.maker ORDER BY o.seq DESC))
+    SELECT k.id, k.newest, k.item_kind, k.item_key FROM ranked k WHERE k.rn > 1 ORDER BY k.pool, k.seq
   LOOP
     UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = r.newest
      WHERE id = r.id AND closed_at IS NULL;

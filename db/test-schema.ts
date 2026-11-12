@@ -19421,7 +19421,7 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
     (await db.query<{ level: number; open_count: number }>(`SELECT level, open_count FROM priority_current WHERE item_kind = $1 AND item_key = $2`, [kind, key])).rows[0] ?? null;
   const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
 
-  // The shape: the new function STABLE and commented; the replaced ones say 133; the lock PL/pgSQL.
+  // The shape: the two new functions STABLE and commented; the replaced ones say 133; the lock PL/pgSQL.
   const fns = (await db.query<{ n: string; v: string; l: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, l.lanname AS l, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
       WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_pool_items', 'ob1_priority_lock_key', 'ob1_priority_lock', 'ob1_priority_winner', 'ob1_priority_project', 'ob1_rebuild_priority_projection', 'assert_priority', 'clear_priority', 'priority_of', 'priority_history', 'ob1_priority_counted') ORDER BY 1`)).rows;
