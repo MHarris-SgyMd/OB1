@@ -474,6 +474,7 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
   try {
     await sleep(1500);
     ok(!got.some((m) => m.slot === "own"), "a broker gone 2 s is found again within the 3 s grace: no ask takes its own share", got);
+    ok(got.some((m) => m.slot === "back"), "and each pass is told the broker is back, so a call waiting on its own share asks again", got);
     ok(pool(b).background === 1 && pool(b).waiting.stable === 1, "the grant re-registered and the ask asked again", b.snapshot());
     port.detach();
   } finally { await relay.stop(); await b.stop(); }
@@ -584,6 +585,21 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
   port.detach();
   await relay.stop();
 }
+
+await withBroker(registry({ slots: 1 }), async (b) => {
+  // A live call past the broker's max_held on the socket: refused limit, kept as running, and counted once room frees.
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const port = relay.port("probe");
+  port.attach(() => {});
+  for (let i = 0; i <= 4096; i++) port.onMessage({ slot: "ask", id: `l${i}`, base: BASE, model: "m", cls: "live" });
+  ok(await until(() => pool(b).live === 4096 && relay.state().own === 1, 10_000), "4096 live calls counted, the 4097th refused for the limit and kept as running", { snap: b.snapshot(), s: relay.state() });
+  port.onMessage({ slot: "done", id: "l0" });
+  await sleep(500);
+  ok(pool(b).live === 4096, "and counted as one ends: the refused one sent again as held (one done, the count back at 4096)", { snap: b.snapshot(), s: relay.state() });
+  port.detach();
+  await relay.stop();
+});
 
 {
   // A refused key met only after an outage was said: named all the same.

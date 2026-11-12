@@ -12,7 +12,8 @@
  *   {slot: "ask", id, base, model, cls, first?, max_wait_s?}  a slot for a call; answered go, queued, own or lapsed
  *   {slot: "running", id, base, model, cls}                   a call running on the child's own share (after `own`)
  *   {slot: "done", id}                                        a call ended, or an ask withdrawn
- * Relay → child: {slot: "go" | "queued" | "own" | "lapsed", id}. `own` is "take your own share" (PR 2's semaphore):
+ * Relay → child: {slot: "go" | "queued" | "own" | "lapsed", id}, and {slot: "back"} at each new socket, so a call still
+ * waiting on its own share asks again, its time waited carried (`waited_s` on the ask). `own` is "take your own share" (PR 2's semaphore):
  * the broker does not broker that base (`no server`), the ask was malformed, or no broker answered within GRACE_MS.
  *
  * What the broker counts is what runs (review pass 1: a hand-back after a lost link ran six calls on three slots
@@ -51,11 +52,11 @@ export const QUIET_ASK_MS = 500;
 
 /** What a child sends. */
 export type ChildFrame =
-  | { slot: "ask"; id: string; base: string; model?: string | null; cls: "live" | "background"; first?: boolean; max_wait_s?: number }
+  | { slot: "ask"; id: string; base: string; model?: string | null; cls: "live" | "background"; first?: boolean; max_wait_s?: number; waited_s?: number }
   | { slot: "running"; id: string; base: string; model?: string | null; cls: "live" | "background" }
   | { slot: "done"; id: string };
 /** What the relay sends a child. */
-export type RelayFrame = { slot: "go" | "queued" | "own" | "lapsed"; id: string };
+export type RelayFrame = { slot: "go" | "queued" | "own" | "lapsed" | "back"; id: string };
 
 /** One child's link to the relay: messages from it, and the channel to send it on while it runs. */
 export type RelayPort = {
@@ -83,6 +84,8 @@ type Entry = {
   at: number;
   /** When it was last asked of the broker, and whether its child has been told it waits. */
   askedAt: number; told: boolean;
+  /** An own (running) call refused for the broker's limit: sent as `held` again once room frees. */
+  retry?: boolean;
   /** The socket it is registered on (`epoch`), -1 where none: a `done` reaches the broker only where it is known. */
   on: number;
 };
@@ -99,8 +102,9 @@ export function childFrame(m: unknown): ChildFrame | "bad" | null {
   const model = typeof f.model === "string" ? f.model : null;
   if (f.slot === "running") return { slot: "running", id: f.id, base: f.base, model, cls: f.cls };
   if (f.first !== undefined && typeof f.first !== "boolean") return "bad";
-  if (f.max_wait_s !== undefined && !(typeof f.max_wait_s === "number" && Number.isFinite(f.max_wait_s) && f.max_wait_s >= 0 && f.max_wait_s <= 86_400)) return "bad";
-  return { slot: "ask", id: f.id, base: f.base, model, cls: f.cls, ...(f.first === true ? { first: true } : {}), ...(typeof f.max_wait_s === "number" ? { max_wait_s: f.max_wait_s } : {}) };
+  const secs = (v: unknown) => v === undefined || (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 86_400);
+  if (!secs(f.max_wait_s) || !secs(f.waited_s)) return "bad";
+  return { slot: "ask", id: f.id, base: f.base, model, cls: f.cls, ...(f.first === true ? { first: true } : {}), ...(typeof f.max_wait_s === "number" ? { max_wait_s: f.max_wait_s } : {}), ...(typeof f.waited_s === "number" ? { waited_s: f.waited_s } : {}) };
 }
 
 /** Opens the relay: one socket to the broker at `url` with `key`, kept open, and a port per child. */
@@ -162,6 +166,8 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   /** Parked asks to the broker, oldest first, while it takes more. */
   const feed = () => {
     if (!open) return;
+    // A live call refused for the limit, counted once room frees (review pass 4: it waited for the next socket).
+    for (const [relayId, e] of entries) if (e.kind === "own" && e.retry) { e.retry = false; e.on = epoch; toBroker({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls }); }
     for (const [relayId, e] of entries) {
       if (atBroker >= maxWaiting) return;
       if (e.kind === "parked") askOf(relayId, e);
@@ -190,7 +196,10 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     let held = 0;
     for (const [relayId, e] of entries) if (e.kind === "grant" || e.kind === "own") { e.on = epoch; sock.send(JSON.stringify({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls })); held++; }
     // Every call it runs named: any grant the broker kept for it beyond these is given back now (review pass 3).
-    sock.send(JSON.stringify({ op: "synced", id: "synced" }));
+    sock.send(JSON.stringify({ op: "synced", id: nonce }));
+    // Each pass told the broker is back: a call still waiting on its own share asks again (review pass 4: a deep backlog
+    // sent to own shares past the grace drained there for 45 s, the broker back).
+    for (const send of senders.values()) { try { send({ slot: "back", id: "" }); } catch { /* going */ } }
     const parked = [...entries.values()].filter((e) => e.kind === "parked").length;
     feed();
     if (epoch === 1 || restarted || performance.now() - lostSaidAt >= 60_000 || lostUnsaid === 0) log(`slot relay: the broker answers${restarted ? " (restarted)" : ""}${held ? `; ${held} call${held === 1 ? "" : "s"} still running re-registered` : ""}${parked ? `; ${parked} waiting asked again` : ""}`);
@@ -290,7 +299,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
         if (e.kind === "ask" && m.why === "limit") {
           atBroker--;
           // A live call runs already: kept for `held` (review pass 3: parked, it ran uncounted).
-          if (e.cls === "live") { e.kind = "own"; e.on = -1; return; }
+          if (e.cls === "live") { e.kind = "own"; e.on = -1; e.retry = true; return; }
           // Never its own share for the broker's limit: it waits here, asked again as those ahead resolve.
           e.kind = "parked"; maxWaiting = Math.max(1, atBroker);
           if (!e.told) { e.told = true; tell(e, "queued"); }
@@ -303,8 +312,10 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           feed();
           return;
         }
-        // A held call the broker does not broker (an own call to another base): left unregistered.
+        // A held call the broker does not broker (an own call to another base): left unregistered; one refused for its
+        // limit, asked again as room frees.
         e.on = -1;
+        if (m.why === "limit") e.retry = true;
       }
     };
     sock.onclose = (ev) => {
@@ -355,7 +366,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           }
           if (mine.has(f.id)) { if (f.slot === "ask") send?.({ slot: "own", id: f.id }); return; }
           const relayId = `${nonce}:${child}:${++next}`;
-          const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now(), on: -1, askedAt: 0, told: false };
+          const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now() - (f.slot === "ask" && f.waited_s ? f.waited_s * 1000 : 0), on: -1, askedAt: 0, told: false };
           if (f.slot === "running") {
             e.kind = "own";
             entries.set(relayId, e);

@@ -73,7 +73,7 @@ async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
 
 async function withBroker(reg: Registry, fn: (b: Broker, lines: string[]) => Promise<void>, orphanMs = 0): Promise<void> {
   const lines: string[] = [];
-  // A closed socket's grants given back at once unless a row asks otherwise: [14] reads the keeping itself.
+  // A closed socket's grants given back at once unless a row asks otherwise: [13] reads the keeping itself.
   const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), orphanMs });
   try { await fn(b, lines); } finally { await b.stop(); }
 }
@@ -294,7 +294,7 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   await s.close();
 });
 
-section("[5] a socket that closes, or goes silent, gives everything back (the keeping off: [14] reads it)");
+section("[5] a socket that closes, or goes silent, gives everything back (the keeping off: [13] reads it)");
 await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
   const s = await connect(b, KEYS.stable);
   const c = await connect(b, KEYS.canary);
@@ -660,12 +660,14 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
 
 await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
-  ask(s, "g", "background"); await s.next("go", "g");
+  ask(s, "n1:g", "background"); await s.next("go", "n1:g");
   ask(c, "c1", "background"); await c.next("queued", "c1");
   await s.close();
   const s2 = await connect(b, KEYS.stable);
-  s2.send({ op: "synced", id: "synced" });
-  ok(!!(await c.next("go", "c1", 1000)), "synced, naming no held, gives the brain's kept grants back at once, not at the keeping's end");
+  s2.send({ op: "synced", id: "n2" });
+  ok(!(await c.next("go", "c1", 400)), "another relay's synced (another prefix) leaves this relay's kept grants kept");
+  s2.send({ op: "synced", id: "n1" });
+  ok(!!(await c.next("go", "c1", 1000)), "its own relay's synced, naming no held, gives them back at once, not at the keeping's end");
   await s2.close(); await c.close();
 }, 5000);
 
@@ -721,6 +723,69 @@ await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
   await sleep(100);
   ok(pool(b).live <= 4096, `a brain's kept grants are held to MAX_HELD, the oldest given back (${pool(b).live} kept)`, pool(b).live);
 }, 60_000);
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  // A grant kept at one close, taken back, and kept again at a later close is the later close's: the first close's
+  // timer leaves it.
+  const s1 = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s1, "n1:g", "background"); await s1.next("go", "n1:g");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await s1.close();
+  const s2 = await connect(b, KEYS.stable);
+  s2.send({ op: "held", id: "n1:g", base: BASE, model: "qwen3:8b", cls: "background" }); await s2.next("go", "n1:g");
+  await sleep(1000);
+  await s2.close();
+  const closed = performance.now();
+  ok(!(await c.next("go", "c1", 1500)), "the first close's timer, firing first, leaves the grant the second close kept");
+  ok(!!(await c.next("go", "c1", 2000)) && performance.now() - closed >= 1800, "the second close's own keeping gives it back", Math.round(performance.now() - closed));
+  await c.close();
+}, 2000);
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  // A brain's grant on one socket, its ask again on another of its sockets still open (a half-open old one): moved, go.
+  const s1 = await connect(b, KEYS.stable), s2 = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s1, "n1:a", "background"); await s1.next("go", "n1:a");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  ask(s2, "n1:a", "background");
+  ok(!!(await s2.next("go", "n1:a")) && pool(b).background === 1, "an ask naming the brain's grant on its other open socket moves it: go, counted once", pool(b));
+  // A relay synced on the new socket: the old socket's close gives back what it still holds of that relay at once.
+  s2.send({ op: "synced", id: "n1" });
+  done(s2, "n1:a");
+  ok(!!(await c.next("go", "c1")), "the moved grant's done frees it");
+  done(c, "c1");
+  ask(s1, "n1:b", "background"); await s1.next("go", "n1:b");
+  ask(c, "c2", "background"); await c.next("queued", "c2");
+  await s1.close();
+  ok(await until(() => c.seen("go", "c2"), 1000), "the old socket's grants of a relay synced on a newer socket are given back at its close, not kept");
+  await s2.close(); await c.close();
+}, 5000);
+
+await withBroker(registry({ slots: 1, reserve: 0, idle: 8 }), async (b) => {
+  // A socket that stops answering (a raw client, no pongs) with an ask queued: no grant goes into it once it has been
+  // silent half its idle_s, and it is ended at idle_s, whatever the broker sends it.
+  const net = await import("node:net");
+  const frame = (text: string) => { const body = Buffer.from(text), mask = Buffer.from([1, 2, 3, 4]); return Buffer.concat([Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]), mask, Buffer.from(body.map((x, i) => x ^ mask[i % 4]))]); };
+  const c = await connect(b, KEYS.canary);
+  ask(c, "c0", "background"); await c.next("go", "c0");
+  const raw = net.connect(b.port, "127.0.0.1");
+  let got = "";
+  let closed = false;
+  raw.on("data", (d: Buffer) => { got += d.toString("latin1"); });
+  raw.on("close", () => { closed = true; });
+  raw.on("error", () => {});
+  await new Promise<void>((r) => raw.on("connect", () => r()));
+  raw.write(`GET /v1/slots HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-brain-key: ${KEYS.third}\r\n\r\n`);
+  await until(() => got.includes(" 101 "), 3000);
+  raw.write(frame(JSON.stringify({ op: "ask", id: "q", base: BASE, model: "qwen3:8b", cls: "background" })));
+  await until(() => pool(b).waiting.third === 1, 2000);
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await sleep(4500);
+  done(c, "c0");
+  ok(!!(await c.next("go", "c1", 1500)), "the slot freed goes past the silent socket's older ask to the brain that answers");
+  ok(await until(() => closed, 6000) && !pool(b).waiting.third, "and the silent socket is ended at idle_s, its ask withdrawn", pool(b));
+  raw.destroy();
+  await c.close();
+});
 
 section("[14] the base is the brain's, read the same way");
 for (const base of ["http://Host.Containers.Internal:11434/v1/", "https://openrouter.ai/api/v1", "http://u:p@h:1/v1//", "not a url/", "http://[::1]:11434/v1"]) {
