@@ -36,7 +36,7 @@ import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, norma
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
 import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
-import { DUE_ONLY_LEVEL, INFER_PROMPT, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
+import { citedIn, DUE_ONLY_LEVEL, flooredIn, INFER_PROMPT, INFER_PROMPT_VERSION, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
 
 const { assert, report } = createAssert();
 
@@ -2964,6 +2964,44 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
       && readAnswer({ level: "urgent", level_phrase: "not urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "high", level_phrase: "no rush" }, "no rush on this", TUE).level === null
       && readAnswer({ level: "low", level_phrase: "no rush" }, "no rush on this", TUE).level?.value === 1 && readAnswer({ level: "high", level_phrase: "no time to lose" }, "no time to lose here", TUE).level?.value === 3,
     "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands, and emphasis (\"never been more urgent\") is no negation");
+  // SMD-4226: a label cited for another item is no level of the text's own (v1 read 10 of its 38 summary levels so).
+  const export944 = "SMD-944 — Add keyword search — vector-only retrieval cannot find an exact token\nProject: Retrieval & Ranking · Status: Done (completed) · Priority: High · Parent: none";
+  assert(citedIn("Medium", "Filed SMD-1768 (Medium) for the drift.") && citedIn("SMD-2627 (Medium):", "Next: SMD-2627 (Medium): the gate.")
+      && citedIn("Medium, Release Engineering", "Filed SMD-2742 — Medium, Release Engineering.") && citedIn("Backlog, Low", "It is Backlog, Low now.")
+      && citedIn("Urgent", "SMD-3410 stays first. Urgent and the date stand.") && citedIn("High", "the follow-up (High) is filed")
+      && citedIn("Low", "Tickets: Backlog, Low") && citedIn("Medium", "Priority Medium, Release Engineering"),
+    "a label cited for another item: a ticket key in the phrase or the 40 characters before it, parentheses, or a level in a list of labels");
+  assert(!citedIn("Priority: High", export944) && !citedIn("Urgent", "Urgent: the landlord wants an answer by Friday") && !citedIn("urgent", "this is urgent, please")
+      && !citedIn("high", "SMD-1 landed last week, and this one matters a great deal: it is high on my list") && !citedIn("Low", "Low priority: tidy the shed")
+      && !citedIn("Medium", "SMD-12 (Medium) is done, and the release notes went out. Medium is how much the garden matters now"),
+    "the text's own level stands: a ticket's own export (its key opens the text, far before the field), a key further back than 40 characters, a lower-case clause after a comma, and one place of the phrase that is not cited");
+  assert(readAnswer({ level: "medium", level_phrase: "SMD-2627 (Medium):" }, "Next: SMD-2627 (Medium): the gate.", TUE).level === null
+      && readAnswer({ level: "high", level_phrase: "Priority: High" }, export944, TUE).level?.value === 3
+      && readAnswer({ level: "low", level_phrase: "Backlog, Low", due_phrase: "by Friday" }, "It is Backlog, Low now; I'll file it by Friday", TUE).due?.day === "2026-11-06",
+    "readAnswer drops a cited label's level and keeps the due day beside it; a ticket's own export keeps its level");
+  // SMD-4226: the earliest something can happen is no deadline (v1 and v2 read "can't happen before 11-03" as one).
+  assert(flooredIn("before 11-03", "the cut, which can't happen before 11-03.") && flooredIn("tomorrow", "ship it tomorrow at the earliest")
+      && flooredIn("until Friday", "not until Friday") && flooredIn("before the 12th", "it cannot start before the 12th")
+      && flooredIn("Friday", "no sooner than Friday, then") && flooredIn("tomorrow", "tomorrow, or later"),
+    "a negation up to two words before the time, or \"at the earliest\" or \"or later\" after it, makes it a floor");
+  assert(!flooredIn("by Friday", "the landlord wants an answer by Friday") && !flooredIn("before the 12th", "pay the deposit before the 12th")
+      && !flooredIn("by Friday", "I can't stress enough that it is due by Friday") && !flooredIn("by Friday", "not now: it can't wait, so by Friday, and it can't start before Monday"),
+    "a deadline stands: no negation within two words before it, and one place of the phrase that is no floor");
+  assert(readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE).due === null
+      && readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE).level?.value === 3,
+    "readAnswer drops a floor's due day and keeps the level beside it");
+  assert(citedIn("High-priority", "It is the only High-priority open child in the project.") && citedIn("Medium-priority", "It's the only Medium-priority ticket left in the line")
+      && citedIn("High-priority", "It is one of two High-priority children still open") && citedIn("highest value open issue", "the highest value open issue for the project")
+      && citedIn("Medium", "| SMD-1 | one thought per episode | Medium |") && citedIn("Low", "| a row | Low |"),
+    "a level that ranks an item among others, or sits in a table's cell, is cited");
+  assert(!citedIn("urgent", "the only thing I need is this: it's urgent") && !citedIn("High", "High: renew the passport before the trip")
+      && !citedIn("high priority", "This is high priority for me this week") && !citedIn("urgent", "Only this is urgent for me today"),
+    "a level the writer says of their own work stands, \"only\" with no item ranked among others included");
+  assert(INFER_PROMPT_VERSION === 2 && INFER_PROMPT.includes("carries its own priority field") && INFER_PROMPT.includes("Not a level:") && INFER_PROMPT.includes("Not a deadline:")
+      && INFER_PROMPT.includes("where one item ranks among others") && INFER_PROMPT.includes("the earliest something can happen"),
+    "the prompt is v2 (SMD-4226): a ticket's own field, what is no level, what is no deadline; a prompt edited without its version bumped shows here");
+  assert(flooredIn("can't happen before 11-03", "the cut, which can't happen before 11-03.") && flooredIn("not until Friday", "it waits: not until Friday")
+      && !flooredIn("by Friday", "by Friday"), "the floor's words inside the quoted phrase make it a floor");
   // Review pass 2: the deadline quoted as the level (the local 7B read "I need the slides by Friday" as High).
   const slides = "Before the meeting, I need the slides by Friday.";
   const asLevel = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday" }, slides, TUE);
@@ -2993,10 +3031,10 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   assert([null, "x", [1], 3].every((a) => { const r = readAnswer(a, verify, TUE); return r.level === null && r.due === null; }), "an answer that is not an object reads as nothing");
 
   const st = inferredStatement(read);
-  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === 'inferred from the text (v1): urgent from "Urgent"; due 2026-11-06 from "by Friday"',
+  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): urgent from "Urgent"; due 2026-11-06 from "by Friday"`,
     `the statement: High, due by the end of 2026-11-06 (UTC), its reason quoting both phrases (${JSON.stringify(st)})`);
   const dueOnly = inferredStatement({ level: null, due: { day: "2026-11-13", phrase: "next Friday", by: "model" } });
-  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v1): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
+  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
       && inferredStatement({ level: { value: 1, word: "low", phrase: "no rush" }, due: null })?.dueAt === undefined
       && inferredStatement({ level: null, due: null }) === null && inferredStatement(null) === null,
     `a due phrase alone states Medium, saying so and whose date it is; a level alone no due time; nothing read, nothing stated (${JSON.stringify(dueOnly)})`);

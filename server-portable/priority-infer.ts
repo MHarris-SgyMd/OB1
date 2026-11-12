@@ -11,7 +11,10 @@
  *   words (case-folded, white space collapsed). A phrase the model made up
  *   drops its half of the answer, and so does a level word the text negates
  *   ("not very urgent" read as urgent), a High read off a phrase negating its
- *   own cue ("no rush"), and a level phrase that is only the deadline's words.
+ *   own cue ("no rush"), a level phrase that is only the deadline's words, and
+ *   a label cited for another item ("SMD-2627 (Medium)", SMD-4226). A due
+ *   phrase that is the earliest something can happen ("can't happen before
+ *   11-03") drops its half too (SMD-4226).
  * - An inferred level is at most High (3): "urgent" costs nothing to write in
  *   a note, and the maintainer's own example reads "Urgent: …" as High
  *   (confirmed by the maintainer, 2026-11-09, with the two rules below and in
@@ -35,13 +38,21 @@ import type { EgressSubject } from "./egress.ts";
 import { endOfDay, type PriorityLevel } from "./priority-scale.ts";
 
 /** The prompt's version, bumped by hand when its meaning moves; the reason a statement carries names it. */
-export const INFER_PROMPT_VERSION = 1;
-export const INFER_PROMPT = `Read the user's captured note for how much it matters and when it is due. The first line gives the day it was captured. Return JSON with:
-- "level": one of "none", "low", "medium", "high", "urgent", or null when the note says nothing about how much it matters
-- "level_phrase": the exact words of the note that show that level, or null
-- "due_phrase": the exact words of the note that set a deadline, such as "by Friday" or "before the 12th", or null when it sets none
+export const INFER_PROMPT_VERSION = 2;
+/**
+ * Version 2 (SMD-4226): v1 read a label quoted beside a ticket, priority discussed as a subject and an expiry as the
+ * note's own level and deadline, and agreed with the operator on 0.188 of its level reads (SMD-3670 PR 2). v2 says
+ * whose work a level and a deadline must be about, and names what is neither.
+ */
+export const INFER_PROMPT = `Read the user's captured note for how much its writer says their own work matters, and for a deadline it sets for that work. The first line gives the day it was captured. Return JSON with:
+- "level": one of "none", "low", "medium", "high", "urgent", only when the writer says how much the work they mean matters ("urgent", "important", "no rush", "low priority"); else null
+- "level_phrase": the exact words of the note that say it, or null
+- "due_phrase": the exact words that set a deadline for work the note asks to be done, such as "by Friday" or "before the 12th", or null
 - "due_date": that deadline as YYYY-MM-DD, counted from the capture day, or null
-Copy phrases exactly as the note writes them. Only read what the note says.`;
+A note that is itself a ticket or task record carries its own priority field ("Priority: High") as its level.
+Not a level: a priority or label quoted beside another ticket, task or item ("ABC-12 (High)", "Medium, Design team", "Backlog, Low"); where one item ranks among others ("the highest-priority open issue", "one of two High-priority tickets"); text about priorities, scales or rankings; how severe a bug or finding is; a deadline on its own.
+Not a deadline: when a lease, claim, token or cache expires; the earliest something can happen ("not before 11-03", "can't happen before Friday", "can go on tomorrow at the earliest"); a time to watch or measure something; a date already past or one something happened on; dates in quoted material.
+Most notes say neither: then every field is null. Copy phrases exactly as the note writes them.`;
 
 /** The highest level an inferred statement takes: High (the maintainer, 2026-11-09). */
 export const INFERRED_CEILING: PriorityLevel = 3;
@@ -91,6 +102,59 @@ const NEGATED_BEFORE = new RegExp(`(\\b(${NEGATORS})(\\s+(?!(?:${EMPHASIS})\\b)[
 const LEVEL_CUES = /\b(urgent|urgently|urgency|asap|important|importance|unimportant|critical|crucial|priority|emergency|immediately|pressing|vital|essential|rush|hurry|whenever|someday|trivial|minor|optional|idea|low|medium|high|top)\b/;
 /** A phrase that negates its own cue ("not urgent", "no rush", "non-critical"), not across an emphasis word: it never says a level of High or more. */
 const SELF_NEGATED = new RegExp(`\\b(${NEGATORS}|non)\\b-?(\\s*(?!(?:${EMPHASIS})\\b)[\\p{L}']+){0,2}?\\s*\\b(urgent|urgently|important|critical|crucial|priority|pressing|vital|essential|rush|hurry|emergency)\\b`, "u");
+
+/** A ticket's key: two to ten capitals and digits from a capital, a hyphen, digits ("SMD-2627", "ABC-12"). */
+const TICKET_KEY = /\b[A-Z][A-Z0-9]{1,9}-\d{1,6}\b/;
+/** Words that rank an item among others ("the only High-priority child", "one of two", "the highest-priority open issue"). */
+const RANKED = /\b(only|highest|lowest|most|least|top|one of (?:two|three|four|five|\d+))\b/;
+/** The items a rank is among: a ticket, issue, child, item, bug, task, row or pull request. */
+const RANKED_ITEMS = /\b(tickets?|issues?|child|children|items?|bugs?|tasks?|rows?|prs?|pull requests?)\b/;
+/** A level word beside a label in a list ("Backlog, Low", "Medium, Release Engineering"). */
+const LABEL_TUPLE = /\b[A-Z][\p{L}\d-]*, (none|low|medium|high|urgent|critical)\b|\b(none|low|medium|high|urgent|critical), [A-Z]/iu;
+
+/**
+ * Whether every place the text holds the level phrase is a label cited for another item (SMD-4226): the phrase holds a
+ * ticket key, a key stands in the 40 characters before it, it sits in parentheses ("SMD-2627 (Medium)") or a table's
+ * cell ("| Medium |"), it is a level word in a list of labels ("Backlog, Low", "Medium, Release Engineering"), or it
+ * ranks an item among others ("the only High-priority open child", "the highest-priority ticket"). The model read a tag, not what the
+ * writer says of their own work: v1 did so on 10 of the 38 level reads it made on session summaries. A ticket's own
+ * export ("SMD-944 — … · Priority: High") keeps its level: its key opens the text, far before the field.
+ */
+export function citedIn(phrase: string, text: string): boolean {
+  const kept = text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/gu, " ").trim();
+  // wholeWordAt's places index the folded text; they index this case-kept copy only when folding kept every length.
+  if (kept.toLowerCase().length !== kept.length) return false;
+  const p = phrase.replace(/\s+/gu, " ").trim();
+  const at = wholeWordAt(p, text);
+  return at.length > 0 && at.every((i) => {
+    const said = kept.slice(i, i + p.length), before = kept.slice(Math.max(0, i - 40), i), after = kept.slice(i + p.length, i + p.length + 40);
+    const near = `${before.slice(-20)} ${said} ${after.slice(0, 30)}`.toLowerCase();
+    return TICKET_KEY.test(said) || TICKET_KEY.test(before) || (/\(\s*$/.test(before) && /^\s*[),]/.test(after))
+      || LABEL_TUPLE.test(said) || /\b[A-Z][\p{L}\d-]*, $/u.test(before) || /^, [A-Z]/.test(after)
+      || (/\|\s*$/.test(before) && /^\s*\|/.test(after)) || (RANKED.test(near) && RANKED_ITEMS.test(near));
+  });
+}
+
+/** The words that make a time the earliest something can happen, up to two words before it ("can't happen before 11-03", "not until Friday"). */
+const FLOOR_BEFORE = /\b(can't|cannot|can not|won't|not|no sooner|not until|no earlier)(\s+[\p{L}']+){0,2}\s+$/u;
+/** The words that make a quoted phrase a floor in itself ("can't happen before 11-03", "not until Friday"). */
+const FLOOR_IN = /\b(can't|cannot|can not|won't|not until|no sooner|no earlier|at the earliest|or later|at the soonest)\b/;
+/** The words that make a time a floor when they follow it ("tomorrow at the earliest"). */
+const FLOOR_AFTER = /^[\s,)]*(at the earliest|or later|at the soonest)\b/;
+
+/**
+ * Whether every place the text holds the due phrase is the earliest something can happen, not a deadline (SMD-4226):
+ * a negation up to two words before it ("which can't happen before 11-03") or "at the earliest" after it, or the floor's
+ * words inside the phrase the model quoted ("can't happen before 11-03"). The model
+ * quoted the time and left the floor's words out: v1 and v2 both read "before 11-03" in "can't happen before 11-03"
+ * as a deadline.
+ */
+export function flooredIn(phrase: string, text: string): boolean {
+  const t = folded(text), p = folded(phrase);
+  const at = wholeWordAt(phrase, text);
+  if (FLOOR_IN.test(p)) return at.length > 0;
+  return at.length > 0 && at.every((i) => FLOOR_BEFORE.test(t.slice(Math.max(0, i - 40), i)) || FLOOR_AFTER.test(t.slice(i + p.length, i + p.length + 30)));
+}
 
 /**
  * Whether every place the text holds the phrase follows a negating word, up to two words before it ("urgent" in
@@ -282,11 +346,12 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
   const deadlineAsLevel = levelPhrase !== null && !LEVEL_CUES.test(folded(levelPhrase)) && (DATE_WORDS.test(folded(levelPhrase))
     || (duePhrase !== null && (folded(levelPhrase).includes(folded(duePhrase)) || folded(duePhrase).includes(folded(levelPhrase)))));
   const negatedHigh = levelPhrase !== null && (LEVEL_WORDS[word] ?? 0) >= 3 && SELF_NEGATED.test(folded(levelPhrase));
-  if (Object.hasOwn(LEVEL_WORDS, word) && levelPhrase !== null && !negatedIn(levelPhrase, text) && !deadlineAsLevel && !negatedHigh) {
+  if (Object.hasOwn(LEVEL_WORDS, word) && levelPhrase !== null && !negatedIn(levelPhrase, text) && !deadlineAsLevel && !negatedHigh
+    && !citedIn(levelPhrase, text)) {
     level = { value: Math.min(LEVEL_WORDS[word], INFERRED_CEILING) as PriorityLevel, word, phrase: levelPhrase };
   }
   let due: Inferred["due"] = null;
-  if (duePhrase !== null) {
+  if (duePhrase !== null && !flooredIn(duePhrase, text)) {
     const ruled = resolveDue(duePhrase, captureDay);
     const modelled = ruled === null ? modelDay(a.due_date, captureDay, duePhrase) : null;
     if (ruled !== null) due = { day: ruled, phrase: duePhrase, by: "rule" };

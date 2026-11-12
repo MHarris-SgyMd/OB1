@@ -30,7 +30,7 @@ import { listCursor, parseRelationsCursor, relationsCursor, threadCursor } from 
 import * as say from "./render.ts";
 import { REFUSAL_STATUS } from "./rest/app.ts";
 import { TOOL_NAMES } from "./tools.ts";
-import { INFER_PROMPT } from "./priority-infer.ts";
+import { INFER_PROMPT, INFER_PROMPT_VERSION } from "./priority-infer.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { checkerOver, subjectHash, tokenSettings } from "./oauth-token.ts";
 
@@ -3134,7 +3134,7 @@ console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_IN
   const startDay = new Date().toISOString().slice(0, 10);
   const stated = (a: A | undefined, kind: string, key: string, maker: string, scope: string) => [startDay, new Date().toISOString().slice(0, 10)].map(fridayAfter).some((friday) =>
     a !== undefined && a.item.kind === kind && a.item.key === key && a.level === 3
-    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v1): urgent from "Urgent"; due ${friday} from "by Friday"`
+    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): urgent from "Urgent"; due ${friday} from "by Friday"`
     && a.inferred === true && a.tierName === "inferred" && a.maker.name === maker && a.maker.scope === scope && a.closedAt === null);
   const friday = fridayAfter(startDay);
   await sql`SELECT set_agent_kind('rival', 'operator')`;

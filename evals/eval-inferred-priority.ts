@@ -36,6 +36,11 @@
  *       a blank or unreadable answer, one that is not the draw, or a captured day that is not the run's, and refuses
  *       everything at a registration other than the pinned one.
  *
+ *   bun eval-inferred-priority.ts --run <dev-run.jsonl> --only-fixture --texts <texts.jsonl>
+ *   bun eval-inferred-priority.ts --dev <dev-run.jsonl>
+ *       A development check (SMD-4226): the shipped prompt over the committed fixture's texts alone, then scored
+ *       against its frozen labels. No verdict: those items were drawn from v1's calls. Prints private phrases.
+ *
  *   bun eval-inferred-priority.ts
  *       The report from the fixture: each half's precision, per writer, High where none was read, the misses, the
  *       κ between the raters, and the verdict against the bar. No database, no model.
@@ -65,6 +70,9 @@ const FIXTURE = join(HERE, "fixtures", "inferred-priority.json");
  * one its fixture records.
  */
 export const REGISTERED = "1239b47ca93a5870";
+
+/** The prompt version the committed fixture measured (SMD-3670 PR 2). A later prompt is measured by a new registration (SMD-4226). */
+export const MEASURED_PROMPT_VERSION: number = 1;
 
 /** One line of a texts file: a thought as the population lists it. */
 type Text = { id: string; at: string; writer: string; text: string };
@@ -228,7 +236,8 @@ async function run(out: string): Promise<void> {
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
   const done = new Set(existsSync(path) ? readJsonl<RunLine>(path).map((l) => l.id) : []);
   const [k, n] = shardOf(flag("shard"));
-  const todo = (await texts()).filter((t) => !done.has(t.id)).filter((_, i) => i % n === k);
+  const only = args.includes("--only-fixture") ? new Set(Object.keys((JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture).items)) : null;
+  const todo = (await texts()).filter((t) => (only === null || only.has(t.id)) && !done.has(t.id)).filter((_, i) => i % n === k);
   const model = `${cfg.metadataModel}@${cfg.chat.base} t=${cfg.metadataTemperature}`;
   console.log(`model ${model}; ${done.size} done, ${todo.length} to run`);
   let failed = 0;
@@ -269,7 +278,7 @@ async function run(out: string): Promise<void> {
 // ── --draw ────────────────────────────────────────────────────────────────────
 
 /** The run's lines, refused on any of checkRunLines's problems. */
-function runLines(path: string, population: readonly Text[] | null): RunLine[] {
+function runLines(path: string, population: readonly { id: string }[] | null): RunLine[] {
   const lines = readJsonl<RunLine>(path);
   const problems = checkRunLines(lines, population);
   if (problems.length) throw new Error(problems.join("\n"));
@@ -336,7 +345,8 @@ export function reportLines(f: Fixture, current: string = registrationHash()): s
   const bothDue = rated.filter((i) => i.gold.dues.length > 0 && i.second!.dues.length > 0);
   const sameDays = bothDue.filter((i) => JSON.stringify(i.gold.dues) === JSON.stringify(i.second!.dues)).length;
   const registered = f.registration.map((d) => d.toString(16)).join("");
-  const pinned = registered === REGISTERED && current === REGISTERED && f.prompt_version === INFER_PROMPT_VERSION;
+  const pinned = registered === REGISTERED && current === REGISTERED, shipped = f.prompt_version === INFER_PROMPT_VERSION;
+  const outcome = v.passes ? "PASSES" : `FAILS — ${v.failures.join("; ")}`;
   return [
     `population ${f.population.calls + f.population.others}: ${f.population.calls} calls, ${f.population.others} others (prompt v${f.prompt_version}); sample ${items.length}`,
     `level precision  ${pct(s.level)}   bar ≥ ${BAR.levelPrecisionMin}`,
@@ -345,9 +355,48 @@ export function reportLines(f: Fixture, current: string = registrationHash()): s
     ...Object.entries(s.writers).map(([w, x]) => `  ${w}: level ${pct(x.level)}, due ${pct(x.due)}`),
     `missed, of the others: level ${pct(s.missed.level)}, due ${pct(s.missed.due)} (no bar)`,
     `κ between the raters: level ${kl === null ? "—" : kl.toFixed(3)}, whether a due day is stated ${kd === null ? "—" : kd.toFixed(3)} (${rated.length} items); the same days on ${sameDays} of the ${bothDue.length} both date`,
-    pinned
-      ? `verdict: ${v.passes ? "PASSES — PR 3 may turn count_inferred on" : `FAILS — ${v.failures.join("; ")}`}`
-      : `no verdict: the fixture was labelled under registration ${registered} on prompt v${f.prompt_version}; this file's registration is ${current}, the pinned one ${REGISTERED}, the prompt v${INFER_PROMPT_VERSION}`,
+    !pinned
+      ? `no verdict: the fixture was labelled under registration ${registered}; this file's is ${current}, the pinned one ${REGISTERED}`
+      : shipped
+        ? `verdict: ${v.passes ? "PASSES — count_inferred may be turned on" : outcome}`
+        : `verdict on prompt v${f.prompt_version}, not the shipped v${INFER_PROMPT_VERSION}, so it gates nothing: ${outcome}`,
+  ];
+}
+
+// ── --dev: a new prompt against the frozen labels ─────────────────────────────
+
+/**
+ * A development check (SMD-4226): a run of the shipped prompt over the fixture's texts, scored against the frozen
+ * labels. It is no verdict: the fixture's items were drawn from v1's calls, so the 120 are no random sample for any
+ * other prompt, and a prompt tuned on them can fit them. A verdict needs a new registration and a fresh draw.
+ * Prints each half's precision over the run's calls among the 120, High where the gold reads no level, how many of the
+ * gold's levels and days the run reads, and each call where the gold reads nothing, by writer, id and phrase (the run
+ * file's own, so this prints private text: run it in a terminal, never in CI).
+ */
+export function devLines(f: Fixture, lines: readonly RunLine[]): string[] {
+  const { items, problems } = fromFixture(f);
+  if (problems.length) return ["the fixture is not sound:", ...problems.map((p) => `  ${p}`)];
+  const runOf = new Map(lines.map((l) => [l.id, l]));
+  const missing = items.filter((i) => !runOf.has(i.id));
+  if (missing.length) return [`the run lacks ${missing.length} of the fixture's ${items.length} items: run it with --only-fixture first`];
+  const now = items.map((i) => ({ ...i, stratum: "call" as const, call: runOf.get(i.id)!.call }));
+  const s = score(now);
+  const goldLevels = now.filter((i) => i.gold.levels.length > 0), goldDues = now.filter((i) => i.gold.dues.length > 0);
+  const strays = now.flatMap((i) => {
+    const l = runOf.get(i.id)!, out: string[] = [];
+    if (i.call.level !== null && i.gold.levels.length === 0) out.push(`  level ${i.call.level} on ${i.writer} ${i.id.slice(0, 8)}: "${(l.level_phrase ?? "").slice(0, 80)}"`);
+    if (i.call.due !== null && i.gold.dues.length === 0) out.push(`  due +${i.call.due} on ${i.writer} ${i.id.slice(0, 8)}: "${(l.due_phrase ?? "").slice(0, 80)}"`);
+    return out;
+  });
+  return [
+    `development check, prompt v${lines[0]?.prompt_version} over the ${items.length} frozen items (no verdict: they were drawn from v${f.prompt_version}'s calls)`,
+    `level reads the gold agrees with  ${pct(s.level)}`,
+    `due reads the gold agrees with    ${pct(s.due)}`,
+    `High where the gold reads none    ${pct(s.highOnNone)}`,
+    `the gold's levels read            ${goldLevels.filter((i) => levelRead(i.call, i.gold)).length} of ${goldLevels.length}`,
+    `the gold's due days read          ${goldDues.filter((i) => dueRead(i.call, i.gold)).length} of ${goldDues.length}`,
+    `calls where the gold reads nothing: ${strays.length}`,
+    ...strays,
   ];
 }
 
@@ -485,7 +534,7 @@ function selfCheck(): void {
 
   // The fixture.
   const its = items({ level: [16, 20], due: [9, 10], others: [3, 30] });
-  const fx = toFixture(its, { generated: "2026-11-10T00:00:00Z", note: "planted", promptVersion: 1, population: { calls: 300, others: 1000 } });
+  const fx = toFixture(its, { generated: "2026-11-10T00:00:00Z", note: "planted", promptVersion: INFER_PROMPT_VERSION, population: { calls: 300, others: 1000 } });
   const strings: string[] = [];
   const walk = (n: unknown, key: string): void => {
     if (typeof n === "string") { if (!["note", "generated"].includes(key) && !/^[0-9a-f-]{36}$/.test(n)) strings.push(`${key}=${n}`); }
@@ -601,7 +650,20 @@ function selfCheck(): void {
   assert(sizeLines(["x"]).length === 1, "a sheet with no long item flags none");
 
   // A report only at the pinned registration, on this prompt version.
-  assert(!reportLines({ ...fx, registration: registrationDigits(), prompt_version: INFER_PROMPT_VERSION + 1 }).at(-1)!.startsWith("verdict"), "a fixture measured on another prompt version gets no verdict");
+  const otherPrompt = reportLines({ ...fx, registration: registrationDigits(), prompt_version: INFER_PROMPT_VERSION + 1 }).at(-1)!;
+  assert(otherPrompt.startsWith(`verdict on prompt v${INFER_PROMPT_VERSION + 1}, not the shipped v${INFER_PROMPT_VERSION}, so it gates nothing: PASSES`), "a fixture measured on another prompt version gets a verdict that gates nothing");
+  assert(reportLines({ ...fx, registration: registrationDigits(), prompt_version: INFER_PROMPT_VERSION }).at(-1)!.startsWith("verdict: PASSES — count_inferred may be turned on"), "a fixture on the shipped prompt gets the verdict that gates");
+
+  // The development check.
+  const devRun = (call: (i: Item) => Call, phrase = "QQ") => Object.entries(fx.items).map(([iid]) => ({ ...rl(0), id: iid, writer: "w",
+    call: call(fromFixture(fx).items.find((x) => x.id === iid)!), level_phrase: phrase, due_phrase: phrase, prompt_version: 2 }));
+  const asGold = devLines(fx, devRun((i) => ({ level: i.gold.levels[0] ?? null, due: i.gold.dues[0] ?? null, byRule: null })));
+  assert(asGold[0].startsWith("development check, prompt v2 over the 60 frozen items (no verdict") && asGold.includes("calls where the gold reads nothing: 0"), "a run reading exactly the gold strays nowhere, and says it is no verdict");
+  assert(asGold.some((l) => /^level reads the gold agrees with  1\.000 \(23 of 23\)/.test(l)) && asGold.some((l) => /^the gold's due days read          13 of 13$/.test(l)), "it scores each half over the run's calls and counts the gold's reads");
+  const allHigh = devLines(fx, devRun(() => ({ level: 3, due: null, byRule: null })));
+  assert(allHigh.some((l) => /^High where the gold reads none    0\.617 \(37 of 60\)/.test(l)) && allHigh.some((l) => l === "calls where the gold reads nothing: 37") && allHigh.includes("the gold's levels read            3 of 23"), "a run reading High everywhere strays on every item the gold reads no level in");
+  assert(allHigh.some((l) => /^  level 3 on (session_hook|claude_code) [0-9a-f]{8}: "QQ"$/.test(l)), "each stray names its writer, id and phrase");
+  assert(devLines(fx, devRun(() => C(null)).slice(1))[0].startsWith("the run lacks 1 of the fixture's 60"), "a run short of the fixture is refused");
   assert(!reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("verdict"), "a fixture labelled under another registration gets no verdict");
   assert(!reportLines({ ...fx, registration: registrationDigits("eeeeeeeeeeeeeeee") }, "eeeeeeeeeeeeeeee").at(-1)!.startsWith("verdict"), "a fixture and a rules file moved together, away from the pinned registration, get no verdict");
 
@@ -613,7 +675,9 @@ function selfCheck(): void {
     assert(got.length === DRAW.calls + DRAW.others || f.population.calls < DRAW.calls, "the committed fixture holds the whole draw");
     assert(got.every((i) => i.second !== null), "every committed item carries the second rater's label");
     assert(f.registration.map((x) => x.toString(16)).join("") === REGISTERED, "the committed fixture was labelled under the pinned registration");
-    assert(f.prompt_version === INFER_PROMPT_VERSION, "the committed fixture was measured on the shipped prompt version");
+    assert(f.prompt_version === MEASURED_PROMPT_VERSION, "the committed fixture is SMD-3670's measurement of prompt v1");
+    assert(reportLines(f).at(-1)!.startsWith(INFER_PROMPT_VERSION === MEASURED_PROMPT_VERSION ? "verdict: FAILS" : `verdict on prompt v${MEASURED_PROMPT_VERSION}, not the shipped v${INFER_PROMPT_VERSION}, so it gates nothing: FAILS`),
+      "the committed fixture's verdict reads as recorded, and gates nothing once the shipped prompt has moved on");
   }
   report();
 }
@@ -627,6 +691,10 @@ if (import.meta.main) {
   else if (flag("draw")) {
     if (!flag("sheet")) throw new Error("--draw <run.jsonl> needs --sheet <sheet.md> [--answers <replies.txt>]");
     await draw(flag("draw")!, flag("sheet")!, flag("answers") ?? flag("sheet")!.replace(/(\.md)?$/, ".replies.txt"));
+  } else if (flag("dev")) {
+    const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
+    const lines = runLines(outsideRepo(flag("dev")!, "the run file"), Object.keys(f.items).map((id) => ({ id })));
+    for (const l of devLines(f, lines)) console.log(l);
   } else if (flag("freeze")) {
     const i = args.indexOf("--freeze"), [r, g, s] = args.slice(i + 1, i + 4);
     if (!r || !g || !s || !flag("note")) throw new Error("--freeze <run.jsonl> <gold> <second> --note \"<who labelled, when>\" (each a filled sheet or reply file)");
