@@ -54,7 +54,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert } from "../db/test-support.ts";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
-import { INFER_PROMPT_VERSION, INFERRED_CEILING, inferPriority, type Inferred } from "../server-portable/priority-infer.ts";
+import { forWriter, INFER_PROMPT_VERSION, INFERRED_CEILING, inferPriority, type Inferred } from "../server-portable/priority-infer.ts";
 import {
   BAR, CAPTURES_SQL, CEILING, CONVENTIONS, DRAW, LEVEL_WORDS, MIN_CALLS, callOf, dayOffset, drawSample, dueCategory, dueRead, fromFixture, isCall, kappa,
   isSheet, levelCategory, levelRead, parseAnswers, parseSheet, readAnswer, registeredSection, renderAnswers, registrationDigits, registrationHash, renderSheet, score, toFixture, verdict,
@@ -272,7 +272,8 @@ async function run(out: string): Promise<void> {
       continue;
     }
     const line: RunLine = {
-      id: t.id, at: t.at, writer: t.writer, call: callOf(outcome.got, at),
+      // The population is actor_kind agent alone (CAPTURES_SQL), so a cited level is dropped as the capture drops an agent's.
+      id: t.id, at: t.at, writer: t.writer, call: callOf(forWriter(outcome.got, "agent"), at),
       level_phrase: outcome.got?.level?.phrase ?? null, due_phrase: outcome.got?.due?.phrase ?? null,
       ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION, model, infer_hash: source,
     };

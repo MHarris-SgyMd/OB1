@@ -36,7 +36,7 @@ import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, norma
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
 import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
-import { citedIn, DUE_ONLY_LEVEL, flooredIn, INFER_PROMPT, INFER_PROMPT_VERSION, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
+import { citedIn, DUE_ONLY_LEVEL, flooredIn, forWriter, INFER_PROMPT, INFER_PROMPT_VERSION, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
 
 const { assert, report } = createAssert();
 
@@ -2974,7 +2974,7 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["Medium", "Filed SMD-2742 — Medium, Release Engineering.", true],
     ["High", "SMD-2368, `platform`, High, in Welcome Agent Turn Reliability.", true],
     ["Backlog, Low", "SMD-2719 is Backlog, Low now.", true],
-    ["Low", "Tickets: Backlog, Low", true],
+    ["Low", "Tickets: Backlog, Low", false],
     ["High-priority", "It is the only High-priority open child in the project.", true],
     ["Medium-priority", "It's the only Medium-priority ticket left in the line", true],
     ["High-priority", "It is one of two High-priority children still open", true],
@@ -2982,12 +2982,30 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["highest value open issue", "the highest value open issue for the project", true],
     ["Medium", "| SMD-1 | one thought per episode | Medium |", true],
     ["urgent", "İstanbul trip: SMD-1 (urgent)", true],
-    ["High", "It is yours, High, Todo in cycle 21, due 11-05.", true],
+    ["High", "SMD-3333 is the gate. It is yours, High, Todo in cycle 21, due 11-05.", true],
     ["Urgent", "Owner, Urgent priority and cycle unchanged.", true],
     ["Owner, Urgent priority and cycle unchanged.", "Started. Owner, Urgent priority and cycle unchanged.", true],
     ["High-priority", "the only child left, under the High-priority SMD-1350", true],
     ["Urgent", "Urgent, due Friday: rent", false],
     ["Urgent", "Urgent, todo: call the bank", false],
+    ["urgent", "SMD-12 moved along nicely this week after the long review, and so it went done, urgent: call mom", false],
+    ["Medium", "Filed SMD-12, Medium is the garden's level", false],
+    ["it’s Medium", "SMD-12 (it’s Medium) stays", true],
+    ["urgent", "Done, urgent: call mom", false],
+    ["high", "Todo, high: dentist", false],
+    ["urgent", "Things to do, urgent: renew passport", false],
+    ["Urgent", "Urgent, Todo: call the bank", false],
+    ["Q4-2026 high priority", "Q4-2026 high priority: launch the shop", false],
+    ["mid-2025 high", "Project mid-2025 high priority", false],
+    ["Phase-2: high priority", "Phase-2: high priority for the garden", false],
+    ["Urgent", "Urgent COVID-19 booster", false],
+    ["COVID-19 (urgent)", "COVID-19 (urgent) booster", false],
+    ["Med", "Filed SMD-1768 (Medium) for the drift.", false],
+    ["Medium", "Filed SMD-1768 [Medium]", true],
+    ["Medium", "Filed SMD-1768: Medium, follow-up", true],
+    ["High", "SMD-12 · High · Backlog", true],
+    ["it's Medium", "SMD-12 (it’s Medium) stays", true],
+    ["Medium", "SMD-12 is filed. Medium is the garden's level", false],
     ["urgent", "Filed SMD-12. Rent (urgent)", false],
     ["urgent", "SMD-12 is something the team will get to after the long holiday weekend ends, the rent (urgent)", false],
     ["urgent", "the only High-priority open child is done, and this one is urgent", false],
@@ -3027,11 +3045,18 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   ];
   const citedWrong = citedCases.filter(([p, t, want]) => citedIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
   assert(citedWrong.length === 0, `a label cited for another item is read only in a shape that cites: a key's clause ending in "(", "," or a dash, a key beside the level, a table row with a key, a board status, a rank among items; the writer's own level stands, a "Priority:" field, a name, a flight or a standard's number beside it included (wrong: ${citedWrong.join("; ")})`);
-  assert(readAnswer({ level: "medium", level_phrase: "SMD-2627 (Medium):" }, "Next: SMD-2627 (Medium): the gate.", TUE).level === null
-      && readAnswer({ level: "high", level_phrase: "Priority: High" }, export944, TUE).level?.value === 3
-      && readAnswer({ level: "urgent", level_phrase: "urgent", due_phrase: "by Friday" }, "So, urgent: the landlord wants an answer by Friday", TUE).level?.value === 3
-      && readAnswer({ level: "low", level_phrase: "Backlog, Low", due_phrase: "by Friday" }, "SMD-2719 is Backlog, Low now; I'll file it by Friday", TUE).due?.day === "2026-11-06",
-    "readAnswer drops a cited label's level and keeps the due day beside it; a ticket's own export and the writer's own urgency keep theirs");
+  const citedRead = readAnswer({ level: "medium", level_phrase: "SMD-2627 (Medium):" }, "Next: SMD-2627 (Medium): the gate.", TUE);
+  const citedDue = readAnswer({ level: "low", level_phrase: "Backlog, Low", due_phrase: "by Friday" }, "SMD-2719 is Backlog, Low now; I'll file it by Friday", TUE);
+  assert(citedRead.level?.cited === true && citedRead.level.value === 2
+      && readAnswer({ level: "high", level_phrase: "Priority: High" }, export944, TUE).level?.cited === undefined
+      && readAnswer({ level: "urgent", level_phrase: "urgent", due_phrase: "by Friday" }, "So, urgent: the landlord wants an answer by Friday", TUE).level?.cited === undefined,
+    "readAnswer marks a cited label's level and leaves it standing; a ticket's own export and the writer's own urgency are unmarked");
+  // SMD-4226, the maintainer's choice after review pass 2: only an agent-kind writer's cited level is dropped.
+  assert(forWriter(citedRead, "agent")?.level === null && forWriter(citedDue, "agent")?.due?.day === "2026-11-06" && forWriter(citedDue, "agent")?.level === null
+      && JSON.stringify(forWriter(citedRead, "operator")?.level) === JSON.stringify({ value: 2, word: "medium", phrase: "SMD-2627 (Medium):" })
+      && forWriter(citedRead, null)?.level?.value === 2 && forWriter(null, "agent") === null
+      && JSON.stringify(forWriter(readAnswer({ level: "urgent", level_phrase: "Urgent" }, "Urgent: the landlord wants an answer by Friday", TUE), "agent")?.level) === JSON.stringify({ value: 3, word: "urgent", phrase: "Urgent" }),
+    "forWriter drops a cited level for an agent-kind writer and keeps the due day beside it; anyone else's cited level stands, unmarked; an uncited level stands for every writer");
   // SMD-4226: the earliest something can happen is no deadline (v1 read "can't happen before 11-03" as one), read only
   // in the floor's own construction: review pass 1 found a negation alone dropping "not later than" deadlines.
   const flooredCases: [string, string, boolean][] = [
@@ -3057,6 +3082,22 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["by Friday", "if not by Friday, then by Monday", false],
     ["the deadline by Friday", "do not miss the deadline by Friday", false],
     ["by Friday", "I can't stress enough that it is due by Friday", false],
+    ["Friday", "Not urgent but before Friday please", false],
+    ["the 15th", "If it's not paid before the 15th, there's a late fee", false],
+    ["before the 15th", "If it's not paid before the 15th, there's a late fee", false],
+    ["before Friday", "Not urgent but before Friday please: return library books", false],
+    ["before Friday", "do not forget before Friday: the rent", false],
+    ["until Friday", "Do not wait until Friday to pay rent", false],
+    ["before Friday", "it can't happen before Friday; or pay before Friday", false],
+    ["Monday", "doesn't open until Monday", true],
+    ["until Monday", "Don't start until Monday", true],
+    ["Monday", "isn't ready until Monday", true],
+    ["Monday", "starting Monday", true],
+    ["the 12th", "from the 12th onwards", true],
+    ["Monday", "Monday earliest", true],
+    ["Friday", "Friday at earliest", true],
+    ["Friday", "only after Friday", true],
+    ["Friday", "Friday at the soonest", true],
   ];
   const flooredWrong = flooredCases.filter(([p, t, want]) => flooredIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
   assert(flooredWrong.length === 0, `a floor is read in its own construction — a negation then "before", "until" or "till", "no sooner than", "at the earliest" or "or later" — and a deadline with a negation elsewhere stands ("not later than", "can't wait past", "do not miss") (wrong: ${flooredWrong.join("; ")})`);

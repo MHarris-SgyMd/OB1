@@ -11,7 +11,7 @@ import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
 import { writerScope } from "./caller.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
-import { inferPriority, inferredStatement, type Inferred } from "../priority-infer.ts";
+import { forWriter, inferPriority, inferredStatement, type Inferred } from "../priority-infer.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
@@ -1104,12 +1104,26 @@ async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: str
  * capture alone (its caller's `existed === false`; both the maintainer's, 2026-11-09). Nothing ranks on it until the
  * measurement clears its bar (effective_priority's `count_inferred`). Never fails the capture: a refusal or a fault
  * is logged and the rest are not stated.
+ *
+ * A level cited for another item ("SMD-2627 (Medium)") is dropped only when the row's writer is agent-kind (SMD-4226,
+ * the maintainer's choice): its stamp is read only then, and a stamp that can't be read counts as an agent's, since the
+ * statement is a guess either way and a cited shape is the likelier tag.
  */
-async function stateInferred(ctx: Ctx, principal: Principal, thoughtId: string, items: string[], inferred: Inferred | null): Promise<void> {
+async function stateInferred(ctx: Ctx, principal: Principal, thoughtId: string, items: string[], read: Inferred | null): Promise<void> {
+  const store = await ctx.store();
+  let kind: string | null = "agent";
+  if (read?.level?.cited) {
+    try {
+      const row = await store.getThought(thoughtId);
+      kind = typeof row?.metadata?.actor_kind === "string" ? (row.metadata.actor_kind as string) : "agent";
+    } catch (e) {
+      console.error(`capture: the writer of thought ${thoughtId} was not read for its cited level: ${(e as Error)?.message ?? e}`);
+    }
+  }
+  const inferred = forWriter(read, kind);
   const statement = inferredStatement(inferred);
   const scope = writerScope(principal);
   if (!statement || !scope) return;
-  const store = await ctx.store();
   const targets = items.length ? items.map((key) => ({ kind: "item", key })) : [{ kind: "thought", key: thoughtId }];
   for (const { kind, key } of targets) {
     try {
