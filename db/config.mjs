@@ -2643,9 +2643,12 @@ export const ROLE_GRANTS = Object.freeze({
   // (SMD-4193 PR 2), the operator's weights: every effective priority reads
   // the standing row of priority_weight_settings, and set_priority_weights
   // ends it and writes the next (INSERT and UPDATE; its trigger refuses a
-  // DELETE, and the function admits an operator key alone). Soft: a role
-  // without the group is refused the priority calls, naming the table, and
-  // nothing else.
+  // DELETE, and the function admits an operator key alone). SELECT on
+  // thought_sources since 133 (SMD-4127): a ticket and its own rows are one
+  // item to the writers and the reads, so every call on a thought or a ticket
+  // asks which ticket's row a thought is; 133 grants it to the roles holding
+  // the group already. Soft: a role without the group is refused the
+  // priority calls, naming the table, and nothing else.
   priority: Object.freeze([
     Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "116" }),
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
@@ -2654,6 +2657,7 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
     Object.freeze({ table: "open_items",          privileges: Object.freeze(["SELECT"]), since: "117" }),
     Object.freeze({ table: "open_item_events",    privileges: Object.freeze(["SELECT"]), since: "117" }),
+    Object.freeze({ table: "thought_sources",     privileges: Object.freeze(["SELECT"]), since: "053" }),
   ]),
   // Open items (117, SMD-3665): a to-do, a commitment or a plugin's task, its
   // status and its history. Written only through open_item, update_item,

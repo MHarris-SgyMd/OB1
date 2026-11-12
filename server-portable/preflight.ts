@@ -237,11 +237,14 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure. 132's
  * setting is read by every ranked priority read (SELECT) and written by set_priority_weights (INSERT, UPDATE), and is
  * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
- * review pass 2).
+ * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
+ * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
+ * its own too.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
-  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings "));
+  const sources = ungranted.filter((g) => g.startsWith("thought_sources "));
+  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings ") && !g.startsWith("thought_sources "));
   const clauses: string[] = [];
   if (rest.length) {
     const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
@@ -252,12 +255,15 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
     const agenda = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT");
     clauses.push(`${failing} naming the table${agenda ? ", and so does agenda (SMD-3669)" : ""}`);
   }
+  if (sources.length) {
+    clauses.push("set_priority, clear_priority and priority_history on a thought or a ticket (or set_priority taking one's due time), agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources (migration 133)");
+  }
   if (weights.length) {
     clauses.push(weights.includes("priority_weight_settings SELECT")
       ? "every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings (migration 132)"
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
   }
-  const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT");
+  const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
 }
 
