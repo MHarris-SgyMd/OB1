@@ -1311,7 +1311,8 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   each with its maker, tier, reason and how its window closed. A ticket's history and
   each of its rows' are one list, each statement naming its own item, and the text says
   where one stands when it is not on the item asked. `exists: false` is an
-  item since removed, whose statements are kept.
+  item since removed, whose statements are kept, closed since migration 134
+  (SMD-3711) with the reason `deleted`.
 - **`set_priority_weights`** (`POST /v1/priority-weights`, write scope; SMD-4193 PR 2,
   migration 132): the operator's weights, which every read takes as its defaults (the
   agenda, plan_context's board, search's `priority_weight` and `min_priority`), by

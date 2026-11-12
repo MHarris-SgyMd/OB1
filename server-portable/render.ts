@@ -2355,9 +2355,15 @@ const statementText = (a: PriorityAssertion) =>
  */
 const onOther = (a: PriorityAssertion, asked: PriorityItem) =>
   a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
-/** One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open, replaced (by which) or cleared. */
+/**
+ * One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open,
+ * replaced (by which), cleared, or closed when its item was deleted (migration 134).
+ */
 const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
-  `- ${statementText(a)}${onOther(a, asked)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
+  `- ${statementText(a)}${onOther(a, asked)}; ${a.closedAt === null ? "open"
+    : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}`
+    : a.closeReason === "deleted" ? `closed at ${a.closedAt}, when its item was deleted`
+    : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
 const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
   !v.winnerShown ? ""

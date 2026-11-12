@@ -752,12 +752,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // own rows as one item, adds ob1_priority_pool_items, closes a maker's
   // older statements across one pool and carries the priority group's
   // thought_sources grant, refusing by name without 116, 117 or 122
-  // ([20bx]) — all recorded by the
+  // ([20bx]); 134 widens priority_assertions' close CHECK with `deleted`,
+  // adds the delete triggers on thoughts and ob1_entities, the sweep and its
+  // helpers, and replaces 016's merge_entities, refusing by name without 016,
+  // 116 or 133 ([20by]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 104, `030 is among the last one hundred and four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 105, `030 is among the last one hundred and five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6186,6 +6189,78 @@ console.log("\n[20bx] Migration 133: onto a populated brain at the file before i
   assert(await closed() === closedBefore && JSON.stringify(await open()) === JSON.stringify(["thought:upgrade-bot:3", "thought:upgrade-op:2"]),
     `a re-apply is a no-op: nothing more closed (${closedBefore})`);
   for (const r of ["ob1_upgrade_133_writer", "ob1_upgrade_133_reader", "ob1_upgrade_133_none"]) await sql.unsafe(`DROP OWNED BY ${r}; DROP ROLE ${r}`);
+  await sql.close();
+}
+
+console.log("\n[20by] Migration 134: onto a populated brain at the file before it — refused by name without 133's ob1_priority_lock_key, nothing made; then applied: the statements a deleted thought and a merged-away entity left open at 133 close as deleted, a living thought's stay; after it a delete_thought closes its thought's, a merge restates the loser's on the survivor, and a role without the priority grants deletes as before; a re-apply a no-op (SMD-3711)");
+{
+  const the134 = MIGRATIONS.find((f) => /^\d{3}_priority_deleted_items\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the134 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const OP = JSON.stringify({ name: "upgrade-op", via: "open-brain", scope: "write" });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content) VALUES (${content}) RETURNING id`)[0].id);
+  const entity = async (name: string) => String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${name}, lower(${name})) RETURNING id`)[0].id);
+  const put = async (kind: string, key: string, level: number) =>
+    ((await sql`SELECT assert_priority(${kind}, ${key}, ${level}::int, NULL, NULL, NULL, NULL, NULL, false, (${OP}::text)::jsonb) AS r`)[0] as { r: { assertion: { id: string } } }).r.assertion.id;
+  const reason = async (id: string) => ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${id}::uuid`)[0] as { close_reason: string | null }).close_reason;
+  const drift = async () => Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
+
+  // At 133: a thought deleted and an entity merged away, each leaving an open statement; a living thought's.
+  const doomed = await thought("upgrade 134: a note deleted at 133"), living = await thought("upgrade 134: a note that stays");
+  const onDoomed = await put("thought", doomed, 4), onLiving = await put("thought", living, 2);
+  const s133 = await entity("upgrade 134 survivor"), l133 = await entity("upgrade 134 loser");
+  const onL133 = await put("entity", l133, 3);
+  await sql`SELECT delete_thought(${doomed}::uuid, (${OP}::text)::jsonb)`;
+  await sql`SELECT merge_entities(${s133}::uuid, ${l133}::uuid)`;
+  const at133 = [await reason(onDoomed), await reason(onL133)];
+
+  // Without 133's ob1_priority_lock_key: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_priority_lock_key(text, text) RENAME TO ob1_priority_lock_key_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the134 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_priority_lock_key_away(text, text) RENAME TO ob1_priority_lock_key`;
+  const made = async () => (await sql`SELECT to_regprocedure('ob1_close_orphan_priorities()') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 134 needs 133 \(ob1_priority_lock_key\); this schema lacks it/.test(without) && !(await made()) && await reason(onDoomed) === null,
+    `without 133's ob1_priority_lock_key the file is refused by name; nothing made, nothing closed (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the134 });
+  assert(JSON.stringify(at133) === "[null,null]" && await reason(onDoomed) === "deleted" && await reason(onL133) === "deleted" && await reason(onLiving) === null && await drift() === 0,
+    `applied: the statements a thought deleted and an entity merged away at 133 left open close as deleted; a living thought's stays open; no drift (at 133: ${JSON.stringify(at133)})`);
+
+  // After it: a delete_thought closes its thought's; a merge restates the loser's on the survivor.
+  const later = await thought("upgrade 134: a note deleted after"), onLater = await put("thought", later, 5);
+  await sql`SELECT delete_thought(${later}::uuid, (${OP}::text)::jsonb)`;
+  const s = await entity("upgrade 134 survivor two"), l = await entity("upgrade 134 loser two"), onL = await put("entity", l, 4);
+  const merged = ((await sql`SELECT merge_entities(${s}::uuid, ${l}::uuid) AS r`)[0] as { r: { priorities_moved: number } }).r;
+  const onS = (await sql`SELECT level FROM priority_assertions WHERE item_kind = 'entity' AND item_key = ${s} AND closed_at IS NULL`) as { level: number }[];
+  assert(await reason(onLater) === "deleted" && merged.priorities_moved === 1 && await reason(onL) === "replaced" && onS.length === 1 && onS[0].level === 4 && await drift() === 0,
+    `after it a delete_thought closes its thought's statement as deleted, and a merge restates the loser's on the survivor (${JSON.stringify(merged)})`);
+
+  // A role holding the capture and server groups alone deletes as before, on Postgres's own privileges; the sweep closes
+  // what it left.
+  const ROLE = "ob1_upgrade_134_nopriority";
+  await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE}`);
+  for (const st of grantStatements(ROLE, { groups: ["capture", "server"] })) await sql.unsafe(st);
+  const byRole = await thought("upgrade 134: deleted by a role without the priority grants"), onByRole = await put("thought", byRole, 2);
+  let roleDelete = "";
+  try {
+    await sql.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL ROLE ${ROLE}`);
+      roleDelete = String(((await tx`SELECT delete_thought(${byRole}::uuid, (${OP}::text)::jsonb) AS r`)[0] as { r: { ok: boolean } }).r.ok);
+    });
+  } catch (e) { roleDelete = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const leftOpen = await reason(onByRole);
+  const swept = (await sql`SELECT * FROM ob1_close_orphan_priorities()`)[0] as { thoughts_closed: number };
+  assert(roleDelete === "true" && leftOpen === null && swept.thoughts_closed === 1 && await reason(onByRole) === "deleted",
+    `a role without the priority grants deletes a thought as before, its statement left open; the sweep closes it (${roleDelete}, ${JSON.stringify(swept)})`);
+  await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // A re-apply is a no-op: nothing more closed.
+  const closed = async () => Number((await sql`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)[0].n);
+  const closedBefore = await closed();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the134 });
+  assert(await closed() === closedBefore && await reason(onLiving) === null, `a re-apply is a no-op: nothing more closed (${closedBefore})`);
   await sql.close();
 }
 
