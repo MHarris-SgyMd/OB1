@@ -31584,7 +31584,7 @@ if (want("48")) {
 }
 
 if (want("49")) {
-  console.log("\n[49] Migration 134 on a real Postgres, beside other transactions: a second verification of one deliverable waits for the first and reads its status; a raw event that waited on the deliverable's lock while another was written is numbered after it, not sorted under it; the rebuild beside a delete of the thought waits it out, repairs the rest and counts only what it wrote (SMD-1715 review passes 1 and 2)");
+  console.log("\n[49] Migration 134 on a real Postgres, beside other transactions: a second verification of one deliverable waits for the first and reads its status; a raw event that waited on the deliverable's lock while another was written is numbered after it, not sorted under it; the rebuild beside a delete of the thought waits it out, repairs the rest and counts only what it wrote; two rebuilds at once count one facet once (SMD-1715 review passes 1 to 3)");
   const owner = new SQL({ url: URL_!, max: 1 });
   const A = new SQL({ url: URL_!, max: 1 }), B = new SQL({ url: URL_!, max: 1 });
   const W = (name: string) => JSON.stringify({ name, scope: "write" });

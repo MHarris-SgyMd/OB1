@@ -78,15 +78,15 @@
 --        thought a deliverable: {outcome: captured | unchanged | refused,
 --        deliverable, event}. The thought is written first, by the capture
 --        path (upsert_thought, its derived_from carrying the spec), in the
---        same transaction (SMD-1715 PR 2). Refused WRITE_SCOPE_REQUIRED (an envelope
---        stating no write scope), THOUGHT_NOT_FOUND, SPEC_NOT_FOUND,
+--        same transaction (SMD-1715 PR 2). Refused WRITE_SCOPE_REQUIRED (an
+--        envelope stating no write scope), THOUGHT_NOT_FOUND, SPEC_NOT_FOUND,
 --        SPEC_IS_SELF, ALREADY_A_DELIVERABLE (another spec or checkpoint, or
 --        another key: it names the key that recorded it); the same spec and
 --        checkpoint again by the key that recorded it is unchanged.
 --      * verify_deliverable(thought, status, method, outcome, actor) — one
 --        verification: {outcome: changed | refused, deliverable, event, from,
---        to}. Refused WRITE_SCOPE_REQUIRED, NOT_A_DELIVERABLE (no capture, or its
---        thought deleted), ILLEGAL_TRANSITION (naming from and to), and
+--        to}. Refused WRITE_SCOPE_REQUIRED, NOT_A_DELIVERABLE (no capture, or
+--        its thought deleted), ILLEGAL_TRANSITION (naming from and to), and
 --        VERIFY_NOT_YOURS: a move to verified by the key that recorded the
 --        deliverable or a key the brain records as writing its thought's text
 --        (its capture, an update changing its content, or a capture-only
@@ -130,9 +130,10 @@
 --   seq's sequence (the trigger draws each event's seq itself); SELECT,
 --   INSERT and UPDATE on thought_facets (the projection is written and
 --   replaced). The thoughts' existence, their KEY SHARE locks and their
---   authors (thought_audit) are the capture group's SELECT and UPDATE. Soft: a role without the group is refused the
---   deliverable calls, naming the table, and nothing else; the server first
---   calls them in PR 2, whose preflight checks the group.
+--   authors (thought_audit) are the capture group's SELECT and UPDATE.
+--   Soft: a role without the group is refused the deliverable calls, naming
+--   the table, and nothing else; the server first calls them in PR 2, whose
+--   preflight checks the group.
 --
 -- SAFETY
 --   One new table, its indexes, five triggers (four on it, one on
@@ -278,7 +279,7 @@ AS $$
   SELECT pg_advisory_xact_lock(hashtextextended('ob1:deliverable:' || p_thought::text, 0))
 $$;
 COMMENT ON FUNCTION ob1_deliverable_lock(uuid) IS
-  'Takes the transaction advisory lock on one deliverable (its thought''s id): the writers and the event trigger take it before they read its events. Migration 134 / SMD-1715.';
+  'Takes the transaction advisory lock on one deliverable (its thought''s id): the writers, the event trigger, the facet''s validator and the rebuild take it before they read its events. Migration 134 / SMD-1715.';
 
 -- A time as the payload holds it: UTC, to the microsecond, whatever the
 -- session's time zone, so the projection a session writes is the one any
@@ -294,8 +295,8 @@ COMMENT ON FUNCTION ob1_deliverable_time(timestamptz) IS
   'A time in a deliverable''s payload: ISO 8601 in UTC to the microsecond, the same text whatever the session''s time zone. Migration 134 / SMD-1715.';
 
 -- The projection: the facet's payload as the thought's events make it, or
--- NULL for a thought with none. The validator, the writers' projector and the
--- drift check all read this one rule.
+-- NULL for a thought with none. The validator, the projector, the rebuild and
+-- the drift check all read this one rule.
 CREATE OR REPLACE FUNCTION ob1_deliverable_payload(p_thought uuid)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -810,8 +811,8 @@ BEGIN
     INTO name, agent_id, env_agent_id, kind, trust, scope
     FROM ob1_actor_maker(p_actor, p_what) m;
   IF scope IS DISTINCT FROM 'write' THEN
-    refusal := jsonb_build_object('outcome', 'refused', 'code', 'WRITE_SCOPE_REQUIRED',
-      'message', format('%s states no write scope, so it may not record or verify a deliverable', name));
+    refusal := ob1_deliverable_refused('WRITE_SCOPE_REQUIRED',
+      format('%s states no write scope, so it may not record or verify a deliverable', name));
   END IF;
 END;
 $$;
@@ -905,7 +906,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_project(uuid) IS
-  'Makes one thought''s deliverable facet current from its events (ob1_deliverable_payload): replaced when it differs, written when there is none; returns the deliverable (ob1_deliverable_json), NULL for a thought with no capture or one deleted. The thought is locked FOR KEY SHARE, so a delete in flight is waited out. Called by the writers under the deliverable''s lock, and by the rebuild. Migration 134 / SMD-1715.';
+  'Makes one thought''s deliverable facet current from its events (ob1_deliverable_payload): replaced when it differs, written when there is none; returns the deliverable (ob1_deliverable_json), NULL for a thought with no capture or one deleted. The thought is locked FOR KEY SHARE, so a delete in flight is waited out. Called as each event lands (deliverable_events_projected, under the lock its BEFORE trigger took), and by the rebuild. Migration 134 / SMD-1715.';
 
 -- Every event projected as it lands, a raw one too: the writers alone
 -- projected, so a raw event left the facet stale until someone ran the

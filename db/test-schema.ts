@@ -205,8 +205,9 @@ function definedIn(file: string): string[] {
  * entry. 120 is 102's record_thought_relation and 111's validator, each with
  * a thread's edge (SMD-3306), and carries both: 102 last states the comment
  * on supersession_proposals [74] reads, and 111 last defines
- * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134 is 120's validator with the
- * deliverable kind (SMD-1715) and carries 120, whose door and thread functions it does not define.
+ * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
+ * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
+ * whose door and thread functions it does not define.
  */
 const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -19628,8 +19629,8 @@ console.log("\n[121] Migration 134: deliverables — deliverable_events append-o
      VALUES ($1::uuid, $2, $3, $4::uuid, $5, CASE WHEN $2 = 'verification' THEN 'm' END, CASE WHEN $2 = 'verification' THEN 'o' END, 'raw', false, now())`,
     [t, event, status, spec, checkpoint]);
 
-  // The shape: the table, its indexes and triggers; the facet's index and delete trigger; twenty functions, each
-  // commented by 134, the reads STABLE, none SECURITY DEFINER; 134 the last definer of each and of the validator.
+  // The shape: the table, its indexes and triggers; the facet's index and delete trigger; twenty-two functions,
+  // each commented by 134, the reads STABLE, none SECURITY DEFINER; 134 the last definer of each and of the validator.
   const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
       FROM pg_attribute WHERE attrelid = 'deliverable_events'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
   const idx = (await one<{ i: string }>(`SELECT string_agg(indexname, ' ' ORDER BY indexname) AS i FROM pg_indexes WHERE tablename = 'deliverable_events'`)).i;
@@ -19866,7 +19867,7 @@ console.log("\n[121] Migration 134: deliverables — deliverable_events append-o
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
   assert(roleUse.code === "" && roleUse.r === "captured,changed" && roleUpdate.code === "42501"
          && roleWithout.code === "42501" && /permission denied for table deliverable_events/.test(roleWithout.message ?? ""),
-    `a role granted capture and deliverables alone records, verifies and reads a deliverable (the author read and the seq drawn by the group's grants); it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
+    `a role granted capture and deliverables alone records, verifies and reads a deliverable (the author read by the capture group's grant, the seq drawn by this group's); it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
 
   // The thought deleted: the facet goes with it, the events stay as history; no more verifications; not drift.
   const events = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);

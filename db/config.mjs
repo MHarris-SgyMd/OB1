@@ -2682,8 +2682,8 @@ export const ROLE_GRANTS = Object.freeze({
   // otherwise; Postgres grants it per table, so a role holding this group
   // writes any facet kind, as one holding structure does. A thought's
   // existence, its KEY SHARE locks and its author (thought_audit) are the
-  // capture group's SELECT and UPDATE. Soft: a role without the group is refused the
-  // deliverable calls, naming the table, and nothing else.
+  // capture group's SELECT and UPDATE. Soft: a role without the group is
+  // refused the deliverable calls, naming the table, and nothing else.
   deliverables: Object.freeze([
     Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "134" }),
     // The trigger draws each event's seq under the deliverable's lock, by nextval, which an identity's implicit draw

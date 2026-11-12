@@ -6201,7 +6201,7 @@ console.log("\n[20by] Migration 134: onto a populated brain at the file before i
   const sql = new SQL({ url: URL_, max: 1 });
   const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
   const spec = await thought("upgrade 134: the spec"), out = await thought("upgrade 134: the output"), other = await thought("upgrade 134: a subject's thought");
-  // The facets a brain at 132 holds: a citation and a subject.
+  // The facets a brain at 133 holds: a citation and a subject.
   await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${out}::uuid, 'citation', (${JSON.stringify({ text: "rests on the spec", stance: "stated", source_id: spec })}::text)::jsonb)`;
   await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${other}::uuid, 'subject', '{"key": "ticket:SMD-9761", "by": "metadata", "judge_key": "upgrade-134"}'::jsonb)`;
   const facets = async () => JSON.stringify(await sql`SELECT thought_id, kind, payload, valid_until FROM thought_facets ORDER BY thought_id, kind`);
