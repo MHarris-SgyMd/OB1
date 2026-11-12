@@ -959,7 +959,10 @@ async function sweep(
   // filed since — which the fingerprint, the text's alone, does not see (review pass 4: a ticket moved before 113, or
   // under another pool, was never pooled at a naming). `after`, a page's cursor, bounds the facets read too, so a dry
   // run's pages each read from their cursor, not from the first facet (review pass 5: its pages read every facet before
-  // them, a dry run before a naming quadratic in the thoughts).
+  // them, a dry run before a naming quadratic in the thoughts). A rule's set is current here whatever that rule now finds
+  // at the same text, where a claim's rulesAgree asks for the rule's keys exactly and narrows it: a set wider than its
+  // rule finds is not pooled, so a rule that comes to find another set needs its version bumped (SUBJECT_RULE_VERSIONS)
+  // to be asked again (SMD-3306 PR 7a-3b-1's review pass 3, run-it; PR 7a-3b-2's header rule).
   const noCurrentSubject = (c: SQL, after = NIL_ID) => c`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
@@ -1524,16 +1527,17 @@ async function sweep(
    * subject elsewhere while the model was asked and handed back, is taken twice, so, and then its outcome, as --limit
    * counts it. `taken`, for --limit, counts that one too. `setBack`: those whose call the caller aborted (abortInHand),
    * put back unanswered, taken again when they come up. `overBudget`: those whose own write passed a scheduler's
-   * statement_timeout, failed. `ownError`: those the provider erred on again right after answering a probe, failed.
+   * statement_timeout, failed; `deadlocked`, those whose own write the server rolled back to break a deadlock, failed.
+   * `ownError`: those the provider erred on again right after answering a probe, failed.
    * `hungOwn`: those that hung the provider again, their claims marked hung (HUNG_MARK), failed — one whose call was
    * aborted in hand counted there, out of setBack, as the probe after the abort finds it so, its place under --limit
    * taken again. `pollsLost`, no thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed
-   * back taken twice, as an edited one is. `replaced` and `newKey` count within the recorded ones, `closed` within
-   * those the model named nothing for, `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
+   * back taken twice, as an edited one is. `replaced` and `newKey` count within the recorded ones, `closed` the
+   * subjects closed on those the model named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
    * when it released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and
    * those whose failure's release a lost poll handed back, which the failure count leaves out.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, deadlocked: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -1628,7 +1632,7 @@ async function sweep(
    * cast keeps the declared type (SMD-1932's way, as extract-entities.ts's configError).
    */
   let endedBy = null as { code: number; line: string } | null;
-  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, pollsLost: false, ownError: false, hungOwn: false };
+  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, deadlocked: false, pollsLost: false, ownError: false, hungOwn: false };
   /**
    * The judge's answer on the claim in hand, null until it answers (PR 5b): appended to the pool's window once the
    * claim is released (`judgedAlone`), or, for a claim this run finishes as named nothing, in the finish's own
@@ -1663,7 +1667,7 @@ async function sweep(
   };
 
   /** The claims this run failed, its leases spent while it ran aside: what --retry-failed would put back of its own. */
-  const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey + n.overBudget + n.ownError + n.hungOwn - n.lostFailed;
+  const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey + n.overBudget + n.deadlocked + n.ownError + n.hungOwn - n.lostFailed;
   /** What to run once the model is right, the claims this run failed named. */
   const runAgain = (lead: string) => {
     const failed = failedHere();
@@ -2084,6 +2088,21 @@ async function sweep(
   }
 
   /**
+   * A thought's own write — the door's, or the finish of one named nothing — the server rolled back to break a deadlock
+   * (40P01): since 130 a set's close or write moves several keys' threads, and a move across two keys can still
+   * deadlock with a delete at a thread's gap (130's NOT HERE). The thought failed, for --retry-failed, said once and
+   * counted, as one past the budget is, and the run goes on (SMD-3306 PR 7a-3b-1's review pass 3, cold read: rethrown,
+   * it ended the run, a scheduler's sleep with it).
+   */
+  const deadlocked = (row: Candidate, e: unknown): Done | false => {
+    if (hardStop.signal.aborted) return false;
+    n.deadlocked++;
+    if (row.standing_keys !== null) n.leftOutOfDate++;
+    const why = `the server rolled its write back to break a deadlock (${String((e as Error)?.message ?? e).slice(0, 200)})`;
+    return { release: "failed", error: why, say: () => sayOnce("deadlocked", `  ${row.id}: ${why}; --retry-failed returns it to the pool`) };
+  };
+
+  /**
    * A thought's own write — the door's, or the finish of one named nothing — past a scheduler's statement_timeout: the
    * thought failed, for --retry-failed, as a claim pass fails one on its own write (sleep.ts), said once and counted,
    * and the run goes on, an answer it was asked judged as a failed one's is (review pass 6, run-it: thrown, it ended
@@ -2337,8 +2356,8 @@ async function sweep(
       }
       if (a.key === null) {
         // Asked, got nothing: the claim finished is the record, so it is not asked again until its text, the ticket it
-        // is filed under or the pool changes; an out-of-date subject standing on it closes, if it is still the one read
-        // at the text read. Counted once the finish has answered: a text moved since is edited mid-sweep, a thought
+        // is filed under or the pool changes; the out-of-date subjects standing on it close, if they are still the set
+        // read at the text read. Counted once the finish has answered: a text moved since is edited mid-sweep, a thought
         // deleted is gone, and past the hard stop nothing is closed nor finished (review pass 1: each was counted as
         // named nothing). A subject written since the read, by another pass or another key's run, is one the answer
         // said nothing of: the thought goes back in the pool and the run reads what stands when it comes up (review
@@ -2416,6 +2435,10 @@ async function sweep(
             answer.f = answer.c = false;
             return overBudget(row, e);
           }
+          if (sqlState(e) === "40P01") {
+            answer.f = answer.c = false;
+            return deadlocked(row, e);
+          }
           throw e;
         }
         if (typeof fin === "string") {
@@ -2466,6 +2489,7 @@ async function sweep(
         return false;
       }
       if (budgetTimedOut(e)) return overBudget(row, e);
+      if (state === "40P01") return deadlocked(row, e);
       throw e;
     }
     if (typeof w === "string") {
@@ -2818,7 +2842,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
+  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.deadlocked, "failed on a write the server rolled back to break a deadlock"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const pollsLost = n.pollsLost ? `; ${n.pollsLost} poll(s) lost to the scheduler's statement_timeout` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";

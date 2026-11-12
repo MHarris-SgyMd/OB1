@@ -189,8 +189,8 @@
  * about, those whose text moved, those whose subject an older rule or
  * question found, and, while the question is asked with the judge model's
  * reasoning on (OB1_SUBJECT_REASONING), those a model found with it off. A
- * brain before 111, or a role
- * without the grants 111's door needs, records no subject and says so once;
+ * brain before 130, or a role
+ * without the grants 130's set door needs, records no subject and says so once;
  * the entities stand either way.
  */
 

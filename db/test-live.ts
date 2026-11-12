@@ -8958,6 +8958,37 @@ if (want("10h")) {
         && narrowLeft === "pr:727" && ownCalls === asked + 1,
       `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
     await sql`DELETE FROM thoughts WHERE id = ${narrow}::uuid`;
+    // A set's close, or its write, the server rolls back to break a deadlock (40P01; 130's NOT HERE: a move across two
+    // keys can still deadlock with a delete at a thread's gap): each thought failed for --retry-failed, asked once, its
+    // set standing, said once and counted, and the run goes on (review pass 3, cold read: rethrown, it ended the run).
+    // Two out-of-date sets under an older question, one the model names nothing for (the close), one it names PR 727
+    // for (the door); a trigger refuses each update of their facets as the server's deadlock check would.
+    const deadSets: string[] = [];
+    for (const [text, keys] of [["[10h] a deadlocked set, nothing in it to name", ["phrase:a deadlocked set", "pr:7311"]],
+      ["[10h] a merged pull request 727, its set deadlocked", ["phrase:a deadlocked write", "pr:7312"]]] as const) {
+      const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
+      await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array([...keys], "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
+        (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
+      await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
+      deadSets.push(id);
+    }
+    await sql.unsafe(`CREATE FUNCTION zz_set_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01'; END $$;
+      CREATE TRIGGER zz_set_deadlock BEFORE UPDATE ON thought_facets FOR EACH ROW WHEN (OLD.thought_id IN ('${deadSets[0]}'::uuid, '${deadSets[1]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock()`);
+    asked = ownCalls;
+    let deadRun: Awaited<ReturnType<typeof sweep>>;
+    try {
+      deadRun = await sweep({ limit: 3 });
+    } finally {
+      await sql.unsafe(`DROP TRIGGER zz_set_deadlock ON thought_facets; DROP FUNCTION zz_set_deadlock()`);
+    }
+    const deadClaims = await Promise.all(deadSets.map((id) => claimOf(id)));
+    const deadStanding = (await subjects()).filter((x) => deadSets.includes(x.thought) && x.standing).length;
+    assert(deadRun.code === 1 && ownCalls === asked + 2 && deadStanding === 4
+        && deadClaims.every((c) => c?.status === "failed" && c.last_error?.startsWith("the server rolled its write back to break a deadlock (deadlock detected (the suite's))") === true)
+        && (deadRun.stderr.match(/: the server rolled its write back to break a deadlock/g) ?? []).length === 1
+        && tally(deadRun) === "0 subject(s) recorded; 2 failed on a write the server rolled back to break a deadlock — among them, 2 with an out-of-date subject still standing",
+      `a set's close or write rolled back to break a deadlock fails its thought, asked once, its set standing, said once, and the run goes on (exit ${deadRun.code}, ${ownCalls - asked} asked, ${deadStanding} standing, claims ${JSON.stringify(deadClaims)}: ${tally(deadRun)}; ${deadRun.stderr.trim().slice(0, 300)})`);
+    for (const id of deadSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
     // The pass's rule narrowing a set its rule found: counted recorded (review pass 1, mutant: a `closed` answer went
     // uncounted). The pass's backlog drained first.
     await extractRun();
@@ -10095,6 +10126,25 @@ if (want("10h")) {
         && JSON.stringify(besideWindow.back) === JSON.stringify([besideIds[2], besideIds[1]])
         && /\n {2}Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, on answers from stub-judge, after this run began \(db\/subject-sweep\.ts, JUDGE_ALARM\), so this run, whose judge model is likely the same, stops here too, the claim in hand, which it named nothing for, back in the pool with that run's\.\n/.test(besideRun.stderr),
         `another run's trip since this run began, its stamp older than the run, stops it at the claim in hand, exit 3, that claim back in the pool uncounted, in that trip's hand-back (review pass 3 of PR 6a, run-it) (exit ${besideRun.code}, ${ownCalls - asked} asked, claims ${besideClaims.join(",")}, window ${besideWindow?.answers.length} answer(s), back ${JSON.stringify(besideWindow?.back)}): ${besideRun.stderr.trim().slice(0, 400)}`);
+
+      // …and the claim in hand holding an out-of-date subject it closed: the line says the subject(s) it closed stay
+      // closed, and they do (review pass 3 of PR 7a-3b-1, mutant: the wording pass 2 changed here was unheld).
+      await drop(besideIds);
+      await alarmAt(5);
+      const heldCloseIds = await seedAll(["Alarm note 157: alarm-good work.", "Alarm note 158: named nothing as the trip lands, its subject out of date.", "Alarm note 159: alarm-good work."]);
+      await sql`SELECT record_thought_subject(${heldCloseIds[1]}::uuid, 'phrase:an older subject', 'model', 'subject:stub-judge@p1', NULL, (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${heldCloseIds[1]}::uuid), NULL)`;
+      onOwn = async (thought) => {
+        if (!thought.includes("Alarm note 158")) return;
+        onOwn = null;
+        await sql`UPDATE ob1_config SET value = jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00', 'by', '["stub-judge"]'::jsonb, 'back', jsonb_build_array(${heldCloseIds[2]}::text))::text WHERE key = ${JUDGE_WINDOW_KEY}`;
+      };
+      asked = ownCalls;
+      const heldCloseRun = await alarmRun().finally(() => { onOwn = null; });
+      const heldCloseStanding = await standingOf(heldCloseIds[1]);
+      assert(heldCloseRun.code === 3 && ownCalls - asked === 2 && heldCloseStanding === undefined
+        && /, the claim in hand, which it named nothing for, back in the pool with that run's \(the out-of-date subject\(s\) it closed stay closed until it is asked again\)\.\n/.test(heldCloseRun.stderr),
+        `another run's trip stops the run at a claim in hand whose out-of-date subject it closed: the line says the subject(s) it closed stay closed, and they do (exit ${heldCloseRun.code}, ${ownCalls - asked} asked, standing ${heldCloseStanding?.key ?? "none"}): ${heldCloseRun.stderr.trim().slice(0, 400)}`);
+      await drop(heldCloseIds);
 
       // …and, with no answer in hand, at its next claim, read once that claim is taken, which goes back unasked: here
       // the stamp lands during a call past the limit, no answer to judge, and the line names the claim the run failed.

@@ -19120,9 +19120,22 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   let hashedServes = "";
   await db.transaction(async (tx) => {
     await tx.query(`SET LOCAL enable_sort = off`);
+    // Planned now, for these settings: plpgsql keeps a generic plan once a statement has run five times, built under
+    // the settings of the call that built it, so with one more read above this one the plan would be a sorted one, the
+    // ORDER BY unheld (review pass 3, mutant).
+    await tx.query(`SET LOCAL plan_cache_mode = force_custom_plan`);
     hashedServes = (await tx.query<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('thought', $1)`, [hashed])).rows.map((r) => `${r.kind}:${r.key}`).join(",");
   });
   assert(hashedServes === "ticket:SMD-91711,ticket:SMD-91712,ticket:SMD-91713", `a set of three served in key order under a hashed DISTINCT too (${hashedServes})`);
+
+  // 122's filed-ticket arm as 131 copies it ([109] re-applies 122's own, so only this section reads 131's): a ticket
+  // filed in lower case serves upper case, a malformed metadata.ticket passes to a valid issue, an issue alone serves
+  // (review pass 3, mutants: each unheld).
+  const lowFiled = await serves(await thought("filed under its ticket in lower case", { ticket: "smd-91714" }));
+  const badTicket = await serves(await thought("a malformed ticket beside its issue", { ticket: "SMD 91715", issue: "SMD-91715" }));
+  const issueOnly = await serves(await thought("an issue alone", { issue: "smd-91716" }));
+  assert(lowFiled === "ticket:SMD-91714" && badTicket === "ticket:SMD-91715" && issueOnly === "ticket:SMD-91716",
+    `131's filed-ticket arm as 122's: upper case, a malformed ticket passing to its issue, an issue alone (${lowFiled || "none"} | ${badTicket || "none"} | ${issueOnly || "none"})`);
 
   // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
   // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
@@ -19172,6 +19185,20 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   await db.query(`DELETE FROM open_items WHERE item_id IN ($1::uuid, $2::uuid)`, [noOrigin, withOrigin]);
   assert(parentRows === "ticket:SMD-91701" && itemRows[0] === "" && itemRows[1] === `thought:${session}`,
     `a child serves its parent alone, upper case, not itself; an item with no origin nothing, one with an origin its thought, as under 122 (${parentRows} | ${itemRows.map((r) => r || "none").join(" | ")})`);
+
+  // The ticket arm as 131 copies it: a closed child_of link serves nothing, nor an active link of another relation
+  // (review pass 3, mutants: each unheld once [109] re-applies 122's own).
+  let orphan = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
+    orphan = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
+      ["[117] SMD-91704", JSON.stringify({ source: "linear", issue: "SMD-91704", status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+  });
+  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-91704', '[117] SMD-91704', 'text/markdown')`, [orphan]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }, { relation: "blocks", target: "SMD-91702" }])]);
+  await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'link' AND payload->>'relation' = 'child_of'`, [orphan]);
+  const orphanRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91704')`)).map((r) => `${r.kind}:${r.key}`).join(",");
+  assert(orphanRows === "", `a closed parent link serves nothing, nor a link of another relation (${orphanRows || "none"})`);
 
   // Re-applied, 131 changes nothing.
   await reapply(file.slice(0, 4));
