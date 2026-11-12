@@ -2543,6 +2543,14 @@ export const ROLE_GRANTS = Object.freeze({
     // stop through 093's functions (an upsert, so UPDATE too), deleted at a
     // succeeded release. Without it the worker keeps nothing and says so once.
     Object.freeze({ table: "extraction_progress", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "093" }),
+    // An entity's priority statements, closed when the pass prunes it (136,
+    // SMD-3711): the delete trigger runs as this role, closing each open
+    // statement on a deleted entity and re-projecting it. 116's guard lets the
+    // role close a statement, never write or reopen one. Without these the
+    // trigger skips, and the statements stay open for
+    // ob1_close_orphan_priorities().
+    Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "136" }),
+    Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "136" }),
   ]),
   // A structured pass — sync-linear.ts, the ingest adapters' structure step
   // (ingest-structure.ts) — additionally records the thought's source row and
@@ -2643,9 +2651,12 @@ export const ROLE_GRANTS = Object.freeze({
   // (SMD-4193 PR 2), the operator's weights: every effective priority reads
   // the standing row of priority_weight_settings, and set_priority_weights
   // ends it and writes the next (INSERT and UPDATE; its trigger refuses a
-  // DELETE, and the function admits an operator key alone). Soft: a role
-  // without the group is refused the priority calls, naming the table, and
-  // nothing else.
+  // DELETE, and the function admits an operator key alone). SELECT on
+  // thought_sources since 133 (SMD-4127): a ticket and its own rows are one
+  // item to the writers and the reads, so every call on a thought or a ticket
+  // asks which ticket's row a thought is; 133 grants it to the roles holding
+  // the group already. Soft: a role without the group is refused the
+  // priority calls, naming the table, and nothing else.
   priority: Object.freeze([
     Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "116" }),
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
@@ -2654,6 +2665,7 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
     Object.freeze({ table: "open_items",          privileges: Object.freeze(["SELECT"]), since: "117" }),
     Object.freeze({ table: "open_item_events",    privileges: Object.freeze(["SELECT"]), since: "117" }),
+    Object.freeze({ table: "thought_sources",     privileges: Object.freeze(["SELECT"]), since: "053" }),
   ]),
   // Open items (117, SMD-3665): a to-do, a commitment or a plugin's task, its
   // status and its history. Written only through open_item, update_item,
@@ -2668,6 +2680,24 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "open_item_events",          privileges: Object.freeze(["SELECT", "INSERT"]), since: "117" }),
     Object.freeze({ table: "open_items",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "117" }),
     Object.freeze({ table: "open_item_close_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "117" }),
+  ]),
+  // Deliverables (134, SMD-1715): a unit of agent output tied to a spec, with a
+  // checkpoint and a status. Written only through record_deliverable and
+  // verify_deliverable (SECURITY INVOKER, PUBLIC's EXECUTE), read through
+  // deliverable_history. No UPDATE or DELETE on the events: a trigger refuses
+  // them. The `deliverable` facet is their projection, written and replaced,
+  // so INSERT on thought_facets, which only the structure group grants
+  // otherwise; Postgres grants it per table, so a role holding this group
+  // writes any facet kind, as one holding structure does. A thought's
+  // existence, its KEY SHARE locks and its author (thought_audit) are the
+  // capture group's SELECT and UPDATE. Soft: a role without the group is
+  // refused the deliverable calls, naming the table, and nothing else.
+  deliverables: Object.freeze([
+    Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "134" }),
+    // The trigger draws each event's seq under the deliverable's lock, by nextval, which an identity's implicit draw
+    // does not need (review pass 2).
+    Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "134" }),
+    Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
@@ -2702,12 +2732,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "openbrain_agents",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ table: "agent_memory_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/per-agent-identity" }),
     Object.freeze({ function: "lookup_agent_memory_key(text)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/per-agent-identity" }),
-    // schemas/smart-ingest (bigserial ids; the SECURITY DEFINER append is REVOKEd FROM PUBLIC, and takes Daemonic Brain's uuid thought id — SMD-2128)
-    Object.freeze({ table: "ingestion_jobs",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ table: "ingestion_items", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ sequence: "ingestion_jobs_id_seq",  privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ sequence: "ingestion_items_id_seq", privileges: Object.freeze(["USAGE", "SELECT"]), since: "schemas/smart-ingest" }),
-    Object.freeze({ function: "append_thought_evidence(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/smart-ingest" }),
     // schemas/entity-extraction (upstream's `entities`/`edges`, not 016's ob1_* tables; three bigserial ids;
     // `thought_entities` is the one name the two share — on a migrated brain the file's IF NOT EXISTS
     // leaves 016's table, so this row is `extraction`'s privileges exactly — a row issued on every
@@ -2751,13 +2775,12 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "classification_outcomes", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
     Object.freeze({ table: "capture_thresholds",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
     Object.freeze({ table: "ab_comparisons",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "recipes/adaptive-capture-classification" }),
-    // recipes/brain-health-monitoring/ops-views.sql (eight views; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then)
+    // recipes/brain-health-monitoring/ops-views.sql (seven views; the last two exist only where schemas/entity-extraction is applied, and are skipped until then; the ingestion summary retired with schemas/smart-ingest, SMD-2690)
     Object.freeze({ view: "ops_source_volume_24h",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_recent_thoughts",         privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_enrichment_gaps",         privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_type_distribution",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_sensitivity_distribution", privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
-    Object.freeze({ view: "ops_ingestion_summary",       privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_stalled_entity_queue",    privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     Object.freeze({ view: "ops_graph_coverage",          privileges: Object.freeze(["SELECT"]), since: "recipes/brain-health-monitoring" }),
     // recipes/chatgpt-conversation-import (user_id a plain nullable uuid now; upstream's referenced auth.users)
@@ -2820,7 +2843,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "closedclaims", "priority", "items", "community", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "closedclaims", "priority", "items", "deliverables", "community", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read

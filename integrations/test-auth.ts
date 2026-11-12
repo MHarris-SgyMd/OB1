@@ -108,7 +108,7 @@ const FORWARD_KEY = "f".repeat(64);
 const KEYS = [`laptop:write:${hashKey(WRITE_KEY)}`, `chatgpt:read:${hashKey(READ_KEY)}`].join(",");
 
 // The HTTP APIs' kind, its routes and its read probe, left with the last behind this module, agent-memory-api, which
-// is the agent-memory plugin since SMD-2690 (smart-ingest checks its one key itself, below); its route classifier
+// is the agent-memory plugin since SMD-2690 (as smart-ingest, which checked its one key itself, is); its route classifier
 // (RPC_READS, LOG_TABLES) went with it.
 type Kind = "worker";
 type Server = {
@@ -349,10 +349,8 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
 // fetch them from npm (SMD-1991) — then asked over the port for the one thing that proves it is
 // that server, authenticating: an API's read probe passes under a read key, a
 // worker dry-runs under one; each refuses a
-// wrong key; each is still running afterwards and not reached at a second loopback address; then stopped. The API on its
-// own constant-time compare of a single key (smart-ingest; its key is not
-// _shared/auth.ts's — it takes only routable and listenOn from it — and check 8 passes
-// it) is started too, with a probe of its own. Every file
+// wrong key; each is still running afterwards and not reached at a second loopback address; then stopped. (smart-ingest, on
+// its own compare of a single key, was started too until SMD-2690 made it a plugin.) Every file
 // in the tree that imports the shim and exports the entry shape is in the
 // list, or the guard below fails.
 console.log("\n[each server on the SQL shim starts under bun and answers over the port]");
@@ -368,17 +366,6 @@ const LIVE: Live[] = [
       const r = await parse(await fetch(base + dry.path, { method: "POST", headers: rpcHeaders(READ_KEY), body: dry.body }));
       assert(passed(r), `${s.file}: under bun, a read key may dry-run (${r.status})`);
       assert((await fetch(base + dry.path, { method: "POST", headers: rpcHeaders("not-a-key"), body: dry.body })).status === 401, "…and a wrong key is refused with 401");
-    },
-  })),
-  ...([["integrations/smart-ingest/index.ts", "POST", "/"]] as const).map(([file, method, path]): Live => ({
-    file, env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG },
-    probe: async (base) => {
-      const body = method === "GET" ? undefined : "{}";
-      const r = await fetch(base + path, { method, headers: { "x-brain-key": LEGACY_KEY, "Content-Type": "application/json" }, body });
-      assert(r.status !== 401 && r.status !== 503, `${file}: under bun, the configured key passes the gate on ${method} ${path} (${r.status})`);
-      assert((await fetch(base + path, { method, headers: { "x-brain-key": "not-a-key", "Content-Type": "application/json" }, body })).status === 401, "…and a wrong key is refused with 401");
-      assert((await fetch(base + path, { method, headers: { "x-brain-key": "x".repeat(LEGACY_KEY.length), "Content-Type": "application/json" }, body })).status === 401,
-        "…and so is a wrong key of the right length: its compare is of the key, not of its length");
     },
   })),
 ];
@@ -516,28 +503,11 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
   // since fetch sends a Host of its own: at Host localhost, the control, and at
   // each of those, every answer with the control's status and the word that
   // names the route the control reached. No row reaches a store or a model.
-  // smart-ingest reads its one key at import, so it is imported here with
-  // it set, and the environment put back after.
-  const saved = { key: process.env.MCP_ACCESS_KEY, url: process.env.SUPABASE_URL };
-  const singleKey: Record<string, Handler> = {};
-  let importFailed: unknown = null;
-  process.env.MCP_ACCESS_KEY = LEGACY_KEY;
-  process.env.SUPABASE_URL = PG_REFUSED;
-  hush(); // smart-ingest warns at import that no extraction worker is set
-  try {
-    for (const file of ["integrations/smart-ingest/index.ts"]) singleKey[file] = await importServer(file);
-  } catch (e) {
-    importFailed = e;
-  } finally {
-    unhush();
-    if (saved.key === undefined) delete process.env.MCP_ACCESS_KEY; else process.env.MCP_ACCESS_KEY = saved.key;
-    process.env.SUPABASE_URL = saved.url;
-  }
-  const handlerOf = (file: string): Handler | undefined => singleKey[file] ?? handlers[SERVERS.findIndex((s) => s.file === file)];
+  const handlerOf = (file: string): Handler | undefined => handlers[SERVERS.findIndex((s) => s.file === file)];
   const ask = (port: number, method: string, target: string, host: string | null, headers: string[], body: string) =>
     askRaw(port, method, target, host, ["content-type: application/json", ...headers], body);
   const HOSTS = ["x:99999", "[::1", "brain.example.test:abc", "::1:8000", null, "a@brain.example.test", "brain.example.test/x"];
-  const read = [`x-brain-key: ${READ_KEY}`], legacy = [`x-brain-key: ${LEGACY_KEY}`];
+  const read = [`x-brain-key: ${READ_KEY}`];
   /** A request, the status it gets at localhost and a word its body holds at every Host: each row names the route it reached. */
   type Row = [method: string, target: string, headers: string[], status: number, says: string];
   const worker: Row[] = [["POST", "/", [], 401, "Unauthorized"], ["POST", "/", read, 403, "dry_run=true"], ["POST", `/?dry_run=true&key=${READ_KEY}`, [], 503, "API key"]];
@@ -545,10 +515,9 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
     ["integrations/consolidation-workers/bio/index.ts", worker],
     ["integrations/consolidation-workers/metadata-norm/index.ts", worker],
     ["integrations/entity-extraction-worker/index.ts", worker],
-    ["integrations/smart-ingest/index.ts", [["POST", "/smart-ingest", legacy, 400, "text"], ["POST", "/smart-ingest/execute", legacy, 400, "job_id"], ["POST", "/", [], 401, "Unauthorized"]]],
+    ["recipes/editorial-policy/auditor/index.ts", [["POST", "/", [], 401, "unauthorized"]]],
   ];
-  const why = importFailed instanceof Error ? importFailed.message : String(importFailed);
-  for (const [file] of ROWS) if (!handlerOf(file)) assert(false, `${file}: has a handler to serve — it is in neither SERVERS nor the single-key imports above, or it failed to import${importFailed ? ` (${why})` : ""}`);
+  for (const [file] of ROWS) if (!handlerOf(file)) assert(false, `${file}: has a handler to serve — it is not in SERVERS`);
   const servers = new Map(ROWS.filter(([file]) => handlerOf(file)).map(([file]) => [file, Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: handlerOf(file)! })]));
   for (const s of SERVERS) if (servers.has(s.file)) env(s, KEYS);
   // A server logs what it refuses (a URL, a body cut short) on console.error:
@@ -578,7 +547,8 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
     // does, where a copy made by `new Request(url, req)` never settles and its
     // handler waits forever. Each server that reads a body, at a route that
     // reads it.
-    for (const [file, target, headers] of [["integrations/smart-ingest/index.ts", "/", legacy]] as const) {
+    // The auditor since SMD-2690 made smart-ingest, the one before it, a plugin.
+    for (const [file, target, headers] of [["recipes/editorial-policy/auditor/index.ts", "/", read]] as const) {
       const server = servers.get(file);
       if (!server) continue;
       for (const host of ["localhost", "x:99999", null]) {

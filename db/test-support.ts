@@ -90,6 +90,11 @@ const TABLES = [
   "open_item_events",
   "open_items",
   "open_item_close_proposals",
+  // 134's deliverable events (SMD-1715): no foreign key either way — an event
+  // names its thought and spec by id, and outlives a deleted thought — so its
+  // place is free. Its CASCADE takes the helpers whose arguments or result are
+  // its row type, and its triggers.
+  "deliverable_events",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -427,6 +432,13 @@ const FUNCTIONS = [
   "ob1_priority_lock(text, text)",
   "ob1_priority_winner(text, text)",
   "ob1_priority_project(text, text)",
+  "ob1_priority_pool_items(text, text)",
+  "ob1_priority_lock_key(text, text)",
+  // 136 (SMD-3711): a deleted item's statements closed.
+  "ob1_priority_can_close()",
+  "ob1_priority_close_items(text, text[])",
+  "ob1_priority_close_deleted()",
+  "ob1_close_orphan_priorities()",
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row
   // type of 117's go with its table's CASCADE, and are named anyway).
@@ -503,6 +515,27 @@ const FUNCTIONS = [
   "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)",
   "close_thought_subjects(uuid, uuid[], text)",
   "ob1_thread_lock_keys(text[])",
+  // 134 (SMD-1715): the deliverables' writers, read, drift check, rebuild and helpers (those taking or returning a
+  // deliverable_events row go with its CASCADE); the facet's triggers and index go with thought_facets.
+  "ob1_deliverable_events_guard()",
+  "ob1_deliverable_transition_ok(text, text)",
+  "ob1_deliverable_lock(uuid)",
+  "ob1_deliverable_time(timestamp with time zone)",
+  "ob1_deliverable_payload(uuid)",
+  "ob1_deliverable_event_check()",
+  "ob1_deliverable_facet_kept()",
+  "ob1_deliverable_id(text, text)",
+  "ob1_deliverable_actor(jsonb, text)",
+  "ob1_deliverable_refused(text, text)",
+  "ob1_deliverable_json(uuid)",
+  "ob1_deliverable_project(uuid)",
+  "ob1_deliverable_is_author(uuid, text, uuid)",
+  "ob1_deliverable_event_projected()",
+  "record_deliverable(text, text, text, jsonb)",
+  "verify_deliverable(text, text, text, text, jsonb)",
+  "deliverable_history(text)",
+  "ob1_deliverable_projection_drift()",
+  "ob1_rebuild_deliverable_projection()",
 ];
 
 /**
@@ -1500,8 +1533,8 @@ export const CONTRIB_DIR = join(HERE, "..");
  * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` would be here ([50]
  * checks; none is left since SMD-2311 made the six plugins), and the order among them is free — no file references another's
  * table — but ops-views.sql reads columns enhanced-thoughts adds to `thoughts`,
- * and its three guarded views exist only over smart-ingest's and
- * entity-extraction's tables, so the community files must come first.
+ * and its two guarded views exist only over entity-extraction's tables, so
+ * the community files must come first.
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
   "recipes/adaptive-capture-classification/schema.sql",

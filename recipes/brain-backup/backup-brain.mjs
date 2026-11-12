@@ -33,11 +33,13 @@ const WORK_DIR = process.cwd();
 const PAGE_SIZE = 1000;
 
 // Stock Open Brain only has `thoughts`. The other tables are from optional
-// companion contributions (entity extraction, smart ingest). Missing tables
+// companion contributions (entity extraction, the old smart ingest). Missing tables
 // are skipped at runtime so this recipe works against any Daemonic Brain install.
 // In Daemonic Brain the companions are `schemas/entity-extraction` (entities,
-// edges; thought_entities is migration 016's on a migrated brain) and
-// `schemas/smart-ingest` (ingestion_jobs, ingestion_items); Daemonic Brain's
+// edges; thought_entities is migration 016's on a migrated brain) and the
+// retired `schemas/smart-ingest` (ingestion_jobs, ingestion_items: a brain that
+// applied it keeps them until its operator drops them, SMD-2690 — the
+// smart-ingest plugin's own are plugin_smart_ingest's, not read here); Daemonic Brain's
 // own tables — thought_audit, thought_sources, thought_facets, ob1_entities and
 // the rest — are not in this list, and `pg_dump` is the whole-brain backup
 // (README).

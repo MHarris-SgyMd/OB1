@@ -11,6 +11,7 @@ import { SAID_BY, TRUST } from "./filter.ts";
 import { EVIDENCE_LIMITS, META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { PRIORITY_KINDS } from "../priority-kinds.ts";
+import { VERIFY_STATUSES } from "../deliverables.ts";
 import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN, type PriorityWeights } from "../store.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
@@ -47,6 +48,9 @@ const ITEM_REASON = z.string().max(4000).refine(NO_NUL, "may not hold a NUL char
 // version and variant alone (review pass 1: an imported thought's id was refused before the brain was asked), never
 // braced or unhyphenated (review pass 4), trimmed.
 const UUID_ARG = z.string().trim().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, "a uuid");
+// A deliverable's checkpoint or a verification's method (134): trimmed, 1 to 200 characters, no control character —
+// 134's own bounds, held here so an argument never reaches it as a raise.
+const DELIVERABLE_LINE = z.string().trim().min(1).max(200).refine((s) => !/\p{Cc}/u.test(s), "may not hold a control character");
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /**
@@ -727,7 +731,7 @@ export const SPECS = {
   set_priority: {
     title: "Set Priority",
     description:
-      "State how much an item matters: a thought (its id), a ticket (its key, e.g. SMD-3664), an entity (its id) or an open item (its id), on one scale — 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical — optionally by when it is due (`due_at`), when it can start at the earliest (`not_before`, never after `due_at`), or taking another item's due time (`due_ref`), and why (`reason`). The statement is yours: your key is its maker, and its tier comes from your key, never from an argument — operator, a declared priority source, agent, or inferred (`inferred: true` lowers your own statement to it). Your new statement on an item replaces your earlier one there, which stays in the history; the same statement again writes nothing (`unchanged`). Every key's statement is kept, and the item's winner is the statement of the lowest tier, the newest within it; the reply names the winner. A capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it (or an open item its plugin's row stands for, through that plugin), and is never shown the winner. Refused: an item the brain does not hold (ITEM_NOT_FOUND), a capture-only key on anything else (ITEM_NOT_YOURS), an argument out of its rule (REFUSED_PRIORITY_INPUT).",
+      "State how much an item matters: a thought (its id), a ticket (its key, e.g. SMD-3664), an entity (its id) or an open item (its id), on one scale — 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical — optionally by when it is due (`due_at`), when it can start at the earliest (`not_before`, never after `due_at`), or taking another item's due time (`due_ref`), and why (`reason`). The statement is yours: your key is its maker, and its tier comes from your key, never from an argument — operator, a declared priority source, agent, or inferred (`inferred: true` lowers your own statement to it). Your new statement on an item replaces your earlier one there, which stays in the history; the same statement again writes nothing (`unchanged`). A ticket and its own board-sync rows are one item: your statement on either replaces yours on the other. Every key's statement is kept, and the item's winner is the statement of the lowest tier, the newest within it (each key's newest alone); the reply names the winner. A capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it (or an open item its plugin's row stands for, through that plugin), and is never shown the winner. Refused: an item the brain does not hold (ITEM_NOT_FOUND), a capture-only key on anything else (ITEM_NOT_YOURS), an argument out of its rule (REFUSED_PRIORITY_INPUT).",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity, or item (an open item)"),
@@ -746,7 +750,7 @@ export const SPECS = {
   clear_priority: {
     title: "Clear Priority",
     description:
-      "Withdraw your own statement of an item's priority (its kind and key, as set_priority takes them): it closes as cleared and stays in the history. Another key's statements are untouched, so the item may still have a winner, which the reply names (never to a capture-only key). With no statement of yours open on the item, nothing changes (`nothing_to_clear`).",
+      "Withdraw your own statement of an item's priority (its kind and key, as set_priority takes them): it closes as cleared and stays in the history. On a ticket or one of its own board-sync rows, it closes yours on both, which are one item. Another key's statements are untouched, so the item may still have a winner, which the reply names (never to a capture-only key). With no statement of yours open on the item, nothing changes (`nothing_to_clear`).",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
@@ -756,7 +760,7 @@ export const SPECS = {
   priority_history: {
     title: "Priority History",
     description:
-      "Read who said an item (its kind and key, as set_priority takes them) matters, how much and when: its winning statement and level (null: nobody stated one — unknown, not low), and every statement made on it, replaced and cleared ones included, in the order written, each with its maker (key name, kind and trust as they stood), its tier, its reason, and when its window closed and why. `exists: false` is an item the brain no longer holds, whose statements are kept. Refused: an item the brain does not hold and nobody stated a priority on (ITEM_NOT_FOUND).",
+      "Read who said an item (its kind and key, as set_priority takes them) matters, how much and when: its winning statement and level (null: nobody stated one — unknown, not low), and every statement made on it — on a ticket or one of its own board-sync rows, every statement on both, which are one item, each naming the item it was made on — replaced, cleared and deleted ones included (`deleted`: closed when its item was deleted, migration 136), in the order written, each with its maker (key name, kind and trust as they stood), its tier, its reason, and when its window closed and why. `exists: false` is an item the brain no longer holds, whose statements are kept. Refused: an item the brain does not hold and nobody stated a priority on (ITEM_NOT_FOUND).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
@@ -842,6 +846,47 @@ export const SPECS = {
       id: UUID_ARG.describe("The proposed close's id"),
       accept: z.boolean().describe("True to accept (close the item), false to reject"),
       reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
+    },
+  },
+  // Deliverables (SMD-1715 PR 2, migration 134): the two writers a write key's alone, as 134 refuses any other scope; the history any key's.
+  capture_deliverable: {
+    title: "Capture Deliverable",
+    description:
+      "Record a deliverable: a piece of output you produced, tied to the spec it was meant to meet (`spec`, the id of the thought that states what was asked) and the checkpoint it was handed back at (`checkpoint`: a commit hash or a content fingerprint). " +
+      "The output is captured as a thought, as capture_thought captures one, its derived_from the spec and its text closing with a `Checkpoint: …` line, so a new checkpoint is a new thought: reworked output is a new deliverable. " +
+      "It starts unverified. Another key verifies it (verify_deliverable): neither the key that recorded it nor a key the brain records as writing its thought may move it to verified. " +
+      "The same output, spec and checkpoint again from your key changes nothing and captures nothing; from another key, or at another spec or checkpoint, it is refused, naming the deliverable that stands. " +
+      "Output whose text (with its checkpoint line) is a thought already, not a deliverable, is refused (OUTPUT_EXISTS): a deliverable is always a thought your key wrote from its spec. Your key's own capture from this spec that no deliverable names (a record that did not land) is recorded now. A text is matched as a thought's fingerprint matches it, ignoring letter case and runs of white space, so two checkpoints that differ only there name one deliverable.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      content: z.string().min(1).refine(NO_NUL, "may not hold a NUL character").refine((s) => s.trim() !== "", "may not be blank").describe("The output, or a clear standalone account of it: what was produced and where it is"),
+      spec: UUID_ARG.describe("The id of the thought stating what was asked: the spec this output was meant to meet"),
+      checkpoint: DELIVERABLE_LINE.describe("What the output was handed back at: a commit hash or a content fingerprint, at most 200 characters on one line"),
+    },
+  },
+  verify_deliverable: {
+    title: "Verify Deliverable",
+    description:
+      "Record a check of a deliverable against its spec: how it was checked (`method`), what was found (`finding`), and the status it moves to. " +
+      "`verified`: the output at its checkpoint meets the spec. `corrected`: the check found it wanting. The moves allowed are unverified → verified or corrected, verified → corrected, and corrected → verified (a later check overturning the finding, at the same checkpoint); nothing returns to unverified. " +
+      "A verification vouches for the output at its checkpoint, not for the thought's text, which can still be edited. " +
+      "Neither the key that recorded the deliverable nor a key the brain records as writing its thought may move it to verified; either may mark it corrected.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      id: UUID_ARG.describe("The deliverable's thought id"),
+      status: z.enum(VERIFY_STATUSES).describe("verified (it meets the spec) or corrected (the check found it wanting)"),
+      method: DELIVERABLE_LINE.describe("How it was checked, at most 200 characters on one line: a review, a test run, a measurement"),
+      finding: z.string().max(4000).refine(NO_NUL, "may not hold a NUL character").refine((s) => s.trim() !== "", "may not be blank").describe("What the check found, at most 4000 characters"),
+    },
+  },
+  deliverable_history: {
+    title: "Deliverable History",
+    description:
+      "Read one deliverable: its spec, checkpoint and status, who recorded it and when, its newest verification (method, finding, by whom, when), and every event in the order written — its capture, then each verification. " +
+      "A deliverable whose thought was deleted keeps its events, and reads with no deliverable standing.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      id: UUID_ARG.describe("The deliverable's thought id"),
     },
   },
   item_history: {
