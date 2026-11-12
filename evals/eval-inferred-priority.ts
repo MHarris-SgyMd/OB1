@@ -47,6 +47,7 @@
  */
 
 import { SQL } from "bun";
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -81,7 +82,12 @@ type RunLine = {
   id: string; at: string; writer: string; call: Call; level_phrase: string | null; due_phrase: string | null; ms: number; prompt_version: number;
   /** The model, its endpoint and its temperature, as `model@base t=temperature` (absent on lines from before review pass 1). */
   model?: string;
+  /** The inference's own source (priority-infer.ts: the prompt and the guards), hashed, so drafts under one version never mix (SMD-4226 review pass 1). */
+  infer_hash?: string;
 };
+
+/** The first 12 hex digits of sha256 over priority-infer.ts as it stands: the prompt and every rule that reads its answer. */
+export const inferHash = (): string => createHash("sha256").update(readFileSync(join(REPO, "server-portable", "priority-infer.ts"), "utf8").replace(/\r\n/g, "\n")).digest("hex").slice(0, 12);
 
 /** The message inferPriority logs when the model's own answer was not JSON: the live capture states nothing then, so the run records nothing. */
 export const NON_JSON = "inferPriority: model content was not valid JSON";
@@ -109,6 +115,8 @@ export function checkRunLines(lines: readonly RunLine[], population: readonly { 
   if (versions.size !== 1 || !versions.has(INFER_PROMPT_VERSION)) problems.push(`the run holds prompt versions ${[...versions].join(", ")}, not ${INFER_PROMPT_VERSION} alone`);
   const models = new Set(lines.map((l) => l.model ?? "unrecorded"));
   if (models.size > 1) problems.push(`the run mixes models: ${[...models].join("; ")}`);
+  const sources = new Set(lines.map((l) => l.infer_hash ?? "unrecorded"));
+  if (sources.size > 1) problems.push(`the run mixes the inference's source: ${[...sources].join("; ")} (a prompt or rule edited mid-run)`);
   if (population) {
     const have = new Set(lines.map((l) => l.id)), missing = population.filter((t) => !have.has(t.id));
     if (missing.length) problems.push(`the run lacks ${missing.length} of the population's ${population.length} texts: finish it with --run first`);
@@ -238,7 +246,7 @@ async function run(out: string): Promise<void> {
   const [k, n] = shardOf(flag("shard"));
   const only = args.includes("--only-fixture") ? new Set(Object.keys((JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture).items)) : null;
   const todo = (await texts()).filter((t) => (only === null || only.has(t.id)) && !done.has(t.id)).filter((_, i) => i % n === k);
-  const model = `${cfg.metadataModel}@${cfg.chat.base} t=${cfg.metadataTemperature}`;
+  const model = `${cfg.metadataModel}@${cfg.chat.base} t=${cfg.metadataTemperature}`, source = inferHash();
   console.log(`model ${model}; ${done.size} done, ${todo.length} to run`);
   let failed = 0;
   for (const [j, t] of todo.entries()) {
@@ -266,7 +274,7 @@ async function run(out: string): Promise<void> {
     const line: RunLine = {
       id: t.id, at: t.at, writer: t.writer, call: callOf(outcome.got, at),
       level_phrase: outcome.got?.level?.phrase ?? null, due_phrase: outcome.got?.due?.phrase ?? null,
-      ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION, model,
+      ms: Math.round(performance.now() - t0), prompt_version: INFER_PROMPT_VERSION, model, infer_hash: source,
     };
     appendFileSync(path, JSON.stringify(line) + "\n", { mode: 0o600 });
     if ((j + 1) % 50 === 0) console.log(`${j + 1} of ${todo.length}`);
@@ -382,10 +390,14 @@ export function devLines(f: Fixture, lines: readonly RunLine[]): string[] {
   const now = items.map((i) => ({ ...i, stratum: "call" as const, call: runOf.get(i.id)!.call }));
   const s = score(now);
   const goldLevels = now.filter((i) => i.gold.levels.length > 0), goldDues = now.filter((i) => i.gold.dues.length > 0);
+  let strayItems = 0, strayLevels = 0, strayDues = 0;
   const strays = now.flatMap((i) => {
     const l = runOf.get(i.id)!, out: string[] = [];
     if (i.call.level !== null && i.gold.levels.length === 0) out.push(`  level ${i.call.level} on ${i.writer} ${i.id.slice(0, 8)}: "${(l.level_phrase ?? "").slice(0, 80)}"`);
     if (i.call.due !== null && i.gold.dues.length === 0) out.push(`  due +${i.call.due} on ${i.writer} ${i.id.slice(0, 8)}: "${(l.due_phrase ?? "").slice(0, 80)}"`);
+    if (i.call.level !== null && i.gold.levels.length === 0) strayLevels++;
+    if (i.call.due !== null && i.gold.dues.length === 0) strayDues++;
+    if (out.length) strayItems++;
     return out;
   });
   return [
@@ -395,7 +407,7 @@ export function devLines(f: Fixture, lines: readonly RunLine[]): string[] {
     `High where the gold reads none    ${pct(s.highOnNone)}`,
     `the gold's levels read            ${goldLevels.filter((i) => levelRead(i.call, i.gold)).length} of ${goldLevels.length}`,
     `the gold's due days read          ${goldDues.filter((i) => dueRead(i.call, i.gold)).length} of ${goldDues.length}`,
-    `calls where the gold reads nothing: ${strays.length}`,
+    `items where the run reads a half the gold doesn't: ${strayItems} (a level on ${strayLevels}, a due day on ${strayDues})`,
     ...strays,
   ];
 }
@@ -601,6 +613,9 @@ function selfCheck(): void {
   assert(checkRunLines([rl(1), rl(2, { prompt_version: INFER_PROMPT_VERSION + 1 })], null).some((p) => /prompt versions/.test(p)), "a run of two prompt versions is refused");
   assert(checkRunLines([rl(1, { model: "a@x t=0" }), rl(2, { model: "b@x t=0" })], null).some((p) => /mixes models/.test(p)), "a run of two models is refused");
   assert(checkRunLines([rl(1, { model: "a@x t=0" }), rl(2)], null).some((p) => /mixes models/.test(p)), "a recorded model beside unrecorded lines is refused");
+  assert(checkRunLines([{ ...rl(1), infer_hash: "aaa" }, { ...rl(2), infer_hash: "bbb" }], null).some((p) => /mixes the inference's source/.test(p))
+      && checkRunLines([{ ...rl(1), infer_hash: "aaa" }, { ...rl(2), infer_hash: "aaa" }], null).length === 0, "a run mixing two drafts of the inference's source is refused, one source taken");
+  assert(/^[0-9a-f]{12}$/.test(inferHash()), "the inference's source is hashed to 12 hex digits");
   assert(checkRunLines([rl(1)], [{ id: id(1) }, { id: id(2) }]).some((p) => /lacks 1 of the population's 2/.test(p)), "a run short of the population is refused");
   assert(checkRunLines([rl(1), rl(2)], [{ id: id(1) }]).some((p) => /1 ids the population no longer does/.test(p)), "a run holding a thought the population no longer does is refused");
 
@@ -658,11 +673,14 @@ function selfCheck(): void {
   const devRun = (call: (i: Item) => Call, phrase = "QQ") => Object.entries(fx.items).map(([iid]) => ({ ...rl(0), id: iid, writer: "w",
     call: call(fromFixture(fx).items.find((x) => x.id === iid)!), level_phrase: phrase, due_phrase: phrase, prompt_version: 2 }));
   const asGold = devLines(fx, devRun((i) => ({ level: i.gold.levels[0] ?? null, due: i.gold.dues[0] ?? null, byRule: null })));
-  assert(asGold[0].startsWith("development check, prompt v2 over the 60 frozen items (no verdict") && asGold.includes("calls where the gold reads nothing: 0"), "a run reading exactly the gold strays nowhere, and says it is no verdict");
+  assert(asGold[0].startsWith("development check, prompt v2 over the 60 frozen items (no verdict") && asGold.includes("items where the run reads a half the gold doesn't: 0 (a level on 0, a due day on 0)"), "a run reading exactly the gold strays nowhere, and says it is no verdict");
   assert(asGold.some((l) => /^level reads the gold agrees with  1\.000 \(23 of 23\)/.test(l)) && asGold.some((l) => /^the gold's due days read          13 of 13$/.test(l)), "it scores each half over the run's calls and counts the gold's reads");
   const allHigh = devLines(fx, devRun(() => ({ level: 3, due: null, byRule: null })));
-  assert(allHigh.some((l) => /^High where the gold reads none    0\.617 \(37 of 60\)/.test(l)) && allHigh.some((l) => l === "calls where the gold reads nothing: 37") && allHigh.includes("the gold's levels read            3 of 23"), "a run reading High everywhere strays on every item the gold reads no level in");
+  assert(allHigh.some((l) => /^High where the gold reads none    0\.617 \(37 of 60\)/.test(l)) && allHigh.includes("items where the run reads a half the gold doesn't: 37 (a level on 37, a due day on 0)") && allHigh.includes("the gold's levels read            3 of 23"), "a run reading High everywhere strays on every item the gold reads no level in");
   assert(allHigh.some((l) => /^  level 3 on (session_hook|claude_code) [0-9a-f]{8}: "QQ"$/.test(l)), "each stray names its writer, id and phrase");
+  const bothHalves = devLines(fx, devRun(() => ({ level: 3, due: 5, byRule: null })));
+  assert(bothHalves.includes("items where the run reads a half the gold doesn't: 57 (a level on 37, a due day on 47)"),
+    "an item the run reads both halves of, where the gold reads neither, counts once, each half apart");
   assert(devLines(fx, devRun(() => C(null)).slice(1))[0].startsWith("the run lacks 1 of the fixture's 60"), "a run short of the fixture is refused");
   assert(!reportLines({ ...fx, registration: registrationDigits("ffffffffffffffff") }).at(-1)!.startsWith("verdict"), "a fixture labelled under another registration gets no verdict");
   assert(!reportLines({ ...fx, registration: registrationDigits("eeeeeeeeeeeeeeee") }, "eeeeeeeeeeeeeeee").at(-1)!.startsWith("verdict"), "a fixture and a rules file moved together, away from the pinned registration, get no verdict");
