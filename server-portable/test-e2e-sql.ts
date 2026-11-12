@@ -3613,12 +3613,12 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     logged.length = 0;
     const gatewayed = await loggedDuring(() => captureRaw(CAPTURE_KEY, "[20] a session summary sent while a gateway answers for the provider"));
     // The operator's log carries the gateway's own words, which no capture key is shown (review pass 3: the log had none).
-    assert(logged.some((l) => /returned no embedding for model .* — it said: \{"error":\{"message":"No successful provider responses\./.test(l)), `a gateway's words in the log (${logged.join(" | ").slice(0, 240)})`);
+    assert(logged.some((l) => /returned no embedding for model .* — it said: No successful provider responses\./.test(l)), `a gateway's words in the log (${logged.join(" | ").slice(0, 240)})`);
     assert(gatewayed.isError && gatewayed.sc?.code === "EMBEDDING_PROVIDER_ERROR" && gatewayed.sc?.reason === "provider_body" && /no embedding in its answer/.test(gatewayed.text)
       && !/stub\.invalid|No successful/.test(gatewayed.text),
       `a 200 with no embedding, to a capture key: refused coded, provider_body, no endpoint or gateway words (${gatewayed.text.slice(0, 200)})`);
     const gatewayedRead = await captureRaw("e2e-key", "[20] a thought captured while a gateway answers for the provider");
-    assert(gatewayedRead.isError && gatewayedRead.sc?.reason === "provider_body" && /It said: \{"error":\{"message":"No successful provider responses\."/.test(gatewayedRead.text),
+    assert(gatewayedRead.isError && gatewayedRead.sc?.reason === "provider_body" && /It said: "No successful provider responses\."/.test(gatewayedRead.text),
       `…and a write key is shown the gateway's own words (${gatewayedRead.text.slice(0, 260)})`);
     // A redirect: refused, and a write key told where it points, to set the base there (review pass 1; SETUP.md).
     stubDown = "redirect";

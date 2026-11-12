@@ -196,6 +196,19 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
  * code of its own), a caller's abort, and a plain Error such as the width
  * mismatch, which stays a fault.
  */
+/**
+ * What a 2xx answer with no embedding says of itself: its `error` (a string, or its `message`), else its `message` —
+ * never the whole answer, which an endpoint echoing the request fills with the brain's own headers, and which a deep
+ * nest makes JSON.stringify throw on (SMD-2892 review pass 4). Capped.
+ */
+export function answerWords(d: unknown): string {
+  const o = typeof d === "object" && d !== null ? (d as { error?: unknown; message?: unknown }) : {};
+  const e = o.error;
+  const said = typeof e === "string" ? e : typeof e === "object" && e !== null && typeof (e as { message?: unknown }).message === "string" ? (e as { message: string }).message
+    : typeof o.message === "string" ? o.message : "";
+  return said.slice(0, PROVIDER_ERROR_CHARS);
+}
+
 export function providerFault(e: unknown): { retryable: boolean; reason: string; detail: string; status?: number; provider?: string } | null {
   const down = providerDown(e);
   if (down) return { retryable: true, ...down, ...(e instanceof ProviderError && e.status !== undefined ? { status: e.status } : {}) };
@@ -1032,7 +1045,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       // an empty `data`. A body error, as a 2xx that is not JSON is, so a caller is refused coded rather than told the
       // base in a raw message; its words kept (capped) for a reader. The message's phrase is reembed's and the
       // orchestration runner's to match (deploy/orchestration/runner.ts REEMBED_PHRASES).
-      throw new ProviderError(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`, "body", 200, JSON.stringify(d ?? null).slice(0, PROVIDER_ERROR_CHARS));
+      throw new ProviderError(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`, "body", 200, answerWords(d));
     }
 
     // Refuse a width the column cannot hold. Postgres would reject the insert

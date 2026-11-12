@@ -977,6 +977,23 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const empty = providerFault(new ProviderError("http://x/v1 returned no embedding for model m", "body", 200, '{"error":{"message":"No successful provider responses."}}'));
   assert(empty?.retryable === false && empty.reason === "provider_body" && empty.detail === "it answered 200 with no embedding in its answer" && /No successful provider/.test(empty.provider ?? ""),
     `providerFault: a 200 with no embedding is final, provider_body, said so, the gateway's words kept (${JSON.stringify(empty)})`);
+  // The provider's words cleaned before a reply tells them or a log prints them (review pass 4): the brain's own key and
+  // credential shapes redacted (an echoing endpoint sends the Authorization back), one line (no forged log line), no
+  // terminal escape, no invisible character a model would read.
+  const { providerSaid, providerLogWords } = await import("./core/provider-refusal.ts");
+  const KEY = "abcd1234efgh5678";
+  const hostile = `{"headers":{"authorization":"Bearer ${KEY}","proxy":"Basic dXNlcjpwYXNzd29yZA==","x":"sk-proj-0123456789abcdef"}}\n{"door":"api","outcome":"ok"}\x1b]52;c;ZXZpbA==\x07 zero\u200bwidth\u{E0041}tag your ${KEY} again`;
+  const cleaned = providerSaid(hostile, { key: KEY });
+  assert(!cleaned.includes(KEY) && !cleaned.includes("dXNlcjpwYXNzd29yZA") && !cleaned.includes("sk-proj-0123") && !/[\n\x1b\x07\u200b]/.test(cleaned) && !/\u{E0041}/u.test(cleaned)
+    && (cleaned.match(/\[redacted\]/g) ?? []).length >= 4 && /zerowidthtag/.test(cleaned),
+    `the provider's words: the key and credential shapes redacted, one line, no escape or invisible character (${cleaned})`);
+  const logged = providerLogWords(new ProviderError(`Embeddings request to http://x/v1 failed: 401 ${hostile}`, "http", 401, hostile), { key: KEY });
+  assert(!logged.includes(KEY) && !/[\n\x1b]/.test(logged) && logged.startsWith("Embeddings request to http://x/v1 failed: 401 "), `…and a log line the same (${logged.slice(0, 120)})`);
+  // A 200 holding no embedding is told by its own error words, never the whole answer.
+  const { answerWords } = await import("./embed.ts");
+  assert(answerWords({ error: { message: "No successful provider responses." } }) === "No successful provider responses." && answerWords({ error: "quota" }) === "quota"
+    && answerWords({ message: "m" }) === "m" && answerWords({ headers: { authorization: `Bearer ${KEY}` }, json: { input: "the thought" } }) === "" && answerWords(null) === "",
+    "answerWords: an answer's error or message alone, never an echo of the request");
   // A redirect: never followed, and where it points is the provider's words, for a reader to set the base (review pass 1).
   const moved = providerFault(refuseRedirect("Embeddings", "http://x/v1", new Response(null, { status: 307, headers: { location: "https://user:pw@y.example/v1?key=k" } })));
   assert(moved?.retryable === false && moved.reason === "provider_307" && moved.detail === "it answered 307 (a redirect, never followed)" && moved.provider === "redirecting to https://***@y.example/v1?…",
@@ -1139,6 +1156,25 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     // The handshake's own error, whatever the platform calls it (EPROTO on macOS), not some other throw in capture.
     const tlsSaid = `${String(eTls)} ${(eTls as { code?: unknown })?.code ?? ""}`;
     assert(eTls !== undefined && providerDown(eTls) === null && /TLS|SSL|EPROTO|handshake/i.test(tlsSaid) && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${tlsSaid})`);
+    // An endpoint echoing the request (the brain's own Authorization in it), and a 2xx nested past JSON.stringify's
+    // depth (review pass 4): each refused coded, provider_body, and the key in neither the refusal nor its words.
+    const echo = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => Response.json({ headers: Object.fromEntries(req.headers), error: { message: `echo of ${req.headers.get("authorization")}` } }) });
+    const deep = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(`{"data":${"[".repeat(120_000)}${"]".repeat(120_000)}}`, { headers: { "content-type": "application/json" } }) });
+    try {
+      for (const [what, port] of [["an echoing endpoint", echo.port], ["a deep nest", deep.port]] as const) {
+        const ctx4 = createContext({
+          env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_LLM_API_KEY: "secret-key-0123456789", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+          store: async () => ({ captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000b4", existed: false }) }) as never,
+          door: "test",
+        });
+        const out = await capture(ctx4, { name: "writer", scope: "write", keyHash: "h" } as never, { content: `a thought sent to ${what}` } as never).then((o) => o, (e) => e);
+        assert(out?.ok === false && out.refusal.code === "EMBEDDING_PROVIDER_ERROR" && out.refusal.reason === "provider_body" && !JSON.stringify(out).includes("secret-key-0123456789"),
+          `${what}: refused coded, provider_body, the brain's key nowhere in it (${JSON.stringify(out).slice(0, 220)})`);
+      }
+    } finally {
+      echo.stop(true);
+      deep.stop(true);
+    }
     // The same misconfigured chat while the embeddings refuse the brain's key (SMD-2892 review pass 1): the chat's throw
     // no longer wins the race — the capture is refused coded, the provider's verdict, and still nothing is written.
     // Its 401 comes after the chat's handshake fails, so the chat's throw reaches Promise.all first (review pass 2: an

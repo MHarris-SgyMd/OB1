@@ -252,7 +252,7 @@ const FACTS: Facts = {
 
 /** A refusal as a value: its code, whether a retry can help, and its declared facts (FACTS). */
 export function refusalValue(r: Refusal): Record<string, unknown> {
-  return { code: r.code, retryable: r.retryable, ...(FACTS[r.code] as (r: Refusal) => Record<string, unknown>)(r) };
+  return { code: r.code, retryable: r.retryable, ...((FACTS[r.code] ?? none) as (r: Refusal) => Record<string, unknown>)(r) };
 }
 
 /**

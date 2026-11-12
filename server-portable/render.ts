@@ -127,7 +127,7 @@ function providerErrorText(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_ERROR
     : s === 400 || s === 413 || s === 422 ? `It may be a setting it is sent with (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM), which an operator checks, or this text (a shorter or plainer one may land).`
     : r.reason === "provider_body" ? `Something in front of the provider (a proxy, a gateway) may be answering for it: an operator checks ${r.setting}; retrying will not help until then.`
     : `An operator checks ${r.setting}; retrying will not help until then.`;
-  const said = r.provider ? ` It said: ${oneLine(snipText(r.provider, 200))}` : "";
+  const said = r.provider ? ` It said: ${JSON.stringify(oneLine(snipText(r.provider, 200)))}` : "";
   return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. ${advice}${said}`;
 }
 
