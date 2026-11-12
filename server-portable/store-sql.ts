@@ -26,7 +26,7 @@ import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SU
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -41,6 +41,7 @@ import type {
   ThoughtListPage,
   DeleteResult,
   ResetStampResult,
+  SetWeightsResult,
   ProvenanceNode,
   QueryActionLog,
   QueryAgendaLog,
@@ -1196,6 +1197,13 @@ export class SqlStore implements ThoughtStore {
     const span = Number(r?.span);
     if (!Number.isFinite(span) || span <= 0) throw new Error("ob1_priority_span answered no span this server reads");
     return span;
+  }
+
+  // SMD-4193 PR 2: 132's operator write, one statement. The weights ride as JSON text, cast in SQL; null clears.
+  async setPriorityWeights(opts: { weights: Partial<PriorityWeights> | null; actor?: Actor }): Promise<SetWeightsResult> {
+    const rows = await this.sql`
+      SELECT set_priority_weights((${opts.weights === null ? null : JSON.stringify(opts.weights)}::text)::jsonb, ${actorPayload(opts.actor)}::jsonb) AS r`;
+    return normaliseSetWeights(rows[0]?.r);
   }
 
   // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope, the

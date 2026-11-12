@@ -30,6 +30,7 @@ import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
+import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
@@ -68,6 +69,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** An embedding as `<model>@<dim>` (qwen3-embedding:4b@1024, an OpenAI or Ollama name, Cloudflare's leading @): no space, so no sentence. */
+const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -96,6 +99,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
   if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
+  // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
+  if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -417,6 +422,7 @@ export { INGESTED_NOTICE, ingestedNotice };
 // decision's guard (proposal-review.ts) reads without this file's imports.
 export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
 import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { dueText, LEVEL_WORDS } from "./priority-scale.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
 export function standingFlagText(f: StandingFlag): string {
@@ -597,6 +603,9 @@ export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolea
  * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
  */
 export function priorityHint(msg: string): string {
+  // The operator's stored weights refused, or unreadable (migration 132): every ranked read fails alike.
+  const setting = weightSettingHint(msg);
+  if (setting) return setting;
   // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span. Under
   // a call's own weights (SMD-4193) the scale is 131's ob1_priority_span(jsonb): a brain before 131 lacks that alone.
   return /ob1_priority_span\(jsonb\)/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -606,7 +615,7 @@ export function priorityHint(msg: string): string {
     : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
     ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), which 128 leaves to PUBLIC's EXECUTE: the database's default privileges or a REVOKE took it from the server's role, so grant EXECUTE on both to it (migrate.ts --grant does not); search without them meanwhile"
     : /ob1_priority_defaults/.test(msg) && /does not exist|could not find|lacks weight/i.test(msg)
-    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128), which is missing or lacks a weight; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
+    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128; since 132 the built-in weights ob1_priority_builtin under the operator's setting), which is missing or lacks a weight; re-apply every migration, so the last to define each stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
     : /ob1_priority_span answered no span/.test(msg)
     ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without priority_weight meanwhile"
     : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -1932,26 +1941,69 @@ export function renderResetCaptureStamp(o: Outcome<StampReset, StampResetCode>):
       + "Until you do, the next classified key that can read to re-capture it is the one weighed. fetch's label, or thought_changes, shows which way it went.";
   }, (r) => {
     switch (r.code) {
-      case "REFUSED_NOT_OPERATOR": {
-        // The fix depends on what the key is (review pass 2): an unclassified
-        // key may be the operator's, and its line is given; a key classified
-        // otherwise is someone else's, and classifying it operator would
-        // raise the trust of everything it writes.
-        const key = snipText(r.key, 80);
-        const lead = "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.";
-        if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
-        // The line only for a name set_agent_kind takes as written — no
-        // control character, nothing it trims — or the line would classify
-        // another label (review pass 3: a mangled name created an operator row).
-        const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
-        if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
-        return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
-      }
+      case "REFUSED_NOT_OPERATOR": return notOperatorText(r, "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.");
       case "REFUSED_NOT_CAPTURE_STAMP": return `Refused: ${r.id}'s label is not one a reset can put back — a capture-only key did not capture it (or captured it before the server marked such captures), or its text was changed since. Its label is its writer's: a text edit restamps it.`;
       default: return mutationRefusalText(r);
     }
   }, (v) => ({ id: v.id, reset: v.reset, restored: v.restored, declines: v.declines, actorKind: oneOf(SAID_BY, v.stamp.actorKind), trust: oneOf(TRUST, v.stamp.trust) }));
 }
+
+/**
+ * An operator-only call refused (086's reset, 132's weights): what the key is, and the fix that fits it (review pass
+ * 2): an unclassified key may be the operator's, and its line is given; a key classified otherwise is someone else's,
+ * and classifying it operator would raise the trust of everything it writes.
+ */
+function notOperatorText(r: Extract<Refusal, { code: "REFUSED_NOT_OPERATOR" }>, lead: string): string {
+  const key = snipText(r.key, 80);
+  if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
+  // The line only for a name set_agent_kind takes as written — no
+  // control character, nothing it trims — or the line would classify
+  // another label (review pass 3: a mangled name created an operator row).
+  const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
+  if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
+  return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
+}
+
+/**
+ * The operator's priority weights (SMD-4193 PR 2, migration 132): what every read now takes as its defaults, and what
+ * it replaced. A call's own weights still override them by name.
+ */
+export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>): Reply {
+  return render(o, (v) => {
+    const now = v.weights ? `${weightsText(v.weights)}, the rest built in` : "the built-in weights";
+    if (!v.changed) return `Unchanged: every read already takes ${now} as its defaults${v.weights && v.setAt ? ` (set ${v.setAt}${v.setBy ? ` by ${snipText(v.setBy, 80)}` : ""})` : ""}. Nothing was written.`;
+    const before = v.previous ? `${weightsText(v.previous)}, the rest built in` : "the built-in weights";
+    return `${v.weights ? "Set" : "Cleared"} the operator's priority weights: every read now takes ${now} as its defaults, and a call's own weights still override them by name. Before: ${before}.`
+      + (v.weights ? " A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it." : "");
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may set the priority weights, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
+    : r.code === "PRIORITY_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+    : unknownRefusal(r),
+  (v) => ({ changed: v.changed, weights: v.weights, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
+}
+
+/** set_priority_weights' fault: a database before 132 has no such function. */
+export const setWeightsHint = (msg: string): string =>
+  /set_priority_weights/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 132 (db/migrations/132_priority_weight_setting.sql) is not applied"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — the server's role needs the priority group's grants on priority_weight_settings (migration 132; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
+/**
+ * The fault every ranked priority read gives while the operator's stored weights are refused (migration 132): a later
+ * migration narrowed a range under them, or a raw write. The read fails rather than order by weights the operator did
+ * not choose; this says how to mend it.
+ */
+export const weightSettingHint = (msg: string): string =>
+  /the operator's priority weights \(set .*\) are refused/.test(msg)
+    ? " — an operator key sets them again, or clears them with {}, through set_priority_weights (REST POST /v1/priority-weights); brain_info shows the setting"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — every effective priority takes the operator's weights from priority_weight_settings (migration 132), and the server's role needs the priority group's grants on it (db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
 
 /** reset_capture_stamp's fault: a database before 086 has no such function. */
 export const resetHint = (msg: string): string =>
@@ -2290,18 +2342,8 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 // Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
 // null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
 
-const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
-/**
- * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
- * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
- * and any other as the instant itself.
- */
-const dueText = (iso: string) => {
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
-};
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
   `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
@@ -2526,6 +2568,9 @@ export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => ren
   : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
   : unknownRefusal(r), AS_JSON);
 
+/** A similarity to three places, rounded down, so a value under a bar never prints as the bar (0.7399 is 0.739, not 0.740). */
+const simDown = (x: number): string => (Math.floor(x * 1000) / 1000).toFixed(3);
+
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {
   switch (g.gap) {
@@ -2533,6 +2578,8 @@ const gapWords = (g: PlanGap): string => {
     case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
     case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
+    case "little": return `Little on this: ${g.topSimilarity === null ? "no hit has a similarity (exact matches alone)" : `the best hit's similarity is ${simDown(g.topSimilarity)}`}, under ${g.bar}, where the brain was measured to hold little that bears on a request (SMD-4212, on ${quoted(g.embeddingId, 80)}). A coverage signal, not a verdict: weigh the hits.`;
+    case "little_not_measured": return `A note, not a gap: whether the brain has little on this is not measured for this embedding (${quoted(g.embeddingId, 80)}; the bar was measured on ${quoted(g.measuredOn, 80)})${g.topSimilarity === null ? "; no hit has a similarity" : `; the best hit's similarity is ${simDown(g.topSimilarity)}, on that embedding's own scale`}.`;
     case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}${g.more ? ` and ${g.more} more` : ""}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
     case "trimmed": return `Cut to keep this reply readable: ${[
@@ -2609,7 +2656,8 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
   // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
   // A budget cut is no coverage gap (review pass 1): the weighing line stands whenever nothing else is found.
-  const found = v.gaps.filter((g) => g.gap !== "trimmed");
+  // Nor is a bar not measured for this embedding (SMD-4212): it finds nothing, so the weighing line stands beside it.
+  const found = v.gaps.filter((g) => g.gap !== "trimmed" && g.gap !== "little_not_measured");
   out.push("\n## Gaps", ...v.gaps.map((g) => `- ${gapWords(g)}`),
     ...(found.length ? [] : [`- ${v.gaps.length ? "Nothing else found" : "None found"}. How close the hits are to the request is each hit's match; weigh them before relying on them.`]));
   return out.join("\n");

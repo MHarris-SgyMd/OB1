@@ -47,7 +47,7 @@ export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "o
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
 /** The tables the read asks after: the counted ones, the config, the ledger, where consolidation's findings stand (SMD-2680) and what became of those posted to the board (SMD-2682). */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted"] as const;
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -170,6 +170,16 @@ export interface DatabaseFacts {
    * row reads it.
    */
   threads: ThreadsFact | null;
+  /**
+   * The operator's priority weights (132, SMD-4193 PR 2), which every read
+   * takes as its defaults over the built-in ones: `standing` the setting, its
+   * weights, when and by which key, and `refused` what is wrong with it (every
+   * priority read fails while it stands), or null when none stands and the
+   * built-in weights are the defaults. Null when the table is absent (no
+   * `unread` entry: before 132, the built-in weights alone) or not read
+   * (`unread` names it). Not a stats read.
+   */
+  priorityWeights: { standing: PriorityWeightSetting | null } | null;
   /**
    * What became of the findings db/board-findings.ts posted to the board
    * (087, SMD-2682): each (ticket pair, word) this brain posted, as accepted,
@@ -296,7 +306,19 @@ export interface WorkerHeartbeat {
   holds?: SleepHold[];
   /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width or model name forms no key a row carries (SMD-2679 PR 4b-2, SMD-3486). */
   reembedJob?: string;
+  /**
+   * board-sync held by Linear's rate limit (SMD-4133): no pass, so no request,
+   * until `until` (a UTC instant), by the reset time Linear sent (`linear`) or
+   * a backoff when it sent none (`backoff`). On a live board-sync row alone;
+   * absent while not held, and for the other workers.
+   */
+  limited?: BoardLimited;
 }
+
+/** Why board-sync's hold ends when it does: the reset time Linear sent, or a backoff when it sent none. */
+export const BOARD_LIMIT_BY = ["linear", "backoff"] as const;
+/** board-sync's hold on Linear's rate limit (WorkerHeartbeat.limited), as db/sync-linear.ts writes it. */
+export type BoardLimited = { until: string; by: (typeof BOARD_LIMIT_BY)[number] };
 
 /** What set the scheduler's re-embed pass down for a sleep (WorkerHeartbeat.aside), beside a model switch, which sets it aside. */
 export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "statement", "outage", "failed"] as const;
@@ -890,6 +912,11 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
     const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
     const holds = worker === "sleep" ? parseHolds(v!.holds) : undefined;
+    // board-sync's hold on Linear's rate limit (SMD-4133), on a live row alone and left off when not of the shape.
+    const lim = worker === "board-sync" && live ? (v!.limited as Record<string, unknown> | undefined) : undefined;
+    const limited = lim !== null && typeof lim === "object" && typeof lim.until === "string" && UTC_INSTANT.test(lim.until) && (BOARD_LIMIT_BY as readonly unknown[]).includes(lim.by)
+      ? { until: lim.until, by: lim.by as BoardLimited["by"] }
+      : undefined;
     // Its own re-embed key (SMD-2679 PR 4b-2), a model's own key or left off.
     const reembedJob = worker === "sleep" && typeof v!.reembedJob === "string" && REEMBED_OWN_KEY.test(v!.reembedJob) ? v!.reembedJob : undefined;
     heartbeats.push({
@@ -916,6 +943,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(reembedJob ? { reembedJob } : {}),
       ...(paused ? { paused } : {}),
       ...(holds ? { holds } : {}),
+      ...(limited ? { limited } : {}),
       // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
       ...(worker === "sleep" && v!.resting === true && live ? { resting: true as const } : {}),
     });
@@ -1636,12 +1664,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'ob1_entities', to_regclass('ob1_entities') IS NOT NULL,
                'supersession_proposals', to_regclass('supersession_proposals') IS NOT NULL,
                'thought_facets', to_regclass('thought_facets') IS NOT NULL,
-               'board_findings_posted', to_regclass('board_findings_posted') IS NOT NULL) AS resolved,
+               'board_findings_posted', to_regclass('board_findings_posted') IS NOT NULL,
+               'priority_weight_settings', to_regclass('priority_weight_settings') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -1673,6 +1702,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       proposals: null,
       relations: null,
       threads: null,
+      priorityWeights: null,
       findings: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
@@ -1734,6 +1764,14 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         table: "supersession_proposals",
         read: async (sp) => { facts.proposals = proposalsValue((await PROPOSALS_SQL(sp))[0]); },
         clear: () => { facts.proposals = null; },
+      },
+      // The operator's priority weights (SMD-4193 PR 2): one row at most, read by 132's function, which says what is
+      // wrong with a stored setting without raising.
+      {
+        field: "priorityWeights",
+        table: "priority_weight_settings",
+        read: async (sp) => { facts.priorityWeights = { standing: weightSettingValue((await sp`SELECT priority_weight_setting() AS s`)[0]?.s) }; },
+        clear: () => { facts.priorityWeights = null; },
       },
       // Not a stats read either: preflight's threads row reads it (SMD-3306 PR 7a-2c). Bounded: two index walks of at
       // most THREAD_CENSUS_BOUND rows each, and the thoughts they name.
@@ -1915,6 +1953,26 @@ export type DatabaseSummary = Omit<DatabaseFacts, "ledger"> & {
 };
 
 export type LedgerStatus = "current" | "behind" | "ahead" | null;
+
+/**
+ * The operator's priority weights (132, SMD-4193 PR 2): overrides by name over the built-in weights, which every read
+ * takes as its defaults. `setAt` and `setBy` say when and by which operator key; `refused`, what is wrong with a stored
+ * setting in effective_priority's words (every ranked priority read fails while it stands), else null.
+ */
+export type PriorityWeightSetting = { weights: Record<string, unknown>; setAt: string | null; setBy: string | null; refused: string | null };
+/**
+ * priority_weight_setting()'s jsonb → the record's setting; null when none stands. Its weights are kept as stored,
+ * whatever they hold: a refused setting (a null, a string, past a range) is the one this row exists to say (review
+ * pass 1: a read refusing it left the row unread while every ranked priority read failed). No setting at all throws.
+ */
+export function weightSettingValue(r: unknown): PriorityWeightSetting | null {
+  if (r === null || r === undefined) return null;
+  const o = typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null;
+  const w = o && o.weights !== null && typeof o.weights === "object" && !Array.isArray(o.weights) ? (o.weights as Record<string, unknown>) : null;
+  if (!o || !w) throw new Error("the priority weights read answered no setting");
+  const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
+  return { weights: w, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
+}
 
 /** The threads' census as the record carries it: its counts, and no key (see DatabaseFacts.threads). */
 export type ThreadsFact = Omit<ThreadCensus, "first">;
@@ -2243,7 +2301,23 @@ export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly Slee
   // review passes 1 and 2).
   const state = h.paused ? `paused by a live call for ${ago(Math.max(0, secondsSince(h, h.paused.since)))}${at === null ? "" : `, waiting for the provider${at}`}`
     : h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
-  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
+  return `${state}${h.limited ? `, ${limitWords(h, h.limited)}` : h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
+}
+
+/** Whose word ends board-sync's hold: Linear's reset time, or the backoff. */
+export const limitByWords = (l: BoardLimited): string => (l.by === "linear" ? "the reset time Linear sent" : "a backoff: Linear sent no reset time");
+
+/**
+ * board-sync's hold on Linear's rate limit in words (SMD-4133): until when,
+ * by whose word, and — by the row's own clock — how long that is from now,
+ * or that it has passed and the next trigger passes.
+ */
+export function limitWords(h: Pick<WorkerHeartbeat, "at" | "ageS">, l: BoardLimited): string {
+  const left = -secondsSince(h, l.until);
+  const by = limitByWords(l);
+  return left > 0
+    ? `its last pass rate-limited by Linear: no pass, and no request, until ${l.until} (in ${ago(left)}; ${by})`
+    : `its last pass rate-limited by Linear until ${l.until} (${by}), which has passed: the next trigger passes`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */
@@ -2329,6 +2403,26 @@ function relationsLine(db: DatabaseSummary): string {
   // A brain short of 084 holds none because it cannot yet, not because none was found.
   if (n === 0) return (db.highestMigration !== null && db.highestMigration < 84 ? "none — migration 084 is not applied" : "none standing") + apart;
   return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})${apart}`;
+}
+
+/** The operator's priority weights (SMD-4193 PR 2): built in, the operator's, or the operator's refused (every ranked priority read fails). */
+export function priorityWeightsLine(db: Pick<DatabaseSummary, "priorityWeights" | "unread">): string {
+  const w = db.priorityWeights;
+  if (w === null) {
+    const u = db.unread.priorityWeights;
+    return u ? `? (${deniedObject(u.message)?.name ?? "priority_weight_settings"} ${unreadWords(u)})` : "built in (no operator's setting before migration 132)";
+  }
+  if (w.standing === null) return "built in (no operator's setting)";
+  const s = w.standing;
+  // A number or a boolean as written; anything else a stored setting holds as its JSON, so a null or a string shows.
+  // Each cut, and the name and the refusal, as the set reply cuts the name (review pass 2): a raw write is the case
+  // this row exists for, and a raw write's values are unbounded. JSON escapes what a line cannot hold.
+  const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  const set = Object.entries(s.weights).slice(0, 20).map(([k, v]) => `${cut(JSON.stringify(k).slice(1, -1), 40)} ${typeof v === "number" || typeof v === "boolean" ? String(v) : cut(JSON.stringify(v) ?? "?", 40)}`).join(", ");
+  const when = `set ${s.setAt ?? "?"}${s.setBy ? ` by ${cut(JSON.stringify(s.setBy).slice(1, -1), 80)}` : ""}`;
+  return s.refused === null
+    ? `the operator's: ${set}, the rest built in (${when})`
+    : `the operator's, REFUSED, so every ranked priority read fails: ${set} (${when}): ${cut(s.refused, 300)}. An operator key sets them again, or clears them with {}, through set_priority_weights`;
 }
 
 /**
@@ -2539,6 +2633,7 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
   }
   lines.push(row("Proposals", proposalsLine(db)));
   lines.push(row("Threads", threadsLine(db)));
+  lines.push(row("Priority weights", priorityWeightsLine(db)));
   if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));
   const calls = modelCallsLine(db);

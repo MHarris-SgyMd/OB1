@@ -1502,6 +1502,32 @@ export type EffectivePriority = {
 };
 
 /**
+ * set_priority_weights' answer (132). `changed` false: the weights given were those standing, and nothing was written.
+ * `weights` is the setting now (null: none, the built-in weights stand), `previous` the one it replaced. Refused:
+ * NOT_OPERATOR (not a key the registry classifies operator by its agent id; `kind` what it is), BAD_WEIGHTS (`message`
+ * in effective_priority's words).
+ */
+export type SetWeightsResult =
+  | { ok: true; changed: boolean; weights: Partial<PriorityWeights> | null; previous: Partial<PriorityWeights> | null; setAt: string | null; setBy: string | null }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "BAD_WEIGHTS"; message: string };
+
+const weightsOrNull = (v: unknown): Partial<PriorityWeights> | null =>
+  v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Partial<PriorityWeights>) : null;
+
+/** set_priority_weights' jsonb (132) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseSetWeights(r: unknown): SetWeightsResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  if (o?.ok === true && typeof o.changed === "boolean") {
+    return { ok: true, changed: o.changed, weights: weightsOrNull(o.weights), previous: weightsOrNull(o.previous), setAt: isoTimestampOrNull(o.set_at), setBy: word(o.set_by) };
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
+  if (o?.ok === false && o.error === "BAD_WEIGHTS" && typeof o.message === "string") return { ok: false, error: "BAD_WEIGHTS", message: o.message };
+  throw new Error(`set_priority_weights answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
  * is the database's, which quotes the argument it could not read, cut. Any other
@@ -2506,6 +2532,13 @@ export interface ThoughtStore {
    */
   prioritySpan(weights?: Partial<PriorityWeights>): Promise<number>;
   /**
+   * The operator sets the weights every read takes as its defaults (migration 132's set_priority_weights, SMD-4193
+   * PR 2): overrides by name over the built-in weights; null or {} clears them. The function decides who may — a key
+   * the registry classifies operator, by its agent id — and checks the weights in effective_priority's words. A
+   * database before 132 throws.
+   */
+  setPriorityWeights(opts: { weights: Partial<PriorityWeights> | null; actor?: Actor }): Promise<SetWeightsResult>;
+  /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
    * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
@@ -2870,7 +2903,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 

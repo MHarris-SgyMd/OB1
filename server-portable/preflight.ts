@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -225,6 +225,41 @@ const { metadataModel: metaModel, judgeModel, egress } = resolvedEmbed;
 const { embeddings: embEndpoint, chat: chatEndpoint } = resolveProviderEndpoints(env);
 /** Whether the chat knobs name an endpoint of their own; the report then carries a provider and a credential row for it. */
 const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
+
+
+/**
+ * What a server role without some of the priority group's grants fails, in preflight's priority row (SMD-3664; 117's
+ * open items; 132's operator's weights). A read (priority_history) needs SELECT on the assertions and on what keys an
+ * item (ob1_entities); the writers need every grant (review pass 3: the history was said to fail for a missing write).
+ * 117's open-item reads are asked only of an item of kind item, by set_priority and priority_history alone (SMD-3665
+ * review pass 2): open_items for an item's existence, open_item_events only for whether a capture-only key owns one
+ * (its set_priority) — review pass 5. The agenda (SMD-3669) reads priority_assertions and open_items on every call;
+ * plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure. 132's
+ * setting is read by every ranked priority read (SELECT) and written by set_priority_weights (INSERT, UPDATE), and is
+ * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
+ * review pass 2).
+ */
+function priorityUngrantedWords(ungranted: readonly string[]): string {
+  const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
+  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings "));
+  const clauses: string[] = [];
+  if (rest.length) {
+    const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
+    const eventsOnly = rest.every((g) => g.startsWith("open_item_events "));
+    const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item) fails"
+      : itemOnly ? "set_priority and priority_history on an open item (kind item) fail"
+      : rest.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history fail" : "set_priority and clear_priority fail";
+    const agenda = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT");
+    clauses.push(`${failing} naming the table${agenda ? ", and so does agenda (SMD-3669)" : ""}`);
+  }
+  if (weights.length) {
+    clauses.push(weights.includes("priority_weight_settings SELECT")
+      ? "every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings (migration 132)"
+      : "set_priority_weights fails naming priority_weight_settings (migration 132)");
+  }
+  const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT");
+  return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
+}
 
 /**
  * A loopback or private-network endpoint — Ollama, LM Studio, vLLM on the same
@@ -3185,22 +3220,7 @@ if (configFailed) {
             add("priority", "fail", `migration 116's ${pr.missing.join(", ")} missing under 116's signature; set_priority, clear_priority and priority_history call them`,
                 ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
           } else if (pr.ungranted?.length) {
-            // A read (priority_history) needs SELECT on the assertions and on what keys an item (ob1_entities); the
-            // writers need every grant (review pass 3: the history was said to fail for a missing write). 117's
-            // open-item reads are asked only of an item of kind item, by set_priority and priority_history alone
-            // (SMD-3665 review pass 2).
-            // open_items is read for an item's existence (set_priority, priority_history); open_item_events only for
-            // whether a capture-only key owns one (its set_priority) — review pass 5.
-            const itemOnly = pr.ungranted.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
-            const eventsOnly = pr.ungranted.every((g) => g.startsWith("open_item_events "));
-            const failing = eventsOnly ? "a capture-only key's set_priority on an open item (kind item)"
-              : itemOnly ? "set_priority and priority_history on an open item (kind item)"
-              : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
-            // The agenda (SMD-3669) reads priority_assertions and open_items on every call (review pass 5: open_items
-            // alone was left out, and the items row said otherwise).
-            // plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure.
-            const also = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") ? ", and so does agenda (SMD-3669); plan_context answers with no board (SMD-2684)" : ", and nothing else does";
-            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table${also}`,
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${priorityUngrantedWords(pr.ungranted)}`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
@@ -5263,6 +5283,9 @@ if (configFailed) {
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).
                 if (h.running && h.waitingMidPass?.length) return `${name} waits for the provider mid-pass — it stopped answering: check it, and the ${h.worker === "reembed" ? "embedding provider row here (--deep calls it)" : "model provider rows here (--deep probes chat)"}; the pass resumes on its own once it answers.`;
+                // Held by Linear's rate limit, by its own word (SMD-4133): it waits on its own; the fix is the hour's sum.
+                // A hold already past is said as past, as brain_info's words say it (review pass 1).
+                if (h.limited) return `${name}'s last pass was rate-limited by Linear: ${secondsSince(h, h.limited.until) < 0 ? `it sends no request until ${h.limited.until} (${limitByWords(h.limited)}), then passes again on its own` : `its hold ended at ${h.limited.until} (${limitByWords(h.limited)}), and its next trigger passes`}. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user: if this recurs, raise OB1_BOARD_SYNC_INTERVAL here or on the others, or give each brain a Linear user of its own (deploy/README.md, "What a pass costs", has the sum).`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
                   : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;

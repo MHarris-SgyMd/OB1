@@ -131,6 +131,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     set_priority: { kind: "ticket", key: "smd-3664", level: 4, due_at: "2027-03-01", not_before: "2027-02-01T09:00:00+01:00", due_ref: { kind: "thought", key: ID }, reason: "a reason & more?", inferred: false },
     clear_priority: { kind: "thought", key: ID },
     priority_history: { kind: "entity", key: ID },
+    // The operator's weights (SMD-4193 PR 2): the weights ride the POST body.
+    set_priority_weights: { weights: { overdue: 3, unblocks_many_at: 2, count_inferred: true } },
     // Open items (SMD-3665 PR 2): an item's or a proposal's id in the path; a null rides the PATCH body to clear.
     open_item: { text: "call the dentist & more?", owner: "me", due_at: "2027-03-01", origin_thought: ID, plugin_row: "task-1", proposed: true },
     update_item: { id: ID, text: "call the dentist", owner: null, due_at: "2027-03-02T09:00:00+01:00" },
