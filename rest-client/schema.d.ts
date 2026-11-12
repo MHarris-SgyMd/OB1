@@ -546,7 +546,7 @@ export interface paths {
         };
         /**
          * Priority History
-         * @description Read who said an item (its kind and key, as set_priority takes them) matters, how much and when: its winning statement and level (null: nobody stated one — unknown, not low), and every statement made on it — on a ticket or one of its own board-sync rows, every statement on both, which are one item, each naming the item it was made on — replaced and cleared ones included, in the order written, each with its maker (key name, kind and trust as they stood), its tier, its reason, and when its window closed and why. `exists: false` is an item the brain no longer holds, whose statements are kept. Refused: an item the brain does not hold and nobody stated a priority on (ITEM_NOT_FOUND).
+         * @description Read who said an item (its kind and key, as set_priority takes them) matters, how much and when: its winning statement and level (null: nobody stated one — unknown, not low), and every statement made on it — on a ticket or one of its own board-sync rows, every statement on both, which are one item, each naming the item it was made on — replaced, cleared and deleted ones included (`deleted`: closed when its item was deleted, migration 136), in the order written, each with its maker (key name, kind and trust as they stood), its tier, its reason, and when its window closed and why. `exists: false` is an item the brain no longer holds, whose statements are kept. Refused: an item the brain does not hold and nobody stated a priority on (ITEM_NOT_FOUND).
          */
         get: operations["priority_history"];
         put?: never;
