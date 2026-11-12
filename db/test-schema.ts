@@ -19702,7 +19702,7 @@ console.log("\n[121] Migration 134: deliverables — deliverable_events append-o
   assert(captured.outcome === "captured" && captured.deliverable?.status === "unverified" && captured.deliverable?.checkpoint === "c0ffee" && captured.deliverable?.spec_ref === spec
          && captured.deliverable?.captured_by === "[121] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
          && unchanged.outcome === "unchanged" && unchanged.event?.id === captured.event?.id && again.code === "ALREADY_A_DELIVERABLE"
-         && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[120\] maker/.test(otherKey.message ?? "")
+         && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[121\] maker/.test(otherKey.message ?? "")
          && p1?.status === "unverified" && JSON.stringify(p1) === JSON.stringify((await one<{ p: unknown }>(`SELECT ob1_deliverable_payload($1::uuid) AS p`, [out])).p),
     `a capture: unverified, the id and checkpoint trimmed, the maker and its agent id stamped from the envelope, the facet the payload's projection; the same spec and checkpoint again unchanged for its maker and refused ALREADY_A_DELIVERABLE for another key, naming the maker; another checkpoint refused (${JSON.stringify([captured.outcome, unchanged.outcome, otherKey.code, again.code])})`);
 
@@ -19751,8 +19751,8 @@ console.log("\n[121] Migration 134: deliverables — deliverable_events append-o
   const editorRow = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND actor_name = $2 AND diff ? 'content'`, [authored, EDITOR.name])).n;
   const byEditor = await ver(authored, "verified", EDITOR);
   const byThird = await ver(authored, "verified", THIRD);
-  assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[120\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
-         && authorCorrects.outcome === "changed" && editorRow === 1 && byEditor.code === "VERIFY_NOT_YOURS" && /\[120\] editor wrote the thought/.test(byEditor.message ?? "")
+  assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[121\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
+         && authorCorrects.outcome === "changed" && editorRow === 1 && byEditor.code === "VERIFY_NOT_YOURS" && /\[121\] editor wrote the thought/.test(byEditor.message ?? "")
          && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
     `a key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS, its first capture's key and a key that rewrote its text alike; the author may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, editorRow, byEditor.code, byThird.outcome])})`);
 
