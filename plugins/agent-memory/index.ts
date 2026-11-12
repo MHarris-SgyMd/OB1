@@ -133,7 +133,11 @@ const asMemories = async (sql: PluginSql, rows: Row[]) => {
 
 /** A core operation's refusal, as this plugin's: retryable stays retryable (503), anything else is 422. */
 export const coreRefused = (r: { code: string; retryable: boolean }): PluginOutcome<never> =>
-  refuse(r.retryable ? 503 : 422, "CORE_REFUSED", { refused: r.code });
+  refuse(r.retryable ? 503 : 422, "CORE_REFUSED", {
+    refused: r.code,
+    // The brain's embedding provider refusing the call (SMD-2892): said, so a client that shows the text alone tells it from an input refused.
+    ...(r.code === "EMBEDDING_PROVIDER_ERROR" ? { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend; the REST core's log names which)" } : {}),
+  });
 
 /** What makes a write-back unsafe to keep, the old server's tests unchanged: a key, a credential, a large code block, a transcript. */
 export function unsafeReasons(t: string): string[] {

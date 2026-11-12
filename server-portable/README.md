@@ -79,9 +79,13 @@ other answers still fail the capture — a 4xx (an input the model refuses, a
 credential, a model that is not there), a redirect, a 2xx that is not JSON or
 holds no embedding — because those say the brain is misconfigured, and a thought
 with no vector is invisible to semantic search: refused `EMBEDDING_PROVIDER_ERROR`
-(SMD-2892), final, naming the word (`provider_401` …), the provider's status and
-the setting to check, and to a key that can read the endpoint and the provider's
-own words (REST 503, no `Retry-After`). A vector of the wrong width is still a
+(SMD-2892), final (REST 503, no `Retry-After`). Its values — the REST body, the
+MCP `structuredContent` — are the word (`provider_401` …), the provider's
+status, `setting` (`OB1_LLM_BASE_URL`) and `check`, the settings to look at for
+that status (the key for a 401, 402 or 403, the model for a 404, the model and
+its width for a 400, 413 or 422); its MCP text says the same in words, and to a
+key that can read names the endpoint and the provider's own words, which the
+REST core's log carries too. A vector of the wrong width is still a
 fault. An edit (`update_thought`) whose provider fails is refused whole, as
 before, coded the same way: retryable while the provider does not answer (REST
 503 with `Retry-After`), final otherwise. Nothing is lost, and storing the new

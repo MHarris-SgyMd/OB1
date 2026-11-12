@@ -3583,8 +3583,10 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
       assert(logged.some((l) => l.startsWith("capture: the embedding provider at https://stub.invalid/v1 refused the capture's embedding:") && l.includes(`stub answers ${status}`)),
         `a ${status}: the log names the endpoint and the provider's words (${logged.join(" | ").slice(0, 200)})`);
       // What to check, as the status says it (review pass 2: the 400's and 403's advice unheld).
-      const advice = status === 400 ? /It may be this text \(a shorter or plainer one may land\)/ : status === 404 ? /OB1_EMBEDDING_MODEL/ : /OB1_LLM_API_KEY, else OPENROUTER_API_KEY/;
-      assert(advice.test(r.text), `a ${status}: the refusal says what to check (${r.text.slice(0, 260)})`);
+      const advice = status === 400 ? /a setting it is sent with \(OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM\), which an operator checks, or this text \(a shorter or plainer one may land\)/ : status === 404 ? /OB1_EMBEDDING_MODEL/ : /OB1_LLM_API_KEY, else OPENROUTER_API_KEY/;
+      // …and `check` names the settings for a client reading values (review pass 3: REST had the base alone).
+      const check = status === 400 ? ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"] : status === 404 ? ["OB1_EMBEDDING_MODEL"] : ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"];
+      assert(advice.test(r.text) && JSON.stringify(r.sc?.check) === JSON.stringify(check), `a ${status}: the refusal says what to check, in its text and its \`check\` (${r.text.slice(0, 260)} ${JSON.stringify(r.sc?.check)})`);
       const [n] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${content}`;
       assert(r.isError && n.n === 0 && r.sc?.code === "EMBEDDING_PROVIDER_ERROR" && r.sc?.retryable === false && r.sc?.reason === `provider_${status}` && r.sc?.status === status
         && r.sc?.setting === "OB1_LLM_BASE_URL",
@@ -3608,7 +3610,10 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     // A 200 JSON holding no embedding (a gateway's error object), to a capture key (review pass 1): refused coded, not
     // the store's STORE_UNAVAILABLE carrying the endpoint in a raw message.
     stubDown = "no-embedding";
-    const gatewayed = await captureRaw(CAPTURE_KEY, "[20] a session summary sent while a gateway answers for the provider");
+    logged.length = 0;
+    const gatewayed = await loggedDuring(() => captureRaw(CAPTURE_KEY, "[20] a session summary sent while a gateway answers for the provider"));
+    // The operator's log carries the gateway's own words, which no capture key is shown (review pass 3: the log had none).
+    assert(logged.some((l) => /returned no embedding for model .* — it said: \{"error":\{"message":"No successful provider responses\./.test(l)), `a gateway's words in the log (${logged.join(" | ").slice(0, 240)})`);
     assert(gatewayed.isError && gatewayed.sc?.code === "EMBEDDING_PROVIDER_ERROR" && gatewayed.sc?.reason === "provider_body" && /no embedding in its answer/.test(gatewayed.text)
       && !/stub\.invalid|No successful/.test(gatewayed.text),
       `a 200 with no embedding, to a capture key: refused coded, provider_body, no endpoint or gateway words (${gatewayed.text.slice(0, 200)})`);
@@ -3630,7 +3635,7 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     const editDown = await loggedDuring(() => result("update_thought", { id: target, content: "[20] the edit made while the provider is down" }));
     assert(logged.some((l) => l.startsWith("update_thought: the embedding provider at https://stub.invalid/v1 was unavailable:")), `the edit's log says the provider was unavailable (${logged.join(" | ").slice(0, 200)})`);
     assert(editDown.isError && editDown.sc?.code === "EMBEDDING_PROVIDER_ERROR" && editDown.sc?.retryable === true && editDown.sc?.reason === "provider_unreachable" && editDown.sc?.setting === "OB1_LLM_BASE_URL"
-      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable \(the connection was refused\)\. The same call can land once it answers\.$/.test(editDown.text)
+      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable: the connection was refused\. The same call can land once it answers\.$/.test(editDown.text)
       && !/Unable to connect|STORE_UNAVAILABLE/.test(editDown.text),
       `an edit while the provider is down: coded, retryable, said as an Error naming the endpoint, no Bun text (${editDown.text.slice(0, 200)})`);
     stubDown = 401;

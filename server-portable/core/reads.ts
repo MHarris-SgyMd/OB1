@@ -16,7 +16,7 @@ import { BRAIN_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
 import { BRAIN_INFO_TOOL_DEADLINE_MS, HEALTH_DEADLINE_MS } from "../deadlines.ts";
 import { canRead, type Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
-import { embeddingProviderError } from "./provider-refusal.ts";
+import { embeddingProviderError, providerLogWords } from "./provider-refusal.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { listCursor, parseListCursor, parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "./list-cursor.ts";
@@ -112,7 +112,7 @@ export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts
       // search, coded and final, and the provider's words go to the log (SMD-2892); anything else is still a fault.
       const refused = embeddingProviderError(e, ctx.embedConfig().embeddings, canRead(principal));
       if (!refused) throw e;
-      console.error(`${opts.tool}: the embedding provider at ${shownBase(ctx.embedConfig().embeddings)} refused the query's embedding: ${(e as Error).message}`);
+      console.error(`${opts.tool}: the embedding provider at ${shownBase(ctx.embedConfig().embeddings)} refused the query's embedding: ${providerLogWords(e)}`);
       return { refusal: refused, rows: [] };
     }
     // As a row prints an endpoint: userinfo masked (SMD-2885).

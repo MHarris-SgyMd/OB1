@@ -964,7 +964,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   for (const [what, e, reason, detail] of [
     ["a 401", http(401, "{\"error\":\"bad key\"}"), "provider_401", "it answered 401 (its credential was refused)"], ["a 403", http(403), "provider_403", "it answered 403 (its credential was refused)"],
     ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400 (it refused the request: this text, or a setting sent with it such as the model)"],
-    ["a 413", http(413), "provider_413", "it answered 413 (it refused the request: this text, or a setting sent with it such as the model)"], ["a 422", http(422), "provider_422", "it answered 422 (it refused the request: this text, or a setting sent with it such as the model)"],
+    ["a 402", http(402), "provider_402", "it answered 402 (payment is required: the account's credit)"], ["a 413", http(413), "provider_413", "it answered 413 (it refused the request: this text, or a setting sent with it such as the model)"], ["a 422", http(422), "provider_422", "it answered 422 (it refused the request: this text, or a setting sent with it such as the model)"],
     ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200, "<html>"), "provider_body", "it answered 200 with a body that is not JSON"],
   ] as [string, ProviderError, string, string][]) {
     const f = providerFault(e);

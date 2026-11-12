@@ -7,7 +7,7 @@
 
 import { createHash } from "node:crypto";
 import { providerDown, shownBase, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
-import { embeddingProviderError, type EmbeddingProviderError } from "./provider-refusal.ts";
+import { embeddingProviderError, providerLogWords, type EmbeddingProviderError } from "./provider-refusal.ts";
 import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
 import { writerScope } from "./caller.ts";
@@ -353,7 +353,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
               heardFrom(ctx.providerHealth, embedStarted, e);
               providerRefused = embeddingProviderError(e, cfg.embeddings, reader) ?? undefined;
               if (!providerRefused) throw e;
-              console.error(`capture: the embedding provider at ${shownBase(cfg.embeddings)} refused the capture's embedding: ${(e as Error).message}`);
+              console.error(`capture: the embedding provider at ${shownBase(cfg.embeddings)} refused the capture's embedding: ${providerLogWords(e)}`);
               // Thrown, so the capture is refused at once rather than after the chat calls beside it (review pass 2: it
               // waited out the tags' and the priority's calls, which run on regardless, as they did before).
               throw providerRefused;
@@ -792,7 +792,7 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
       heardFrom(ctx.providerHealth, embedStarted, e);
       const refused = embeddingProviderError(e, cfg.embeddings, canRead(principal));
       if (!refused) throw e;
-      console.error(`update_thought: the embedding provider at ${shownBase(cfg.embeddings)} ${refused.retryable ? "was unavailable" : "refused the edit's embedding"}: ${(e as Error).message}`);
+      console.error(`update_thought: the embedding provider at ${shownBase(cfg.embeddings)} ${refused.retryable ? `was unavailable: ${refused.detail}` : `refused the edit's embedding: ${providerLogWords(e)}`}`);
       return refuse(refused);
     }
   }

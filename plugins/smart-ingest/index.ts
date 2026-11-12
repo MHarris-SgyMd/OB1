@@ -372,17 +372,17 @@ export class Unavailable {
  * its address, a gateway in front of it): no item's fault, and every other item's call meets it too. While deciding
  * the job fails once, so the same call runs again once an operator mends the provider (review pass 1: each item
  * failed and the job answered complete, the text then held by a dead job); while executing it pauses, as an outage
- * does, its items still ready for execute_job (review pass 2). A 400, 413 or 422 may be the item's own text, and
- * fails that item alone, as any refusal does.
+ * does, its items still ready for execute_job (review pass 2). Any status, a 400 among them, which a hosted
+ * provider answers to every call for a setting it will not take (the maintainer's call, 2026-11-12).
  */
 export class ProviderRefused {
   constructor(readonly facts: Record<string, unknown>) {}
 }
 
-/** The core's refusal as a ProviderRefused when it is the provider refusing what an operator mends; else null. */
-export function providerRefusal(r: { code: string; status?: unknown; reason?: unknown; setting?: unknown }): ProviderRefused | null {
-  if (r.code !== "EMBEDDING_PROVIDER_ERROR" || [400, 413, 422].includes(r.status as number)) return null;
-  return new ProviderRefused({ refused: r.code, ...(typeof r.reason === "string" ? { reason: r.reason } : {}), ...(typeof r.status === "number" ? { provider_status: r.status } : {}), ...(typeof r.setting === "string" ? { setting: r.setting } : {}) });
+/** The core's refusal as a ProviderRefused when it is the brain's embedding provider refusing the call; else null. */
+export function providerRefusal(r: { code: string; status?: unknown; reason?: unknown; setting?: unknown; check?: unknown }): ProviderRefused | null {
+  if (r.code !== "EMBEDDING_PROVIDER_ERROR") return null;
+  return new ProviderRefused({ refused: r.code, ...(typeof r.reason === "string" ? { reason: r.reason } : {}), ...(typeof r.status === "number" ? { provider_status: r.status } : {}), ...(typeof r.setting === "string" ? { setting: r.setting } : {}), ...(Array.isArray(r.check) ? { check: r.check } : {}) });
 }
 
 /** The trust words, lowest first (046's ladder, ob1_trust_ceiling's). */
@@ -477,8 +477,9 @@ export async function itemKey(seed: string, itemId: string): Promise<string> {
  * thought is this very item's write (it keeps the item's key: a job resumed
  * after a fault between the capture and the item's row). A search that cannot
  * answer for the text captures nothing: its vector not made (which leaves a
- * prose text unfindable) or a refusal worth retrying throws Unavailable, the
- * job paused; any other refusal is answered, the item failed with it.
+ * prose text unfindable) or a refusal worth retrying throws Unavailable, and
+ * the brain's embedding provider refusing the call ProviderRefused, the job
+ * paused either way; any other refusal is answered, the item failed with it.
  */
 async function heldText(ctx: Pick<PluginContext, "call">, item: ItemRow, key: string, caller: string): Promise<{ id: string; own: boolean } | { refused: string } | null> {
   const found = await ctx.call("search_thoughts", { query: item.content, limit: SEARCH_HITS });
@@ -522,7 +523,8 @@ async function aboveNow(ctx: Pick<PluginContext, "call">, id: string, mine: stri
  * between the look and the capture, past the search's first SEARCH_HITS, or
  * one the key cannot read) is a re-capture, told by the capture's `existed`,
  * and merged into as any capture of known text is. A refusal the core says is
- * worth retrying throws Unavailable: the job pauses, its item still ready.
+ * worth retrying throws Unavailable, and the embedding provider's refusal
+ * ProviderRefused: the job pauses, its item still ready.
  */
 export async function execute(ctx: Pick<PluginContext, "call" | "caller">, job: Job, item: ItemRow, key: string, mine: string | null): Promise<Done> {
   const trust = job.trust ? { trust: job.trust } : {};
@@ -580,9 +582,10 @@ export async function execute(ctx: Pick<PluginContext, "call" | "caller">, job: 
  * Every ready item of an executing job carried out in order, each recorded as
  * it finishes; then the job complete. A fault on one item fails that item, the
  * rest going on, as the old server's did. A fault outside one (a store that
- * stops answering), or Unavailable from one (a provider down, a thought kept
- * busy), leaves the job a dry run's again, its error saying why, so
- * execute_job carries out the items still ready; it is thrown.
+ * stops answering), or Unavailable or ProviderRefused from one (a provider
+ * down or refusing the call, a thought kept busy), leaves the job a dry run's
+ * again, its error saying why, so execute_job carries out the items still
+ * ready; it is thrown.
  */
 async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
   try {
@@ -610,7 +613,7 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
   } catch (e) {
     // The job a dry run's again, its counts what was done so far; a pause that could not be recorded is no pause (a 500).
     const why = e instanceof Unavailable ? "paused: a service the core needs did not answer"
-      : e instanceof ProviderRefused ? "paused: the brain's embedding provider refused the call (its key or its model, an operator's to mend)" : `interrupted by ${FAULT}`;
+      : e instanceof ProviderRefused ? "paused: the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)" : `interrupted by ${FAULT}`;
     const paused = await ctx.db.tx(async (sql) => (await sql<{ id: string }>`
         UPDATE ingestion_jobs SET status = 'dry_run_complete', error_message = ${`${why}; execute_job carries out the items still ready`}
          WHERE id = ${job.job_id}::bigint AND status = 'executing' RETURNING id::text AS id`).length > 0).catch(() => false);
@@ -658,7 +661,7 @@ export default definePlugin({
   operations: {
     extract: operation({
       title: "Extract a document's thoughts",
-      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess (import_key counts as text alone); a failed job answers no one, so the same call after a refusal runs again. RESTRICTED_CONTENT (422) refuses, before any model sees it, a text holding what looks like a national id, a card or account number, a key or a password (the old server's patterns, read loosely). Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, or the core says a write may land a moment later (a thought kept busy), and PROVIDER_REFUSED (422: the embedding provider refuses the brain's key or model, an operator's to mend), EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest.`,
+      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess (import_key counts as text alone); a failed job answers no one, so the same call after a refusal runs again. RESTRICTED_CONTENT (422) refuses, before any model sees it, a text holding what looks like a national id, a card or account number, a key or a password (the old server's patterns, read loosely). Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, or the core says a write may land a moment later (a thought kept busy), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest. EMBEDDING_PROVIDER_REFUSED (422) is the brain's embedding provider refusing the call (its key, its model or its address, an operator's to mend): while deciding the job is marked failed, and the same call runs again once it is mended; while executing the job is paused as for a 503.`,
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -722,7 +725,7 @@ export default definePlugin({
             const resumed = await executeJob(ctx, { ...made.job, status: "executing" });
             return ok({ existing: true, job: resumed, message: `${why} as job ${made.job.job_id}, paused while executing; carried out now` });
           } catch (e) {
-            if (e instanceof ProviderRefused) return refused(422, "PROVIDER_REFUSED", made.job.job_id, { message: "the brain's embedding provider refused the call (its key or its model, an operator's to mend)", ...e.facts, paused: "the same call, or execute_job, carries out the items still ready once it is mended" });
+            if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", made.job.job_id, { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)", ...e.facts, paused: "the same call, or execute_job, carries out the items still ready once it is mended" });
             if (!(e instanceof Unavailable)) throw e;
             return refused(503, "PROVIDER_UNAVAILABLE", made.job.job_id, { ...e.facts, paused: "the same call, or execute_job, carries out the items still ready" });
           }
@@ -782,7 +785,7 @@ export default definePlugin({
           } catch (e) {
             if (e instanceof ProviderRefused) {
               await failJob(ctx, job.job_id, "the brain's embedding provider refused the search while deciding", calls);
-              return refused(422, "PROVIDER_REFUSED", job.job_id, { message: "the brain's embedding provider refused the search (its key or its model, an operator's to mend); the same call runs again once it is", ...e.facts });
+              return refused(422, "EMBEDDING_PROVIDER_REFUSED", job.job_id, { message: "the brain's embedding provider refused the search (its key, its model or its address, an operator's to mend); the same call runs again once it is", ...e.facts });
             }
             if (!(e instanceof Unavailable)) throw e;
             await failJob(ctx, job.job_id, "the search was unavailable while deciding", calls);
@@ -808,7 +811,7 @@ export default definePlugin({
             try {
               job = await executeJob(ctx, job);
             } catch (e) {
-              if (e instanceof ProviderRefused) return refused(422, "PROVIDER_REFUSED", job.job_id, { message: "the brain's embedding provider refused the call (its key or its model, an operator's to mend)", ...e.facts, paused: "this same call, or execute_job, carries out the items still ready once it is mended" });
+              if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", job.job_id, { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)", ...e.facts, paused: "this same call, or execute_job, carries out the items still ready once it is mended" });
               if (!(e instanceof Unavailable)) throw e;
               return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { ...e.facts, paused: "this same call, or execute_job, carries out the items still ready" });
             }
@@ -819,7 +822,7 @@ export default definePlugin({
     }),
     execute_job: operation({
       title: "Execute a dry-run job",
-      description: "Carries out a dry run's decisions, in order: each add captured, each skip recorded against the thought it matched, each append written as evidence, each revision captured as superseding the thought it matched. Counted by what was done (existed_count: an add whose text was a thought by now, or evidence the thought already held; failed_count: refused, with why on the item). A job already complete answers as it stands (already); one not a dry run's, or one another call is executing, is refused JOB_NOT_READY; no such job NO_SUCH_JOB. Refused PROVIDER_UNAVAILABLE (503, retryable) when a provider the core needs does not answer, or the core says a write may land a moment later (a thought kept busy): the job is paused, a dry run's again with its items still ready, for execute_job once it answers; PROVIDER_REFUSED (422) when the embedding provider refuses the brain's key or model, the job paused the same way for execute_job once an operator mends it. A match whose trust is now above the job's captures' is given evidence, marked, never superseded.",
+      description: "Carries out a dry run's decisions, in order: each add captured, each skip recorded against the thought it matched, each append written as evidence, each revision captured as superseding the thought it matched. Counted by what was done (existed_count: an add whose text was a thought by now, or evidence the thought already held; failed_count: refused, with why on the item). A job already complete answers as it stands (already); one not a dry run's, or one another call is executing, is refused JOB_NOT_READY; no such job NO_SUCH_JOB. Refused PROVIDER_UNAVAILABLE (503, retryable) when a provider the core needs does not answer, or the core says a write may land a moment later (a thought kept busy): the job is paused, a dry run's again with its items still ready, for execute_job once it answers; EMBEDDING_PROVIDER_REFUSED (422) when the brain's embedding provider refuses the call (its key, its model or its address), the job paused the same way for execute_job once an operator mends it. A match whose trust is now above the job's captures' is given evidence, marked, never superseded.",
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -844,7 +847,7 @@ export default definePlugin({
         try {
           return ok({ already: false, job: await executeJob(ctx, claimed.job) });
         } catch (e) {
-          if (e instanceof ProviderRefused) return refused(422, "PROVIDER_REFUSED", job_id, { message: "the brain's embedding provider refused the call (its key or its model, an operator's to mend)", ...e.facts, paused: "execute_job carries out the items still ready once it is mended" });
+          if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", job_id, { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)", ...e.facts, paused: "execute_job carries out the items still ready once it is mended" });
           if (!(e instanceof Unavailable)) throw e;
           return refused(503, "PROVIDER_UNAVAILABLE", job_id, { ...e.facts, paused: "execute_job carries out the items still ready" });
         }

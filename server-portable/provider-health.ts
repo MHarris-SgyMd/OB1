@@ -46,7 +46,7 @@ export function reprobeIntervalFrom(raw: string | undefined): { intervalS: numbe
  *   a call's that it embeds. `fault`, when set, is an answered call the
  *   provider refused or answered unusably (a 4xx — a model not pulled, a
  *   key refused —, a body that is not JSON, a vector of the wrong width):
- *   the provider is there, and a capture fails outright, not degraded.
+ *   the provider is there, and a capture, a search or an edit is refused (EMBEDDING_PROVIDER_ERROR, SMD-2892), not degraded.
  * - `unreachable`: an outage since `since` (the first of this run of them),
  *   `at` the latest, with providerDown's word and words for the latest —
  *   never the text, nor the base — and `clears`, what evidence may end it:
@@ -122,7 +122,7 @@ export function createProviderHealth(opts: { base: () => string; log?: (line: st
       if (by === "call") callAnsweredMono = answeredMono;
       s = { status: "answering", at: now().toISOString(), by, ...(seen.fault ? { fault: seen.fault } : {}) };
       const hadFault = was.status === "answering" && was.fault !== undefined;
-      if (seen.fault && (was.status !== "answering" || !hadFault)) log(`provider: the embedding provider at ${opts.base()} answers, but refuses its embedding calls (${seen.fault}) — a capture fails outright until that is fixed`);
+      if (seen.fault && (was.status !== "answering" || !hadFault)) log(`provider: the embedding provider at ${opts.base()} answers, but refuses its embedding calls (${seen.fault}) — a capture, a search or an edit of a thought's text is refused (EMBEDDING_PROVIDER_ERROR) until that is fixed`);
       else if (was.status === "unreachable") log(`provider: the embedding provider at ${opts.base()} answers again — no longer degraded`);
       else if (hadFault && by === "call" && !seen.fault) log(`provider: the embedding provider at ${opts.base()} embeds again`);
     },

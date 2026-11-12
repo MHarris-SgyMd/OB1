@@ -210,7 +210,7 @@ export function providerFault(e: unknown): { retryable: boolean; reason: string;
   if (s === undefined) return null;
   // Why, where the status says it: the key or the model (an operator's), a redirect never followed (where it points
   // is the provider's words: refuseRedirect), or the request — this text, or a setting it is sent with.
-  const why = s === 401 || s === 403 ? " (its credential was refused)" : s === 404 ? " (the path or the model is not there)"
+  const why = s === 401 || s === 403 ? " (its credential was refused)" : s === 402 ? " (payment is required: the account's credit)" : s === 404 ? " (the path or the model is not there)"
     : isRedirect(s) ? " (a redirect, never followed)"
     : s === 400 || s === 413 || s === 422 ? " (it refused the request: this text, or a setting sent with it such as the model)" : "";
   return { retryable: false, reason: `provider_${s}`, detail: `it answered ${s}${why}`, status: s, ...provider };

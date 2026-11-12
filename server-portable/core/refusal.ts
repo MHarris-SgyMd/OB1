@@ -35,7 +35,7 @@ export type Refusal =
   // provider did not answer (retryable; a capture lands without the vector, a search answers by its literals).
   // `retryable` is providerDown's (embed.ts providerFault); `base`, masked, only to a key that can read (SMD-2284's
   // rule for a capture's provider); `provider`, the provider's own capped words, to the text alone.
-  | { code: "EMBEDDING_PROVIDER_ERROR"; retryable: boolean; reason: string; detail: string; status?: number; setting: "OB1_LLM_BASE_URL"; base?: string; provider?: string }
+  | { code: "EMBEDDING_PROVIDER_ERROR"; retryable: boolean; reason: string; detail: string; status?: number; setting: "OB1_LLM_BASE_URL"; check: string[]; base?: string; provider?: string }
   // capture_thought's shapes, refused before any model call (032, SMD-2014).
   | { code: "REFUSED_SUPERSEDES_SHAPE"; retryable: false; value: string; orNull: boolean } // `supersedes` is not a thought id (update_thought's also takes null)
   | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id
@@ -176,7 +176,7 @@ const FACTS: Facts = {
   EMBEDDING_PROVIDER_UNAVAILABLE: (r) => ({ reason: r.reason, matched: r.matched }),
   // The marker word, the provider's status and the setting to check: the endpoint (a reader's alone) and the
   // provider's own words ride the text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does — a URL is no token.
-  EMBEDDING_PROVIDER_ERROR: (r) => ({ reason: r.reason, ...(r.status !== undefined ? { status: r.status } : {}), setting: r.setting }),
+  EMBEDDING_PROVIDER_ERROR: (r) => ({ reason: r.reason, ...(r.status !== undefined ? { status: r.status } : {}), setting: r.setting, check: r.check }),
   REFUSED_SUPERSEDES_SHAPE: none,
   REFUSED_DERIVED_FROM_SHAPE: none,
   // Which rule, and the key, so a client reading values knows what to drop

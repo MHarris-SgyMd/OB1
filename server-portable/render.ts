@@ -117,13 +117,14 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  */
 function providerErrorText(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_ERROR" }>, what: string): string {
   const at = r.base ? `the embedding provider at ${r.base}` : "the brain's embedding provider";
-  if (r.retryable) return `Error: ${what} was not done — ${at} is unavailable (${r.detail}). The same call can land once it answers.`;
+  if (r.retryable) return `Error: ${what} was not done — ${at} is unavailable: ${r.detail}. The same call can land once it answers.`;
   const s = r.status ?? 0;
   // What to check, as the status says it (review pass 1: a 400 may be this text, not the brain's settings).
   const advice = s === 401 || s === 403 ? `An operator checks ${r.setting} and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.`
+    : s === 402 ? `An operator checks the credit of the account behind its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.`
     : s === 404 ? `An operator checks ${r.setting} and the embedding model it serves (OB1_EMBEDDING_MODEL); retrying will not help until then.`
     : s >= 300 && s < 400 ? `An operator sets ${r.setting} where it points; retrying will not help until then.`
-    : s === 400 || s === 413 || s === 422 ? `It may be this text (a shorter or plainer one may land), or a setting it is sent with (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM) an operator checks.`
+    : s === 400 || s === 413 || s === 422 ? `It may be a setting it is sent with (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM), which an operator checks, or this text (a shorter or plainer one may land).`
     : r.reason === "provider_body" ? `Something in front of the provider (a proxy, a gateway) may be answering for it: an operator checks ${r.setting}; retrying will not help until then.`
     : `An operator checks ${r.setting}; retrying will not help until then.`;
   const said = r.provider ? ` It said: ${oneLine(snipText(r.provider, 200))}` : "";

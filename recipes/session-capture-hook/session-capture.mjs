@@ -1612,13 +1612,14 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
 const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "").join("\n");
 
 /**
- * Whether a refusal is the brain's embedding provider refusing what an operator mends (SMD-2892): its key, its
- * model, a redirect, a gateway's answer — EMBEDDING_PROVIDER_ERROR with any status but 400, 413 or 422, which may be
- * the text's own. Such a payload is kept, as a transient is, until the mend lands it or the week is up.
+ * Whether a refusal is the brain's embedding provider refusing the call (SMD-2892): EMBEDDING_PROVIDER_ERROR, any
+ * status. Its key, its model, its address, a gateway's answer, or a request it refuses — a 400 included, which a
+ * hosted provider answers to every call for a setting it will not take (the maintainer's call, 2026-11-12: kept, as
+ * before the code, rather than lose every summary to a misconfigured brain). Such a payload is kept, as a transient
+ * is, until the mend lands it or the week is up.
  */
 export function providerMends(result) {
-  const sc = result?.structuredContent;
-  return sc?.code === "EMBEDDING_PROVIDER_ERROR" && ![400, 413, 422].includes(sc.status);
+  return result?.structuredContent?.code === "EMBEDDING_PROVIDER_ERROR";
 }
 
 /**
@@ -1731,8 +1732,7 @@ export async function postCapture(cfg, payload) {
     const v = verdictOf(result, text);
     // Kept by its code too (SMD-2892): the brain's embedding provider refusing it — a key or a model an operator
     // mends — is final for the call and no fault of the summary's, so the payload waits for the mend as an outage's
-    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal. One that may be the text's own (a 400, 413 or
-    // 422) is final as any refusal is.
+    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal.
     const kept = v.retryable || providerMends(result);
     const err = new CaptureError(kept ? "failed" : "refused", `capture ${kept ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
     // A pointer the server could not judge: a failure ON the pointer, counted by

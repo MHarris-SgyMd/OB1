@@ -883,16 +883,16 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   // The embedding provider refusing the brain's key (SMD-2892): 503 with no Retry-After, as a refusal waiting on an
   // operator; its facts the code, final, the word, the status and the setting — the endpoint and the provider's words
   // ride the MCP text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does.
-  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", base: "https://api.example/v1", provider: "{\"error\":\"bad key\"}" });
+  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", check: ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"], base: "https://api.example/v1", provider: "{\"error\":\"bad key\"}" });
   const pe = await hit("/v1/search", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "plain words" }) });
   const peb = await pe.json() as Record<string, unknown>;
-  assert(pe.status === 503 && pe.headers.get("retry-after") === null && same(peb, { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" }),
-    `a search whose provider refused its key: 503 without Retry-After, the code, final, the word, the status and the setting, not the endpoint or the provider's words (${pe.status} ${pe.headers.get("retry-after")} ${JSON.stringify(peb)})`);
+  assert(pe.status === 503 && pe.headers.get("retry-after") === null && same(peb, { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL", check: ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"] }),
+    `a search whose provider refused its key: 503 without Retry-After, the code, final, the word, the status, the setting and the key's settings to check, not the endpoint or the provider's words (${pe.status} ${pe.headers.get("retry-after")} ${JSON.stringify(peb)})`);
   // An edit whose provider is away: retryable, so Retry-After; no endpoint where the operation gave none.
-  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", detail: "the connection was refused", setting: "OB1_LLM_BASE_URL" });
+  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", detail: "the connection was refused", setting: "OB1_LLM_BASE_URL", check: [] });
   const pd = await hit("/v1/thoughts/00000000-0000-4000-8000-000000000001", { key: "write-raw", method: "PATCH", body: JSON.stringify({ content: "z" }) });
   const pdb = await pd.json() as Record<string, unknown>;
-  assert(pd.status === 503 && pd.headers.get("retry-after") === "2" && same(pdb, { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL" }),
+  assert(pd.status === 503 && pd.headers.get("retry-after") === "2" && same(pdb, { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL", check: [] }),
     `an edit whose provider is away: 503 with Retry-After, retryable, the word and the setting (${pd.status} ${JSON.stringify(pdb)})`);
   answer = async () => { throw new Error("connection refused"); };
   r = await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
@@ -1467,7 +1467,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     // The brain's own embedding provider failing (SMD-2892): a refusal by its shape, a fault on both spans — the request's
     // and the operation's — as the request line and the MCP server count it (review pass 2: the operation's said refused).
     exporter.reset();
-    answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401", status: 401, setting: "OB1_LLM_BASE_URL" });
+    answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401", status: 401, setting: "OB1_LLM_BASE_URL", check: [] });
     await (await app.fetch(new Request("http://api/v1/search", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: JSON.stringify({ query: "q" }) }))).text();
     spans = exporter.getFinishedSpans();
     const keylessReq = spans.find((sp) => sp.kind === SpanKind.SERVER);
