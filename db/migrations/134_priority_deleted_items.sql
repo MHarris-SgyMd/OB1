@@ -51,8 +51,10 @@
 --     as the writers match one (116's is_maker: its agent id, a by-name
 --     statement taking the id the registry gives its name). A due reference
 --     naming the survivor is dropped from the copy (an item's may not name
---     itself). Its answer gains `priorities_moved`. A restatement is written
---     last, so within its tier it is the survivor's newest, and may outrank
+--     itself). Its answer gains `priorities_moved`. Two words said at one
+--     instant (the clock's resolution) go to the loser's, restated: the merge
+--     compares times across two items, where no seq orders them (review pass
+--     4, said). A restatement is written last, so within its tier it is the survivor's newest, and may outrank
 --     another maker's statement written there after the original (the
 --     maintainer, review pass 1: kept, merges being an operator's step). A
 --     role that could not restate (no INSERT on priority_assertions) merges
@@ -66,7 +68,8 @@
 --   NOT CHANGED. Tickets: a ticket is no row of its own, its head is
 --   rebuilt wholesale, and a deleted row deletes no ticket; that row's own
 --   statements close as a thought's. Open items are never deleted (they are
---   dropped, a status). A reason's text stays: removing it is forgetting,
+--   dropped, a status). A TRUNCATE fires no delete trigger, and leaves its
+--   items' statements to the sweep. A reason's text stays: removing it is forgetting,
 --   SMD-1723's, which relaxes 116's guard for it. Filed as SMD-4241 from
 --   review pass 1: an entity that extraction re-derives (pruned, then made
 --   again under a new id) closes as deleted rather than following its name; a
@@ -291,6 +294,11 @@ DECLARE
   v_have  priority_assertions;
   v_open  priority_assertions;
 BEGIN
+  -- Both rows locked first, in id order (134's review pass 4): a prune of the
+  -- loser running beside the merge waits for it, rather than closing the
+  -- loser's statements in its trigger while the merge holds them and
+  -- deadlocking on the loser's row.
+  PERFORM 1 FROM ob1_entities WHERE id IN (p_survivor, p_loser) ORDER BY id FOR UPDATE;
   SELECT * INTO v_s FROM ob1_entities WHERE id = p_survivor;
   IF NOT FOUND THEN RETURN jsonb_build_object('ok', false, 'error', 'SURVIVOR_NOT_FOUND'); END IF;
   SELECT * INTO v_l FROM ob1_entities WHERE id = p_loser;
@@ -380,9 +388,9 @@ BEGIN
            AND ob1_priority_is_maker(y, v_loser.maker_name, v_maker)
          ORDER BY y.seq DESC LIMIT 1;
         IF v_open.id IS NOT NULL THEN
-          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_open.id WHERE id = v_loser.id;
+          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_open.id WHERE id = v_loser.id AND closed_at IS NULL;
         ELSE
-          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'cleared' WHERE id = v_loser.id;
+          UPDATE priority_assertions SET closed_at = v_now, close_reason = 'cleared' WHERE id = v_loser.id AND closed_at IS NULL;
         END IF;
       ELSE
         v_id := gen_random_uuid();
@@ -390,7 +398,7 @@ BEGIN
         -- as replaced by the restatement; closed first, as 116's one open
         -- statement per item and maker holds.
         UPDATE priority_assertions y SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
-         WHERE y.id = v_loser.id
+         WHERE (y.id = v_loser.id AND y.closed_at IS NULL)
             OR (y.closed_at IS NULL AND y.item_kind = 'entity' AND y.item_key = p_survivor::text
                 AND ob1_priority_is_maker(y, v_loser.maker_name, v_maker));
         INSERT INTO priority_assertions (id, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
