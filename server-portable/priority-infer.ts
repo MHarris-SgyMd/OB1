@@ -15,7 +15,7 @@
  *   words. A label cited for another item ("SMD-2627 (Medium)") is marked,
  *   and dropped only for an agent-kind writer (forWriter, SMD-4226). A due
  *   phrase that is the earliest something can happen ("can't happen before
- *   11-03") drops its half for every writer (SMD-4226).
+ *   11-03") is marked and dropped the same way (SMD-4226).
  * - An inferred level is at most High (3): "urgent" costs nothing to write in
  *   a note, and the maintainer's own example reads "Urgent: …" as High
  *   (confirmed by the maintainer, 2026-11-09, with the two rules below and in
@@ -67,7 +67,8 @@ const LEVEL_WORDS: Readonly<Record<string, PriorityLevel>> = { none: 0, low: 1, 
 export type Inferred = {
   /** `cited`: the phrase is a label cited for another item (citedIn); forWriter drops it for an agent-kind writer. */
   level: { value: PriorityLevel; word: string; phrase: string; cited?: boolean } | null;
-  due: { day: string; phrase: string; by: "rule" | "model" } | null;
+  /** `floored`: the phrase is the earliest something can happen (flooredIn); forWriter drops it for an agent-kind writer. */
+  due: { day: string; phrase: string; by: "rule" | "model"; floored?: boolean } | null;
 };
 
 // ── Phrases ──────────────────────────────────────────────────────────────────
@@ -201,8 +202,13 @@ export function citedIn(phrase: string, text: string): boolean {
     let cut = 0;
     for (const m of lineBefore.matchAll(/[.!?;]\s/g)) cut = m.index! + m[0].length;
     const clauseBefore = lineBefore.slice(cut);
-    // A ticket's own "Priority:" field is the text's own, even after a key and a "·" or ":" (a short export).
-    if (/^priority\b/i.test(said) || /\bpriority\s*:?\s*$/i.test(clauseBefore)) return false;
+    // A ticket's own "Priority:" field, as an export lists it at a line's start or after "·" or "|", is the text's own;
+    // "Filed SMD-4300 (Priority: High)" cites another's (review pass 3).
+    if (/^priority\b/i.test(said) ? /(^|[·|])\s*$/.test(lineBefore) : /(^|[·|])\s*priority\s*:?\s*$/i.test(lineBefore)) return false;
+    // A ticket's key, then "is", "to" or "at" (or nothing) and a capitalised level: "SMD-12 is High", "Moved SMD-12 to
+    // High", "SMD-3670's priority is Medium", "SMD-12 High" (review pass 3); "SMD-12 is urgent" stays the writer's own.
+    const keyThen = /\b([A-Z][A-Z0-9]{1,9})-\d{1,6}(?:'s)?(?:\s+priority)?(?:\s+(?:is|was|stays|to|at|as)(?:\s+now)?)?\s+$/.exec(clauseBefore);
+    if (keyThen && !NOT_TICKETS.has(keyThen[1]) && /^(None|Low|Medium|High|Urgent|Critical)\b/.test(said)) return true;
     const keyEnd = lastKeyEnd(clauseBefore);
     if (keyEnd >= 0 && clauseBefore.length - keyEnd <= 60 && /[(\[,:·—–-]\s*$/.test(clauseBefore)) return true;
     const besideLevel = KEY_BESIDE_LEVEL.exec(said);
@@ -222,58 +228,62 @@ export function citedIn(phrase: string, text: string): boolean {
   });
 }
 
-/** A negation that can open a floor (review pass 2 added the contractions: "doesn't open until Monday"). */
-const FLOOR_NEG = "not|never|can't|cannot|can not|won't|don't|doesn't|isn't|aren't|wasn't|weren't|shouldn't|mustn't|hasn't|haven't|hadn't|wouldn't|couldn't|didn't";
-/** A negation, up to two words, then "before", "until" or "till"; the words between are group 2. */
-const FLOOR_LEAD = new RegExp(`\\b(${FLOOR_NEG})\\s+((?:[\\p{L}']+\\s+){0,2}?)(before|until|till)\\b`, "gu");
+/** A negation that can open a floor: the contractions ("doesn't open until Monday") and "nothing"/"no one" ("nothing ships until Friday"). */
+const FLOOR_NEG = "not|never|nothing|no one|nobody|can't|cannot|can not|won't|don't|doesn't|isn't|aren't|wasn't|weren't|shouldn't|mustn't|hasn't|haven't|hadn't|wouldn't|couldn't|didn't";
+/** A verb of something starting: only a negated start makes a floor (review pass 3: "isn't due until Friday" is a deadline). */
+const START_VERB = "open|opens|start|starts|begin|begins|happen|happens|ship|ships|land|lands|launch|launches|release|releases|go live|goes live|go out|goes out|run|runs|arrive|arrives|come|comes|be ready|ready|be available|available|be out|out|deploy|deploys|merge|merges";
+/** A negation then a start verb (a word between allowed), then "before", "until" or "till"; or "not before" / "not until" with nothing between. */
+const FLOOR_LEAD = new RegExp(`\\b(?:(?:${FLOOR_NEG})\\s+(?:[\\p{L}']+\\s+)?(?:${START_VERB})\\s+(?:[\\p{L}']+\\s+)?|(?:not|never)\\s+)(before|until|till)\\b`, "gu");
 /** The same lead with its floor word left to the quoted phrase ("which can't happen" + "before 11-03"). */
-const FLOOR_LEAD_OPEN = new RegExp(`\\b(${FLOOR_NEG})((?:\\s+[\\p{L}']+){0,2})\\s+$`, "u");
-/** Words between the negation and "before" that make a deadline of it ("do not forget before Friday", "not urgent but before Friday"). */
-const NOT_FLOOR_BETWEEN = /\b(but|forget|forgetting|miss|missing|wait|waiting|leave|leaving|delay|let|slip|pass)\b/;
-/** A condition ahead of the negation makes a deadline of it ("if it's not paid before the 15th"). */
+const FLOOR_LEAD_OPEN = new RegExp(`\\b(?:(?:${FLOOR_NEG})\\s+(?:[\\p{L}']+\\s+)?(?:${START_VERB})(?:\\s+[\\p{L}']+)?|not|never)\\s+$`, "u");
+/** A condition ahead of the lead makes a deadline of it ("if it doesn't ship before Friday, we lose the slot"). */
 const CONDITION_BEFORE = /\b(if|unless|when|whether|in case)\s+(?:[\p{L}']+\s+){0,4}$/u;
 /** "no sooner than", "no earlier than", "not earlier than", just before a time. */
 const FLOOR_THAN = /\b(no sooner|no earlier|not earlier|not sooner) than\s*$/;
-/** Words just before a time that make it the start of something ("starting Monday", "only after Friday", "from the 12th"). */
-const FLOOR_FROM = /\b(starting|starts|start|beginning|begins|from|only after|after)\s+$/;
-/** The words that make a time a floor when they follow it ("tomorrow at the earliest", "Monday earliest", "the 12th onwards"). */
-const FLOOR_AFTER = /^[\s,)]*(at the earliest|at earliest|earliest|or later|at the soonest|onwards|onward)\b/;
-/** The floor's words inside a quoted phrase. */
-const FLOOR_SAID = /\b(at the earliest|at earliest|or later|at the soonest|onwards|onward|(no sooner|no earlier|not earlier|not sooner) than)\b|^(starting|starts|beginning|from|only after|after)\b/;
+/** Words just before a time that make it the start of something ("starting Monday", "only after Friday", "from the 12th"); not "start", since "start by Monday" is a deadline. */
+const FLOOR_FROM = /\b(starting|starts|beginning|begins|from|only after|after)\s+$/;
+/** The words that make a time a floor when they follow it ("tomorrow at the earliest", "the 12th onwards"); not "or later if …" or "earliest possible", which keep the deadline. */
+const FLOOR_AFTER = /^[\s,)]*(at the earliest|at earliest|earliest(?!\s+possible)|or later(?!\s+(?:if|when|should|depending))|at the soonest|onwards|onward)\b/;
+/** The floor's words inside a quoted phrase; an opening "from" or "after" only when the phrase names no "by", "before" or "until" ("from now until Friday" is a deadline). */
+const FLOOR_SAID = /\b(at the earliest|at earliest|at the soonest|(no sooner|no earlier|not earlier|not sooner) than)\b|\bor later\b(?!\s+(?:if|when|should|depending))/;
+const FLOOR_OPENS = /^(starting|starts|beginning|from|only after|after)\b/;
+const DEADLINE_WORD = /\b(by|before|until|till|due|no later than)\b/;
 
-/** Whether a negation-then-"before" lead in a stretch is a floor: no deadline word between, no condition ahead; `atEnd` when it must end the stretch. */
+/** Whether a floor lead in a stretch holds: no condition ahead of it; `atEnd` when it must end the stretch. */
 function floorLead(s: string, atEnd: boolean): boolean {
   for (const m of s.matchAll(FLOOR_LEAD)) {
     if (atEnd && s.slice(m.index! + m[0].length).trim() !== "") continue;
-    if (NOT_FLOOR_BETWEEN.test(m[2]) || CONDITION_BEFORE.test(s.slice(0, m.index!))) continue;
+    if (CONDITION_BEFORE.test(s.slice(0, m.index!))) continue;
     return true;
   }
   return false;
 }
 
 /**
- * Whether every place the text holds the due phrase is the earliest something can happen, not a deadline (SMD-4226). It
- * applies to every writer, and takes the floor's own construction, never a negation alone:
- * - a negation, up to two words, then "before", "until" or "till" — before the phrase, inside it, or split across
- *   them ("which can't happen" + "before 11-03") — unless the words between make a deadline of it ("do not forget
- *   before Friday", "not urgent but before Friday") or a condition comes first ("if it's not paid before the 15th");
+ * Whether every place the text holds the due phrase is the earliest something can happen, not a deadline (SMD-4226),
+ * read in the floor's own construction:
+ * - a negation, then a verb of something starting, then "before", "until" or "till" ("can't happen before 11-03",
+ *   "doesn't open until Monday", "isn't ready until Monday", "nothing ships until Friday"), or "not until" / "not
+ *   before" with nothing between — before the phrase, inside it, or split across them, and with no condition ahead;
  * - "no sooner than" or "no earlier than" before it;
- * - "starting", "from" or "(only) after" just before it;
- * - "at the earliest", "earliest", "or later", "at the soonest" or "onwards" after it;
- * - any of those words inside it.
- * A deadline with a negation elsewhere stands ("not later than 15 November", "can't wait past Friday"). The model quoted
- * the time and left the floor's words out: v1 read "before 11-03" in "can't happen before 11-03" as a deadline.
+ * - "starting", "from" or "(only) after" just before it, or opening it with no "by", "before" or "until" of its own;
+ * - "at the earliest", "earliest", "or later", "at the soonest" or "onwards" after it, or those inside it.
+ * A negated deadline stays one ("isn't due until Friday", "don't need it until Friday", "not later than 15 November",
+ * "if it's not paid before the 15th"), as do "start by Monday", "by Friday, or later if blocked" and "earliest
+ * possible". readAnswer marks the due day, and only an agent-kind writer's is dropped (forWriter, the maintainer's
+ * choice after review pass 3). The model quoted the time and left the floor's words out: v1 read "before 11-03" in
+ * "can't happen before 11-03" as a deadline.
  */
 export function flooredIn(phrase: string, text: string): boolean {
   const t = folded(text), p = folded(phrase);
   const at = wholeWordAt(phrase, text);
   if (at.length === 0) return false;
-  if (floorLead(p, false) || FLOOR_SAID.test(p)) return true;
+  if (floorLead(p, false) || FLOOR_SAID.test(p) || (FLOOR_OPENS.test(p) && !DEADLINE_WORD.test(p))) return true;
   return at.every((i) => {
     const before = t.slice(Math.max(0, i - 60), i), after = t.slice(i + p.length, i + p.length + 30);
     const open = FLOOR_LEAD_OPEN.exec(before);
     return floorLead(before, true)
-      || (open !== null && /^(before|until|till)\b/.test(p) && !NOT_FLOOR_BETWEEN.test(open[2]) && !CONDITION_BEFORE.test(before.slice(0, open.index)))
+      || (open !== null && /^(before|until|till)\b/.test(p) && !CONDITION_BEFORE.test(before.slice(0, open.index)))
       || FLOOR_THAN.test(before) || FLOOR_FROM.test(before) || FLOOR_AFTER.test(after);
   });
 }
@@ -473,25 +483,29 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
     if (citedIn(levelPhrase, text)) level.cited = true;
   }
   let due: Inferred["due"] = null;
-  if (duePhrase !== null && !flooredIn(duePhrase, text)) {
+  if (duePhrase !== null) {
     const ruled = resolveDue(duePhrase, captureDay);
     const modelled = ruled === null ? modelDay(a.due_date, captureDay, duePhrase) : null;
     if (ruled !== null) due = { day: ruled, phrase: duePhrase, by: "rule" };
     else if (modelled !== null) due = { day: modelled, phrase: duePhrase, by: "model" };
+    if (due !== null && flooredIn(duePhrase, text)) due.floored = true;
   }
   return { level, due };
 }
 
 /**
- * What a reading states for its writer (SMD-4226, the maintainer's choice after review pass 2): an agent-kind writer's
- * level cited for another item is dropped, since a session summary's "SMD-2627 (Medium)" is a tag; anyone else's is kept,
- * since a person's own "Fix SMD-12 (urgent)" or "Done, urgent: call mom" reads the same to the guard. The `cited` mark is
- * not carried on.
+ * What a reading states for its writer (SMD-4226, the maintainer's choices after review passes 2 and 3): when the
+ * writer is agent-kind, a level cited for another item and a due day that is a floor are dropped, since a session
+ * summary's "SMD-2627 (Medium)" is a tag and its "can't happen before 11-03" no deadline. Any other writer, a key never
+ * classified, an importer or an unread stamp (kind null) included, keeps both: a person's own "Fix SMD-12 (urgent)" or
+ * "rent isn't due until the 1st" reads too much like them to the guards. The marks are not carried on.
  */
 export function forWriter(inf: Inferred | null, kind: string | null): Inferred | null {
   if (inf === null) return null;
-  const level = inf.level === null || (inf.level.cited && kind === "agent") ? null : { value: inf.level.value, word: inf.level.word, phrase: inf.level.phrase };
-  return { level, due: inf.due };
+  const agent = kind === "agent";
+  const level = inf.level === null || (inf.level.cited && agent) ? null : { value: inf.level.value, word: inf.level.word, phrase: inf.level.phrase };
+  const due = inf.due === null || (inf.due.floored && agent) ? null : { day: inf.due.day, phrase: inf.due.phrase, by: inf.due.by };
+  return { level, due };
 }
 
 /** The user message: the capture day and its weekday on the first line, then the text. */

@@ -2988,6 +2988,13 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["High-priority", "the only child left, under the High-priority SMD-1350", true],
     ["Urgent", "Urgent, due Friday: rent", false],
     ["Urgent", "Urgent, todo: call the bank", false],
+    ["High", "Filed SMD-4300 (Priority: High) for the follow-up.", true],
+    ["Priority: High", "Filed SMD-4300 (Priority: High) for the follow-up.", true],
+    ["High", "Filed SMD-4300, Priority: High, in Retrieval.", true],
+    ["High", "SMD-12 is High priority now", true],
+    ["High", "Moved SMD-12 to High", true],
+    ["Medium", "SMD-3670's priority is Medium", true],
+    ["High", "SMD-12 High", true],
     ["urgent", "SMD-12 moved along nicely this week after the long review, and so it went done, urgent: call mom", false],
     ["Medium", "Filed SMD-12, Medium is the garden's level", false],
     ["it’s Medium", "SMD-12 (it’s Medium) stays", true],
@@ -3082,6 +3089,26 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     ["by Friday", "if not by Friday, then by Monday", false],
     ["the deadline by Friday", "do not miss the deadline by Friday", false],
     ["by Friday", "I can't stress enough that it is due by Friday", false],
+    ["before Friday", "if it doesn't ship before Friday, we lose the slot", false],
+    ["after Friday", "only after Friday", true],
+    ["starting Monday", "starting Monday, the pool hours change", true],
+    ["until Friday", "The report isn't due until Friday", false],
+    ["until the 1st", "rent isn't due until the 1st", false],
+    ["until Friday", "I don't need it until Friday", false],
+    ["Monday", "not needed until Monday", false],
+    ["until the 15th", "the payment isn't required until the 15th", false],
+    ["until Friday", "You don't have long until Friday", false],
+    ["Friday", "Only 3 days. Not long until Friday", false],
+    ["until the 30th", "It's not too late until the 30th: register", false],
+    ["until Friday", "can't rest until Friday", false],
+    ["by Monday", "start by Monday on the taxes", false],
+    ["by Friday", "finish the draft by Friday, or later if blocked", false],
+    ["Friday", "Friday, earliest possible", false],
+    ["after the meeting but before Friday", "after the meeting but before Friday", false],
+    ["from now until Friday", "from now until Friday", false],
+    ["Friday", "if it doesn't ship before Friday, we lose the slot", false],
+    ["until Friday", "this can't slip; nothing ships until Friday", true],
+    ["Friday", "it won't be ready before Friday", true],
     ["Friday", "Not urgent but before Friday please", false],
     ["the 15th", "If it's not paid before the 15th, there's a late fee", false],
     ["before the 15th", "If it's not paid before the 15th, there's a late fee", false],
@@ -3101,10 +3128,17 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   ];
   const flooredWrong = flooredCases.filter(([p, t, want]) => flooredIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
   assert(flooredWrong.length === 0, `a floor is read in its own construction — a negation then "before", "until" or "till", "no sooner than", "at the earliest" or "or later" — and a deadline with a negation elsewhere stands ("not later than", "can't wait past", "do not miss") (wrong: ${flooredWrong.join("; ")})`);
-  assert(readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE).due === null
-      && readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE).level?.value === 3
-      && readAnswer({ level: "urgent", level_phrase: "Urgent", due_phrase: "15 November", due_date: "2026-11-15" }, "Urgent: tax payment due not later than 15 November", TUE).due?.day === "2026-11-15",
-    "readAnswer drops a floor's due day and keeps the level beside it, and keeps a \"not later than\" deadline");
+  const flooredRead = readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE);
+  const notLater = readAnswer({ level: "urgent", level_phrase: "Urgent", due_phrase: "15 November", due_date: "2026-11-15" }, "Urgent: tax payment due not later than 15 November", TUE);
+  assert(flooredRead.due?.floored === true && flooredRead.level?.value === 3 && notLater.due?.day === "2026-11-15" && notLater.due.floored === undefined,
+    "readAnswer marks a floor's due day and leaves the level beside it; a \"not later than\" deadline is unmarked");
+  // SMD-4226, the maintainer's choice after review pass 3: a floor is dropped for an agent-kind writer alone, and a writer
+  // of no kind (null: never classified, an importer, an unread stamp) keeps both marks' halves.
+  assert(forWriter(flooredRead, "agent")?.due === null && forWriter(flooredRead, "agent")?.level?.value === 3
+      && JSON.stringify(forWriter(flooredRead, "operator")?.due) === JSON.stringify({ day: "2026-11-03", phrase: "before 11-03", by: "model" })
+      && forWriter(flooredRead, null)?.due?.day === "2026-11-03" && forWriter(flooredRead, "ingested")?.due?.day === "2026-11-03"
+      && forWriter(citedRead, null)?.level?.value === 2 && forWriter(citedRead, "ingested")?.level?.value === 2,
+    "forWriter drops a floored due day for an agent-kind writer and keeps the level beside it; an operator, an importer or a writer of no kind keeps both, unmarked");
   assert(INFER_PROMPT_VERSION === 2 && INFER_PROMPT.includes("carries its own priority field") && INFER_PROMPT.includes("Not a level:") && INFER_PROMPT.includes("Not a deadline:")
       && INFER_PROMPT.includes("where one item ranks among others") && INFER_PROMPT.includes("the earliest something can happen"),
     "the prompt is v2 (SMD-4226): a ticket's own field, what is no level, what is no deadline; a prompt edited without its version bumped shows here");
@@ -3181,13 +3215,16 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     const b = await req.json() as { messages: { content: string }[] };
     const isInfer = b.messages[0].content === INFER_PROMPT;
     calls[isInfer ? "infer" : "tags"]++;
-    const answer = isInfer ? { level: "high", level_phrase: "matters", due_phrase: "tomorrow" } : { topics: ["t"], type: "idea" };
+    const cited = b.messages[1]?.content.includes("SMD-12 (Medium)");
+    const answer = !isInfer ? { topics: ["t"], type: "idea" } : cited ? { level: "medium", level_phrase: "Medium", due_phrase: null } : { level: "high", level_phrase: "matters", due_phrase: "tomorrow" };
     return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
   } });
   try {
     const stated: Record<string, unknown>[] = [];
     let existed = false, assertFails = false;
+    let stamp: "throws" | string | null = null, stampReads = 0;
     const stubStore = {
+      getThought: async () => { stampReads++; if (stamp === "throws") throw new Error("the row is away"); return { id: "00000000-0000-4000-8000-0000000000c1", content: "", metadata: stamp === null ? {} : { actor_kind: stamp }, created_at: null }; },
       captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000c1", existed }),
       keyAtText: async () => (existed ? { id: "00000000-0000-4000-8000-0000000000c1", clientKey: null } : null),
       assertPriority: async (o: Record<string, unknown>) => { if (assertFails) throw new Error("the store is away"); stated.push(o); return { outcome: "asserted" }; },
@@ -3221,14 +3258,41 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     try { faulted = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
     assert(faulted.ok && stated.length === 1 && errs.some((e) => /the inferred priority of thought \S+ was not stated: the store is away/.test(e)),
       `a store fault stating it is logged, and the capture stands (${errs.filter((e) => /inferred/.test(e)).join(" | ")})`);
+    // SMD-4226: a level cited for another ticket reads the row's stamp; an agent's is dropped, an operator's stands, and
+    // a stamp that can't be read leaves it standing (the maintainer's choice after review pass 3), logged.
+    assertFails = false;
+    const citedText = "Filed SMD-12 (Medium) for review";
+    const statedBefore = stated.length, readsBefore = stampReads;
+    stamp = "agent";
+    const byAgent = await capture(ctxWith(true), writer, { content: citedText } as never);
+    const afterAgent = stated.length;
+    stamp = "operator";
+    const byOperator = await capture(ctxWith(true), writer, { content: citedText } as never);
+    const operatorStated = stated.at(-1);
+    stamp = "throws";
+    const stampErrs: string[] = [];
+    console.error = (...a: unknown[]) => { stampErrs.push(a.join(" ")); };
+    let byUnread;
+    try { byUnread = await capture(ctxWith(true), writer, { content: citedText } as never); } finally { console.error = realErr; }
+    assert(byAgent.ok && afterAgent === statedBefore && byOperator.ok && stated.length === statedBefore + 2 && operatorStated?.level === 2
+        && byUnread?.ok && stated.at(-1)?.level === 2 && stampReads === readsBefore + 3 && stampErrs.some((e) => /the writer of thought \S+ was not read, so its marked halves stand: the row is away/.test(e)),
+      `a cited level: the stamp read; an agent's dropped, an operator's stated, and one whose stamp can't be read stated and logged (${afterAgent - statedBefore} | ${stated.length - statedBefore} | ${stampReads - readsBefore})`);
+    stamp = null;
+    const statedBeforeNoKind = stated.length;
+    await capture(ctxWith(true), writer, { content: citedText } as never);
+    assert(stated.length === statedBeforeNoKind + 1 && stated.at(-1)?.level === 2, "a cited level whose row carries no kind is stated: only an agent stamp drops it");
+    const readsBeforePlain = stampReads;
+    await capture(ctxWith(true), writer, { content: "this matters, due tomorrow, a plain one" } as never);
+    assert(stampReads === readsBeforePlain, "a reading with nothing marked reads no stamp");
     // The chat endpoint refusing the connection: the runtime's error the inference throws is caught by the capture,
     // which lands with the tags' outage marker and states nothing (review pass 1: no test held that catch).
     assertFails = false;
+    const statedBeforeRefused = stated.length;
     const refusedErrs: string[] = [];
     console.error = (...a: unknown[]) => { refusedErrs.push(a.join(" ")); };
     let refused;
     try { refused = await capture(ctxWith(true, closedPort), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
-    assert(refused.ok && stated.length === 1 && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
+    assert(refused.ok && stated.length === statedBeforeRefused && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
       `a chat endpoint that refuses the connection: the capture lands, nothing stated (${refusedErrs.filter((e) => /inferred/.test(e)).join(" | ")})`);
   } finally {
     chat.stop(true);
