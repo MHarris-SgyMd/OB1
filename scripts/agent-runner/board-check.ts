@@ -9,7 +9,7 @@
  */
 
 import type { Gql, GqlResult } from "../../db/linear-api.ts";
-import { BACKLOG, IN_PROGRESS, handBack, moveToInProgress } from "./board.ts";
+import { BACKLOG, IN_PROGRESS, comment, handBack, moveToInProgress } from "./board.ts";
 import type { Config } from "./facts.ts";
 
 const CFG = { team: "SMD" } as unknown as Config;
@@ -23,6 +23,8 @@ type Scenario = {
   issue?: { id: string; labelIds: string[] } | null;
   /** issueUpdate's `success` (default true). */
   updateSuccess?: boolean;
+  /** commentCreate's `success` (default true). */
+  commentSuccess?: boolean;
   /** Make every call answer a GraphQL error (so `strict` throws). */
   gqlError?: string;
 };
@@ -42,6 +44,7 @@ function stub(s: Scenario): { gql: Gql; calls: { query: string; variables: Recor
     }
     if (query.includes("issue(id")) return data({ issue: s.issue === undefined ? { id: "u1", labelIds: [] } : s.issue });
     if (query.includes("issueUpdate")) return data({ issueUpdate: { success: s.updateSuccess ?? true } });
+    if (query.includes("commentCreate")) return data({ commentCreate: { success: s.commentSuccess ?? true } });
     return { data: null, errors: [{ message: `unrouted query: ${query.slice(0, 40)}` }] };
   };
   return { gql, calls };
@@ -135,6 +138,24 @@ export async function selfCheck(): Promise<number> {
     const outage = stub({ gqlError: "rate limited" });
     const rOut = await handBack(outage.gql, CFG, { identifier: "SMD-9", kind: "work", readyLabelId: READY, handedBackLabelId: HANDED });
     ok(rOut.ok === false && rOut.detail.includes("failed"), "a GraphQL error is caught as a failed move, not thrown");
+  });
+
+  await section("comment posts one commentCreate on the issue's uuid, and refusals are results, not throws", async () => {
+    const s = stub({ issue: { id: "uuid-1", labelIds: [] } });
+    const r = await comment(s.gql, "SMD-9", "the hand-back note");
+    ok(r.ok === true, `the comment posts${r.ok ? "" : `: ${r.detail}`}`);
+    const cc = s.calls.find((c) => c.query.includes("commentCreate"));
+    const input = cc?.variables.input as { issueId?: string; body?: string } | undefined;
+    ok(input?.issueId === "uuid-1", "the comment targets the issue's uuid, not its identifier");
+    ok(input?.body === "the hand-back note", "the body is the runner's text, passed through");
+    const refused = stub({ issue: { id: "uuid-1", labelIds: [] }, commentSuccess: false });
+    ok((await comment(refused.gql, "SMD-9", "x")).ok === false, "commentCreate success=false is a failed comment");
+    const noIssue = stub({ issue: null });
+    const rNo = await comment(noIssue.gql, "SMD-404", "x");
+    ok(rNo.ok === false && !noIssue.calls.some((c) => c.query.includes("commentCreate")), "a missing issue is refused, nothing posted");
+    const outage = stub({ gqlError: "rate limited" });
+    const rOut = await comment(outage.gql, "SMD-9", "x");
+    ok(rOut.ok === false && rOut.detail.includes("failed"), "a GraphQL error is caught as a failed comment, not thrown");
   });
 
   console.log(`${passed} passed, ${failed} failed`);
