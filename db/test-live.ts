@@ -4716,7 +4716,8 @@ if (want("9f")) {
     // unanswered each time, the innocent re-embedded, each claim's attempt refunded at every hand-back. Then a crash at the
     // next call after each recovery, whatever is in flight, three times, twice on a suspect retried alone: nothing failed,
     // and the drain after the isolated one takes the four behind with both workers at once.
-    {
+    // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+    await (async () => {
       const aloneOf = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the probe after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
       /** Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (the mutant: no outage begun). */
       const waitsAfterFailure = (lines: string[]) => {
@@ -4786,8 +4787,10 @@ if (want("9f")) {
         crashMarker = null;
         const batchBehindDone = await pollUntil(async () => (await Promise.all(batchBehind.map(atModel))).every(Boolean), 30_000);
         const batchedExit = await batched.stop();
-        assert(batchFirstBack && batchPoisonFailed && batchBehindDone && crashedBy.length === 4 && aloneOf(batched.lines) === "1,2" && batchedExit === "exit 0",
-          `batch 2, the isolated claim is one thought: the poison failed at its third outage alone, the two behind re-embedded after (failed ${batchPoisonFailed}; behind ${batchBehindDone}; ${crashedBy.length} crash(es); alone ${aloneOf(batched.lines)}; ${batchedExit})`);
+        // One worker: the isolated line says no "one worker, before the drain goes back to" (review pass 3, mutant).
+        const batchLine = batched.lines.some((l) => l === "  retrying the last outage's 1 suspect thought(s) one at a time; one that errs again alone is blamed only on a probe made at once");
+        assert(batchFirstBack && batchPoisonFailed && batchBehindDone && batchLine && crashedBy.length === 4 && aloneOf(batched.lines) === "1,2" && batchedExit === "exit 0",
+          `batch 2, the isolated claim is one thought: the poison failed at its third outage alone, the two behind re-embedded after (failed ${batchPoisonFailed}; behind ${batchBehindDone}; one-worker line ${batchLine}; ${crashedBy.length} crash(es); alone ${aloneOf(batched.lines)}; ${batchedExit})`);
         await sql`DELETE FROM thoughts WHERE id = ${batchPoison}::uuid OR id = ANY(${sql.array(batchBehind, "TEXT")}::uuid[])`;
 
         // Two workers, both suspects deleted during the outage: the isolated drain claims a thought no suspect, so the
@@ -4817,7 +4820,7 @@ if (want("9f")) {
         hangProbeAtHemlock = 0;
         hemlock503At = 0;
       }
-    }
+    })();
 
     // Another worker's outage is joined unprobed (SMD-2636 PR 3b, as extract's, PR 3a's review pass 1): under two
     // workers a slow hemlock note's 500 begins an outage while a deadline thought's call is still in hand, which, met
@@ -4900,8 +4903,10 @@ if (want("9f")) {
     const limitedExit = await limited.stop();
     // Rows getting past the limit each cycle start the schedule over: the waits do not grow (review pass 3: they doubled at every cycle).
     const limitedWaits = waitsOf(limited.lines);
-    assert(limitedFailed === 0 && limitedDone === 6 && limitedExit === "exit 0",
-      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six (${limitedFailed} failed, ${limitedDone} done; ${limitedExit})`);
+    // …and makes no suspect, so no drain after its outages isolates (SMD-2641 PR 2, review pass 3, mutant: a 429's thought made a suspect).
+    const limitedIsolated = limited.lines.filter((l) => /retrying the last outage's/.test(l)).length;
+    assert(limitedFailed === 0 && limitedDone === 6 && limitedIsolated === 0 && limitedExit === "exit 0",
+      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six, no drain isolated (${limitedFailed} failed, ${limitedDone} done; ${limitedIsolated} isolated drain(s); ${limitedExit})`);
     assert(limitedWaits.length >= 2 && limitedWaits.every((w) => w === limitedWaits[0]),
       `…each cycle that re-embedded something starts the probe's schedule over, so the waits stay at the first (${JSON.stringify(limitedWaits)})`);
     for (const id of limitedThoughts) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
@@ -5053,6 +5058,26 @@ if (want("9f")) {
     assert(gatedIdle && gatedWaiting && gatedProbed && gatedClaimInOutage?.status !== "failed" && gatedEmbedded && gatedExit === "exit 0",
       `with the probe's own subject refused by the gate, an outage waits, probing under the thought's subject: nothing recorded failed through two probes' 503s, then re-embedded (idle ${gatedIdle}, waiting ${gatedWaiting}, probed ${gatedProbed}, embedded ${gatedEmbedded}; claim in the outage ${JSON.stringify(gatedClaimInOutage)}; ${gatedExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${gatedThought}::uuid`;
+
+    // The blame probe goes under the same subject (SMD-2641 PR 2, review pass 3, mutant: under the probe's own, which the
+    // gate refuses, the blame read a refusal and ended the follower with 2 at its first suspect retried alone): a hemlock
+    // note the gate passes by its type, retried alone, its blame probe answering — recorded failed, the follower running on.
+    poison = true;
+    const gatedPoison = liveFollower({ env: gatedEnv });
+    let gatedPoisonEnd: string | null = "running";
+    let gatedPoisonThought = "";
+    try {
+      await gatedPoison.idle();
+      [{ id: gatedPoisonThought }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('the gated hemlock note', ${{ type: "gated-outage" }}) RETURNING id::text AS id`;
+      await pollUntil(async () => (await claimOf(gatedPoisonThought))?.status === "failed", 20_000);
+    } finally {
+      poison = false;
+    }
+    const gatedPoisonClaim = await claimOf(gatedPoisonThought);
+    gatedPoisonEnd = await gatedPoison.stop();
+    assert(gatedPoisonClaim?.status === "failed" && /^provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: /.test(gatedPoisonClaim.last_error ?? "") && gatedPoisonEnd === "exit 0",
+      `with the probe's own subject refused by the gate, a suspect retried alone is blamed on a probe under its own subject: recorded failed as answered, the follower running on, a stop 0 (${gatedPoisonClaim?.status}: ${gatedPoisonClaim?.last_error?.slice(0, 100)}; ${gatedPoisonEnd})`);
+    await sql`DELETE FROM thoughts WHERE id = ${gatedPoisonThought}::uuid`;
 
     // A poll's statement past the session's statement_timeout ends the follower, its row failed — no longer swallowed.
     const timed = liveFollower({ session: { statement_timeout: "1s" } });
