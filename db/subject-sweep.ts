@@ -161,7 +161,10 @@ const DOOR = "record_thought_subjects(uuid, text[], text, text, uuid, text, json
 /** 130's close of a set, by its signature: the sweep's close of out-of-date subjects the model names nothing for. */
 const CLOSE = "close_thought_subjects(uuid, uuid[], text)";
 
-/** What the door needs of the role that calls it (111's and 130's comments), and where each grant comes from: the sweep's refusals and the pass's say this. */
+/**
+ * What the door needs of the role that calls it (111's and 130's comments), and where each grant comes from: the
+ * sweep's refusals and the pass's say this.
+ */
 export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT, UPDATE and SELECT on derivations (the capture group's)";
 
 /** What the pool needs of the role (113): the claims' reads and writes, and the pool's name in ob1_config. */
@@ -964,10 +967,10 @@ async function sweep(
   // filed since — which the fingerprint, the text's alone, does not see (review pass 4: a ticket moved before 113, or
   // under another pool, was never pooled at a naming). `after`, a page's cursor, bounds the facets read too, so a dry
   // run's pages each read from their cursor, not from the first facet (review pass 5: its pages read every facet before
-  // them, a dry run before a naming quadratic in the thoughts). A rule's set is current here whatever that rule now finds
-  // at the same text, where a claim's rulesAgree asks for the rule's keys exactly and narrows it: a set wider than its
-  // rule finds is not pooled, so a rule that comes to find another set needs its version bumped (SUBJECT_RULE_VERSIONS)
-  // to be asked again (SMD-3306 PR 7a-3b-1's review pass 3, run-it; PR 7a-3b-2's header rule).
+  // them, a dry run before a naming quadratic in the thoughts). A rule's set is current here whatever that rule now
+  // finds at the same text, where a claim's rulesAgree asks for the rule's keys exactly and narrows it: a set wider
+  // than its rule finds is not pooled, so a rule that comes to find another set needs its version bumped
+  // (SUBJECT_RULE_VERSIONS) to be asked again (SMD-3306 PR 7a-3b-1's review pass 3, run-it; PR 7a-3b-2's header rule).
   const noCurrentSubject = (c: SQL, after = NIL_ID) => c`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
@@ -979,8 +982,8 @@ async function sweep(
   const NO_CURRENT_SUBJECT = noCurrentSubject(sql);
   /**
    * A thought's standing subjects, one row however many stand (`s`, joined beside `t`): their facets and keys by key,
-   * and their way and pass. A plain join gave a row a subject (SMD-3306 PR 7a-3b-1: a set's thought taken once for each,
-   * its dry run counting it so).
+   * and their way and pass. A plain join gave a row a subject (SMD-3306 PR 7a-3b-1: a set's thought taken once for
+   * each, its dry run counting it so).
    */
   const STANDING = sql`LEFT JOIN LATERAL (
       SELECT array_agg(f.id::text ORDER BY f.payload->>'key', f.id) AS ids, array_agg(f.payload->>'key' ORDER BY f.payload->>'key', f.id) AS keys,
@@ -1533,12 +1536,12 @@ async function sweep(
    * counts it. `taken`, for --limit, counts that one too. `setBack`: those whose call the caller aborted (abortInHand),
    * put back unanswered, taken again when they come up. `overBudget`: those whose own write passed a scheduler's
    * statement_timeout, failed; `deadlocked`, those whose own write the server rolled back to break a deadlock, failed.
-   * `ownError`: those the provider erred on again right after answering a probe, failed.
-   * `hungOwn`: those that hung the provider again, their claims marked hung (HUNG_MARK), failed — one whose call was
-   * aborted in hand counted there, out of setBack, as the probe after the abort finds it so, its place under --limit
-   * taken again. `pollsLost`, no thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed
-   * back taken twice, as an edited one is. `replaced` and `newKey` count within the recorded ones, `closed` the
-   * subjects closed on those the model named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
+   * `ownError`: those the provider erred on again right after answering a probe, failed. `hungOwn`: those that hung the
+   * provider again, their claims marked hung (HUNG_MARK), failed — one whose call was aborted in hand counted there,
+   * out of setBack, as the probe after the abort finds it so, its place under --limit taken again. `pollsLost`, no
+   * thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed back taken twice, as an edited
+   * one is. `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
+   * named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
    * when it released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and
    * those whose failure's release a lost poll handed back, which the failure count leaves out.
    */
@@ -2113,9 +2116,9 @@ async function sweep(
   /**
    * A thought's own write — the door's, or the finish of one named nothing — the server rolled back to break a deadlock
    * (40P01) each of DEADLOCK_TRIES times: since 130 a set's close or write moves several keys' threads, and a move
-   * across two keys can still deadlock at its commit (130's NOT HERE). The thought failed, for --retry-failed, said once
-   * and counted, as one past the budget is, and the run goes on, in any run (SMD-3306 PR 7a-3b-1's review pass 3, cold
-   * read: rethrown, it ended the run, a scheduler's sleep with it).
+   * across two keys can still deadlock at its commit (130's NOT HERE). The thought failed, for --retry-failed, said
+   * once and counted, as one past the budget is, and the run goes on, in any run (SMD-3306 PR 7a-3b-1's review pass 3,
+   * cold read: rethrown, it ended the run, a scheduler's sleep with it).
    */
   const deadlocked = (row: Candidate, e: unknown): Done | false => {
     if (hardStop.signal.aborted) return false;
@@ -2207,7 +2210,7 @@ async function sweep(
         if (row.standing_keys !== null) {
           n.replaced++;
           // A key the set did not hold (review pass 1: a set narrowed to one of its keys was counted a new key).
-          if (!(row.standing_keys ?? []).includes(found.key)) n.newKey++;
+          if (!row.standing_keys.includes(found.key)) n.newKey++;
         }
       }
       return { release: "none" };
@@ -2417,8 +2420,8 @@ async function sweep(
             if (!now.same) return { c: null, stale: true, gone: false, written: false, held: await back(), judged: false, alarm: null };
             let c: Close | null = null, written: boolean;
             if (row.standing_ids !== null) {
-              // Every subject read, the set closed whole or not at all (SMD-3306 PR 7a-3b-1: one facet of a set answered
-              // moved, closing none, and the thought went back to the pool to be asked again within the run).
+              // Every subject read, the set closed whole or not at all (SMD-3306 PR 7a-3b-1: one facet of a set
+              // answered moved, closing none, and the thought went back to the pool to be asked again within the run).
               [{ c }] = (await tx`SELECT close_thought_subjects(${row.id}::uuid, ${tx.array(row.standing_ids, "UUID")}::uuid[], ${row.fingerprint}) AS c`) as { c: Close }[];
               // A text moved between that read and the close's own: the claim handed back as above. Never gone: a
               // delete waits on that read's FOR KEY SHARE until this transaction ends.

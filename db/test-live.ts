@@ -8953,7 +8953,7 @@ if (want("10h")) {
     await sql`SELECT update_thought(${narrow}::uuid, ${"[10h] a merged pull request 727, reviewed, its notes since"})`;
     asked = ownCalls;
     const narrowed = await sweep({ limit: 3 });
-    const narrowLeft = ((await subjects()).filter((x) => x.thought === narrow && x.standing)).map((x) => x.key).join(",");
+    const narrowLeft = (await subjects()).filter((x) => x.thought === narrow && x.standing).map((x) => x.key).join(",");
     assert(narrowed.code === 0 && tally(narrowed) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (0 with a new key)"
         && narrowLeft === "pr:727" && ownCalls === asked + 1,
       `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
@@ -8967,31 +8967,38 @@ if (want("10h")) {
       // the run; pass 4, cold read and run-it: failed at the first, a one-off left it failed under a scheduler). Two
       // out-of-date sets under an older question, one the model names nothing for (the close), one it names PR 727 for
       // (the door); a trigger refuses each update of their facets as the server's deadlock check would, counting.
-      const deadSets: string[] = [];
-      for (const [text, keys] of [["[10h] a deadlocked set, nothing in it to name", ["phrase:a deadlocked set", "pr:7311"]],
-        ["[10h] a merged pull request 727, its set deadlocked", ["phrase:a deadlocked write", "pr:7312"]]] as const) {
+      // A thought of `text` holding a model's set of `keys` under an older question, out of date, pooled.
+      const seedSet = async (text: string, keys: string[]) => {
         const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
-        await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array([...keys], "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
+        await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
           (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
         await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
-        deadSets.push(id);
-      }
+        return id;
+      };
+      /**
+       * A sweep of at most `limit` beside the case's trigger on thought_facets (`trigger`, its CREATE) and its function
+       * (`body`), which counts in a sequence: all three named `name`, made before the run and dropped after. The run,
+       * and the sequence's count.
+       */
+      const sweepBeside = async (name: string, body: string, trigger: string, limit: number) => {
+        await sql.unsafe(`CREATE SEQUENCE ${name}; CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} END $$; ${trigger}`);
+        try {
+          const run = await sweep({ limit });
+          return { run, count: Number(((await sql.unsafe(`SELECT last_value FROM ${name}`)) as { last_value: string }[])[0].last_value) };
+        } finally {
+          await sql.unsafe(`DROP TRIGGER ${name} ON thought_facets; DROP FUNCTION ${name}(); DROP SEQUENCE ${name}`);
+        }
+      };
+      const deadSets = [await seedSet("[10h] a deadlocked set, nothing in it to name", ["phrase:a deadlocked set", "pr:7311"]),
+        await seedSet("[10h] a merged pull request 727, its set deadlocked", ["phrase:a deadlocked write", "pr:7312"])];
       // …and a thought no subject stands on, its first write rolled back so: failed and counted, not as out of date
       // (review pass 4, mutant: the "among them" count was unheld for a thought holding no subject).
       deadSets.push((await sql`INSERT INTO thoughts (content, metadata) VALUES ('[10h] a merged pull request 727, never keyed, its write deadlocked', '{}'::jsonb) RETURNING id::text AS id`)[0].id as string);
       await sql`SELECT requeue_thought_work(${POOL}, ${deadSets[2]}::uuid)`;
-      await sql.unsafe(`CREATE SEQUENCE zz_set_deadlock_tries;
-        CREATE FUNCTION zz_set_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('zz_set_deadlock_tries'); RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01'; END $$;
-        CREATE TRIGGER zz_set_deadlock BEFORE INSERT OR UPDATE ON thought_facets FOR EACH ROW WHEN (NEW.thought_id IN ('${deadSets[0]}'::uuid, '${deadSets[1]}'::uuid, '${deadSets[2]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock()`);
       asked = ownCalls;
-      let deadRun: Awaited<ReturnType<typeof sweep>>;
-      let deadTries = 0;
-      try {
-        deadRun = await sweep({ limit: 4 });
-        deadTries = Number(((await sql`SELECT last_value FROM zz_set_deadlock_tries`) as { last_value: string }[])[0].last_value);
-      } finally {
-        await sql.unsafe(`DROP TRIGGER zz_set_deadlock ON thought_facets; DROP FUNCTION zz_set_deadlock(); DROP SEQUENCE zz_set_deadlock_tries`);
-      }
+      const { run: deadRun, count: deadTries } = await sweepBeside("zz_set_deadlock",
+        "PERFORM nextval('zz_set_deadlock'); RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01';",
+        `CREATE TRIGGER zz_set_deadlock BEFORE INSERT OR UPDATE ON thought_facets FOR EACH ROW WHEN (NEW.thought_id IN ('${deadSets[0]}'::uuid, '${deadSets[1]}'::uuid, '${deadSets[2]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock()`, 4);
       const deadClaims = await Promise.all(deadSets.map((id) => claimOf(id)));
       const deadStanding = (await subjects()).filter((x) => deadSets.includes(x.thought) && x.standing).length;
       assert(deadRun.code === 1 && ownCalls === asked + 3 && deadStanding === 4 && deadTries === 9
@@ -9002,29 +9009,13 @@ if (want("10h")) {
       for (const id of deadSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
       // A deadlock as the server's come, at the commit (120's re-link is a deferred trigger), once: the transaction run
       // again lands, the close's set closed and the door's subject written, each asked once, nothing failed (pass 4).
-      const onceSets: string[] = [];
-      for (const [text, keys] of [["[10h] a set deadlocked once, nothing in it to name", ["phrase:a set deadlocked once", "pr:7313"]],
-        ["[10h] a merged pull request 727, its set deadlocked once", ["phrase:a write deadlocked once", "pr:7314"]]] as const) {
-        const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
-        await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array([...keys], "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
-          (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
-        await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
-        onceSets.push(id);
-      }
-      await sql.unsafe(`CREATE SEQUENCE zz_set_deadlock_once;
-        CREATE FUNCTION zz_set_deadlock_once() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
-          IF nextval('zz_set_deadlock_once') = 1 THEN RAISE EXCEPTION 'deadlock detected (the suite''s, at the commit)' USING ERRCODE = '40P01'; END IF; RETURN NULL; END $$;
-        CREATE CONSTRAINT TRIGGER zz_set_deadlock_once AFTER UPDATE ON thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
-          WHEN (OLD.thought_id IN ('${onceSets[0]}'::uuid, '${onceSets[1]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock_once()`);
+      const onceSets = [await seedSet("[10h] a set deadlocked once, nothing in it to name", ["phrase:a set deadlocked once", "pr:7313"]),
+        await seedSet("[10h] a merged pull request 727, its set deadlocked once", ["phrase:a write deadlocked once", "pr:7314"])];
       asked = ownCalls;
-      let onceRun: Awaited<ReturnType<typeof sweep>>;
-      let onceFired = 0;
-      try {
-        onceRun = await sweep({ limit: 3 });
-        onceFired = Number(((await sql`SELECT last_value FROM zz_set_deadlock_once`) as { last_value: string }[])[0].last_value);
-      } finally {
-        await sql.unsafe(`DROP TRIGGER zz_set_deadlock_once ON thought_facets; DROP FUNCTION zz_set_deadlock_once(); DROP SEQUENCE zz_set_deadlock_once`);
-      }
+      const { run: onceRun, count: onceFired } = await sweepBeside("zz_set_deadlock_once",
+        "IF nextval('zz_set_deadlock_once') = 1 THEN RAISE EXCEPTION 'deadlock detected (the suite''s, at the commit)' USING ERRCODE = '40P01'; END IF; RETURN NULL;",
+        `CREATE CONSTRAINT TRIGGER zz_set_deadlock_once AFTER UPDATE ON thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          WHEN (OLD.thought_id IN ('${onceSets[0]}'::uuid, '${onceSets[1]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock_once()`, 3);
       const onceClaims = await Promise.all(onceSets.map((id) => claimOf(id)));
       const onceLeft = (await subjects()).filter((x) => onceSets.includes(x.thought) && x.standing).map((x) => `${x.thought === onceSets[0] ? "close" : "door"}:${x.key}`).join(",");
       assert(onceRun.code === 0 && ownCalls === asked + 2 && onceFired > 1 && onceClaims.every((c) => c?.status === "succeeded") && onceLeft === "door:pr:727"

@@ -19077,7 +19077,9 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
   const sets = async (id: string, keys: string[]) =>
     (await one<{ r: { action: string } }>(`SELECT record_thought_subjects($1::uuid, $2::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL, $3, NULL) AS r`, [id, keys, await fp(id)])).r;
-  const serves = async (id: string) => (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('thought', $1)`, [id])).map((r) => `${r.kind}:${r.key}`).join(",");
+  /** What an item serves, `kind:key` each, a thought's by default. */
+  const serves = async (key: string, kind = "thought") =>
+    (await q<{ kind: string; key: string | null }>(`SELECT kind, key FROM ob1_item_serves($1, $2)`, [kind, key])).map((r) => `${r.kind}:${r.key}`).join(",");
 
   // A session on two tickets, and a phrase beside them: both tickets served, in key order, the phrase none. The lesser
   // key's facet is written first, so a read of one subject in scan order would serve it alone.
@@ -19147,8 +19149,8 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
     const r = (await one<{ r: { outcome: string } }>(`SELECT assert_priority('ticket', $1, $2, NULL, NULL, NULL, NULL, NULL, false, $3::jsonb) AS r`, [key, level, JSON.stringify(OP)])).r;
     if (r.outcome !== "asserted") throw new Error(`[117] fixture: assert_priority on ${key} answered ${JSON.stringify(r)}`);
   };
-  // The two tickets as board-sync writes them ([109]'s way): a source row each, open.
-  for (const issue of ["SMD-91701", "SMD-91702"]) {
+  /** A ticket's row as board-sync writes it ([109]'s way): its thought, open, and its Linear source row. */
+  const ticketRow = async (issue: string) => {
     let id = "";
     await db.transaction(async (tx) => {
       await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
@@ -19156,7 +19158,10 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
         [`[117] ${issue}`, JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
     });
     await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, `[117] ${issue}`]);
-  }
+    return id;
+  };
+  // The two tickets, open.
+  for (const issue of ["SMD-91701", "SMD-91702"]) await ticketRow(issue);
   await put("SMD-91701", 3);
   await put("SMD-91702", 4);
   type Eff = { level: number | null; inherited_from: { kind: string; key: string; level: number; hops: number } | null; effective: string };
@@ -19171,41 +19176,26 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   assert(parentArm === 0 && itemArm === 0, `a ticket with no parent link and an item that does not exist serve nothing, as under 122 (${parentArm}, ${itemArm})`);
   // …and each arm's rows: a child with a link to its parent and one to itself serves its parent alone, upper case; an
   // item with no origin thought serves nothing, one with an origin its thought.
-  let child = "";
-  await db.transaction(async (tx) => {
-    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
-    child = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
-      ["[117] SMD-91703", JSON.stringify({ source: "linear", issue: "SMD-91703", status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
-  });
-  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-91703', '[117] SMD-91703', 'text/markdown')`, [child]);
+  const child = await ticketRow("SMD-91703");
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [child, JSON.stringify([{ relation: "child_of", target: "smd-91701" }, { relation: "child_of", target: "smd-91703" }, { relation: "child_of", target: "SMD-91701" }, { relation: "child_of", target: "smd-0" }])]);
-  const parentRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91703')`)).map((r) => `${r.kind}:${r.key}`).join(",");
+  const parentRows = await serves("SMD-91703", "ticket");
   const [noOrigin, withOrigin] = ["00000000-0000-4000-8000-000000009171", "00000000-0000-4000-8000-000000009172"];
   await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq, origin_thought_id) VALUES ($1::uuid, 'open', '[117] no origin', now(), now(), 'raw-writer', now(), 0, NULL), ($2::uuid, 'open', '[117] an origin', now(), now(), 'raw-writer', now(), 0, $3::uuid)`, [noOrigin, withOrigin, session]);
-  const itemRows = [
-    (await q<{ kind: string; key: string | null }>(`SELECT kind, key FROM ob1_item_serves('item', $1)`, [noOrigin])).map((r) => `${r.kind}:${r.key}`).join(","),
-    (await q<{ kind: string; key: string | null }>(`SELECT kind, key FROM ob1_item_serves('item', $1)`, [withOrigin])).map((r) => `${r.kind}:${r.key}`).join(","),
-  ];
+  const itemRows = [await serves(noOrigin, "item"), await serves(withOrigin, "item")];
   await db.query(`DELETE FROM open_items WHERE item_id IN ($1::uuid, $2::uuid)`, [noOrigin, withOrigin]);
   assert(parentRows === "ticket:SMD-91701" && itemRows[0] === "" && itemRows[1] === `thought:${session}`,
     `a child serves its parent alone, upper case, not itself; an item with no origin nothing, one with an origin its thought, as under 122 (${parentRows} | ${itemRows.map((r) => r || "none").join(" | ")})`);
 
   // The ticket arm as 131 copies it: a closed child_of link serves nothing, nor an active link of another relation
   // (review pass 3, mutants: each unheld once [109] re-applies 122's own).
-  let orphan = "";
-  await db.transaction(async (tx) => {
-    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
-    orphan = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
-      ["[117] SMD-91704", JSON.stringify({ source: "linear", issue: "SMD-91704", status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
-  });
-  await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-91704', '[117] SMD-91704', 'text/markdown')`, [orphan]);
+  const orphan = await ticketRow("SMD-91704");
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }, { relation: "blocks", target: "SMD-91702" }])]);
   await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'link' AND payload->>'relation' = 'child_of'`, [orphan]);
   // Another system's child_of link on the ticket's thought (review pass 4, mutant: the link's system filter unheld).
   await db.query(`SELECT record_source_links($1::uuid, 'github', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91705" }])]);
-  const orphanRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91704')`)).map((r) => `${r.kind}:${r.key}`).join(",");
-  // A key another system's source row holds, its thought linked by Linear: no Linear ticket, so no parent (review pass 4,
-  // mutant: the source row's system filter unheld).
+  const orphanRows = await serves("SMD-91704", "ticket");
+  // A key another system's source row holds, its thought linked by Linear: no Linear ticket, so no parent (review pass
+  // 4, mutant: the source row's system filter unheld).
   let elsewhere = "";
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
@@ -19213,7 +19203,7 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   });
   await db.query(`SELECT record_thought_source($1::uuid, 'github', 'SMD-91706', '[117] SMD-91706 held elsewhere', 'text/markdown')`, [elsewhere]);
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [elsewhere, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }])]);
-  const elsewhereRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91706')`)).map((r) => `${r.kind}:${r.key}`).join(",");
+  const elsewhereRows = await serves("SMD-91706", "ticket");
   assert(orphanRows === "" && elsewhereRows === "",
     `a closed parent link serves nothing, nor a link of another relation or another system, nor a key no Linear source row holds (${orphanRows || "none"} | ${elsewhereRows || "none"})`);
 
