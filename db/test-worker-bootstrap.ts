@@ -373,6 +373,62 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   plain.end();
   ok(plain.resumeFrom(-1, 60_000) === 0 && plain.resumeFrom(0, 60_000) === 0, "an end with no step and no count (extract's) never carries a schedule");
 
+  // Isolated (SMD-2641, extract's and consolidate's): after an outage its suspects are retried one at a time, and one
+  // that errs again alone is blamed only on a probe made at once — answered, its own; no answer, an outage it was
+  // alone at, and at the third (ALONE_OUTAGES) its own.
+  let isoClock = 0;
+  const iso = new ProviderOutage(() => isoClock, SUSPECT_WINDOW_MS, true);
+  ok(!iso.isolating(), "isolated: no outage yet, no pass to isolate");
+  iso.begin("500", "A");
+  iso.begin("500", "B");
+  ok(!iso.isolating() && !iso.blames("A"), "…none while the outage lasts");
+  iso.end();
+  ok(iso.isolating() && iso.suspected === 2 && iso.blames("A") && iso.blames("B") && !iso.blames("C"), "once a probe answers, its two suspects are retried one at a time, each blamed only on a probe; another thought is not");
+  ok(iso.blame("A", "500 alone", false) === "outage" && iso.reason === "500 alone" && iso.aloneAt("A") === 1 && !iso.isolating(), "a suspect alone, no answer: an outage it was alone at, its first, begun by the blame");
+  iso.end();
+  ok(iso.isolating() && iso.suspected === 2, "…the suspects kept for the next pass");
+  iso.begin("503");
+  iso.end();
+  ok(iso.isolating() && iso.suspected === 2 && iso.aloneAt("A") === 1, "an outage begun while isolating — the provider holding calls back — keeps the suspects not yet retried, and their counts");
+  ok(iso.begin("500", "N") === "outage" && iso.suspected === 3, "a thought no suspect erring alone begins an outage and is one, beside the others");
+  iso.end();
+  iso.settled("N");
+  ok(iso.blame("A", "500", false) === "outage" && iso.aloneAt("A") === 2, "…the suspect's second outage alone");
+  iso.end();
+  ok(iso.blame("A", "500", false) === "alone" && iso.reason === null && iso.aloneAt("A") === 3, "its third: its own, no outage begun by the blame");
+  ok(iso.blames("A"), "…and a suspect still until its record settles it: one the database kept from its record is retried alone again (review pass 1)");
+  iso.settled("A");
+  iso.begin("500");
+  iso.end();
+  ok(iso.isolating() && iso.suspected === 1, "the outage the worker begins after it keeps the other suspect");
+  ok(iso.blame("B", "500", true) === "answered" && iso.isolating(), "a probe made at once answering: its own, a suspect until recorded");
+  iso.settled("B");
+  ok(!iso.isolating(), "every suspect settled: the isolation ends");
+  ok(iso.begin("500", "C") === "outage", "…and a thought's error then begins an outage, never its own");
+  iso.end();
+  isoClock += SUSPECT_WINDOW_MS + 1;
+  iso.begin("500", "D");
+  ok(iso.suspected === 1 && !iso.blames("C"), "an outage begun past the window, unasked whether it isolates, drops the lapsed suspects: only its own is kept");
+  iso.end();
+  isoClock += SUSPECT_WINDOW_MS + 1;
+  ok(!iso.isolating() && !iso.blames("D") && iso.suspected === 0, "past the window a suspect is retried as any other thought");
+  iso.begin("500", "E");
+  iso.end();
+  iso.begin("500", "F");
+  ok(iso.suspected === 2, "an outage begun while isolating keeps the last one's suspect beside its own");
+  iso.end();
+  // A blame whose probe ends past the window is an outage as any thought's, its count begun again (review pass 1).
+  ok(iso.blame("E", "500", false) === "outage" && iso.aloneAt("E") === 1, "E's first outage alone");
+  iso.end();
+  isoClock += SUSPECT_WINDOW_MS + 1;
+  ok(iso.blame("E", "500", false) === "outage" && iso.aloneAt("E") === 0 && iso.suspected === 1, "past the window by the probe's end, the blame begins an outage as any thought's: its count begun again, the lapsed suspects gone");
+  iso.end();
+  // The suspects go back at the pool's front, so a thought claimed that is none of them means none is left there (review pass 1).
+  iso.claimed("E");
+  ok(iso.isolating() && iso.suspected === 1, "an isolated pass claiming a suspect goes on");
+  iso.claimed("X1");
+  ok(!iso.isolating() && iso.suspected === 0, "one claiming a thought no suspect ends the isolation: those left are behind the backlog, or elsewhere");
+
   // followClassify — whose a --follow re-embed worker's error is (SMD-2679 PR 4a-2b, review pass 4).
   const pg = (errno: string, code?: string) => Object.assign(new Error(`pg ${errno}`), { name: "PostgresError", errno, ...(code ? { code } : {}) });
   const http = (status: number, body = "") => new ProviderError(`Embeddings request to http://h/v1 failed: ${status} ${body}`, "http", status, body);
