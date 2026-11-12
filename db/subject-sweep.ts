@@ -1,7 +1,8 @@
 /**
  * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought in the subject pool (migration
- * 113) is given its own subject, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
- * migration 130's record_thought_subjects (a set, of one key until SMD-3306 PR 7a-3b-2). A subject is current when it
+ * 113) is given its own subjects, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
+ * migration 130's record_thought_subjects: a set of at most three, one rule's or the model's, which the header rule and
+ * the question find since their versions 3 (SMD-3306 PR 7a-3b-2). A subject is current when it
  * stands at the thought's text and was found under the current rules and question, a model's with its reasoning on when
  * the question is asked with it on (subjectCurrent), and the ticket the thought is filed under agrees with it
  * (filedTicketSql).
@@ -85,8 +86,8 @@
  * would meet. Its pages go in thought id order, so with --limit it counts the first by id, which a run, taking the
  * oldest pooled first, need not.
  *
- * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
- * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
+ * The extraction pass records the rules' subjects with each thought's entities (extract-entities.ts's processRow), so
+ * a thought filed under a ticket, or a session summary whose prompts name its header's tickets, has its subjects once
  * it is extracted, and the sweep finishes it unasked. 111's door replaces a subject found under another pass key, so a
  * changed rule finds again the subjects it found, and those alone; version 1's one key for both rules is taken whole,
  * once, its filed tickets found again unchanged under the metadata rule's own key (review pass 5). Two sweeps, or a
@@ -970,8 +971,9 @@ async function sweep(
   // run's pages each read from their cursor, not from the first facet (review pass 5: its pages read every facet before
   // them, a dry run before a naming quadratic in the thoughts). A rule's set is current here whatever that rule now
   // finds at the same text, where a claim's rulesAgree asks for the rule's keys exactly and narrows it: a set wider
-  // than its rule finds is not pooled, so a rule that comes to find another set needs its version bumped
-  // (SUBJECT_RULE_VERSIONS) to be asked again (SMD-3306 PR 7a-3b-1's review pass 3, run-it; PR 7a-3b-2's header rule).
+  // than its rule finds is not pooled, so a rule that comes to find another set has its version bumped
+  // (SUBJECT_RULE_VERSIONS) to be asked again (SMD-3306 PR 7a-3b-1's review pass 3, run-it), as the header rule's r3
+  // was when it came to find sets (PR 7a-3b-2).
   const noCurrentSubject = (c: SQL, after = NIL_ID) => c`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
@@ -1541,12 +1543,13 @@ async function sweep(
    * provider again, their claims marked hung (HUNG_MARK), failed — one whose call was aborted in hand counted there,
    * out of setBack, as the probe after the abort finds it so, its place under --limit taken again. `pollsLost`, no
    * thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed back taken twice, as an edited
-   * one is. `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
+   * one is. `subjects`, no thoughts' count either: the subjects the recorded ones were given, each of a set (SMD-3306 PR
+   * 7a-3b-2). `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
    * named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
    * when it released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and
    * those whose failure's release a lost poll handed back, which the failure count leaves out.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, deadlocked: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, subjects: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, deadlocked: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -1989,7 +1992,7 @@ async function sweep(
    * the pauses, or a call timed out with the probe after it out, the provider hung, holding calls back or its model
    * being pulled (TimedOutDown), for a following run to wait the provider out.
    */
-  async function ask(row: Candidate): Promise<{ key: string | null; answer: string | null } | { egress: string } | { unanswered: string } | { transient: true }> {
+  async function ask(row: Candidate): Promise<{ keys: string[]; answers: string[] | null } | { egress: string } | { unanswered: string } | { transient: true }> {
     const side = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? {}, writer: actorKindOf(row.metadata) };
     const subject = { kind: "extraction" as const, actor, metadata: row.metadata ?? undefined, content: row.content };
     const call = inCall.get(workerId);
@@ -2020,7 +2023,7 @@ async function sweep(
         if (call) call.waiting = true;
         await sql`UPDATE thought_work_claims SET last_error = NULL WHERE thought_id = ${row.id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed' AND starts_with(last_error, ${HUNG_MARK})`.catch(() => {});
       }
-      return { key: a.key, answer: a.answer };
+      return { keys: a.keys, answers: a.answers };
     } catch (e) {
       came = Date.now();
       if (hardStop.signal.aborted) throw e;
@@ -2197,28 +2200,28 @@ async function sweep(
     // read, or none where one was, is read again (review pass 2: 113's trigger pooled it, and it was finished as
     // current, its fingerprint the text's alone).
     const found = ruleSubject(row);
-    const rulesAgree = row.standing_by === "model" ? found === null : found !== null && sameKeys([found.key], row.standing_keys) && found.by === row.standing_by;
+    const rulesAgree = row.standing_by === "model" ? found === null : found !== null && sameKeys(found.keys, row.standing_keys) && found.by === row.standing_by;
     if (row.current && rulesAgree) {
       n.current++;
       return { release: "succeeded" };
     }
-    let key: string, by: SubjectBy, judge: string, recipe: Recipe;
+    let keys: string[], by: SubjectBy, judge: string, recipe: Recipe;
     if (found && DRY_RUN) {
       // The door keeps a subject found the same way by the same pass at a moved text, and replaces any other standing
       // one: counted as a run would count it.
-      if (sameKeys([found.key], row.standing_keys) && row.standing_by === found.by && row.standing_judge === subjectRuleKey(found.by)) n.kept++;
+      if (sameKeys(found.keys, row.standing_keys) && row.standing_by === found.by && row.standing_judge === subjectRuleKey(found.by)) n.kept++;
       else {
         n[found.by]++;
         if (row.standing_keys !== null) {
           n.replaced++;
           // A key the set did not hold (review pass 1: a set narrowed to one of its keys was counted a new key).
-          if (!row.standing_keys.includes(found.key)) n.newKey++;
+          if (found.keys.some((k) => !row.standing_keys!.includes(k))) n.newKey++;
         }
       }
       return { release: "none" };
     }
     if (found) {
-      ({ key, by } = found);
+      ({ keys, by } = found);
       judge = subjectRuleKey(found.by);
       recipe = subjectRecipe({ by: found.by });
     } else if (!MODEL || DRY_RUN) {
@@ -2374,15 +2377,15 @@ async function sweep(
         return { release: "failed", error: a.unanswered.slice(0, 500), say: () => sayOnce("unanswered", `  ${row.id}: no answer (${a.unanswered.slice(0, 300)}); --retry-failed asks it again`) };
       }
       // The judge's answer, for the alarm's window, whatever becomes of its claim (PR 5b).
-      const answer: WindowAnswer = { g: a.answer === null ? "u" : a.key === null ? "n" : "k", t: row.id, m: cfg.judgeModel, f: false, c: false };
+      const answer: WindowAnswer = { g: a.answers === null ? "u" : a.keys.length === 0 ? "n" : "k", t: row.id, m: cfg.judgeModel, f: false, c: false };
       answered = answer;
-      // Not JSON with a subject: the model's failure for this thought, as the pass reads a malformed answer.
-      if (a.answer === null) {
+      // Not JSON with subjects: the model's failure for this thought, as the pass reads a malformed answer.
+      if (a.answers === null) {
         n.unread++;
         if (row.standing_keys !== null) n.leftOutOfDate++;
         return { release: "failed", error: `${cfg.judgeModel}'s answer was not JSON of the expected shape`, say: () => sayOnce("unread", `  ${row.id}: ${cfg.judgeModel}'s answer was not JSON of the expected shape; --retry-failed asks it again`) };
       }
-      if (a.key === null) {
+      if (a.keys.length === 0) {
         // Asked, got nothing: the claim finished is the record, so it is not asked again until its text, the ticket it
         // is filed under or the pool changes; the out-of-date subjects standing on it close, if they are still the set
         // read at the text read. Counted once the finish has answered: a text moved since is edited mid-sweep, a thought
@@ -2494,16 +2497,16 @@ async function sweep(
         }
         return { release: "none" };
       }
-      key = a.key;
+      keys = a.keys;
       by = "model";
       judge = judgeKey;
-      recipe = subjectRecipe({ by: "model", model: cfg.judgeModel, temperature: cfg.metadataTemperature, reasoning, answer: a.answer });
+      recipe = subjectRecipe({ by: "model", model: cfg.judgeModel, temperature: cfg.metadataTemperature, reasoning, answers: a.answers });
     }
     // Past the hard stop nothing more is written; nor once the pool named is not this run's.
     if (hardStop.signal.aborted) return false;
     let w: SubjectWrite | string;
     try {
-      w = await beginRetried(async (tx: SQL) => (await poolMoved(tx, true)) ?? (await recordSubject(tx, row, [key], by, judge, recipe, agentId)));
+      w = await beginRetried(async (tx: SQL) => (await poolMoved(tx, true)) ?? (await recordSubject(tx, row, keys, by, judge, recipe, agentId)));
     } catch (e) {
       const state = sqlState(e);
       if (state === "22023") {
@@ -2542,11 +2545,12 @@ async function sweep(
     else if (w.action === "added" || w.action === "replaced" || w.action === "closed") {
       // `closed`: a set narrowed to the keys found, the rest closed — a replacement, as a one-key door's answer said.
       n[by]++;
+      n.subjects += keys.length;
       if (w.action !== "added") {
         n.replaced++;
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
         // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key).
-        if (!(row.standing_keys ?? []).includes(key)) n.newKey++;
+        if (keys.some((k) => !(row.standing_keys ?? []).includes(k))) n.newKey++;
       }
     }
     return { release: "succeeded" };
@@ -2862,7 +2866,7 @@ async function sweep(
       err(endedBy.line);
       return endedBy.code;
     }
-    out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by its session header's ticket"]]) || "none by the rules"}` +
+    out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by its session header's tickets"]]) || "none by the rules"}` +
       (n.replaced ? ` (${n.replaced} in place of a standing subject, ${n.newKey} with a new key)` : "") +
       (n.kept ? `, keep ${n.kept} found the same way at the text read now` : "") +
       (n.current ? `, finish ${n.current} already current` : "") + "; " +
@@ -2872,12 +2876,15 @@ async function sweep(
     return 0;
   }
   const recorded = n.metadata + n.first_line + n.model;
-  const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
+  const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's tickets"], [n.model, `by ${cfg.judgeModel}`]]);
+  // A set of several keys counted as its subjects, on the thoughts the clauses after count (SMD-3306 PR 7a-3b-2): the
+  // words of one-key sets as before.
+  const recordedWords = n.subjects === recorded ? `${recorded} subject(s) recorded` : `${n.subjects} subject(s) recorded on ${recorded} thought(s)`;
   const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.deadlocked, "failed on a write the server rolled back to break a deadlock"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const pollsLost = n.pollsLost ? `; ${n.pollsLost} poll(s) lost to the scheduler's statement_timeout` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";
-  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}${pollsLost}`);
+  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recordedWords}${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}${pollsLost}`);
   if (endedBy) {
     err(endedBy.line);
     return endedBy.code;

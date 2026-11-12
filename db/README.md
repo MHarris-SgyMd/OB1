@@ -3833,21 +3833,23 @@ failed claim naming the rule, and the banner's `egress:` line says what the run
 will do before it claims anything.
 
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
-records its own subject when a rule finds it: the ticket it is filed under
-(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else a
-session summary's header ticket, when the capture hook's header lists that one
-alone and one of the session's listed prompts names it too, in any case (not its
-title, which may be the harness's own and name the branch's ticket). The
-hook's header lists the tickets a session's prompts named, and its branch's or
-directory's only when they named none: a session on a branch may have done other
-work, and a header listing several, or its full three, is the model's to choose
-among. A ticket-shaped word counts unless
+records its own subjects when a rule finds them: the ticket it is filed under
+(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), alone;
+else a session summary's header tickets, each that the capture hook's header
+lists and one of the session's listed prompts names too, in any case (not its
+title, which may be the harness's own and name the branch's ticket). The hook's
+header lists the tickets a session's prompts named, and its branch's or
+directory's only when they named none: a session on a branch may have done
+other work. Since the header rule's version 3 (SMD-3306 PR 7a-3b-2) a header
+listing several, its full three included, keys each one a prompt names, a set
+of one rule's (migration 130); version 2 keyed a header listing one alone, and
+left several to the model. A ticket-shaped word counts unless
 its prefix is on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
 migration 130's `record_thought_subjects` at the text the claim read, under its
-rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
-no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
+rule's key (`subject:metadata@r1`, `subject:first_line@r3`), and the pass asks
+no model for them. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought in its pool (migration 113, below), into which a pool's first run puts
 every thought with no current subject — none at its text (extracted before 111,
 keyed by no rule, or edited since), or one found under an older rule or question,
@@ -3855,15 +3857,18 @@ or by a model with its reasoning off while it is on — and the trigger each new
 edited one, gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`),
 the door replacing the old one. The
 model is asked the subject's own question about the thought alone
-(`server-portable/subject.ts`'s `OWN_RULES`, version 2), with its reasoning on
-unless `OB1_SUBJECT_REASONING` says off, and its
-answer is read into a key: the first ticket id in it, else the PR it is (an
+(`server-portable/subject.ts`'s `OWN_RULES`, version 3), with its reasoning on
+unless `OB1_SUBJECT_REASONING` says off, and each
+subject it answers is read into a key: the first ticket id in it, else the PR it is (an
 answer that is one PR: a PR among other numbers is none), else a release's
 version, else the answer as a lower-case phrase. A ticket or a release counts
 only when the thought itself names it, and a PR only when its number appears in
 it: one it does not name is the model's invention, or its copy of the question's
-example, and is dropped. The
-question asks for one subject: a ticket by its id alone. Version 1 read
+example, and is dropped. Version 3's question (SMD-3306 PR 7a-3b-2) asks for
+each thing the thought's own work is mainly about, at most three, the
+most-worked first and usually one, never a thing it only mentions; a ticket by
+its id alone. Its keys are a set, each once and at most three, written through
+130's door; version 2 asked for one. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken
@@ -3877,7 +3882,7 @@ thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
 (`OB1_METADATA_REASONING` would slow every extraction too), is on when unset, at
 about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
 summaries. A model's subject found with it off is pooled again while it is on
-(`subject:<model>@p2` under `@p2r`), its recipe naming the setting; turning it
+(`subject:<model>@p3` under `@p3r`), its recipe naming the setting; turning it
 off pools none again. An effort asked for (`low`, `high`; `none` is off) is keyed
 as on, though only the provider's default was measured. A brain that set
 `OB1_METADATA_REASONING` asked the question with that before PR 4: set
@@ -3889,8 +3894,8 @@ are asked again once for nothing. The default `--timeout` follows it: 900 s a
 call with reasoning on, where 2 of 200 such calls took over 300 s, else 300 s.
 The sweep claims
 from a pool, as the pass does (migration 113, SMD-3306 PR 5): `thought_work_claims`
-under its pool's key (`subjects:r1.2:p2r`, the rules' versions and the question's
-with its reasoning; `subjects:r1.2:p2` with it off; `subjects:r1.2` for
+under its pool's key (`subjects:r1.3:p3r`, the rules' versions and the question's
+with its reasoning; `subjects:r1.3:p3` with it off; `subjects:r1.3` for
 `--subjects rules`), named in `ob1_config.subject_pool_key`, into which 113's
 trigger puts each new or edited thought, and one whose `metadata.ticket` or
 `metadata.issue` changes. So a run costs what is in the pool, not the brain's size: before it, each
@@ -3964,9 +3969,10 @@ key the door refuses each fail the claim, the subject standing, are said, and
 exit 1, as the pass fails a malformed answer, or 3 once the judge's answers trip
 the garbage-judge alarm (below); `--retry-failed` puts the failed
 claims back in the pool. `--limit` counts the claims taken, the oldest pooled
-first. A run's summary counts the subjects it recorded in place of a standing
-one, and how many of those took a new key, and a claim no longer the run's when
-it released it. A changed judge model leaves its predecessor's
+first. A run's summary counts the subjects it recorded, and the thoughts it
+recorded them on when a set held several; the thoughts whose standing subjects
+they replaced, and how many of those took a new key; and a claim no longer the
+run's when it released it. A changed judge model leaves its predecessor's
 subjects standing, current at the same question, and is not asked the thoughts
 its predecessor named nothing for: the pool's key names whether a model is asked,
 not which. Nothing asks them again yet, but the garbage-judge alarm (below) hands

@@ -140,13 +140,16 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
  * naming the rule and its version; or the judge model's, naming the
  * model, the question's version and hash, the temperature, the reasoning it
  * was asked with (subject.ts's subjectReasoning: on, off or an effort) and the
- * subject it answered, which the key was read from (subject.ts's subjectKey,
- * its guard reading the thought's text at the fingerprint the lineage names),
- * so a changed reading can be checked against what the model said.
+ * subjects it answered, which the keys were read from (subject.ts's
+ * askOwnSubject and subjectKey, its guard reading the thought's text at the
+ * fingerprint the lineage names), so a changed reading can be checked against
+ * what the model said. Since question version 3 (SMD-3306 PR 7a-3b-2) they
+ * are `answers`, a list in the model's order; version 2's one was `answer`.
+ * Each subject of a set has its own lineage row, each with the whole recipe.
  */
-export function subjectRecipe(found: { by: "metadata" | "first_line" } | { by: "model"; model: string; temperature: number; reasoning: string; answer: string }): Recipe {
+export function subjectRecipe(found: { by: "metadata" | "first_line" } | { by: "model"; model: string; temperature: number; reasoning: string; answers: string[] }): Recipe {
   if (found.by !== "model") return { deterministic: true, rule: found.by, rule_version: SUBJECT_RULE_VERSIONS[found.by] };
-  return { deterministic: false, model: found.model, prompt_version: SUBJECT_PROMPT_VERSION, prompt_hash: promptHash(subjectPrompt()), temperature: found.temperature, reasoning: found.reasoning, answer: found.answer };
+  return { deterministic: false, model: found.model, prompt_version: SUBJECT_PROMPT_VERSION, prompt_hash: promptHash(subjectPrompt()), temperature: found.temperature, reasoning: found.reasoning, answers: found.answers };
 }
 
 /** A structured pass's recipe (053): the source's own structure parsed, no model — deterministic. */

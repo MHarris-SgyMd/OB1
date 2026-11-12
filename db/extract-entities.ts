@@ -188,11 +188,11 @@
  * per-thought mixture that nothing repairs.
  *
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
- * With its entities, each thought's own subject is recorded when a rule finds
- * it: the ticket it is filed under, else a session summary's header ticket
- * its prompts name (server-portable/subject.ts), through migration 130's
- * record_thought_subjects at the text the claim read. No model is asked for
- * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts),
+ * With its entities, each thought's own subjects are recorded when a rule
+ * finds them: the ticket it is filed under, else a session summary's header
+ * tickets its prompts name (server-portable/subject.ts), through migration
+ * 130's record_thought_subjects at the text the claim read. No model is asked
+ * for them here. `--subjects` is the sweep for the rest (db/subject-sweep.ts),
  * from migration 113's pool, into which its first run puts every thought with
  * no current subject and the trigger each new or edited one: thoughts
  * extracted before 111, those no rule keys, which it asks the judge model
@@ -1347,10 +1347,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
 
   /**
-   * The thought's own subject by the rules (SMD-3306), recorded once its
+   * The thought's own subjects by the rules (SMD-3306), recorded once its
    * entities are: the ticket it is filed under, else a session summary's
-   * header ticket its prompts name (subject.ts's ruleSubject), each under its
-   * rule's key, at the text the claim read; record_thought_subjects (130)
+   * header tickets its prompts name (subject.ts's ruleSubject), each under
+   * its rule's key, at the text the claim read; record_thought_subjects (130)
    * refuses a text that moved since, and a ticket that did. No model is asked
    * here: a thought no rule keys is --subjects' (db/subject-sweep.ts). A
    * courtesy, as the kept windows are: a brain before 130, or a role without
@@ -1365,8 +1365,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const found = ruleSubject(row);
     if (!found) return;
     try {
-      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, [found.key], found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
-      // `closed`: a set narrowed to the rule's key (130), counted recorded, as a replacement is.
+      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.keys, found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
+      // `closed`: a set narrowed to the rule's keys (130), counted recorded, as a replacement is.
       if (w.action === "added" || w.action === "replaced" || w.action === "closed") subjects.recorded++;
       else if (w.action === "kept") subjects.kept++;
     } catch (e) {
@@ -2335,7 +2335,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       `dropped ${totals.dropped} relation(s) naming an unlisted entity; ${totals.ambiguous} attached to a name listed under two types` +
       (totals.gated ? `; the name gate (056) refused ${totals.refused} entity name(s) and retyped ${totals.retyped}` : "") +
       // SMD-3306: said when a rule found any, so a brain whose thoughts name no ticket reads as before.
-      (subjects.recorded || subjects.kept ? `; recorded ${subjects.recorded} thought(s)' own subject by its ticket${subjects.kept ? `, ${subjects.kept} kept at the text read now` : ""}` : "")
+      (subjects.recorded || subjects.kept ? `; recorded ${subjects.recorded} thought(s)' own subjects by their tickets${subjects.kept ? `, ${subjects.kept} kept at the text read now` : ""}` : "")
   );
   // Thoughts none of whose windows parsed; a window left out beside parsed ones
   // is in the summary's partial clause instead (SMD-2260, review pass 2).
