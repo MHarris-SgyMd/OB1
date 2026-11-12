@@ -4588,7 +4588,8 @@ if (want("9f")) {
         poison = false;
         hemlock503At = 0;
       }
-      const heldClaim = await claimOf(heldThought);
+      // Out of hand: the vector is written before the claim's release reaches the row (SMD-3612; review pass 2, a flake).
+      const heldClaim = await claimOutOfHand(heldThought);
       const heldExit = await held.stop();
       assert(heldEmbedded && heldClaim?.status === "succeeded" && heldExit === "exit 0",
         `a suspect retried alone that meets a 503 is not blamed: re-embedded once it stops (embedded ${heldEmbedded}; claim ${JSON.stringify(heldClaim)}; ${heldExit})`);
@@ -4737,7 +4738,8 @@ if (want("9f")) {
         const movedFirst = await pollUntil(() => atModel(movedId), 15_000);
         // One statement, so one poll pools both and each worker claims one.
         const [{ id: poisonId }, { id: innocentId }] = (await sql`INSERT INTO thoughts (content) VALUES ('a crash-poison thought takes the provider down'), ('an innocent thought beside it') RETURNING id::text AS id`) as { id: string }[];
-        if (await pair.saw(new RegExp(`${poisonId} goes back to the pool unrecorded`))) await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${movedId}::uuid`;
+        const pairBack = await pair.saw(new RegExp(`${poisonId} goes back to the pool unrecorded`));
+        if (pairBack) await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${movedId}::uuid`;
         const poisonFailed = await pollUntil(async () => (await claimOf(poisonId))?.status === "failed", 60_000);
         const innocentDone = await pollUntil(() => atModel(innocentId), 30_000);
         const movedAgain = await pollUntil(() => atModel(movedId), 30_000);
@@ -4745,7 +4747,7 @@ if (want("9f")) {
         const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array([poisonId, innocentId], "TEXT")}::uuid[]) AND work_type = ${OWN_KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
         const pairExit = await pair.stop();
         assert(poisonFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* 500/.test(poisonClaim?.last_error ?? "")
-            && innocentDone && movedFirst && movedAgain && aloneOf(pair.lines) === "1,2" && waitsAfterFailure(pair.lines) && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid(pair.lines) && attempts.join(",") === "1,1" && pairExit === "exit 0",
+            && innocentDone && pairBack && movedFirst && movedAgain && aloneOf(pair.lines) === "1,2" && waitsAfterFailure(pair.lines) && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid(pair.lines) && attempts.join(",") === "1,1" && pairExit === "exit 0",
           `two re-embed workers, a poison thought crashing the provider beside an innocent one: both suspects, retried one at a time — the poison failed at its third outage alone, the innocent re-embedded, each attempt refunded (SMD-2641 PR 2; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentDone}; alone ${aloneOf(pair.lines)}; ${crashedBy.length} crash(es); isolated said ${isolatedSaid(pair.lines)}; waits after the failure ${waitsAfterFailure(pair.lines)}; attempts ${attempts.join(",")}; ${pairExit})`);
         await sql`DELETE FROM thoughts WHERE id = ${poisonId}::uuid OR id = ${innocentId}::uuid OR id = ${movedId}::uuid`;
 
@@ -4791,7 +4793,7 @@ if (want("9f")) {
         // Two workers, both suspects deleted during the outage: the isolated drain claims a thought no suspect, so the
         // isolation ends and the four behind go two at a time (review pass 1, mutant: claimed() dropped).
         crashedBy.length = 0;
-        // Down for three probes (~2 s of waits): long enough to delete the suspects and pool the four before it answers.
+        // Down for three probes, answered at the fourth (~4.5 s in at a 300 ms first wait): time to delete the suspects first.
         crashProbes = 3;
         peakAfterCrashes = 0;
         const gone = liveFollower({ workers: 2 });

@@ -86,13 +86,13 @@
  * the provider's: an outage, the thought back in the pool unrecorded and the
  * row waiting mid-pass while the follower probes, under the subject of the
  * thought that began it when the egress gate refuses the probe's own.
- * Backpressure (429, 503, the model loading) makes no suspect; any other
- * 5xx, a 408 or no connection makes the thought in hand one. After the
- * outage the suspects are retried one at a time, one worker, each handed
- * back at the pool's front (SMD-2641 PR 2): one that fails again alone is
- * recorded failed as its own when a probe made at once answers, or at its
- * third outage alone with none answering. Each says the provider "is not
- * answering".
+ * Each says the provider "is not answering". Backpressure (429, 503, the
+ * model loading) makes no suspect; any other 5xx, a 408 or no connection
+ * makes the thought in hand one. After the outage the suspects are retried
+ * one at a time, one worker, each handed back at the pool's front (SMD-2641
+ * PR 2): one that fails again alone is recorded failed as its own when a
+ * probe made at once answers, or at its third outage alone with none
+ * answering.
  * No pauses come first, as extract's do; an outage that begins again within
  * a minute and a poll interval of the probe answering, no thought settled
  * since, carries on the last one's schedule, so a limit the probe passes and
