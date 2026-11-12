@@ -1464,6 +1464,16 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     assert(missing?.status.code === SpanStatusCode.UNSET && attrs(missing)["ob1.code"] === "NOT_FOUND" && attrs(missing)["ob1.outcome"] === "refused" && attrs(missing)["http.response.status_code"] === 404
       && attrs(missingOp)["ob1.outcome"] === "refused" && attrs(missingOp)["ob1.code"] === "NOT_FOUND" && missingOp?.status.code === SpanStatusCode.UNSET,
       `a refusal: its code on both spans, not an ERROR (${JSON.stringify([attrs(missing), attrs(missingOp)])})`);
+    // The brain's own embedding provider failing (SMD-2892): a refusal by its shape, a fault on both spans — the request's
+    // and the operation's — as the request line and the MCP server count it (review pass 2: the operation's said refused).
+    exporter.reset();
+    answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401", status: 401, setting: "OB1_LLM_BASE_URL" });
+    await (await app.fetch(new Request("http://api/v1/search", { method: "POST", headers: { "x-brain-key": "read-raw", "content-type": "application/json" }, body: JSON.stringify({ query: "q" }) }))).text();
+    spans = exporter.getFinishedSpans();
+    const keylessReq = spans.find((sp) => sp.kind === SpanKind.SERVER);
+    const keylessOp = spans.find((sp) => sp.name.startsWith("execute_tool "));
+    assert(attrs(keylessReq)["ob1.outcome"] === "error" && attrs(keylessOp)["ob1.outcome"] === "error" && attrs(keylessOp)["ob1.code"] === "EMBEDDING_PROVIDER_ERROR",
+      `an EMBEDDING_PROVIDER_ERROR: \`error\` on both spans (${JSON.stringify([attrs(keylessReq)["ob1.outcome"], attrs(keylessOp)])})`);
     // On the histogram: the operation's own refusal is the tool's, and keeps it; a refusal of the key is the key's, and
     // labels no tool, so a keyless caller raises no tool's refusal rate (PR 2c review pass 4).
     await send("/v1/stats", { "x-brain-key": "not-a-key" });

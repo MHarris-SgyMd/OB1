@@ -144,7 +144,7 @@ export function heardFrom(health: ProviderHealth, startedAt: number, e?: unknown
   if (down) { health.noteDown(down, { by: "call", startedAt }); return; }
   if (e instanceof ProviderError) {
     if (e.kind === "http") health.noteUp({ by: "call", fault: `it answered ${e.status}` });
-    else if (e.kind === "body") health.noteUp({ by: "call", fault: "its answer was not JSON" });
+    else if (e.kind === "body") health.noteUp({ by: "call", fault: "its answer was not JSON, or held no embedding" });
     return;
   }
   // A runtime error carries a code (the socket's); one with none was raised on an answer.

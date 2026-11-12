@@ -681,6 +681,14 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   assert(r.status === 422 && ((await r.json()) as { refused?: string }).refused === "REFUSED", "the core refusing the capture: the plugin's 422, naming the core's code");
   const handlerLine = JSON.parse(lines.at(-1) ?? "{}");
   assert(handlerLine.status === 422 && handlerLine.code === "CORE_REFUSED" && handlerLine.outcome === "refused", `a handler's own refusal: its code on the line, read from the JSON it answered (SMD-1849 PR 2c) (${lines.at(-1)})`);
+  // The brain's embedding provider refusing its key (SMD-2892): a 503 PROVIDER_REFUSED the sender sends again once an
+  // operator mends it; one that may be the text's own (a 422 from the provider) a final 422 as any (review pass 2: unheld).
+  for (const [status, want, code] of [[401, 503, "PROVIDER_REFUSED"], [422, 422, "CORE_REFUSED"]] as const) {
+    answer = async () => coreRefuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: `provider_${status}`, detail: `it answered ${status}`, status, setting: "OB1_LLM_BASE_URL" } as never);
+    r = await deliver(on, body, signed);
+    const said = (await r.json()) as { code?: string; refused?: string };
+    assert(r.status === want && said.code === code && said.refused === "EMBEDDING_PROVIDER_ERROR", `the embedding provider answering ${status}: the example hook's ${want} ${code} (${r.status} ${JSON.stringify(said)})`);
+  }
   answer = async () => { throw new Error("store down at secret-host:5432"); };
   lines.length = 0;
   r = await deliver(on, body, signed);

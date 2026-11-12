@@ -3568,16 +3568,29 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     // A 400, a 401 and a 404 say the request, the credential or the model is wrong, not that the provider is away: the
     // capture fails, as before, and nothing lands — refused coded since SMD-2892, final, the word and the status and
     // the setting; a write key told where and what the provider said, never the store's STORE_UNAVAILABLE.
-    for (const status of [400, 401, 404] as const) {
+    // The operator's log: each refusal's line names the endpoint and the provider's own words (review pass 2: unheld).
+    const logged: string[] = [];
+    const realError = console.error;
+    const loggedDuring = async <T>(f: () => Promise<T>): Promise<T> => {
+      console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+      try { return await f(); } finally { console.error = realError; }
+    };
+    for (const status of [400, 401, 403, 404] as const) {
       stubDown = status;
       const content = `[20] a thought captured while the provider answers ${status}`;
-      const r = await captureRaw("e2e-key", content);
+      logged.length = 0;
+      const r = await loggedDuring(() => captureRaw("e2e-key", content));
+      assert(logged.some((l) => l.startsWith("capture: the embedding provider at https://stub.invalid/v1 refused the capture's embedding:") && l.includes(`stub answers ${status}`)),
+        `a ${status}: the log names the endpoint and the provider's words (${logged.join(" | ").slice(0, 200)})`);
+      // What to check, as the status says it (review pass 2: the 400's and 403's advice unheld).
+      const advice = status === 400 ? /It may be this text \(a shorter or plainer one may land\)/ : status === 404 ? /OB1_EMBEDDING_MODEL/ : /OB1_LLM_API_KEY, else OPENROUTER_API_KEY/;
+      assert(advice.test(r.text), `a ${status}: the refusal says what to check (${r.text.slice(0, 260)})`);
       const [n] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE content = ${content}`;
       assert(r.isError && n.n === 0 && r.sc?.code === "EMBEDDING_PROVIDER_ERROR" && r.sc?.retryable === false && r.sc?.reason === `provider_${status}` && r.sc?.status === status
         && r.sc?.setting === "OB1_LLM_BASE_URL",
         `a ${status}: the capture refused coded, final, the word, the status and the setting; nothing stored (${JSON.stringify(r.sc)})`);
       assert(/^Refused: the capture was not done — the embedding provider at https:\/\/stub\.invalid\/v1 answered/.test(r.text) && r.text.includes(`stub answers ${status}`)
-        && (status !== 401 || /OB1_LLM_API_KEY/.test(r.text)) && (status !== 404 || /OB1_EMBEDDING_MODEL/.test(r.text)) && !/STORE_UNAVAILABLE|Embeddings request to/.test(r.text),
+        && !/STORE_UNAVAILABLE|Embeddings request to/.test(r.text),
         `…its words: Refused, the endpoint, the provider's own words, the setting to check (${r.text.slice(0, 260)})`);
     }
     // A capture key: the same code and verdict, told neither where the provider is nor what it said (SMD-2284's rule).
@@ -3591,6 +3604,7 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     const garbled = await captureRaw("e2e-key", "[20] a thought captured while the provider answers a page");
     assert(garbled.isError && garbled.sc?.code === "EMBEDDING_PROVIDER_ERROR" && garbled.sc?.reason === "provider_body" && garbled.sc?.retryable === false && /with a body that is not JSON/.test(garbled.text),
       `a body that is no JSON: refused coded, provider_body, final (${garbled.text.slice(0, 160)})`);
+    assert(/Something in front of the provider \(a proxy, a gateway\) may be answering for it/.test(garbled.text), `…and points at what may answer for the provider (${garbled.text.slice(0, 260)})`);
     // A 200 JSON holding no embedding (a gateway's error object), to a capture key (review pass 1): refused coded, not
     // the store's STORE_UNAVAILABLE carrying the endpoint in a raw message.
     stubDown = "no-embedding";
@@ -3598,6 +3612,9 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     assert(gatewayed.isError && gatewayed.sc?.code === "EMBEDDING_PROVIDER_ERROR" && gatewayed.sc?.reason === "provider_body" && /no embedding in its answer/.test(gatewayed.text)
       && !/stub\.invalid|No successful/.test(gatewayed.text),
       `a 200 with no embedding, to a capture key: refused coded, provider_body, no endpoint or gateway words (${gatewayed.text.slice(0, 200)})`);
+    const gatewayedRead = await captureRaw("e2e-key", "[20] a thought captured while a gateway answers for the provider");
+    assert(gatewayedRead.isError && gatewayedRead.sc?.reason === "provider_body" && /It said: \{"error":\{"message":"No successful provider responses\."/.test(gatewayedRead.text),
+      `…and a write key is shown the gateway's own words (${gatewayedRead.text.slice(0, 260)})`);
     // A redirect: refused, and a write key told where it points, to set the base there (review pass 1; SETUP.md).
     stubDown = "redirect";
     const moved = await captureRaw("e2e-key", "[20] a thought captured while the provider redirects");
@@ -3609,13 +3626,17 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     stubDown = null;
     const target = idIn((await captureRaw("e2e-key", "[20] a thought an edit will try to change")).text)!;
     stubDown = "refused";
-    const editDown = await result("update_thought", { id: target, content: "[20] the edit made while the provider is down" });
+    logged.length = 0;
+    const editDown = await loggedDuring(() => result("update_thought", { id: target, content: "[20] the edit made while the provider is down" }));
+    assert(logged.some((l) => l.startsWith("update_thought: the embedding provider at https://stub.invalid/v1 was unavailable:")), `the edit's log says the provider was unavailable (${logged.join(" | ").slice(0, 200)})`);
     assert(editDown.isError && editDown.sc?.code === "EMBEDDING_PROVIDER_ERROR" && editDown.sc?.retryable === true && editDown.sc?.reason === "provider_unreachable" && editDown.sc?.setting === "OB1_LLM_BASE_URL"
-      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable \(the connection was refused\)/.test(editDown.text)
+      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable \(the connection was refused\)\. The same call can land once it answers\.$/.test(editDown.text)
       && !/Unable to connect|STORE_UNAVAILABLE/.test(editDown.text),
       `an edit while the provider is down: coded, retryable, said as an Error naming the endpoint, no Bun text (${editDown.text.slice(0, 200)})`);
     stubDown = 401;
-    const edit401 = await result("update_thought", { id: target, content: "[20] the edit made while the provider answers 401" });
+    logged.length = 0;
+    const edit401 = await loggedDuring(() => result("update_thought", { id: target, content: "[20] the edit made while the provider answers 401" }));
+    assert(logged.some((l) => l.startsWith("update_thought: the embedding provider at https://stub.invalid/v1 refused the edit's embedding:") && l.includes("stub answers 401")), `the edit's 401 logged as refused, with the provider's words (${logged.join(" | ").slice(0, 200)})`);
     assert(edit401.isError && edit401.sc?.code === "EMBEDDING_PROVIDER_ERROR" && edit401.sc?.retryable === false && edit401.sc?.status === 401 && /^Refused: the edit/.test(edit401.text),
       `an edit while the provider answers 401: coded, final (${edit401.text.slice(0, 160)})`);
     const [kept] = await sql`SELECT content FROM thoughts WHERE id = ${target}::uuid`;
@@ -4038,7 +4059,14 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     // …refused coded since SMD-2892 — in each search tool — where it was a raw FAILED carrying the provider's body.
     stubDown = 401;
     for (const [tool, args] of [["search_thoughts", { query: q + " keyless" }], ["search", { query: q + " keyless" }], ["plan_context", { request: q + " keyless" }]] as const) {
-      const keyless = await result(tool, args);
+      const told: string[] = [];
+      const realError = console.error;
+      console.error = (...a: unknown[]) => { told.push(a.map(String).join(" ")); };
+      let keyless: Awaited<ReturnType<typeof result>>;
+      try { keyless = await result(tool, args); } finally { console.error = realError; }
+      // The operator's log names the endpoint and the provider's words (review pass 2: unheld).
+      assert(told.some((l) => l.startsWith(`${tool}: the embedding provider at https://stub.invalid/v1 refused the query's embedding:`) && l.includes("stub answers 401")),
+        `${tool}'s 401 logged with the endpoint and the provider's words (${told.join(" | ").slice(0, 200)})`);
       assert(keyless.isError && keyless.sc?.code === "EMBEDDING_PROVIDER_ERROR" && keyless.sc?.retryable === false && keyless.sc?.status === 401 && keyless.sc?.setting === "OB1_LLM_BASE_URL"
         && /^Refused: the search was not done — the embedding provider at https:\/\/stub\.invalid\/v1 answered 401 \(its credential was refused\)/.test(keyless.text) && !/Embeddings request to/.test(keyless.text),
         `${tool} with the provider refusing its key: refused coded, final, naming the endpoint and the key to check (${keyless.text.slice(0, 200)})`);

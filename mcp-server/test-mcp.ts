@@ -865,7 +865,7 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
     if (!up) await Bun.sleep(50);
   }
-  const call = (id: number, name: string) => fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", signal: AbortSignal.timeout(10_000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } }) }).then((r) => r.text());
+  const call = (id: number, name: string, args: Record<string, unknown> = {}) => fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST", signal: AbortSignal.timeout(10_000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }) }).then((r) => r.text());
   // The SDK loads after the server answers: its start line, before the calls whose spans are read.
   const said = watchStream(entry.stderr);
   const sdk = await said.until(/ go to \S+ over OTLP\/HTTP/, 10_000);
@@ -873,6 +873,10 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
   try {
     await call(1, "thought_stats");
     await call(2, "example_recent");
+    // The brain's own embedding provider failing (SMD-2892): its tool span ends as an error, not a refusal (review pass 2).
+    answer = (n) => (n === "searchThoughts" ? { ok: false, refusal: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401", status: 401, setting: "OB1_LLM_BASE_URL" } } as never : ok({}));
+    await call(3, "search_thoughts", { query: "q" });
+    answer = () => ok({});
     entry.kill("SIGTERM");
     const hung = setTimeout(() => entry.kill("SIGKILL"), 10_000);
     await entry.exited;
@@ -909,6 +913,9 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
   // The plugin call's line: the second tools/call, the calls made one after the other.
   const pluginLine = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>)
     .filter((l) => l.door === "mcp" && l.rpc === "tools/call")[1];
+  const keylessCall = mcpSpans.find((sp) => sp.name === "execute_tool search_thoughts");
+  assert(valueOf(keylessCall?.attributes, "ob1.outcome") === "error" && valueOf(keylessCall?.attributes, "ob1.code") === "EMBEDDING_PROVIDER_ERROR",
+    `an EMBEDDING_PROVIDER_ERROR's tool span at the MCP door ends \`error\` (${JSON.stringify(keylessCall?.attributes)})`);
   assert(pluginLine?.tool === "example_recent" && mcpSpans.some((sp) => sp.name === "execute_tool example_recent"),
     `a plugin tool is named on the entry's line and its span, the REST core in another process (${JSON.stringify(pluginLine)})`);
 }

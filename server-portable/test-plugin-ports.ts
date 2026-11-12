@@ -2970,7 +2970,7 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   // send again, any other a 422; either way no row, and the id given back. The brain's embedding provider refusing
   // its key or model (SMD-2892) is a 503 PROVIDER_REFUSED, sent again once an operator mends it; one that may be the
   // text's own (a 400) a 422 as any final refusal.
-  for (const [code, status, retryable, want, wantStatus] of [["EMBEDDING_PROVIDER_ERROR", 401, false, "PROVIDER_REFUSED", 503], ["EMBEDDING_PROVIDER_ERROR", 400, false, "CORE_REFUSED", 422]] as const) {
+  for (const [code, status, retryable, want, wantStatus] of [["EMBEDDING_PROVIDER_ERROR", 401, false, "PROVIDER_REFUSED", 503], ["EMBEDDING_PROVIDER_ERROR", 400, false, "CORE_REFUSED", 422], ["EMBEDDING_PROVIDER_ERROR", 422, false, "CORE_REFUSED", 422]] as const) {
     const stubCtx = {
       call: async () => ({ ok: false, refusal: { code, retryable, status, reason: `provider_${status}`, setting: "OB1_LLM_BASE_URL" } }),
       db: { tx: async (fn: (sql: unknown) => Promise<unknown>) => fn(((strings: TemplateStringsArray) => Promise.resolve(strings.join("$").includes("RETURNING claimed_at") ? [{ claimed: "2026-11-05 00:00:00+00" }] : strings.join("$").includes("RETURNING id") ? [{ id: "9101" }] : [])) as unknown) },
@@ -4231,11 +4231,46 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   } finally {
     embedStatus = null;
   }
-  assert(keyless.status === 422 && keyless.body.code === "PROVIDER_REFUSED" && keyless.body.refused === "EMBEDDING_PROVIDER_ERROR" && keyless.body.provider_status === 401 && (await jobOf(keyless.body))?.status === "failed",
+  assert(keyless.status === 422 && keyless.body.code === "PROVIDER_REFUSED" && keyless.body.refused === "EMBEDDING_PROVIDER_ERROR" && keyless.body.provider_status === 401
+      && keyless.body.reason === "provider_401" && keyless.body.setting === "OB1_LLM_BASE_URL" && (await jobOf(keyless.body))?.status === "failed",
     `the embedding provider refusing its key while deciding: 422 PROVIDER_REFUSED, the job failed (${JSON.stringify(keyless.body)})`);
   const mended = await si("extract", { text: keyText, dry_run: true });
   assert(mended.status === 200 && mended.body.existing === false && mended.body.job?.status === "dry_run_complete",
     `…and the same text, the key mended, runs as a new job (${JSON.stringify(mended.body).slice(0, 160)})`);
+  // A 400 from the provider may be the thought's own text: that item fails, not the job (review pass 2: the job failed).
+  extraction = answering([{ content: "si_k4: the user keeps the spare key under the blue flowerpot.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  embedStatus = 400;
+  let textRefused: Called;
+  try {
+    textRefused = await si("extract", { text: doc([]).text, dry_run: true });
+  } finally {
+    embedStatus = null;
+  }
+  const textItems = (await si("get_job", { job_id: String(textRefused.body.job?.job_id) })).body.items ?? [];
+  assert(textRefused.status === 200 && textRefused.body.job?.status === "dry_run_complete" && textItems.length === 1 && textItems[0].status === "failed" && textItems[0].reason === "search_refused",
+    `a 400 while deciding: the item failed, the job a dry run's as any (${JSON.stringify(textRefused.body).slice(0, 160)} ${JSON.stringify(textItems.map((i: SiItem) => [i.status, i.reason]))})`);
+  // The key refused while executing (review pass 2: each item failed and the job ended complete, its items lost): the
+  // job paused, a dry run's again, its items still ready, 422 PROVIDER_REFUSED; execute_job, the key mended, carries them out.
+  // A vector of its own, so the dry run decides an add (the suite's other texts share one stub vector; a token is matched
+  // by substring, so this one holds no other's, as si_k5 held si_k's).
+  vectorFor.push(["zq_train", axis(60)]);
+  extraction = answering([{ content: "zq_train: the user takes the early train on the first Monday of the month.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  const toRun = await si("extract", { text: doc([]).text, dry_run: true });
+  embedStatus = 401;
+  let keyPaused: Called;
+  try {
+    keyPaused = await si("execute_job", { job_id: String(toRun.body.job?.job_id) });
+  } finally {
+    embedStatus = null;
+  }
+  const keyPausedJob = await jobOf(keyPaused.body);
+  const keyPausedItems = (await si("get_job", { job_id: String(toRun.body.job?.job_id) })).body.items ?? [];
+  assert(keyPaused.status === 422 && keyPaused.body.code === "PROVIDER_REFUSED" && /once it is mended/.test(String(keyPaused.body.paused)) && keyPausedJob?.status === "dry_run_complete"
+    && keyPausedItems.every((i: SiItem) => i.status === "ready"),
+    `the key refused while executing: 422 PROVIDER_REFUSED, the job paused, its items ready (${JSON.stringify(keyPaused.body).slice(0, 200)} ${keyPausedJob?.status} ${JSON.stringify(keyPausedItems.map((i: SiItem) => [i.action, i.reason, i.status, i.error_message]))})`);
+  const keyResumed = await si("execute_job", { job_id: String(toRun.body.job?.job_id) });
+  assert(keyResumed.status === 200 && keyResumed.body.job?.status === "complete" && keyResumed.body.job?.added_count === 1,
+    `…and execute_job, the key mended, carries them out (${JSON.stringify(keyResumed.body).slice(0, 200)})`);
   extraction = answering([{ content: "si_o1: the user fixes the bike on Saturdays after the market.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
   const faultText = doc([]).text;
   await sql`ALTER TABLE thoughts RENAME TO thoughts_hidden`;

@@ -239,7 +239,7 @@ const faultWords = (e: unknown): string => {
   if (e instanceof ProviderError) {
     if (e.kind === "http") return `the provider answered ${e.status}`;
     if (e.kind === "timeout") return "the request timed out (OB1_LLM_TIMEOUT)";
-    if (e.kind === "body") return "the provider's answer was not JSON";
+    if (e.kind === "body") return "the provider's answer was not JSON, or held no embedding";
     return e.message; // egress: the gate's words, its rule and host
   }
   const code = typeof e === "object" && e !== null ? (e as { code?: unknown }).code : undefined;
@@ -410,7 +410,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
       // A broken body is an outage for the mender's holds (a proxy's page), an
       // answered call with a fault for the provider's state, as on every
       // other path (heardFrom; review pass 4).
-      if (lastOutage?.reason === "provider_body") ctx.providerHealth.noteUp({ by: "call", fault: "its answer was not JSON" });
+      if (lastOutage?.reason === "provider_body") ctx.providerHealth.noteUp({ by: "call", fault: "its answer was not JSON, or held no embedding" });
       else if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: lastOutageStarted });
       if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }

@@ -185,6 +185,7 @@ const fake = Bun.serve({
       const id = uuid(1000 + n);
       if (/\[\[refused-naming-id\]\]/.test(content)) return err(`Refused: the thought with id ${id} will not hold this.`, { code: "REFUSED", retryable: false });
       // The brain's embedding provider refusing its key (SMD-2892): final for the call, no fault of the summary's.
+      if (/\[\[embed-413\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 413 (it refused the request: this text, or a setting sent with it such as the model).", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_413", status: 413, setting: "OB1_LLM_BASE_URL" });
       if (/\[\[embed-400\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 400 (it refused the request: this text, or a setting sent with it such as the model).", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_400", status: 400, setting: "OB1_LLM_BASE_URL" });
       if (/\[\[embed-401\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" });
       return sse({ result: { content: [{ type: "text", text: `Captured as observation — id ${id} — topics` }] } });
@@ -1097,6 +1098,8 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   const rEmbed = await postCapture(cfg, { text: "[[embed-401]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   const rEmbed400 = await postCapture(cfg, { text: "[[embed-400]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   assert(rEmbed400 instanceof CaptureError && rEmbed400.kind === "refused", `…one that may be the text's own (a 400) is refused, as any refusal is (${rEmbed400?.kind})`);
+  const rEmbed413 = await postCapture(cfg, { text: "[[embed-413]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed413 instanceof CaptureError && rEmbed413.kind === "refused", `…and so is a 413 (review pass 2: only the 400 was held) (${rEmbed413?.kind})`);
   assert(rEmbed instanceof CaptureError && rEmbed.kind === "failed" && /capture failed: Refused: the capture was not done/.test(rEmbed.message),
     `an EMBEDDING_PROVIDER_ERROR, final as it is, keeps the payload (${rEmbed?.kind ?? JSON.stringify(rEmbed)}: ${String(rEmbed?.message).slice(0, 80)})`);
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.

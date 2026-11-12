@@ -354,7 +354,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
               providerRefused = embeddingProviderError(e, cfg.embeddings, reader) ?? undefined;
               if (!providerRefused) throw e;
               console.error(`capture: the embedding provider at ${shownBase(cfg.embeddings)} refused the capture's embedding: ${(e as Error).message}`);
-              return undefined;
+              // Thrown, so the capture is refused at once rather than after the chat calls beside it (review pass 2: it
+              // waited out the tags' and the priority's calls, which run on regardless, as they did before).
+              throw providerRefused;
             }
             console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
             heardFrom(ctx.providerHealth, embedStarted, e);
@@ -366,12 +368,13 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     try {
       settled = await gatherCapture();
     } catch (e) {
+      // The provider's refusal (thrown above), or a sibling's throw before the embedding settled: either way the
+      // provider's verdict, when it refused, is the answer.
       await embedding.catch(() => {});
       if (providerRefused) return refuse(providerRefused);
       throw e;
     }
     const [embedded, metadata, genre, inferred] = settled;
-    if (providerRefused) return refuse(providerRefused);
     function gatherCapture() {
       return Promise.all([
       embedding,

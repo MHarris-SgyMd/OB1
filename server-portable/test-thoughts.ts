@@ -964,6 +964,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   for (const [what, e, reason, detail] of [
     ["a 401", http(401, "{\"error\":\"bad key\"}"), "provider_401", "it answered 401 (its credential was refused)"], ["a 403", http(403), "provider_403", "it answered 403 (its credential was refused)"],
     ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400 (it refused the request: this text, or a setting sent with it such as the model)"],
+    ["a 413", http(413), "provider_413", "it answered 413 (it refused the request: this text, or a setting sent with it such as the model)"], ["a 422", http(422), "provider_422", "it answered 422 (it refused the request: this text, or a setting sent with it such as the model)"],
     ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200, "<html>"), "provider_body", "it answered 200 with a body that is not JSON"],
   ] as [string, ProviderError, string, string][]) {
     const f = providerFault(e);
@@ -1140,7 +1141,9 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     assert(eTls !== undefined && providerDown(eTls) === null && /TLS|SSL|EPROTO|handshake/i.test(tlsSaid) && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${tlsSaid})`);
     // The same misconfigured chat while the embeddings refuse the brain's key (SMD-2892 review pass 1): the chat's throw
     // no longer wins the race — the capture is refused coded, the provider's verdict, and still nothing is written.
-    const keyless = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "bad key" }), { status: 401 }) });
+    // Its 401 comes after the chat's handshake fails, so the chat's throw reaches Promise.all first (review pass 2: an
+    // at-once 401 never raced, and the wait on the embedding went unheld).
+    const keyless = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async () => { await Bun.sleep(400); return new Response(JSON.stringify({ error: "bad key" }), { status: 401 }); } });
     try {
       const written3: unknown[] = [];
       const ctx3 = createContext({
@@ -1365,7 +1368,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       const t = await mendOnce(ctx, newMendState());
       bad.delete("");
       const st = ctx.providerHealth.state();
-      assert(t.down !== null && st.status === "answering" && st.fault === "its answer was not JSON", `a tick of broken bodies: the tick's outage, the state's fault (${JSON.stringify(st)})`);
+      assert(t.down !== null && st.status === "answering" && st.fault === "its answer was not JSON, or held no embedding", `a tick of broken bodies: the tick's outage, the state's fault (${JSON.stringify(st)})`);
     }
     // The provider away for many ticks over many rows, some of them failed
     // before: two calls a tick at most, whatever the rows' history.
@@ -2449,7 +2452,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     heardFrom(h, started, new Error("embedding width 3, expected 4"));
     assert(faultOf() === "its answer could not be used", `a width mismatch: answering, with its fault (${JSON.stringify(h.state())})`);
     heardFrom(h, started, new ProviderError("x answered a body that is not JSON", "body"));
-    assert(faultOf() === "its answer was not JSON", "a broken body: answering, with its fault");
+    assert(faultOf() === "its answer was not JSON, or held no embedding", "a broken body: answering, with its fault");
     heardFrom(h, performance.now(), new ProviderError("x failed: 503", "http", 503));
     assert(h.state().status === "unreachable", "a 503 is an outage");
     heardFrom(h, performance.now(), new ProviderError("x failed: 404", "http", 404));

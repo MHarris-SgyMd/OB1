@@ -1612,16 +1612,6 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
 const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "").join("\n");
 
 /**
- * The server's machine-readable verdict on a result (SMD-1978), read from the
- * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
- * for a server from before that field, derived from the prose rules unchanged.
- * `retryable` is the transient/final split (a kept payload vs a dead one);
- * `mend` names a pointer a retry should drop to mend the capture; `positions`
- * the derived_from indices to drop (absent for a key that may not know a source
- * exists — the existence-oracle rule); `on` marks a pointer the server could not
- * judge, which postPending counts. The hook keys on this, not on English.
- */
-/**
  * Whether a refusal is the brain's embedding provider refusing what an operator mends (SMD-2892): its key, its
  * model, a redirect, a gateway's answer — EMBEDDING_PROVIDER_ERROR with any status but 400, 413 or 422, which may be
  * the text's own. Such a payload is kept, as a transient is, until the mend lands it or the week is up.
@@ -1631,6 +1621,16 @@ export function providerMends(result) {
   return sc?.code === "EMBEDDING_PROVIDER_ERROR" && ![400, 413, 422].includes(sc.status);
 }
 
+/**
+ * The server's machine-readable verdict on a result (SMD-1978), read from the
+ * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
+ * for a server from before that field, derived from the prose rules unchanged.
+ * `retryable` is the transient/final split (a kept payload vs a dead one);
+ * `mend` names a pointer a retry should drop to mend the capture; `positions`
+ * the derived_from indices to drop (absent for a key that may not know a source
+ * exists — the existence-oracle rule); `on` marks a pointer the server could not
+ * judge, which postPending counts. The hook keys on this, not on English.
+ */
 export function verdictOf(result, text) {
   const sc = result?.structuredContent;
   if (sc && typeof sc.code === "string") {

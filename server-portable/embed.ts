@@ -121,8 +121,8 @@ export const PROVIDER_ERROR_CHARS = 500;
  * What a provider call can fail with, told apart without parsing messages:
  * the deadline passed (`timeout`), the provider answered with an error status
  * (`http`, with the status — a redirect among them, never followed:
- * refuseRedirect, SMD-2908), or it answered 2xx with a body that is not JSON
- * (`body`) — or the call was never made, because the egress gate refused to
+ * refuseRedirect, SMD-2908), or it answered 2xx with a body that is not JSON,
+ * or JSON holding no embedding (`body`; SMD-2892) — or the call was never made, because the egress gate refused to
  * send the text to an endpoint not declared local (`egress`, SMD-1903; no
  * status, and nothing about the provider). Anything else — a refused
  * connection, a reset — is the runtime's own error and is rethrown as it came.

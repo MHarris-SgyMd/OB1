@@ -335,7 +335,7 @@ const METRIC_KEYS = ["http.request.method", "http.route", "http.response.status_
 /**
  * The request-duration histogram's labels, from the span's attributes, each
  * from a set the server's own words bound (review pass 3): `error.type` a
- * fault's code (`FAILED`, `STORE_UNAVAILABLE`), else what the span would say
+ * fault's code (`FAILED`, `STORE_UNAVAILABLE`, `EMBEDDING_PROVIDER_ERROR`), else what the span would say
  * without a code (its outcome, or its status) — never a refusal's code, which
  * a plugin's webhook may take from its sender, minting a series per delivery
  * until the SDK's limit swallows every new one — and no `ob1.tool` for a
