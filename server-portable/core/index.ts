@@ -15,6 +15,7 @@ import * as weights from "./weights.ts";
 import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
+import * as deliverables from "./deliverables.ts";
 import * as agendaRead from "./agenda.ts";
 import * as planRead from "./plan.ts";
 import { pluginChat, type ModelAnswer, type ModelCaller, type ModelRequest } from "./model.ts";
@@ -83,6 +84,9 @@ export function createCore(deps: CoreDeps) {
     decideItemClose: bind(ctx, items.decideItemClose),
     itemHistory: bind(ctx, items.itemHistory),
     listItems: bind(ctx, items.listItems),
+    captureDeliverable: bind(ctx, deliverables.captureDeliverable),
+    verifyDeliverable: bind(ctx, deliverables.verifyDeliverable),
+    deliverableHistory: bind(ctx, deliverables.deliverableHistory),
     agenda: bind(ctx, agendaRead.agenda),
     planContext: bind(ctx, planRead.planContext),
     /**

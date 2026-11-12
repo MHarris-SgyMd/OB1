@@ -455,8 +455,9 @@ export function followClassify(e: unknown): FollowVerdict {
  *   it asks one token of — so the probe would answer and read it the thought's, failing the pool row by row); a 402
  *   saying what the call asks is more than the account affords (OpenRouter's "can only afford", which the probe's one
  *   token is not); a deadline whose probe was refused (`ProbeRefused`): every worker stops, exit 2.
- * `suspect`: whether an outage it begins makes the thought in hand a suspect, recorded failed if it meets the provider
- * again right after a probe answers — not on backpressure (a 429, a 503, the model not served), which says nothing
+ * `suspect`: whether an outage it begins makes the thought in hand a suspect — retried alone after it and blamed only on
+ * a probe (ProviderOutage's isolated mode), or, in the subject sweep, recorded failed if it meets the provider again
+ * right after a probe answers — not on backpressure (a 429, a 503, the model not served), which says nothing
  * about the thought.
  */
 export type FollowerFault = { act: "pause" | "outage" | "probe" | "thought" | "fatal"; suspect: boolean };
@@ -795,7 +796,8 @@ export const ALONE_OUTAGES = 3;
  * an edit re-queued hours later, meets a later outage as any other thought
  * does (review pass 1).
  *
- * **Isolated** (`isolate`, SMD-2641; extract's and consolidate's followers, the maintainer's rules of 2026-11-10): with
+ * **Isolated** (`isolate`, SMD-2641; extract's and consolidate's followers since PR 1, re-embed's since PR 2, the
+ * maintainer's rules of 2026-11-10; the subject sweep keeps the rule above): with
  * several workers that rule is a race — a poison thought's crash fails the innocent thought beside it as often as
  * itself — and a provider that crashes on a timer fails whichever suspect it meets first after the window opens. So,
  * once a probe answers, the follower retries the outage's suspects one at a time (`isolating`: one worker, a batch of
