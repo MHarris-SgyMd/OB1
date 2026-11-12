@@ -2349,15 +2349,21 @@ const statementText = (a: PriorityAssertion) =>
   `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
   + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
   + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
-/** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
-const historyLine = (a: PriorityAssertion) =>
-  `- ${statementText(a)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
-/** The item's winner after a write, to a key shown it: its own statement, another's, or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null) =>
+/**
+ * Where a statement stands, when that is not the item asked about: a ticket and its own rows are one item (migration
+ * 133), so a ticket's statements and its rows' answer for either, each on its own item.
+ */
+const onOther = (a: PriorityAssertion, asked: PriorityItem) =>
+  a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
+/** One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open, replaced (by which) or cleared. */
+const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
+  `- ${statementText(a)}${onOther(a, asked)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
+/** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
-  : ` The item's winner is ${statementText(v.winner)}.`;
+  : ` The item's winner is ${statementText(v.winner)}${asked ? onOther(v.winner, asked) : ""}.`;
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
     ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
@@ -2371,21 +2377,21 @@ const priorityRefusal = (r: Refusal) =>
 
 export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
   v.outcome === "unchanged"
-    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id)}`
-    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id)}`,
+    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.assertion.item)}`
+    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement${onOther(v.replaced, v.assertion.item)}, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id, v.assertion.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
   v.assertion
-    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null)}`
-    : `You have no statement open on that item: nothing to clear.${winnerText(v, null)}`,
+    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null, v.assertion.item)}`
+    : `You have no statement open on that item: nothing to clear.${winnerText(v, null, null)}`,
   priorityRefusal, AS_JSON);
 
 export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>
   [
-    `${itemText(v.item)}${v.exists ? "" : " (no longer in this brain; its statements are kept)"}: ${v.winner ? `${levelText(v.winner.level)}, the winner ${statementText(v.winner)}.` : "no statement stands — its priority is unknown."}`,
+    `${itemText(v.item)}${v.exists ? "" : " (no longer in this brain; its statements are kept)"}: ${v.winner ? `${levelText(v.winner.level)}, the winner ${statementText(v.winner)}${onOther(v.winner, v.item)}.` : "no statement stands — its priority is unknown."}`,
     v.history.length ? `Every statement, oldest first (${v.history.length}):` : "Nobody has stated a priority on it.",
-    ...v.history.map(historyLine),
+    ...v.history.map((a) => historyLine(a, v.item)),
   ].join("\n"),
   priorityRefusal, AS_JSON);
 

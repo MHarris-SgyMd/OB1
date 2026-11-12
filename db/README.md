@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and thirty-two (132) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and thirty-three (133) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2505,6 +2505,25 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 133 makes a ticket and its own rows one item to the priority writers
+(SMD-4127), as 122's read already took them. A maker's new statement on a ticket
+or on one of its board-sync rows closes, as replaced, every open statement the
+same maker holds on the ticket or any of its rows; a clear naming either closes
+them all; the same statement again is `unchanged` only on the item it names. Until
+now `clear_priority('ticket', …)` left the maker's older statement on the row
+standing, and the read showed it again. `priority_history`, `priority_of` and the
+writers' winner read the ticket and its rows together, each statement naming its
+own item. A due reference into the item's own pool is refused as one naming the
+item itself. `ob1_priority_lock` takes the ticket's lock for a row, so writers on
+the two wait on each other. `priority_current` stays keyed by the exact item, as its
+drift check computes it, and the writers re-project every item whose statement
+they closed. On upgrade, where one maker already holds two or more open statements
+across a ticket and its rows, each older one closes as replaced by the newest, a
+statement made by name before the key had an id counted as that key's. The
+priority group gains `SELECT` on `thought_sources`, granted to the roles that hold
+`priority_assertions` grants and `SELECT` on `thoughts` already. Needs 053, 115,
+116, 117 and 122. test-schema [120], test-upgrade [20bx].
+
 Migration 132 adds the operator's priority weights (SMD-4193 PR 2), which every
 read takes as its defaults: `priority_weight_settings`, one standing row at most,
 its weights overrides by name over the brain's built-in weights. The maintainer
@@ -2886,6 +2905,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `priority_weight_settings` (132; the operator's weights, which every effective priority reads; a row changes only to end, once, and a DELETE and TRUNCATE are refused by trigger, for the owner too; `set_priority_weights` admits an operator key alone; the identity `id` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
 | | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
+| | `thought_sources` (053; since 133, which ticket's row a thought is: a ticket and its own rows are one item to the writers and the reads) | `SELECT` |
 | **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
 | | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
