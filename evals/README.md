@@ -4960,6 +4960,97 @@ as pre-registered). A level now decides the place, and urgency and unblocks orde
 So the Verify still fails on SMD-2908, for the same reason: its deadline was never stated where the agenda reads.
 Level first narrows the gap from five tickets ahead of it to two.
 
+## Does the inferred priority match the operator's reading? (SMD-3670)
+
+`eval-inferred-priority.ts`, its rules in `inferred-priority.ts`. With `OB1_INFER_PRIORITY` on, a capture asks the
+metadata model for the level and the due day its text states, and states them inferred (tier 4, SMD-3670 PR 1).
+`effective_priority` passes them over until this measurement clears its bar (`count_inferred`, PR 3).
+
+```bash
+bun eval-inferred-priority.ts --self-check     # the rules, the registration's hash and the fixture's shape; no database, no model
+bun eval-inferred-priority.ts --print-sql      # the population's SQL, for a brain whose database only a container reaches
+D=~/.cache/ob1-3670-pr2   # private files live outside any repo; the eval refuses a texts, run or sheet file in a git work tree
+bun eval-inferred-priority.ts --run $D/run.jsonl --texts $D/texts.jsonl [--shard k/n]   # the shipped inferPriority over every text
+bun eval-inferred-priority.ts --draw $D/run.jsonl --sheet $D/sheet.md --texts $D/texts.jsonl   # the blind sheet, and a reply file beside it
+bun eval-inferred-priority.ts --freeze $D/run.jsonl <gold> <second> --note "…"   # each a filled sheet or reply file → fixtures/inferred-priority.json
+bun eval-inferred-priority.ts                  # the report and the verdict, from the fixture
+```
+
+* **The population** is meant to be every current thought written through the capture path, and is read as
+  `actor_kind` agent. On stable, 2026-11-10, that is 1,394 thoughts, 1,262 of them session-hook summaries. The kind
+  is the writing key's classification, not the path, so it also takes 20 rows `db/ingest-records.ts` upserted under a
+  key classified agent, which never reach the inference (review pass 1). The registered SQL is kept; the results say
+  what the 2 of them in the sample move.
+* **The draw** is 60 of the texts the model read a level or a due day from (calls) and 60 it read nothing from
+  (others), by a hash of a fixed seed, shuffled together. The operator labels the sheet blind (the text and its capture
+  day, never the model's answer) and a second blind rater labels a copy for a κ. The operator's labels are the gold.
+* **The bar** (the maintainer, 2026-11-10, registered before any label was read): at least 0.80 of the level calls
+  carry a level the operator read, at least 0.90 of the due calls a day the operator read, and fewer than 0.05 of the
+  level calls are High where the operator read no level, each half on at least 10 calls. Misses carry no bar: a miss
+  leaves unknown, which counts as Medium.
+* **The registration** is `inferred-priority.ts` from "The registration" to "End of the registered section", hashed and
+  pinned (`1239b47ca93a5870`) before the sheet was drawn. The conventions the raters label by are in it, the
+  maintainer's call on a quoted ticket label (a citation, not a stated level) among them.
+
+The texts file holds the text, the run file the model's phrases and the sheet both, so all three are refused inside
+any git work tree; the fixture holds ids and numbers only.
+
+**What `--draw` prints and writes** (after the measurement, from its lessons):
+* **The population by writer,** before drawing. On stable it shows `ingest-records: 20 texts` at once, the frame gap
+  review pass 1 found after the registration was pinned.
+* **A reply file** beside the sheet (`<sheet>.replies.txt`): one `NNN <id> | level | due` line per item. A rater may
+  fill it in instead of the sheet, and `--freeze` reads either. This run's labels came back as such a list and were
+  copied into the sheet by script; re-frozen from a reply file, they give the committed fixture exactly.
+* **The sheet's size:** characters, the median item, a reading estimate with the long items' share apart, and each
+  item over 20,000 characters by number. On this sheet: 462,059 characters, two papers (items 007 and 043) holding
+  189,413 of them.
+
+### Results, 2026-11-11: the bar fails, so `count_inferred` stays off
+
+The run read stable's 1,394 current captures with qwen2.5:7b (prompt v1). The model read something from 186 (13%).
+The operator labelled the 120 drawn texts blind.
+
+| condition | measured | bar |
+| --- | --- | --- |
+| level calls the operator reads | 0.188 (9 of 48) | ≥ 0.80 |
+| due calls the operator reads | 0.500 (8 of 16) | ≥ 0.90 |
+| level calls High where none is read | 0.188 (9 of 48) | < 0.05 |
+| misses among the others (no bar) | level 1 of 60, due 1 of 60 | — |
+
+* **Every level read came from a ticket export.** Its "Priority:" header was read as the ticket's own stated level.
+  These are 9 texts written through the claude-code key, and the model read all 9 right. On the 38 level calls over
+  session-hook summaries it read none right: 24 Medium, 8 High and 6 Low where the operator read no level (the 9th
+  High on none is a research paper's opening sentence, item 043, under the ingester's key). Its phrase
+  was a ticket quoted with its label in 10, a bare level word in 10, and another phrase (a rule under discussion, a
+  sentence) in 18.
+* **The raters split on those exports.** κ on level is 0.173: the second rater read the same header as a citation
+  (convention 2). κ on whether a due day is stated is 0.829; of the 8 items both raters date, they give the same days
+  on 5.
+* **An unblinded review sided with the operator on those exports.** It was a reading of all 120 texts after the
+  freeze, with the three answers beside each. A text that is the ticket carries its header as its own level, not a
+  label beside another item. So convention 2 was ambiguous for such a text, and that is where the low κ comes from.
+  The review also differed on two of the operator's due lists (029, 115). Scored against its own labels, the model
+  reads 9 of 48 levels and 8 of 16 due days, the same as against the frozen gold. The review stays outside the repo
+  with the sheet.
+* **Five of the 8 due reads match one day of a multi-day list.** The operator listed 2 to 11 days on texts quoting
+  a board's due dates (convention 8: any listed day counts). Reading those five lists as none gives 3 of 16.
+* **The ingester's rows move nothing that matters.** Without the 2 sampled rows `db/ingest-records.ts` wrote: level
+  9 of 47, due 8 of 16, High on none 8 of 47, misses 1 of 59 each. It fails as before.
+* **It fails under every reading.** With the second rater's labels as the gold: level 0.021, due 0.313, High on none
+  0.229.
+* **Stated levels are rare in this population.** Among the 60 others, the operator read a level in 1 and a due day in 1.
+  That due day (item 054) is three days before the capture, a day the inference never gives (`modelDay` takes no day
+  before the capture's), so it is no miss the model could have made right.
+* **The run predates review pass 1's fault rule.** Then, an answer with no content was recorded as reading nothing,
+  and the egress gate saw the eval's name as the actor. Neither can move a precision: such a call lands among the
+  others, and the provider was local. At most it moves the population's count of others (1,208).
+  Of the model's 54 reads on session-hook summaries (38 levels and 16 due days), the operator agrees with 8, all of
+  them due days.
+
+The labels were returned as a list and written into a copy of the sheet by script, then frozen.
+`fixtures/inferred-priority.json` records the run's calls, both raters' labels, the population's counts and the
+registration's hash.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

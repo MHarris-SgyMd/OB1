@@ -325,6 +325,7 @@ free_rows() {
   nodb evals              eval-transitive-freshness.ts --self-check
   nodb evals              eval-stated-status.ts --self-check
   nodb evals              eval-priority.ts --self-check
+  nodb evals              eval-inferred-priority.ts --self-check
   nodb evals              board-replay.ts --self-check
   nodb evals              eval-plan-context.ts --self-check
   nodb evals              eval-little.ts --self-check
