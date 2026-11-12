@@ -880,6 +880,20 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   const eub = await eu.json() as Record<string, unknown>;
   assert(eu.status === 503 && eu.headers.get("retry-after") === "2" && same(eub, { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, reason: "provider_unreachable", matched: "text" }),
     `the compat search's outage with nothing found: 503, Retry-After, the code, the word and what was matched alone (${eu.status} ${JSON.stringify(eub)})`);
+  // The embedding provider refusing the brain's key (SMD-2892): 503 with no Retry-After, as a refusal waiting on an
+  // operator; its facts the code, final, the word, the status and the setting — the endpoint and the provider's words
+  // ride the MCP text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does.
+  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", base: "https://api.example/v1", provider: "{\"error\":\"bad key\"}" });
+  const pe = await hit("/v1/search", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "plain words" }) });
+  const peb = await pe.json() as Record<string, unknown>;
+  assert(pe.status === 503 && pe.headers.get("retry-after") === null && same(peb, { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" }),
+    `a search whose provider refused its key: 503 without Retry-After, the code, final, the word, the status and the setting, not the endpoint or the provider's words (${pe.status} ${pe.headers.get("retry-after")} ${JSON.stringify(peb)})`);
+  // An edit whose provider is away: retryable, so Retry-After; no endpoint where the operation gave none.
+  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", detail: "the connection was refused", setting: "OB1_LLM_BASE_URL" });
+  const pd = await hit("/v1/thoughts/00000000-0000-4000-8000-000000000001", { key: "write-raw", method: "PATCH", body: JSON.stringify({ content: "z" }) });
+  const pdb = await pd.json() as Record<string, unknown>;
+  assert(pd.status === 503 && pd.headers.get("retry-after") === "2" && same(pdb, { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL" }),
+    `an edit whose provider is away: 503 with Retry-After, retryable, the word and the setting (${pd.status} ${JSON.stringify(pdb)})`);
   answer = async () => { throw new Error("connection refused"); };
   r = await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
   const cb = await r.json() as Record<string, unknown>;

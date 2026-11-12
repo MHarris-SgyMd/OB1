@@ -1719,7 +1719,11 @@ export async function postCapture(cfg, payload) {
     // worth keeping (first review pass: every isError was "refused", and a brain
     // whose database was down for a minute lost the session for good).
     const v = verdictOf(result, text);
-    const err = new CaptureError(v.retryable ? "failed" : "refused", `capture ${v.retryable ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
+    // Kept by its code too (SMD-2892): the brain's embedding provider refusing it — a key or a model an operator
+    // mends — is final for the call and no fault of the summary's, so the payload waits for the mend as an outage's
+    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal.
+    const kept = v.retryable || v.code === "EMBEDDING_PROVIDER_ERROR";
+    const err = new CaptureError(kept ? "failed" : "refused", `capture ${kept ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
     // A pointer the server could not judge: a failure ON the pointer, counted by
     // postPending so the last attempt can drop it (eighth review pass).
     if (v.on === "supersedes") err.on = "supersedes";

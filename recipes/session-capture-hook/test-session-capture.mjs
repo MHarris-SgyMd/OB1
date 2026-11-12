@@ -184,6 +184,8 @@ const fake = Bun.serve({
       if (/\[\[slow\]\]/.test(content)) await slowGate();
       const id = uuid(1000 + n);
       if (/\[\[refused-naming-id\]\]/.test(content)) return err(`Refused: the thought with id ${id} will not hold this.`, { code: "REFUSED", retryable: false });
+      // The brain's embedding provider refusing its key (SMD-2892): final for the call, no fault of the summary's.
+      if (/\[\[embed-401\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" });
       return sse({ result: { content: [{ type: "text", text: `Captured as observation — id ${id} — topics` }] } });
     }
     return json({ error: { code: -32601, message: "Method not found" } });
@@ -1089,6 +1091,11 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   // error that saved a thought, a save whose vector did not attach, left with its code).
   const r2 = await postCapture(cfg, { text: "[[refused-naming-id]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   assert(r2 instanceof CaptureError && r2.kind === "refused" && r2.id === undefined, `a refusal whose words name an id is refused, not read as a save (${r2?.kind ?? JSON.stringify(r2)})`);
+  // The embedding provider refusing the brain's key (SMD-2892): final for the call, but the summary is not at fault, so
+  // the payload waits for an operator's mend as an outage's does — kept ("failed"), never dead on the first refusal.
+  const rEmbed = await postCapture(cfg, { text: "[[embed-401]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed instanceof CaptureError && rEmbed.kind === "failed" && /capture failed: Refused: the capture was not done/.test(rEmbed.message),
+    `an EMBEDDING_PROVIDER_ERROR, final as it is, keeps the payload (${rEmbed?.kind ?? JSON.stringify(rEmbed)}: ${String(rEmbed?.message).slice(0, 80)})`);
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.
   const bad = prepare({ session_id: "s-bad", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [b] = await postPending({ url: URL_, key: "wrong" }, bad.payloadPath);

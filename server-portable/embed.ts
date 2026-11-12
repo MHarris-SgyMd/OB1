@@ -182,6 +182,33 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
 }
 
 /**
+ * A provider call's failure as a caller may be told it (SMD-2892): the
+ * outages providerDown names, retryable; and the provider's other answers —
+ * an error status that is no outage (a credential refused, a model or path
+ * that is not there, an input refused), or a 2xx whose body is not JSON —
+ * final, as providerDown's rule makes them (decided 2026-10-26: no rule of its
+ * own; SMD-2461's classifier takes both later). `status` is the provider's;
+ * `provider` its own capped words, which a caller that can read is shown and
+ * the server logs — never the runtime's text, nor the message, which leads
+ * with the base the caller names itself.
+ *
+ * Null for what is no provider's answer: an egress refusal (the gate's, with a
+ * code of its own), a caller's abort, and a plain Error such as the width
+ * mismatch, which stays a fault.
+ */
+export function providerFault(e: unknown): { retryable: boolean; reason: string; detail: string; status?: number; provider?: string } | null {
+  const down = providerDown(e);
+  if (down) return { retryable: true, ...down, ...(e instanceof ProviderError && e.status !== undefined ? { status: e.status } : {}) };
+  if (!(e instanceof ProviderError) || e.kind === "egress") return null;
+  const provider = e.body ? { provider: e.body } : {};
+  if (e.kind === "body") return { retryable: false, reason: "provider_body", detail: `it answered ${e.status ?? "2xx"} with a body that is not JSON`, ...(e.status !== undefined ? { status: e.status } : {}), ...provider };
+  const s = e.status;
+  if (s === undefined) return null;
+  const why = s === 401 || s === 403 ? " (its credential was refused)" : s === 404 ? " (the path or the model is not there)" : "";
+  return { retryable: false, reason: `provider_${s}`, detail: `it answered ${s}${why}`, status: s, ...provider };
+}
+
+/**
  * One call to the OpenAI-compatible provider: URL join, headers, the timeout
  * and its name, the status attached, the error body capped, the JSON parsed.
  * The server's embedding, blurb and metadata calls and the bulk passes' all

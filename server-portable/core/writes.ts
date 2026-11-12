@@ -6,7 +6,8 @@
 // REST core (SMD-2284) answers it as JSON.
 
 import { createHash } from "node:crypto";
-import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
+import { providerDown, shownBase, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
+import { embeddingProviderError, type EmbeddingProviderError } from "./provider-refusal.ts";
 import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
 import { writerScope } from "./caller.ts";
@@ -333,6 +334,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // exist nowhere else (SMD-2888). Any other failure — a 4xx, a width
     // mismatch — still fails the capture, so a misconfigured brain says so.
     let vectorFailed: { reason: string; detail: string } | undefined;
+    // The provider's other answers (a credential refused, a model not there, a body that is not JSON) refuse the
+    // capture, coded and final, where they reached the caller as the store's STORE_UNAVAILABLE (SMD-2892).
+    let providerRefused: EmbeddingProviderError | undefined;
     // The provider's state, as every embedding call tells it (SMD-2890).
     const embedStarted = performance.now();
     // The capture's own day, from which the inference resolves a due phrase (SMD-3670).
@@ -344,7 +348,13 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
             return v;
           }, (e: unknown) => {
             const down = providerDown(e);
-            if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
+            if (!down) {
+              heardFrom(ctx.providerHealth, embedStarted, e);
+              providerRefused = embeddingProviderError(e, cfg.embeddings, reader) ?? undefined;
+              if (!providerRefused) throw e;
+              console.error(`capture: the embedding provider at ${shownBase(cfg.embeddings)} refused the capture's embedding: ${(e as Error).message}`);
+              return undefined;
+            }
             console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
             heardFrom(ctx.providerHealth, embedStarted, e);
             vectorFailed = down;
@@ -386,6 +396,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
             })
         : Promise.resolve(null),
     ]);
+    if (providerRefused) return refuse(providerRefused);
     const chunks = embedded?.chunks ?? [];
     const contextFailures = embedded?.contextFailures ?? 0;
 
@@ -752,10 +763,22 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
   const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
   // An edit whose provider does not answer is still refused whole; the provider's state hears it either way (SMD-2890, review pass 1).
+  // Refused coded (SMD-2892): retryable while the provider is away, final on its other answers — never the provider's
+  // raw error, which reached the caller as the store's STORE_UNAVAILABLE.
   const embedStarted = performance.now();
-  const embedded = content !== undefined && gate?.embeddings.allowed
-    ? await ctx.embedder.embedCapture(content, subject).then((v) => { heardFrom(ctx.providerHealth, embedStarted); return v; }, (e: unknown) => { heardFrom(ctx.providerHealth, embedStarted, e); throw e; })
-    : undefined;
+  let embedded: EmbeddedCapture | undefined;
+  if (content !== undefined && gate?.embeddings.allowed) {
+    try {
+      embedded = await ctx.embedder.embedCapture(content, subject);
+      heardFrom(ctx.providerHealth, embedStarted);
+    } catch (e) {
+      heardFrom(ctx.providerHealth, embedStarted, e);
+      const refused = embeddingProviderError(e, cfg.embeddings, canRead(principal));
+      if (!refused) throw e;
+      console.error(`update_thought: the embedding provider at ${shownBase(cfg.embeddings)} ${refused.retryable ? "was unavailable" : "refused the edit's embedding"}: ${(e as Error).message}`);
+      return refuse(refused);
+    }
+  }
 
   const result = await (await ctx.store()).updateThought({
     id,

@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
 import { createProviderHealth, DEFAULT_REPROBE_INTERVAL_S, heardFrom, inContainer, isLoopback, probeable, probeClears, probeProvider, reprobeIntervalFrom, startProviderReprobe, startsDegraded } from "./provider-health.ts";
@@ -954,6 +954,24 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     ["a TypeError with no code", new TypeError("x is not a function")], ["a string", "ECONNREFUSED"], ["null", null], ["a code that is not a string", Object.assign(new Error("x"), { code: 111 })],
   ] as [string, unknown][])
     assert(providerDown(e) === null, `${what} is not an outage: it still fails the call (${said(e)})`);
+
+  // SMD-2892: providerFault, the same failures as a caller is told them. retryable is providerDown's alone; the
+  // provider's other answers final with their status and words; what is no provider's answer, null (still a fault).
+  const fault = (e: unknown) => JSON.stringify(providerFault(e));
+  for (const [what, e, reason] of [["a refused connection", refused, "provider_unreachable"], ["the deadline", new ProviderError("x", "timeout"), "provider_timeout"], ["a 429", http(429), "provider_429"], ["a 503", http(503), "provider_503"]] as [string, unknown, string][])
+    assert(providerFault(e)?.retryable === true && providerFault(e)?.reason === reason, `providerFault: ${what} is retryable, ${reason} (${fault(e)})`);
+  assert(providerFault(http(429))?.status === 429 && providerFault(refused)?.status === undefined, "…an outage carries the provider's status when it answered one");
+  for (const [what, e, reason, detail] of [
+    ["a 401", http(401, "{\"error\":\"bad key\"}"), "provider_401", "it answered 401 (its credential was refused)"], ["a 403", http(403), "provider_403", "it answered 403 (its credential was refused)"],
+    ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400"],
+    ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200, "<html>"), "provider_body", "it answered 200 with a body that is not JSON"],
+  ] as [string, ProviderError, string, string][]) {
+    const f = providerFault(e);
+    assert(f?.retryable === false && f.reason === reason && f.detail === detail && f.status === e.status && f.provider === (e.body || undefined) && !JSON.stringify(f).includes("http://x"),
+      `providerFault: ${what} is final, ${reason}, said "${detail}", its status and the provider's own words, never the base (${fault(e)})`);
+  }
+  for (const [what, e] of [["an egress refusal", new ProviderError("refused by the egress gate", "egress")], ["the width mismatch", new Error("Embedding width mismatch")], ["a TypeError with no code", new TypeError("x")], ["null", null]] as [string, unknown][])
+    assert(providerFault(e) === null, `providerFault: ${what} is no provider's answer, so null: still a fault (${fault(e)})`);
 
   for (const code of ["ETIMEDOUT", "ENETUNREACH", "ETIMEOUT"]) assert(providerDown(Object.assign(new Error("x"), { code }))?.reason === "provider_unreachable", `${code} is an outage`);
   assert(providerDown(Object.assign(new Error("x"), { syscall: "getaddrinfo" }))?.detail === "its name does not resolve" && providerDown(Object.assign(new Error("x"), { code: "ENOTFOUND" }))?.detail === "its name does not resolve (ENOTFOUND)",
@@ -2567,7 +2585,8 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   }
 
   // update_thought's re-embed feeds the state too (review pass 1): an outage
-  // refuses the edit whole, as before, and says so; an answer clears it.
+  // refuses the edit whole, as before, and says so; an answer clears it. Refused
+  // coded since SMD-2892 (EMBEDDING_PROVIDER_ERROR, retryable), not thrown.
   {
     const uid = "00000000-0000-4000-8000-0000000000d1";
     const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
@@ -2575,9 +2594,9 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     let port = closedNow();
     const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });
     try {
-      let threw: unknown;
-      try { await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never); } catch (e) { threw = e; }
-      assert(threw !== undefined && providerDown(threw) !== null && ectx.providerHealth.state().status === "unreachable", `an edit whose provider is down: refused whole, the state unreachable (${JSON.stringify(ectx.providerHealth.state())})`);
+      const edit = await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never);
+      assert(!edit.ok && edit.refusal.code === "EMBEDDING_PROVIDER_ERROR" && edit.refusal.retryable === true && ectx.providerHealth.state().status === "unreachable",
+        `an edit whose provider is down: refused whole, coded and retryable, the state unreachable (${JSON.stringify(edit)} ${JSON.stringify(ectx.providerHealth.state())})`);
       port = embedsOk.port!;
       await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "newer text" } as never);
       assert(ectx.providerHealth.state().status === "answering", "…and an edit it answers: answering");
@@ -2586,19 +2605,20 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
 
   // A capture or a search the provider refuses with a 4xx: the call fails, as
   // before, and the provider is there — answering (review pass 1, the mender's rule).
+  // Refused coded since SMD-2892, final, where each threw the provider's error.
   {
     const refuses = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
     try {
       const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
-      let capThrew = false;
-      try { await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never); } catch { capThrew = true; }
-      assert(capThrew && fctx.providerHealth.state().status === "answering", `a capture refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      const cap = await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never);
+      assert(!cap.ok && cap.refusal.code === "EMBEDDING_PROVIDER_ERROR" && cap.refusal.retryable === false && cap.refusal.status === 400 && fctx.providerHealth.state().status === "answering",
+        `a capture refused 400: refused coded and final, and the provider answering (${JSON.stringify(cap)} ${JSON.stringify(fctx.providerHealth.state())})`);
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
       const { searchThoughts: st } = await import("./core/reads.ts");
-      let searchThrew = false;
-      try { await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never); } catch { searchThrew = true; }
-      assert(searchThrew && fctx.providerHealth.state().status === "answering", `a search refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      const found = await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+      assert(!found.ok && found.refusal.code === "EMBEDDING_PROVIDER_ERROR" && found.refusal.retryable === false && fctx.providerHealth.state().status === "answering",
+        `a search refused 400: refused coded and final, and the provider answering (${JSON.stringify(found)} ${JSON.stringify(fctx.providerHealth.state())})`);
     } finally { refuses.stop(true); }
   }
 

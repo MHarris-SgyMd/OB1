@@ -111,6 +111,19 @@ function guard(v: unknown, key = ""): unknown {
 const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
 
 /**
+ * An embedding call that failed where nothing could be done without it (SMD-2892): the provider, the setting to
+ * check, and — to a key that can read — where it is and its own words. `Error:` while it is away (the same call lands
+ * once it answers), `Refused:` on its other answers (an operator's to mend), as the session hook's prose rule reads them.
+ */
+function providerErrorText(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_ERROR" }>, what: string): string {
+  const at = r.base ? `the embedding provider at ${r.base}` : "the brain's embedding provider";
+  if (r.retryable) return `Error: ${what} was not done — ${at} did not answer (${r.detail}). The same call can land once it answers.`;
+  const credential = r.status === 401 || r.status === 403 ? " and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY)" : r.status === 404 ? " and the embedding model it serves (OB1_EMBEDDING_MODEL)" : "";
+  const said = r.provider ? ` It said: ${oneLine(snipText(r.provider, 200))}` : "";
+  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. An operator checks ${r.setting}${credential}; retrying will not help until then.${said}`;
+}
+
+/**
  * A fault an operation threw — the store down, a missing migration — said as
  * the tool has always said it: `lead` (`Error: `, or update/delete's
  * `<tool> failed: `), the message, and the tool's hint for it when it has one.
@@ -380,6 +393,7 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
   if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
+  if (r.code === "EMBEDDING_PROVIDER_ERROR") return providerErrorText(r, "the search");
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
   if (r.code === "REFUSED_WEIGHTS") return weightsRefusal(r);
   return unknownRefusal(r);
@@ -1545,6 +1559,7 @@ function captureRefusal(r: Refusal): string {
         : "a `derived_from` id";
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
+    case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the capture");
     default: return unknownRefusal(r);
   }
 }
@@ -1732,6 +1747,7 @@ function mutationRefusalText(r: Refusal): string {
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
     case "REFUSED_SOURCE_RESERVED": return `Refused: \`metadata_patch.source: "${r.source}"\` is the board's own label, which only its importers write. Patch without it.`;
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
+    case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the edit (its new text needs its vector)");
     case "NOT_FOUND":
       return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
     case "REFUSED_STALE_READ":

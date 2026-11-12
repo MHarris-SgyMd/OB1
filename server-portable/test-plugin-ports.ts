@@ -77,6 +77,8 @@ console.log(`\n[1] The migrator makes each ported plugin's tables in its own sch
 const STUB_BASE = "https://stub.invalid/v1";
 /** The embedding provider answering 503, as one that is down (agent-memory's section sets it). */
 let embedDown = false;
+/** The embedding route answering this status (SMD-2892): a provider refusing the brain's key, a model not there. */
+let embedStatus: number | null = null;
 /** How long the chat stub waits before it answers, in ms: agent-memory's race widens its window with it. */
 let chatDelayMs = 0;
 /** smart-ingest's vectors: a text holding the token is embedded as the vector (its section sets them). */
@@ -94,6 +96,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const sent = typeof init?.body === "string" ? (JSON.parse(init.body) as Body) : {};
     if (url.endsWith("/embeddings")) {
       if (embedDown) return new Response("down", { status: 503 });
+      if (embedStatus !== null) return new Response(`{"error":"stub answers ${embedStatus}"}`, { status: embedStatus, headers: { "Content-Type": "application/json" } });
       if (embedFailOn?.(String(sent.input ?? ""))) return new Response("down", { status: 503 });
       // A text holding one of smart-ingest's tokens is embedded as that token says; any other, the first axis.
       const input = String(sent.input ?? "");
@@ -3628,6 +3631,22 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
       `writeback while the provider does not answer: the memory kept, its thought without a vector for the mender (${kept.status} ${JSON.stringify(kept.body).slice(0, 160)})`);
   } finally {
     embedDown = false;
+  }
+  // ── The embedding provider refusing the brain's key (SMD-2892, SMD-1992's other half) ──
+  // The core refuses the search and the capture coded, final; the plugin answers each as its own coded JSON — 422, as a
+  // plugin answers a final refusal (only a 503 is retryable) — never a bare 500 or the provider's words.
+  embedStatus = 401;
+  try {
+    const refusedRecall = await am("recall", rq({ query: "am_ledger while the provider refuses its key" }), { as: KEYS.reader });
+    const sc = refusedRecall.viaMcp.result?.structuredContent;
+    assert(refusedRecall.status === 422 && refusedRecall.body.code === "CORE_REFUSED" && refusedRecall.body.refused === "EMBEDDING_PROVIDER_ERROR" && refusedRecall.body.retryable === false
+      && sc?.code === "CORE_REFUSED" && !JSON.stringify(refusedRecall.body).includes("stub answers"),
+      `recall while the provider refuses its key: 422 CORE_REFUSED naming EMBEDDING_PROVIDER_ERROR, final, on REST and on MCP (${refusedRecall.status} ${JSON.stringify(refusedRecall.body)})`);
+    const refusedWrite = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back while the provider refuses its key."] } });
+    assert(refusedWrite.status === 422 && refusedWrite.body.code === "CORE_REFUSED" && refusedWrite.body.refused === "EMBEDDING_PROVIDER_ERROR",
+      `writeback while the provider refuses its key: 422 CORE_REFUSED naming EMBEDDING_PROVIDER_ERROR (${refusedWrite.status} ${JSON.stringify(refusedWrite.body)})`);
+  } finally {
+    embedStatus = null;
   }
   // The repository's two clients of the plugin (SMD-2690 PR 2b), each client method answered on its routes, not refused:
   // the REST input is strict, so a field a client sends that the plugin does not take, or a route it no longer has, fails here.
