@@ -2587,9 +2587,10 @@ The new **deliverables** grant group holds `SELECT, INSERT` on the events,
 **capture** group's `SELECT`. Postgres grants INSERT per table, so a role
 holding the group can write any facet kind, as one holding the **structure**
 group can. The operations over REST and MCP are `capture_deliverable`,
-`verify_deliverable` and `deliverable_history` (SMD-1715 PR 2; server-portable/README.md,
-"Deliverables"). Needs 042, 116, 117 and 120; a re-apply keeps the rows. test-schema
-[121], test-upgrade [20by], test-live [49].
+`verify_deliverable` and `deliverable_history` (SMD-1715 PR 2;
+server-portable/README.md, "Deliverables"). Needs 042, 116, 117 and 120; a
+re-apply keeps the rows. test-schema [121], test-upgrade [20by], test-live
+[49].
 
 Migration 133 makes a ticket and its own rows one item to the priority writers
 (SMD-4127), as 122's read already took them. A maker's new statement on a ticket

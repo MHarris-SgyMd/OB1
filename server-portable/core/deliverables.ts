@@ -17,10 +17,7 @@
 //
 // A deliverable is a thought this call's key wrote, derived from its spec
 // (the maintainer, 2026-11-12). Text that is a thought already is answered by
-// what that thought is: a deliverable from 134, writing nothing (unchanged for
-// its own key, spec and checkpoint, else ALREADY_A_DELIVERABLE); a thought
-// this key captured from this spec that no deliverable names — a record that
-// did not land after it — recorded now; any other refused OUTPUT_EXISTS.
+// what that thought is (onExisting, below).
 // Nothing is ever deleted: a record that does not land after a fresh capture
 // leaves the thought, the refusal naming it, and the same call again records
 // it (review pass 2: a delete could take a thought another key had just been
@@ -30,7 +27,7 @@
 
 import type { Principal } from "../auth.ts";
 import type { DeliverableAnswer } from "../deliverables.ts";
-import type { Deliverable, DeliverableEvent } from "../store.ts";
+import type { Deliverable, DeliverableEvent, DeliverableRecord } from "../store.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome, type RefusalCode } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -54,22 +51,22 @@ const summaryOf = (c: Captured): CaptureSummary => ({
 });
 
 type WriterCode = "WRITE_SCOPE_REQUIRED" | "NOT_FOUND";
-/** `capture` is null when nothing was captured: the same deliverable again, answered from the record. */
+/** `capture` is null when this call captured nothing: its text was a thought already, answered by what that thought is. */
 export type CaptureDeliverableResult = { outcome: "captured" | "unchanged"; deliverable: Deliverable; event: DeliverableEvent | null; capture: CaptureSummary | null };
 /** capture_thought's own refusals stand (a refused egress, a provider down…), the spec's missing one renamed. */
 export type CaptureDeliverableCode = Exclude<RefusalCode, "DERIVED_FROM_MISSING"> | WriterCode | "SPEC_NOT_FOUND" | "SPEC_IS_SELF" | "ALREADY_A_DELIVERABLE" | "OUTPUT_EXISTS";
 export type VerifyDeliverableResult = { outcome: "changed"; deliverable: Deliverable; event: DeliverableEvent | null; from: string; to: string };
 export type VerifyDeliverableCode = WriterCode | "NOT_A_DELIVERABLE" | "ILLEGAL_TRANSITION" | "VERIFY_NOT_YOURS";
 /** deliverable_history's value: the deliverable (null when its thought was deleted: its events stay) and every event, oldest first. */
-export type DeliverableHistoryResult = { deliverable: Deliverable | null; events: DeliverableEvent[] };
+export type DeliverableHistoryResult = DeliverableRecord;
 export type DeliverableHistoryCode = "NOT_A_DELIVERABLE";
 
 const writeScopeRequired = (principal: Principal) => refuse({ code: "WRITE_SCOPE_REQUIRED", retryable: false, key: principal.name });
 const id = (s: string) => s.trim().toLowerCase();
 
 /**
- * A refusal 134 answered as a value, by its code. ALREADY_A_DELIVERABLE names the deliverable that stands, read
- * again, since 134 answers it in words alone; VERIFY_NOT_YOURS says which rule refused, by its words' close (they
+ * A refusal 134 answered as a value, by its code. ALREADY_A_DELIVERABLE names what was recorded on the thought, read
+ * from its capture event, since 134 answers it in words alone; VERIFY_NOT_YOURS says which rule refused, by its words' close (they
  * open with the key's own name, which the server does not choose).
  */
 async function refusedBy(ctx: Ctx, a: DeliverableAnswer, principal: Principal, thought: string, spec = "", left?: string) {

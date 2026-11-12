@@ -848,7 +848,7 @@ export const SPECS = {
       reason: ITEM_REASON.optional().describe("Why, at most 1000 characters"),
     },
   },
-  // Deliverables (SMD-1715 PR 2, migration 134): a write key's alone, as 134 refuses any other scope.
+  // Deliverables (SMD-1715 PR 2, migration 134): the two writers a write key's alone, as 134 refuses any other scope; the history any key's.
   capture_deliverable: {
     title: "Capture Deliverable",
     description:
@@ -856,7 +856,7 @@ export const SPECS = {
       "The output is captured as a thought, as capture_thought captures one, its derived_from the spec and its text closing with a `Checkpoint: …` line, so a new checkpoint is a new thought: reworked output is a new deliverable. " +
       "It starts unverified. Another key verifies it (verify_deliverable): neither the key that recorded it nor a key the brain records as writing its thought may move it to verified. " +
       "The same output, spec and checkpoint again from your key changes nothing and captures nothing; from another key, or at another spec or checkpoint, it is refused, naming the deliverable that stands. " +
-      "Output whose text (with its checkpoint line) is a thought already, not a deliverable, is refused (OUTPUT_EXISTS): a deliverable is always a thought this call writes. A text is matched as a thought's fingerprint matches it, ignoring letter case and runs of white space, so two checkpoints that differ only there name one deliverable.",
+      "Output whose text (with its checkpoint line) is a thought already, not a deliverable, is refused (OUTPUT_EXISTS): a deliverable is always a thought your key wrote from its spec. Your key's own capture from this spec that no deliverable names (a record that did not land) is recorded now. A text is matched as a thought's fingerprint matches it, ignoring letter case and runs of white space, so two checkpoints that differ only there name one deliverable.",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       content: z.string().min(1).refine(NO_NUL, "may not hold a NUL character").refine((s) => s.trim() !== "", "may not be blank").describe("The output, or a clear standalone account of it: what was produced and where it is"),

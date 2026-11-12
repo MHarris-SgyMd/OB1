@@ -2707,8 +2707,8 @@ export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Rep
 
 
 // ── Deliverables (SMD-1715 PR 2, migration 134) ──────────────────────────────
-// Each reply's value is its JSON (AS_JSON), as the items' are: a verification's method and finding, and a capture's
-// tags, are data a reader of the value needs. In the text they are words a key gave, quoted on one line.
+// Each reply's value is its JSON (AS_JSON), as the items' are: a verification's method and finding are data a reader
+// of the value needs. In the text they are words a key gave, quoted on one line.
 
 /** One deliverable: its thought, status, spec and checkpoint, who recorded it. */
 const deliverableLine = (d: Deliverable) =>
@@ -2726,7 +2726,7 @@ const deliverableRefusal = (r: Refusal) =>
   : r.code === "ALREADY_A_DELIVERABLE"
     ? `Refused: thought ${r.id} is a deliverable already, recorded by ${oneLine(snipText(r.recordedBy, 80))}, meant to meet spec ${r.spec} at checkpoint ${quoted(r.checkpoint, 80)}. A deliverable keeps the spec, the checkpoint and the key it was recorded with; reworked output is a new deliverable at its new checkpoint (two checkpoints that differ only in letter case or white space name one thought).`
   : r.code === "OUTPUT_EXISTS"
-    ? `Refused: this output's text, with its checkpoint line, is thought ${r.id} already, which is not a deliverable; a deliverable is a thought this call writes. Nothing was captured. Change the output's words or the checkpoint.`
+    ? `Refused: this output's text, with its checkpoint line, is thought ${r.id} already, which is not a deliverable; a deliverable is a thought its key wrote from its spec. Nothing was recorded. Change the output's words or the checkpoint.`
   : r.code === "NOT_A_DELIVERABLE"
     ? r.deleted ? `Refused: deliverable ${r.id}'s thought was deleted; its events stay as history, and it takes no more verifications.` : `Refused: thought ${r.id} is not a deliverable; capture_deliverable records one.`
   : r.code === "ILLEGAL_TRANSITION"

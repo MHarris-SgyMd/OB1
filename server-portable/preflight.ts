@@ -3310,7 +3310,7 @@ if (configFailed) {
             add("deliverables", "warn", `the server's role holds no ${dl.ungranted.join(", ")}: ${reads ? "every deliverable tool fails" : "capture_deliverable and verify_deliverable fail"} naming the table, and nothing else does`,
                 "Grant the deliverables group (SMD-1715): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups deliverables (db/README.md, Grants for a capturing role).");
           } else {
-            add("deliverables", "ok", "record_deliverable, verify_deliverable, deliverable_history and their helpers present; the server's role holds the deliverables group");
+            add("deliverables", "ok", "record_deliverable, verify_deliverable, and deliverable_history present; the server's role holds the deliverables group");
           }
         }
 

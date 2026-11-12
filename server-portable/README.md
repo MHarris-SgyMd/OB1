@@ -1478,7 +1478,7 @@ Their refusals:
 | Code | Status | When |
 | --- | --- | --- |
 | `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured, unless the spec was deleted between the capture and the record: `left` then names the thought, which stays. |
-| `SPEC_IS_SELF` | 409 | The output's text is the spec's own, so it landed on the spec. |
+| `SPEC_IS_SELF` | 409 | The output's text is the spec's own, and a thought cannot be its own spec. |
 | `ALREADY_A_DELIVERABLE` | 409 | The thought is a deliverable recorded by another key, or at another spec or checkpoint; it names the one that stands (`recordedBy`, `spec`, `checkpoint`). |
 | `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable, and not this key's own leftover from this spec. Nothing is recorded. |
 | `NOT_A_DELIVERABLE` | 404 | No deliverable was recorded on the thought; `deleted` when its thought was deleted, its events kept. |
