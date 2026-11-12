@@ -45,6 +45,9 @@ export const HELLO_MS = 5000;
 export const GRACE_RETRY_MS = 250;
 /** The longest the relay waits on a silent socket, whatever the broker's idle_s (review pass 2: idle_s 30 made 33 s). */
 export const SILENCE_MS = 10_000;
+/** An ask the broker has not answered this long is told `queued` by the relay, so the pass waits on the relay's liveness
+ *  and grace rather than its own 1 s bound (review pass 3: a frozen broker sent new asks to own shares at 1 s). */
+export const QUIET_ASK_MS = 500;
 
 /** What a child sends. */
 export type ChildFrame =
@@ -78,6 +81,8 @@ type Entry = {
   first: boolean; maxWaitS: number | undefined;
   /** When it began waiting (performance.now), for `waited_s` when asked again. */
   at: number;
+  /** When it was last asked of the broker, and whether its child has been told it waits. */
+  askedAt: number; told: boolean;
   /** The socket it is registered on (`epoch`), -1 where none: a `done` reaches the broker only where it is known. */
   on: number;
 };
@@ -151,7 +156,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   const toBroker = (frame: object) => { if (open && ws) ws.send(JSON.stringify(frame)); };
   const askOf = (relayId: string, e: Entry) => {
     const waited = (performance.now() - e.at) / 1000;
-    e.kind = "ask"; e.on = epoch; atBroker++;
+    e.kind = "ask"; e.on = epoch; atBroker++; e.askedAt = performance.now();
     toBroker({ op: "ask", id: relayId, base: e.base, model: e.model, cls: e.cls, ...(e.first ? { first: true } : {}), ...(e.maxWaitS !== undefined ? { max_wait_s: e.maxWaitS } : {}), ...(waited >= 0.001 ? { waited_s: Math.min(waited, 86_400) } : {}) });
   };
   /** Parked asks to the broker, oldest first, while it takes more. */
@@ -184,6 +189,8 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     // Every call running — a grant, or a call on its own share — counted again; then the parked asks, their time carried.
     let held = 0;
     for (const [relayId, e] of entries) if (e.kind === "grant" || e.kind === "own") { e.on = epoch; sock.send(JSON.stringify({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls })); held++; }
+    // Every call it runs named: any grant the broker kept for it beyond these is given back now (review pass 3).
+    sock.send(JSON.stringify({ op: "synced", id: "synced" }));
     const parked = [...entries.values()].filter((e) => e.kind === "parked").length;
     feed();
     if (epoch === 1 || restarted || performance.now() - lostSaidAt >= 60_000 || lostUnsaid === 0) log(`slot relay: the broker answers${restarted ? " (restarted)" : ""}${held ? `; ${held} call${held === 1 ? "" : "s"} still running re-registered` : ""}${parked ? `; ${parked} waiting asked again` : ""}`);
@@ -196,7 +203,10 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     open = false;
     atBroker = 0;
     // A live call is running already (it never waits): kept for `held`, as an own call is; a background ask parks.
-    for (const e of entries.values()) if (e.kind === "ask") e.kind = e.cls === "live" ? "own" : "parked";
+    for (const e of entries.values()) if (e.kind === "ask") {
+      e.kind = e.cls === "live" ? "own" : "parked";
+      if (e.kind === "parked" && !e.told) { e.told = true; tell(e, "queued"); }
+    }
     if (downAt === null) downAt = performance.now();
     if (!grace) grace = setTimeout(graceOver, Math.max(0, graceMs - (performance.now() - downAt)));
     if (stopped) return;
@@ -274,13 +284,16 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
         if (e.kind === "ask") { atBroker--; e.kind = "grant"; tell(e, "go"); feed(); }
         return;
       }
-      if (m.op === "queued") { if (e.kind === "ask") tell(e, "queued"); return; }
+      if (m.op === "queued") { if (e.kind === "ask" && !e.told) { e.told = true; tell(e, "queued"); } return; }
       if (m.op === "lapsed") { forget(m.id); if (e.kind === "grant") tell(e, "lapsed"); feed(); return; }
       if (m.op === "no") {
         if (e.kind === "ask" && m.why === "limit") {
+          atBroker--;
+          // A live call runs already: kept for `held` (review pass 3: parked, it ran uncounted).
+          if (e.cls === "live") { e.kind = "own"; e.on = -1; return; }
           // Never its own share for the broker's limit: it waits here, asked again as those ahead resolve.
-          atBroker--; e.kind = "parked"; maxWaiting = Math.max(1, atBroker);
-          tell(e, "queued");
+          e.kind = "parked"; maxWaiting = Math.max(1, atBroker);
+          if (!e.told) { e.told = true; tell(e, "queued"); }
           return;
         }
         if (e.kind === "ask") {
@@ -307,6 +320,12 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     sock.onerror = () => { /* onclose follows, and says it */ };
   };
   if (graceMs > 0) grace = setTimeout(graceOver, graceMs);
+  // Asks the broker has left unanswered QUIET_ASK_MS, told `queued` by the relay.
+  const quietAsks = setInterval(() => {
+    const now = performance.now();
+    for (const e of entries.values()) if (e.kind === "ask" && e.cls === "background" && !e.told && now - e.askedAt >= QUIET_ASK_MS) { e.told = true; tell(e, "queued"); }
+  }, QUIET_ASK_MS / 2);
+  (quietAsks as unknown as { unref?: () => void }).unref?.();
   connect();
 
   return {
@@ -336,7 +355,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           }
           if (mine.has(f.id)) { if (f.slot === "ask") send?.({ slot: "own", id: f.id }); return; }
           const relayId = `${nonce}:${child}:${++next}`;
-          const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now(), on: -1 };
+          const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now(), on: -1, askedAt: 0, told: false };
           if (f.slot === "running") {
             e.kind = "own";
             entries.set(relayId, e);
@@ -358,7 +377,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           mine.set(f.id, relayId);
           if (open && atBroker < maxWaiting) askOf(relayId, e);
           // Parked — the broker away within the grace, or its limit reached: the child told it waits.
-          else send?.({ slot: "queued", id: f.id });
+          else { e.told = true; send?.({ slot: "queued", id: f.id }); }
         },
         attach(send) { senders.set(child, send); },
         detach() {
@@ -381,6 +400,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     },
     async stop() {
       stopped = true;
+      clearInterval(quietAsks);
       if (retry) clearTimeout(retry);
       if (grace) clearTimeout(grace);
       quietNow();

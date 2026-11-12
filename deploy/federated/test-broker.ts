@@ -294,7 +294,7 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   await s.close();
 });
 
-section("[5] a socket that closes, or goes silent, gives everything back");
+section("[5] a socket that closes, or goes silent, gives everything back (the keeping off: [14] reads it)");
 await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
   const s = await connect(b, KEYS.stable);
   const c = await connect(b, KEYS.canary);
@@ -424,7 +424,7 @@ await withBroker(registry(), async (b) => {
   await s.close();
 });
 
-section("[8] a close gives back its own, a pool goes once empty, the socket cap");
+section("[8] a close gives back its own (the keeping off), a pool goes once empty, the socket cap");
 await withBroker(registry({ slots: 3, reserve: 1 }), async (b) => {
   const s = await connect(b, KEYS.stable);
   for (const id of ["g1", "g2", "a1", "a2", "a3"]) ask(s, id, "background");
@@ -606,7 +606,7 @@ await withBroker(registry(), async (b) => {
   ok((await fetch(`http://127.0.0.1:${b.port}/health`)).ok, "and the broker answers on");
 });
 
-section("[14] a closed socket's grants kept for the brain's return; a brain back with calls running starts level");
+section("[13] a closed socket's grants kept for the brain's return; a brain back with calls running starts level");
 await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   ask(s, "g1", "background"); ask(s, "g2", "background");
@@ -658,7 +658,71 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   } finally { await b.stop(); }
 }
 
-section("[13] the base is the brain's, read the same way");
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s, "g", "background"); await s.next("go", "g");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await s.close();
+  const s2 = await connect(b, KEYS.stable);
+  s2.send({ op: "synced", id: "synced" });
+  ok(!!(await c.next("go", "c1", 1000)), "synced, naming no held, gives the brain's kept grants back at once, not at the keeping's end");
+  await s2.close(); await c.close();
+}, 5000);
+
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s, "g", "background"); await s.next("go", "g");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  // A second socket of the same brain, the first still open (half-open, as the broker sees it): its held moves the grant.
+  const s2 = await connect(b, KEYS.stable);
+  s2.send({ op: "held", id: "g", base: BASE, model: "qwen3:8b", cls: "background" });
+  ok(!!(await s2.next("go", "g")) && pool(b).background === 1, "a held naming a grant still on the brain's other open socket moves it: counted once", pool(b));
+  await s.close();
+  await sleep(100);
+  ok(!c.seen("go", "c1") && pool(b).background === 1, "the old socket's close gives nothing back: the grant is the new socket's", pool(b));
+  done(s2, "g");
+  ok(!!(await c.next("go", "c1")), "and its done on the new socket frees it");
+  await s2.close(); await c.close();
+}, 5000);
+
+await withBroker(registry({ slots: 1, reserve: 0, lease: 1 }), async (b) => {
+  // A one-slot server: stable's grant kept at its close, swept at its lease, the slot then going to canary's ask, which
+  // keeps the pool — so stable's held meets the kept grant's own pool again.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  ask(s, "g", "background"); await s.next("go", "g");
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await s.close();
+  ok(!!(await c.next("go", "c1", 2000)), "the kept grant swept at its lease, its slot goes on");
+  const s2 = await connect(b, KEYS.stable);
+  s2.send({ op: "held", id: "g", base: BASE, model: "qwen3:8b", cls: "background" });
+  ok(!!(await s2.next("go", "g", 1000)) && pool(b).background === 2, "a kept grant the lease's sweep already took back is no longer kept: the held is counted afresh, never adopted uncounted", pool(b));
+  await s2.close(); await c.close();
+}, 5000);
+
+await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
+  const s = await connect(b, KEYS.stable);
+  ask(s, "g", "background"); await s.next("go", "g");
+  await s.close();
+  const s2 = await connect(b, KEYS.stable);
+  s2.send({ op: "held", id: "g", base: BASE, model: "another-model", cls: "background" });
+  await s2.next("go", "g");
+  ok(pool(b).background === 0 && b.snapshot()["ollama/another-model"]?.background === 1, "a held naming a kept grant's id in another pool gives the kept one back: the call counted once", b.snapshot());
+  await s2.close();
+}, 5000);
+
+await withBroker(registry({ slots: 2, reserve: 0 }), async (b) => {
+  // Two sockets in turn, each with 4096 live grants, closed: no more than MAX_HELD kept for the brain.
+  for (const round of [0, 1]) {
+    const s = await connect(b, KEYS.stable);
+    for (let i = 0; i < 4096; i++) ask(s, `r${round}-${i}`, "live");
+    await s.next("go", `r${round}-4095`, 10_000);
+    await s.close();
+  }
+  await sleep(100);
+  ok(pool(b).live <= 4096, `a brain's kept grants are held to MAX_HELD, the oldest given back (${pool(b).live} kept)`, pool(b).live);
+}, 60_000);
+
+section("[14] the base is the brain's, read the same way");
 for (const base of ["http://Host.Containers.Internal:11434/v1/", "https://openrouter.ai/api/v1", "http://u:p@h:1/v1//", "not a url/", "http://[::1]:11434/v1"]) {
   ok(normalisedBase(base) === slotsBase(base), `normalisedBase matches server-portable/slots.ts's for ${base}`, [normalisedBase(base), slotsBase(base)]);
 }

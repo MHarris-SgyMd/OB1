@@ -337,6 +337,8 @@ type RelayClient = {
   /** A call running on this process's own share, after `own`, so the broker counts it too: its id to end it with. */
   running(call: ResolvedModelCall): string;
   done(id: string): void;
+  /** Its listeners off the process: the hook uninstalled. */
+  close(): void;
 };
 
 /**
@@ -346,7 +348,7 @@ type RelayClient = {
  * holds a child open). A word not come within RELAY_ANSWER_MS takes the process's own share, withdrawing the ask.
  */
 function relayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
-  const proc = process as unknown as { send?: (m: unknown) => boolean; channel?: { ref(): void; unref(): void }; on(ev: string, f: (m: unknown) => void): void };
+  const proc = process as unknown as { send?: (m: unknown) => boolean; channel?: { ref(): void; unref(): void }; on(ev: string, f: (m: unknown) => void): void; off(ev: string, f: (m: unknown) => void): void };
   if (env.OB1_SLOT_RELAY !== "ipc" || typeof proc.send !== "function") return null;
   const waiting = new Map<string, (word: "go" | "queued" | "own") => void>();
   let closed = false;
@@ -357,20 +359,23 @@ function relayClient(env: Record<string, string | undefined>, log: (line: string
     try { if (held === 1 && d === 1) proc.channel?.ref(); else if (held === 0) proc.channel?.unref(); } catch { /* the channel is going */ }
   };
   const send = (m: object) => { if (closed) return; try { proc.send!(m); } catch { /* disconnect follows */ } };
-  proc.on("message", (m: unknown) => {
+  const onMessage = (m: unknown) => {
     const f = m as { slot?: string; id?: string };
     if (typeof f?.id !== "string" || (f.slot !== "go" && f.slot !== "queued" && f.slot !== "own")) return;
     waiting.get(f.id)?.(f.slot);
-  });
-  proc.on("disconnect", () => {
+  };
+  const onDisconnect = () => {
     closed = true;
     log("background slots: the coordinator's relay is gone — every call takes this process's own share");
     for (const answer of [...waiting.values()]) answer("own");
-  });
+  };
+  proc.on("message", onMessage);
+  proc.on("disconnect", onDisconnect);
   try { proc.channel?.unref(); } catch { /* no channel to unref */ }
   const frame = (id: string, call: ResolvedModelCall, extra: object = {}) => ({ slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls, ...extra });
   return {
     gone: () => closed,
+    close() { proc.off("message", onMessage); proc.off("disconnect", onDisconnect); },
     live(call) {
       const id = `l${++next}`;
       send(frame(id, call));
@@ -881,6 +886,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     installed: true,
     uninstall: async () => {
       setModelCallHook(before);
+      relay?.close();
       ended.abort(new Error("background slots: the process is stopping"));
       const it = listener;
       listener = undefined;

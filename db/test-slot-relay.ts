@@ -295,11 +295,14 @@ section("[8] a broker frozen, a bad frame, a refused key, `off`");
     a.cmd({ cmd: "call", id: "f2" }); await a.wait("waiting", "f2");
     bp.kill("SIGSTOP");
     const t0 = performance.now();
+    a.cmd({ cmd: "call", id: "f3" });
+    ok(!(await a.wait("run", "f3", 2000)), "an ask made after the freeze is told it waits by the relay, not sent to its own share at 1 s");
     ok(await a.wait("run", "f2", 25_000), "the broker frozen, the waiting call runs on its own share");
     const took = performance.now() - t0;
     ok(took > 6000 && took < 20_000, `after the relay heard nothing for idle_s and the grace (${Math.round(took)} ms)`, took);
     ok(logs.some((l) => /silent for 8 s/.test(l)), "saying the broker went silent", logs);
-    a.cmd({ cmd: "end", id: "f1" }); a.cmd({ cmd: "end", id: "f2" });
+    ok(await a.wait("run", "f3", 5000), "and so does the one asked after the freeze");
+    a.cmd({ cmd: "end", id: "f1" }); a.cmd({ cmd: "end", id: "f2" }); a.cmd({ cmd: "end", id: "f3" });
     await kill(a);
   } finally {
     bp.kill("SIGCONT"); bp.kill("SIGKILL"); await bp.exited;
@@ -451,11 +454,12 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
 }
 
 {
-  // Gone 2 s, under the 3 s grace: the relay finds it again inside the grace, and its waiting ask never takes its own share.
+  // Gone 2 s, under the grace: the relay finds it again inside the grace (dialling every 250 ms), and its waiting ask
+  // never takes its own share. The grace is 4 s here, so a slow runner's stop and timers leave margin.
   const reg = registry({ slots: 1 });
   let b = startBroker(reg, { port: 0, log: () => {} });
   const port0 = b.port;
-  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {} });
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, graceMs: 4000 });
   await upOf(relay);
   const port = relay.port("probe");
   const got: { slot: string; id: string }[] = [];
@@ -480,12 +484,14 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
   // held on its next socket takes it back, and the other brain's ask is never handed the slot meanwhile.
   await withBroker(registry({ slots: 1 }), async (b) => {
     const pairs: { a: { end(): void }; z: { end(): void } }[] = [];
+    let refuse = false;
     // Each client's far side and what it sent before that side was open, by the client's socket.
     const sides = new Map<unknown, { peer?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] }>();
     const proxy = Bun.listen({
       port: 0,
       socket: {
         open(cli) {
+          if (refuse) { cli.end(); return; }
           const side: { peer?: { write(d: Uint8Array): number; end(): void }; buf: Uint8Array[] } = { buf: [] };
           sides.set(cli, side);
           void Bun.connect({ hostname: "127.0.0.1", port: b.port, socket: {
@@ -515,6 +521,23 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
       a.cmd({ cmd: "end", id: "run" });
       ok(await c.wait("run", "wait"), "and it goes on at the call's done");
       c.cmd({ cmd: "end", id: "wait" });
+      await c.wait("ended", "wait");
+      // The link cut again, the call ending while it is down (no reconnect for 1 s): the broker keeps its grant, and the
+      // relay's synced on its next socket gives it back at once, not at ORPHAN_MS.
+      a.cmd({ cmd: "call", id: "run2" }); await a.wait("run", "run2");
+      c.cmd({ cmd: "call", id: "wait2" }); await c.wait("waiting", "wait2");
+      refuse = true;
+      for (const p of pairs.splice(0)) { p.a.end(); p.z.end(); }
+      await until(() => relay.state().broker === "down", 2000);
+      a.cmd({ cmd: "end", id: "run2" });
+      await a.wait("ended", "run2");
+      await sleep(1000);
+      refuse = false;
+      const back = performance.now();
+      ok(await c.wait("run", "wait2", 4000), "a grant kept for a call that ended while the link was down is given back once the relay is back");
+      const tookMs = performance.now() - back;
+      ok(tookMs < 2500, `at once, on the relay's synced, not at ORPHAN_MS (${Math.round(tookMs)} ms)`, tookMs);
+      c.cmd({ cmd: "end", id: "wait2" });
       await kill(a); await kill(c);
     } finally { await relay.stop(); await other.stop(); proxy.stop(true); }
   });
@@ -540,6 +563,26 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
     ok(await until(() => pool(b).live === 1), "a live ask caught mid-ask by a loss is counted once a broker is back", { snap: b.snapshot(), s: relay.state() });
     port.detach();
   } finally { await relay.stop(); await b.stop(); }
+}
+
+{
+  // An ask the broker has not yet answered when the socket is lost: told it waits at the loss, so its pass's own 1 s
+  // bound never sends it to its own share inside the grace.
+  const port0 = 18_850 + Math.floor(Math.random() * 90);
+  const mute = Bun.serve({ port: port0, fetch: (req, srv) => srv.upgrade(req) ? undefined : new Response(null, { status: 400 }), websocket: { open(ws) { ws.send(JSON.stringify({ op: "hello", boot: "mute", idle_s: 30, max_waiting: 1024 })); }, message() {} }, hostname: "127.0.0.1" });
+  const relay = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+  await upOf(relay);
+  const port = relay.port("probe");
+  const got: { slot: string; id: string; at: number }[] = [];
+  port.attach((m) => got.push({ ...m, at: performance.now() }));
+  const t0 = performance.now();
+  port.onMessage({ slot: "ask", id: "q", base: BASE, model: "m", cls: "background" });
+  await mute.stop(true);
+  ok(await until(() => got.some((m) => m.slot === "queued" && m.id === "q"), 1000), "an ask unanswered at a loss is told it waits", got);
+  const told = (got.find((m) => m.slot === "queued")?.at ?? Infinity) - t0;
+  ok(told < 400, `at the loss, before the relay's own 500 ms word (${Math.round(told)} ms)`, told);
+  port.detach();
+  await relay.stop();
 }
 
 {
