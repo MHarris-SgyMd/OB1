@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and thirty-three (133) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and thirty-four (134) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2505,6 +2505,82 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 134 adds deliverables (SMD-1715 PR 1). A deliverable is a unit of
+agent output tied to the spec it was meant to meet (any thought's id), with a
+checkpoint (a commit hash or a content fingerprint) and a status: unverified,
+verified or corrected. The maintainer chose (2026-11-11) three things. The
+events have their own table, `deliverable_events`, as 116's priorities and
+117's open items do. The ticket's "who is working it" on 015's
+`thought_work_claims` is dropped: that table is a worker's batch pool, so each
+event stamps its maker from the envelope instead. And the key that captured a
+deliverable does not verify it, nor does a key that wrote its thought.
+
+Two definitions, the maintainer's (2026-11-12):
+- **A verification vouches for the output at the checkpoint,** not the
+  thought's text. The thought stays editable, and the events don't follow an
+  edit. A reader comparing a content-fingerprint checkpoint with the thought's
+  own fingerprint says when they differ.
+- **`corrected` is a finding on the same output:** a verification found the
+  output at its checkpoint wanting. Corrected to verified is a later
+  verification overturning that finding, at the same checkpoint. Reworked
+  output is a new deliverable, a new thought at its new checkpoint.
+
+What it adds:
+- **The events** (a capture, then each verification) carry the whole state
+  after them and are never changed: an UPDATE, DELETE or TRUNCATE is refused by
+  trigger, for the owner too.
+- **The transitions** are checked by a trigger on every insert, a raw one too:
+  unverified to verified, unverified to corrected, verified to corrected and
+  corrected to verified, and nothing else (`ob1_deliverable_transition_ok`).
+  A verification keeps the capture's spec and checkpoint.
+- **The `deliverable` facet** on the thought is the events' projection, one
+  per thought, written by a trigger as each event lands, a raw one's too. The
+  facet validator (120's, carried with a fifth kind) admits it only when its
+  payload is `ob1_deliverable_payload`'s for the newest event, so a direct
+  UPDATE of its status is refused whether the move is allowed or not. It is
+  deleted only with its thought; the events stay as history.
+- **The writers**, `record_deliverable` and `verify_deliverable`, answer
+  refusals as values:
+  - `WRITE_SCOPE_REQUIRED` for any scope but write (116's and 117's
+    `READ_ONLY_KEY` is a read key's; a capture key is refused here too);
+  - `SPEC_NOT_FOUND`, `SPEC_IS_SELF`, `THOUGHT_NOT_FOUND`;
+  - `ALREADY_A_DELIVERABLE`: another spec or checkpoint, or another key
+    recording it, which it names;
+  - `NOT_A_DELIVERABLE`;
+  - `ILLEGAL_TRANSITION`, naming from and to;
+  - `VERIFY_NOT_YOURS`: a move to verified by the key that recorded the
+    deliverable, or by a key the brain records as writing its thought's text
+    (its capture, an edit of its content, or a capture-only key's row
+    re-captured, in `thought_audit`), by its name or its agent id. A key with
+    no agent id is known by its name alone, so one renamed since isn't
+    matched. Another write key whose byte-identical submission was
+    deduplicated onto the thought leaves no record and isn't matched either
+    (SMD-4242).
+
+  `deliverable_history` reads one. `ob1_deliverable_projection_drift` and
+  `ob1_rebuild_deliverable_projection` are 068's pattern; the rebuild counts
+  only what it wrote.
+- **Who made it.** The writers stamp each event's maker from the call's
+  envelope. A role holding INSERT on the table writes any maker it names, as
+  on 117's events, so the maker and `VERIFY_NOT_YOURS` hold through the
+  writers. The transitions hold for a raw insert too.
+- **Concurrency.** The writers, the event trigger and the facet's validator
+  lock the deliverable and refuse a transaction above READ COMMITTED. The
+  trigger draws each event's `seq` and time itself, under the lock, whatever
+  the insert brought, so a deliverable's events are numbered in the order
+  written, a raw insert's too. `seq` orders one deliverable's events; it is
+  not a cursor across deliverables. The rebuild takes the deliverables in id
+  order.
+
+The new **deliverables** grant group holds `SELECT, INSERT` on the events,
+`USAGE` on their `seq`'s sequence and `SELECT, INSERT, UPDATE` on
+`thought_facets`. A thought's author is read from `thought_audit`, the
+**capture** group's `SELECT`. Postgres grants INSERT per table, so a role
+holding the group can write any facet kind, as one holding the **structure**
+group can. The operations over REST and MCP are PR 2. Needs 042, 116, 117 and
+120; a re-apply keeps the rows. test-schema [121], test-upgrade [20by],
+test-live [49].
+
 Migration 133 makes a ticket and its own rows one item to the priority writers
 (SMD-4127), as 122's read already took them. A maker's new statement on a ticket
 or on one of its board-sync rows closes, as replaced, every open statement the
@@ -2909,6 +2985,9 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
 | | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
+| **deliverables** — deliverables (134, SMD-1715): a role whose clients record and verify deliverables through `record_deliverable` and `verify_deliverable`, or read them through `deliverable_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence, its KEY SHARE locks and its author (`thought_audit`) are the **capture** group's `SELECT` and `UPDATE`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `deliverable_events` (134; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; its trigger draws `seq` by `nextval`, so the sequence row below) | `SELECT, INSERT` |
+| | sequence `deliverable_events_seq_seq` (134; the trigger draws each event's `seq` itself, under the deliverable's lock, by `nextval`, which the identity's own draw does not need) | `USAGE` |
+| | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise; Postgres grants it per table, so the group writes any facet kind, as structure does) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |

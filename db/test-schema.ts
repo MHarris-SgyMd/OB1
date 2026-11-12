@@ -205,9 +205,11 @@ function definedIn(file: string): string[] {
  * entry. 120 is 102's record_thought_relation and 111's validator, each with
  * a thread's edge (SMD-3306), and carries both: 102 last states the comment
  * on supersession_proposals [74] reads, and 111 last defines
- * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]).
+ * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
+ * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
+ * whose door and thread functions it does not define.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -7096,7 +7098,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111 and 120, its last definer (053's body plus the relation kind, [74], with distinct, [92], and the subject kind, [98])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 134, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [121])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -15110,8 +15112,8 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   // both ([108]); the sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && lastDefinerOf("record_thought_relation").startsWith("120"),
-    `120 is the last definer of the door and of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && lastDefinerOf("record_thought_relation").startsWith("120"),
+    `120 is the last definer of the door and 134 of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
     "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
@@ -15176,7 +15178,7 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
   assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("102")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
     `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 102; 102 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
-  // 102 re-applied holds 102's validator and door; 120 is their last definer, so the sections after run on its bodies.
+  // 102 re-applied holds 102's validator and door; 134 and 120 are their last definers, so the sections after run on their bodies.
   await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -15799,7 +15801,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   // which 120 carries with a thread's edge ([108]); the sentinels; the trigger; the indexes (one standing per thought,
   // since 130 per thought and key); the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "120" : "111";
+    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "134" : "111";
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
@@ -15819,8 +15821,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
     assert(/111/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 111 and the ticket`);
   }
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
-  assert(/four kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
-    "thought_facets' comment registers the fourth kind, and the validator's names 111");
+  assert(/five kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
+    "thought_facets' comment registers the subject kind (five since 134), and the validator's names 111");
 
   // The key's shape: one rule, four namespaces.
   const valid = async (k: string | null) => (await one<{ v: boolean | null }>(`SELECT subject_key_valid($1) AS v`, [k])).v === true;
@@ -17461,9 +17463,11 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   // constraint triggers, deferred to the writer's commit, the indexes, the sentinels, SECURITY INVOKER throughout, the
   // comments.
   // (The trigger function's last definer is 130, which takes its locks for a set: [116].)
-  for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink"]) {
+  for (const fn of ["record_thought_relation", "thread_relink"]) {
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
   }
+  // The validator's last definer is 134, which carries 120's with the deliverable kind ([121]).
+  assert((await functionsNamed("thought_facets_validate")) === 1 && lastDefinerOf("thought_facets_validate").startsWith("134"), `one thought_facets_validate, 134 its last definer (${lastDefinerOf("thought_facets_validate")})`);
   assert((await functionsNamed("ob1_thread_relink_subject")) === 1 && lastDefinerOf("ob1_thread_relink_subject").startsWith("130"), `one ob1_thread_relink_subject, 130 its last definer (${lastDefinerOf("ob1_thread_relink_subject")})`);
   const [shape] = await q<{ written: string | null; closed: string | null; deleted: string | null; judged: string | null; thread: string | null; bykey: string | null }>(`SELECT
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_written' AND tgrelid = 'thought_facets'::regclass) AS written,
@@ -17494,15 +17498,15 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
     assert(/120/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 120 and the ticket`);
   }
   const validatorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? "";
-  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120\.$/.test(validatorComment),
-    `the validator's comment says what a thread's edge is and names its migrations, 120 the last (${validatorComment.slice(-60)})`);
+  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120, 134\.$/.test(validatorComment),
+    `the validator's comment says what a thread's edge is and names its migrations, 120 and 134 the last (${validatorComment.slice(-60)})`);
   const closeComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["close_thought_subject(uuid, uuid, text)"])).c ?? "";
   const indexComments = await q<{ c: string | null }>(`SELECT obj_description(to_regclass(n), 'pg_class') AS c FROM unnest(ARRAY['thought_facets_relation_active_uniq', 'thought_facets_relation_thread_uniq', 'thought_facets_thread_key_idx']) n`);
   const payloadComment = (await one<{ c: string | null }>(`SELECT col_description('thought_facets'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_facets'::regclass AND attname = 'payload'`)).c ?? "";
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   assert(/113/.test(closeComment) && /since 120 a close re-links the subject''?s thread/.test(closeComment) && indexComments.every((r) => /120/.test(r.c ?? ""))
-         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130 /.test(tableComment),
-    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130: [116]) (${closeComment.slice(-200)})`);
+         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130, 134 /.test(tableComment),
+    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130, [116], and 134, [121]) (${closeComment.slice(-200)})`);
 
   // A thread kept by the triggers, through the door: written, a thought come between, one re-keyed away, one closed.
   const a = await thought("a", "2026-11-01T00:00:00Z"), b = await thought("b", "2026-11-02T00:00:00Z"), c = await thought("c", "2026-11-03T00:00:00Z"), d = await thought("d", "2026-11-04T00:00:00Z");
@@ -19597,6 +19601,297 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
   const closedAfter = await closedCount();
   assert(closedAfter === closedBefore && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
     `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} → ${closedAfter})`);
+}
+
+console.log("\n[121] Migration 134: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
+{
+  const file = files.find((f) => /^\d{3}_deliverables\.sql$/.test(f)) ?? "no NNN_deliverables.sql";
+  // Sections before re-apply 120's validator and 130's table comment, which 134 replaces: this section holds 134's.
+  await restoreShipped("thought_facets_validate");
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const thought = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text AS id`, [content])).id;
+  const MAKER_ID = "1715a000-0000-4000-8000-000000000001";
+  const MAKER = { name: "[121] maker", scope: "write", agent_id: MAKER_ID };
+  const CHECKER = { name: "[121] checker", scope: "write" };
+  type R = { outcome: string; code?: string; message?: string; from?: string; to?: string; deliverable?: Record<string, unknown> | null; event?: Record<string, unknown> };
+  const rec = async (t: string, s: string, c: string, a: unknown) =>
+    (await one<{ r: R }>(`SELECT record_deliverable($1, $2, $3, $4::jsonb) AS r`, [t, s, c, JSON.stringify(a)])).r;
+  const ver = async (t: string, st: string, a: unknown, method = "review", outcome = "read the diff against the spec") =>
+    (await one<{ r: R }>(`SELECT verify_deliverable($1, $2, $3, $4, $5::jsonb) AS r`, [t, st, method, outcome, JSON.stringify(a)])).r;
+  const facet = async (t: string) => (await one<{ p: Record<string, unknown> | null }>(`SELECT (SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'deliverable') AS p`, [t])).p;
+  const rawEvent = (t: string, event: string, status: string, spec: string, checkpoint: string) => failure(
+    `INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5, CASE WHEN $2 = 'verification' THEN 'm' END, CASE WHEN $2 = 'verification' THEN 'o' END, 'raw', false, now())`,
+    [t, event, status, spec, checkpoint]);
+
+  // The shape: the table, its indexes and triggers; the facet's index and delete trigger; twenty-two functions,
+  // each commented by 134, the reads STABLE, none SECURITY DEFINER; 134 the last definer of each and of the validator.
+  const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'deliverable_events'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
+  const idx = (await one<{ i: string }>(`SELECT string_agg(indexname, ' ' ORDER BY indexname) AS i FROM pg_indexes WHERE tablename = 'deliverable_events'`)).i;
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'deliverable_events'::regclass AND NOT tgisinternal`)).t;
+  const facetTrig = (await one<{ t: string | null }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ') AS t FROM pg_trigger WHERE tgrelid = 'thought_facets'::regclass AND tgname = 'thought_facets_deliverable_kept'`)).t;
+  const facetIdx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thought_facets_deliverable_uniq')) AS d`)).d ?? "";
+  const FNS = ["ob1_deliverable_events_guard()", "ob1_deliverable_transition_ok(text, text)", "ob1_deliverable_lock(uuid)", "ob1_deliverable_time(timestamp with time zone)",
+    "ob1_deliverable_payload(uuid)", "ob1_deliverable_event_check()", "ob1_deliverable_facet_kept()", "ob1_deliverable_id(text, text)", "ob1_deliverable_actor(jsonb, text)",
+    "ob1_deliverable_refused(text, text)", "ob1_deliverable_event_json(deliverable_events)", "ob1_deliverable_json(uuid)",
+    "ob1_deliverable_event(uuid, text, text, uuid, text, text, text, record)", "ob1_deliverable_project(uuid)", "ob1_deliverable_is_maker(deliverable_events, text, uuid)",
+    "ob1_deliverable_is_author(uuid, text, uuid)", "ob1_deliverable_event_projected()",
+    "record_deliverable(text, text, text, jsonb)", "verify_deliverable(text, text, text, text, jsonb)", "deliverable_history(text)",
+    "ob1_deliverable_projection_drift()", "ob1_rebuild_deliverable_projection()"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
+  const checkSrc = await src("ob1_deliverable_event_check()");
+  const shape: Record<string, boolean> = {
+    columns: cols === "id uuid not null, seq bigint not null, thought_id uuid not null, event text not null, status text not null, spec_ref uuid not null, checkpoint text not null, method text, outcome text, actor_name text not null, actor_agent_id uuid, actor_proved boolean not null, actor_kind text, actor_trust text, actor_scope text, at timestamp with time zone not null",
+    indexes: idx === "deliverable_events_one_capture deliverable_events_pkey deliverable_events_seq_key deliverable_events_spec deliverable_events_thought",
+    triggers: trig === "deliverable_events_append_only:27 deliverable_events_no_truncate:34 deliverable_events_projected:5 deliverable_events_transitions:7",
+    facetTrigger: facetTrig === "thought_facets_deliverable_kept:11",
+    facetIndex: /UNIQUE INDEX thought_facets_deliverable_uniq ON public\.thought_facets USING btree \(thought_id\) WHERE \(kind = 'deliverable'::text\)/.test(facetIdx),
+    commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 134 \/ SMD-1715\./.test(f.c ?? "")),
+    stable: ["ob1_deliverable_payload(uuid)", "deliverable_history(text)", "ob1_deliverable_projection_drift()", "ob1_deliverable_json(uuid)", "ob1_deliverable_is_author(uuid,text,uuid)"].every((f) => vol[f] === "s"),
+    definers: ["record_deliverable", "verify_deliverable", "deliverable_history", "ob1_deliverable_projection_drift", "ob1_rebuild_deliverable_projection", "thought_facets_validate"].every((f) => lastDefinerOf(f) === file),
+    sentinels: [/ob1:deliverable-facet-is-the-projection/, /ob1:subject-facet/, /ob1:link-facet/, /ob1:thread-edge/].every((r) => r.test(validator)) && /ob1:deliverable-transitions-on-the-event/.test(checkSrc)
+      && /ob1:deliverable-maker-from-the-envelope/.test(await src("ob1_deliverable_actor(jsonb, text)")),
+  };
+  const bad = Object.keys(shape).filter((k) => !shape[k]);
+  assert(bad.length === 0,
+    `the shape: the table's columns, its indexes and triggers; the facet's delete trigger and one-per-thought index; ${FNS.length} functions commented by 134, none SECURITY DEFINER, the reads STABLE; 134 the last definer of the writers, the read, the drift check, the rebuild and the validator, which carries 120's sentinels (failed: ${bad.join(", ") || "none"}; ${bad.includes("columns") ? cols : ""}${bad.includes("indexes") ? idx : ""}${bad.includes("triggers") ? trig : ""}${bad.includes("facetIndex") ? facetIdx : ""}${bad.includes("commented") ? fns.filter((f) => f.d || !/Migration 134 \/ SMD-1715\./.test(f.c ?? "")).map((f) => f.f).join() + ` ${fns.length}` : ""}${bad.includes("stable") ? JSON.stringify(vol) : ""}${bad.includes("definers") ? lastDefinerOf("record_deliverable") : ""})`);
+
+  // The rule: exactly the four moves.
+  const S = ["unverified", "verified", "corrected"];
+  const moves = (await q<{ m: string }>(`SELECT f || '>' || t AS m FROM unnest($1::text[]) f, unnest($1::text[]) t WHERE ob1_deliverable_transition_ok(f, t) ORDER BY 1`, [S])).map((r) => r.m).join(" ");
+  const nulls = (await one<{ a: boolean; b: boolean }>(`SELECT ob1_deliverable_transition_ok(NULL, 'verified') AS a, ob1_deliverable_transition_ok('unverified', NULL) AS b`));
+  assert(moves === "corrected>verified unverified>corrected unverified>verified verified>corrected" && nulls.a === false && nulls.b === false,
+    `the allowed moves are unverified -> verified, unverified -> corrected, verified -> corrected and corrected -> verified, and a NULL is false (${moves})`);
+
+  // record_deliverable: refusals as values, then the capture and its facet.
+  const spec = await thought("[121] the spec"), out = await thought("[121] the output"), other = await thought("[121] another thought");
+  const recRefusals = [
+    await rec(out, spec, "c0ffee", { name: "[121] reader", scope: "read" }),
+    await rec(out, spec, "c0ffee", { name: "[121] capturer", scope: "capture" }),
+    await rec(out, "00000000-0000-4000-8000-000000000120", "c0ffee", MAKER),
+    await rec(out, out, "c0ffee", MAKER),
+    await rec("00000000-0000-4000-8000-000000000121", spec, "c0ffee", MAKER),
+  ].map((r) => r.code);
+  const recRaised = [
+    await failure(`SELECT record_deliverable('not-a-uuid', $1, 'c', $2::jsonb)`, [spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, '   ', $3::jsonb)`, [out, spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, $3, $4::jsonb)`, [out, spec, "x".repeat(201), JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, E'a\\tb', $3::jsonb)`, [out, spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, 'c', '{"scope": "write"}'::jsonb)`, [out, spec]),
+  ];
+  const none = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events`)).n);
+  assert(recRefusals.join(" ") === "WRITE_SCOPE_REQUIRED WRITE_SCOPE_REQUIRED SPEC_NOT_FOUND SPEC_IS_SELF THOUGHT_NOT_FOUND"
+         && recRaised.slice(0, 4).every((r) => r.startsWith("22023 ")) && /^42501 record_deliverable needs a maker/.test(recRaised[4]) && none === 0,
+    `record_deliverable refuses a read key's and a capture key's call (WRITE_SCOPE_REQUIRED), a missing spec, the thought as its own spec and a missing thought as values; raises 22023 on a bad id, an empty, long or tabbed checkpoint, 42501 on an envelope naming nobody; writes nothing (${recRefusals.join(" ")} | ${recRaised.map((r) => r.slice(0, 40)).join(" | ")})`);
+
+  const captured = await rec(` ${out.toUpperCase()} `, spec, " c0ffee ", MAKER);
+  const unchanged = await rec(out, spec, "c0ffee", MAKER);
+  // Another key recording the same is refused, naming the maker: told `unchanged`, it read the deliverable as its own
+  // and could verify output it had submitted (review pass 3).
+  const otherKey = await rec(out, spec, "c0ffee", CHECKER);
+  const again = await rec(out, spec, "deadbeef", MAKER);
+  const p1 = await facet(out);
+  assert(captured.outcome === "captured" && captured.deliverable?.status === "unverified" && captured.deliverable?.checkpoint === "c0ffee" && captured.deliverable?.spec_ref === spec
+         && captured.deliverable?.captured_by === "[121] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
+         && unchanged.outcome === "unchanged" && unchanged.event?.id === captured.event?.id && again.code === "ALREADY_A_DELIVERABLE"
+         && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[121\] maker/.test(otherKey.message ?? "")
+         && p1?.status === "unverified" && JSON.stringify(p1) === JSON.stringify((await one<{ p: unknown }>(`SELECT ob1_deliverable_payload($1::uuid) AS p`, [out])).p),
+    `a capture: unverified, the id and checkpoint trimmed, the maker and its agent id stamped from the envelope, the facet the payload's projection; the same spec and checkpoint again unchanged for its maker and refused ALREADY_A_DELIVERABLE for another key, naming the maker; another checkpoint refused (${JSON.stringify([captured.outcome, unchanged.outcome, otherKey.code, again.code])})`);
+
+  // verify_deliverable: the moves, the maker's rule, the refusals.
+  const notOne = await ver(other, "verified", CHECKER);
+  const byMaker = await ver(out, "verified", MAKER);
+  const byMakerRenamed = await ver(out, "verified", { name: "[121] maker renamed", scope: "write", agent_id: MAKER_ID });
+  const byMakerNoId = await ver(out, "verified", { name: "[121] maker", scope: "write" });
+  const toSame = await ver(out, "unverified", CHECKER);
+  const readKey = await ver(out, "verified", { name: "[121] reader", scope: "read" });
+  const verRaised = [
+    await failure(`SELECT verify_deliverable($1, 'done', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', '', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', 'm', '  ', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', 'm', $2, $3::jsonb)`, [out, "o".repeat(4001), JSON.stringify(CHECKER)]),
+  ];
+  const ok = await ver(out, " Verified ", CHECKER);
+  const twice = await ver(out, "verified", CHECKER);
+  const back = await ver(out, "unverified", CHECKER);
+  const corrected = await ver(out, "corrected", MAKER, "rerun", "the check missed a failing case");
+  const reverified = await ver(out, "verified", CHECKER, "rerun", "the fix passes");
+  assert(notOne.code === "NOT_A_DELIVERABLE" && byMaker.code === "VERIFY_NOT_YOURS" && byMakerRenamed.code === "VERIFY_NOT_YOURS" && byMakerNoId.code === "VERIFY_NOT_YOURS"
+         && toSame.code === "ILLEGAL_TRANSITION" && toSame.from === "unverified" && toSame.to === "unverified" && readKey.code === "WRITE_SCOPE_REQUIRED"
+         && verRaised.every((r) => r.startsWith("22023 "))
+         && ok.outcome === "changed" && ok.from === "unverified" && ok.to === "verified" && (ok.deliverable?.verification as { by: string }).by === "[121] checker"
+         && twice.code === "ILLEGAL_TRANSITION" && twice.from === "verified" && twice.to === "verified"
+         && back.code === "ILLEGAL_TRANSITION" && back.from === "verified" && back.to === "unverified" && /does not move verified -> unverified/.test(back.message ?? "")
+         && corrected.outcome === "changed" && corrected.deliverable?.status === "corrected" && reverified.outcome === "changed" && reverified.deliverable?.status === "verified"
+         && (await facet(out))?.seq === reverified.event?.seq,
+    `verify_deliverable: a thought with no capture NOT_A_DELIVERABLE; the maker's move to verified refused VERIFY_NOT_YOURS by name and by agent id; unverified -> unverified, verified -> verified and verified -> unverified refused ILLEGAL_TRANSITION naming from and to; a read key WRITE_SCOPE_REQUIRED; a bad status, method or outcome raised 22023; another key verifies, the maker corrects, another verifies again (${JSON.stringify([byMaker.code, byMakerRenamed.code, toSame.code, ok.outcome, back.code, corrected.outcome, reverified.outcome])})`);
+
+  // The author: record_deliverable takes any thought, so the key that wrote it is refused its verification beside the
+  // key that recorded it (review pass 2, the maintainer's choice), and may still correct it.
+  // A key that rewrote the text after it was captured is one of its authors too (review pass 3: the first capture alone
+  // was read).
+  const AUTHOR = { name: "[121] author", scope: "write" }, EDITOR = { name: "[121] editor", scope: "write" }, THIRD = { name: "[121] third", scope: "write" };
+  const authored = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, NULL::vector) AS r`,
+    ["[121] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
+  const byRecorder = await rec(authored, spec, "a17", CHECKER);
+  const byAuthor = await ver(authored, "verified", AUTHOR);
+  const authorCorrects = await ver(authored, "corrected", AUTHOR);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(EDITOR)]);
+    await tx.query(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [authored, "[121] an author's own output, rewritten by an editor"]);
+  });
+  const editorRow = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND actor_name = $2 AND diff ? 'content'`, [authored, EDITOR.name])).n;
+  const byEditor = await ver(authored, "verified", EDITOR);
+  const byThird = await ver(authored, "verified", THIRD);
+  assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[121\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
+         && authorCorrects.outcome === "changed" && editorRow === 1 && byEditor.code === "VERIFY_NOT_YOURS" && /\[121\] editor wrote the thought/.test(byEditor.message ?? "")
+         && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
+    `a key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS, its first capture's key and a key that rewrote its text alike; the author may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, editorRow, byEditor.code, byThird.outcome])})`);
+
+  // A seq the insert brings is not the one it keeps: the trigger draws each event's under the lock (review pass 2: a raw
+  // insert's OVERRIDING SYSTEM VALUE named a seq above every later event's, and pass 1's stale-seq refusal then refused
+  // every verification after it, for good).
+  const offeredFor = await thought("[121] an output a raw seq is offered for");
+  await rec(offeredFor, spec, "5eq", MAKER);
+  const offered = await failure(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at, seq)
+    OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, '1999-01-01T00:00:00Z', 9000000000000000000)`, [offeredFor, spec]);
+  const offeredSeqs = (await q<{ s: string }>(`SELECT seq::text AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s);
+  // Its time is the trigger's too, and the facet is projected as it lands, with no rebuild (review pass 3).
+  const offeredAt = (await one<{ y: number }>(`SELECT extract(year FROM at)::int AS y FROM deliverable_events WHERE thought_id = $1::uuid AND event = 'verification'`, [offeredFor])).y;
+  const offeredFacet = await facet(offeredFor);
+  const offeredDrift = (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length;
+  const afterOffer = await ver(offeredFor, "verified", CHECKER).catch((e: Error) => ({ outcome: `raised ${e.message.split("\n")[0]}` }) as R);
+  const offeredStatuses = (await q<{ s: string }>(`SELECT status AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s).join(" ");
+  assert(offered === "taken" && offeredSeqs.length === 2 && offeredSeqs.every((s) => s !== "9000000000000000000" && BigInt(s) < 9000000000000000000n)
+         && offeredAt > 2000 && offeredFacet?.status === "corrected" && (offeredFacet?.verification as { by: string }).by === "raw" && offeredDrift === 0
+         && afterOffer.outcome === "changed" && offeredStatuses === "unverified corrected verified",
+    `a raw insert's own seq and time are replaced by the trigger's, its event is projected as it lands with no drift, the verification after it is taken and the events read in the order written (${offered.slice(0, 60)}; ${offeredSeqs.join(",")}; ${offeredAt}; ${offeredFacet?.status}, drift ${offeredDrift}; ${afterOffer.outcome}; ${offeredStatuses})`);
+
+  // Below the tools: a raw write is held to the same rules.
+  const before = JSON.stringify(await facet(out));
+  const raw = {
+    forbidden: await failure(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    allowed: await failure(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"corrected"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    closed: await failure(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    moved: await failure(`UPDATE thought_facets SET thought_id = $2::uuid WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out, other]),
+    noEvents: await failure(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'deliverable', $2::jsonb)`, [other, before]),
+    deleted: await failure(`DELETE FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    illegal: await rawEvent(out, "verification", "unverified", spec, "c0ffee"),
+    same: await rawEvent(out, "verification", "verified", spec, "c0ffee"),
+    checkpoint: await rawEvent(out, "verification", "corrected", spec, "deadbeef"),
+    recapture: await rawEvent(out, "captured", "unverified", spec, "c0ffee"),
+    orphan: await rawEvent(other, "verification", "verified", spec, "c0ffee"),
+    noSpec: await rawEvent(other, "captured", "unverified", "00000000-0000-4000-8000-000000000122", "c0ffee"),
+    eventUpdate: await failure(`UPDATE deliverable_events SET outcome = 'rewritten' WHERE thought_id = $1::uuid`, [out]),
+    eventDelete: await failure(`DELETE FROM deliverable_events WHERE thought_id = $1::uuid`, [out]),
+    eventTruncate: await failure(`TRUNCATE deliverable_events`),
+  };
+  assert(/^23514 a deliverable facet is the projection of its events: thought \S+ stands verified as of event \d+, and this row says unverified/.test(raw.forbidden)
+         && /^23514 a deliverable facet is the projection of its events: .* this row says corrected/.test(raw.allowed)
+         && /^23514 a deliverable facet stands while its thought does/.test(raw.closed) && /^23514 a deliverable facet stays on its thought/.test(raw.moved)
+         && /^23514 thought \S+ has no deliverable events/.test(raw.noEvents) && /^23001 the deliverable facet on thought \S+ is the projection of its events and goes only with its thought/.test(raw.deleted)
+         && /^23514 a deliverable's status does not move verified -> unverified/.test(raw.illegal) && /^23514 a deliverable's status does not move verified -> verified/.test(raw.same)
+         && /^23514 a deliverable keeps the spec_ref and checkpoint it was captured with/.test(raw.checkpoint) && /^23514 thought \S+ is a deliverable already/.test(raw.recapture)
+         && /^23514 thought \S+ is not a deliverable: a verification follows a capture/.test(raw.orphan) && /^23514 a deliverable's spec_ref \S+ is not a thought/.test(raw.noSpec)
+         && [raw.eventUpdate, raw.eventDelete, raw.eventTruncate].every((r) => /^23001 deliverable_events is append-only/.test(r))
+         && JSON.stringify(await facet(out)) === before,
+    `below the tools: a raw UPDATE of the facet's status refused whether the move is forbidden or allowed, a close and a move refused, a facet with no events refused, a DELETE of it alone refused; a raw event's forbidden move, a move to the same status, a changed checkpoint, a second capture, a verification with no capture and a capture of no spec refused; an event's UPDATE, DELETE and TRUNCATE refused; the facet as it was (${Object.values(raw).map((r) => r.slice(0, 30)).join(" | ")})`);
+
+  // READ COMMITTED alone: above it a read of the newest event is an older snapshot's, so the writers, a raw event and a
+  // raw facet write are each refused 0A000 (review pass 1: the trigger and the validator checked no isolation, and a raw
+  // insert under REPEATABLE READ wrote a move from a status since replaced). Two sessions are test-live [49]'s.
+  const above = async (sql: string, params: unknown[] = []) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(sql, params); });
+      return "taken";
+    } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const isolated = [
+    await above(`SELECT verify_deliverable($1, 'corrected', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await above(`SELECT record_deliverable($1, $2, 'c', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]),
+    await above(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+                 VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, 'c0ffee', 'm', 'o', 'raw', false, now())`, [out, spec]),
+    await above(`UPDATE thought_facets SET payload = payload WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+  ];
+  assert(/^0A000 verify_deliverable must run under READ COMMITTED/.test(isolated[0]) && /^0A000 record_deliverable must run under READ COMMITTED/.test(isolated[1])
+         && /^0A000 a deliverable event must run under READ COMMITTED/.test(isolated[2]) && /^0A000 a deliverable facet must run under READ COMMITTED/.test(isolated[3])
+         && JSON.stringify(await facet(out)) === before,
+    `above READ COMMITTED the writers, a raw event and a raw facet write are refused 0A000, and the facet stands as it was (${isolated.map((r) => r.slice(0, 60)).join(" | ")})`);
+
+  // The time zone: the payload's times are UTC text, so a session elsewhere computes the same projection.
+  await db.exec(`SET TimeZone = 'Asia/Kolkata'`);
+  const elsewhere = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);
+  const viaElsewhere = await failure(`UPDATE thought_facets SET payload = ob1_deliverable_payload(thought_id) WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]);
+  await db.exec(`RESET TimeZone`);
+  assert(elsewhere.length === 0 && viaElsewhere === "taken" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(String((await facet(out))?.captured_at)),
+    `the payload's times are UTC to the microsecond: no drift read from another time zone, and the projection written there admitted (${elsewhere.length}, ${viaElsewhere})`);
+
+  // Drift and the rebuild: a raw write with the validator off is found, and mended from the events.
+  await db.exec(`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`);
+  await db.query(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]);
+  await db.exec(`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`);
+  const drifted = await q<{ thought_id: string; problem: string }>(`SELECT thought_id::text AS thought_id, problem FROM ob1_deliverable_projection_drift()`);
+  const rebuilt = Number((await one<{ n: number }>(`SELECT ob1_rebuild_deliverable_projection() AS n`)).n);
+  const after = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);
+  assert(drifted.length === 1 && drifted[0].thought_id === out && drifted[0].problem === "differs" && rebuilt === 1 && after.length === 0 && JSON.stringify(await facet(out)) === before,
+    `a facet written with the validator off reads as drift (differs); the rebuild makes it the events' projection again (${JSON.stringify(drifted)}, ${rebuilt})`);
+
+  // The deliverables grant group: with capture alone beside it, it records, verifies and reads; it cannot change an event;
+  // without it, refused naming the table.
+  const ROLE = "ob1_test_deliverables";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "deliverables"] })]) await db.exec(st);
+  const asRole = async (body: (tx: { query: typeof db.query }) => Promise<unknown>) => {
+    try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
+    catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const roleOut = await thought("[121] a role's output");
+  const roleUse = await asRole(async (tx) => {
+    const r1 = (await tx.query<{ r: R }>(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb) AS r`, [roleOut, spec, JSON.stringify(MAKER)])).rows[0].r;
+    const r2 = (await tx.query<{ r: R }>(`SELECT verify_deliverable($1, 'verified', 'm', 'o', $2::jsonb) AS r`, [roleOut, JSON.stringify(CHECKER)])).rows[0].r;
+    await tx.query(`SELECT deliverable_history($1)`, [roleOut]);
+    return `${r1.outcome},${r2.outcome}`;
+  });
+  const roleUpdate = await asRole((tx) => tx.query(`UPDATE deliverable_events SET outcome = 'x' WHERE false`));
+  await db.exec(`REVOKE ALL ON deliverable_events FROM ${ROLE}`);
+  const roleWithout = await asRole((tx) => tx.query(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]));
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+  assert(roleUse.code === "" && roleUse.r === "captured,changed" && roleUpdate.code === "42501"
+         && roleWithout.code === "42501" && /permission denied for table deliverable_events/.test(roleWithout.message ?? ""),
+    `a role granted capture and deliverables alone records, verifies and reads a deliverable (the author read by the capture group's grant, the seq drawn by this group's); it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
+
+  // The thought deleted: the facet goes with it, the events stay as history; no more verifications; not drift.
+  const events = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);
+  await db.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [out]);
+  const gone = await facet(out);
+  const kept = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);
+  const late = await ver(out, "corrected", CHECKER);
+  const lateRaw = await rawEvent(out, "verification", "corrected", spec, "c0ffee");
+  const history = (await one<{ h: { deliverable: unknown; events: { event: string; status: string }[] } }>(`SELECT deliverable_history($1) AS h`, [out])).h;
+  assert(gone === null && kept === events && events === 4 && late.code === "NOT_A_DELIVERABLE" && /thought was deleted/.test(late.message ?? "") && /thought was deleted: it takes no more verifications/.test(lateRaw)
+         && history.deliverable === null && history.events.map((e) => `${e.event}:${e.status}`).join(" ") === "captured:unverified verification:verified verification:corrected verification:verified"
+         && (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length === 0,
+    `the thought deleted: its facet goes by the cascade, its ${kept} events stay; a verification refused NOT_A_DELIVERABLE as a value and as a raw event; the history the events in order with no deliverable; not drift (${JSON.stringify(history.events.map((e) => e.status))})`);
+
+  // A re-apply is a no-op: the events kept, the projection current, the rules the same.
+  const out2 = await thought("[121] a second output");
+  await rec(out2, spec, "f00d", MAKER);
+  const keptRows = JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`));
+  const keptFacet = JSON.stringify(await facet(out2));
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`)) === keptRows && JSON.stringify(await facet(out2)) === keptFacet
+         && (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length === 0 && (await ver(out2, "unverified", CHECKER)).code === "ILLEGAL_TRANSITION",
+    "a re-apply is a no-op: the events and the facet kept, no drift, the rules the same");
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
