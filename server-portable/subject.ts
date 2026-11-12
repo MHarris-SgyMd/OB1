@@ -12,7 +12,7 @@
  *      branch's or directory's only when they named none: that one is the session's work only when it says so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), each of its
  *      answers read into a key (subjectKey).
- * This is the key's version 2 (SMD-3306 PR 3). Version 1 read the first ticket on any thought's first line and asked
+ * Version 1 of the rules and the question (SMD-3306 PR 2) read the first ticket on any thought's first line and asked
  * SMD-3299's round 4 question. Against fresh blind raters on 160 canary thoughts (Verify item 1, Linear a91712e5) it
  * agreed 0.910 of the time, against the raters' own 0.987. The filed ticket was exact. The misses were:
  *   - a session header's branch ticket taken for a session that did other work (the rubric's rule 3, version 2's rule
@@ -187,19 +187,22 @@ const TITLE_LINE = /^Title: /;
 const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
 
 /**
- * A session summary's header tickets: each ticket the header lists that one of the session's listed prompts names
- * too, in any case, as the hook reads a prompt's tickets, in the header's order; none when it names none. The hook's
- * header lists the tickets the session's prompts named, and the branch's or directory's only when they named none. On
- * Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose prompts
- * named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a release,
- * a review. Version 3 (SMD-3306 PR 7a-3b-2) keys every ticket so named, a full list of three included: a thought's
- * subjects are a set since 130, and the maintainer chose one rule's set (2026-11-09). Version 2 keyed a header naming
- * one ticket alone and left several, or a full list that may have left one out, to the model to choose one among
- * (its review pass 1: the rule's first agreed with the raters 0.375 of the time on the four drawn). A denied prefix
- * the hook listed is no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The
- * hook's layout is read as it is written: the header; a blank line between its parts; `Title: …`, passed over; `Asked
- * (N prompts):` and its `- …` items, read. The first line of any other shape ends the read, so the outcome's lines,
- * and a `- ` line no `Asked` heads, never count.
+ * A session summary's header tickets: every ticket the header lists, in its order, each once, when one of the
+ * session's listed prompts names one of them, in any case, as the hook reads a prompt's tickets; else none. The hook's
+ * header lists the tickets the session's prompts named, from every prompt, and the branch's or directory's only when
+ * they named none, so a listed prompt naming one of them shows the header is the prompts' own, each of its tickets
+ * named by one: the summary lists only the first 12 prompts, each cut at 200 characters, so the ticket a later prompt
+ * or a long one's end named is on the header and on no listed line (review pass 1, run-it and cold read: the rule keyed
+ * a part of the set, a one-ticket set on a session of two). On Verify item 1 (post hoc) the header's ticket was the
+ * session's own subject for 0.857 of the sessions whose prompts named it and 0.667 of those whose prompts did not,
+ * where a session on a branch did other work: a triage, a release, a review. Version 3 (SMD-3306 PR 7a-3b-2) keys
+ * every listed ticket, a full list of three included: a thought's subjects are a set since 130, and the maintainer
+ * chose one rule's set (2026-11-09). Version 2 keyed a header naming one ticket alone and left several, or a full list
+ * that may have left one out, to the model to choose one among (its review pass 1: the rule's first agreed with the
+ * raters 0.375 of the time on the four drawn). A denied prefix the hook listed is no ticket (isTicket), and a header
+ * listing more than the hook's three is not the hook's. The hook's layout is read as it is written: the header; a
+ * blank line between its parts; `Title: …`, passed over; `Asked (N prompts):` and its `- …` items, read. The first line
+ * of any other shape ends the read, so the outcome's lines, and a `- ` line no `Asked` heads, never count.
  */
 export function sessionHeaderTickets(content: string): string[] {
   const lines = content.split(HOOK_LINE);
@@ -207,16 +210,16 @@ export function sessionHeaderTickets(content: string): string[] {
   const listed = at < 0 ? undefined : HEADER_TICKETS.exec(lines[at])?.[1].split(", ");
   if (listed === undefined || listed.length > HEADER_TICKETS_MAX) return [];
   const tickets = [...new Set(listed.filter(isTicket))];
-  const named = new Set<string>();
+  const names = tickets.map((t) => new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i"));
   let asked = false;
   for (const line of lines.slice(at + 1)) {
     if (line.trim() === "" || (!asked && TITLE_LINE.test(line))) continue;
     if (!asked && ASKED_LINE.test(line)) asked = true;
     else if (asked && line.startsWith("- ")) {
-      for (const t of tickets) if (new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i").test(line)) named.add(t);
+      if (names.some((n) => n.test(line))) return tickets;
     } else break;
   }
-  return tickets.filter((t) => named.has(t));
+  return [];
 }
 
 /**
@@ -321,6 +324,11 @@ export function ownSubjectsOf(raw: string, max = 200): string[] | null {
 
 /** The most subjects a thought holds: 130's record_thought_subjects's (ob1:subject-set). */
 export const SUBJECT_SET_MAX = 3;
+/**
+ * The most of an answer's subjects read, and kept on a recipe: an answer of hundreds, invented ones among them, kept
+ * every one on each subject's lineage row (review pass 1, cold read).
+ */
+export const SUBJECT_ANSWERS_READ = 8;
 
 /** How much of each of an answer's subjects its key is read from: a ticket past the 200th code point is read whole. */
 const SUBJECT_READ_MAX = 2000;
@@ -389,11 +397,14 @@ export function subjectCurrent(by: string | null, judge: string | null, reasonin
  * with the question's own reasoning (`cfg.subjectReasoning`), through providerCall, which refuses before the request
  * when the egress gate says the row may not leave (kind `egress`) and bounds it by `cfg.timeoutMs`. Each subject the
  * answer gives is read whole into a key (subjectKey), in the answer's order: a ticket or a release only when the
- * thought's own text names it, a PR when its number appears there, none when it named nothing a key holds. `keys` are
- * those keys, each once, until SUBJECT_SET_MAX of them, and `answers` the subjects they were read from, each at most
- * 200 code points, for a recipe: the answer's own up to the one that gave the last key, or all of them when fewer keys
- * came; null when the answer gave no subjects (ownSubjectsOf). No key is none named: [] when every answer named
- * nothing a key holds, or there were none.
+ * thought's own text names it, a PR when its number appears there, none when it named nothing a key holds. Of the
+ * first SUBJECT_ANSWERS_READ subjects, `keys` are those keys, each once, until SUBJECT_SET_MAX of them, a phrase left
+ * out that names, in any case, a ticket the answer gives as a key (`smd-12` or `smd-12 tests` beside `SMD-12`: review
+ * pass 1, run-it and cold read, a ticket standing twice, once as a phrase thread); and `answers` the subjects they were
+ * read from, each at most 200 code points, for a recipe: the answer's own up to the one that gave the last key, or all
+ * read when fewer keys came, those naming nothing ("" or null) left out (ownSubjectsOf); null when the answer gave no
+ * subjects. No key is none named: [] when every answer named nothing a key holds, or there were none. A PR answered
+ * beside a ticket is its own subject: the question asks for a PR only where the work is no ticket's.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answers: string[] | null; keys: string[] }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {
@@ -409,12 +420,14 @@ export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: E
     : kind === "pr" ? has(new RegExp(`(?<![0-9])0*${value}(?![0-9])`))
     : has(new RegExp(`(?<![0-9.])${value.split(".").map((d) => `0*${d}`).join("\\.")}(?![0-9]|\\.[0-9])`));
   if (whole === null) return { raw, answers: null, keys: [] };
+  const read = whole.slice(0, SUBJECT_ANSWERS_READ).map((one) => ({ one, key: subjectKey(one, named) }));
+  const tickets = new Set(read.flatMap((r) => (r.key?.startsWith("ticket:") ? [r.key.slice("ticket:".length)] : [])));
+  const echoes = (key: string) => key.startsWith("phrase:") && [...key.slice("phrase:".length).toUpperCase().matchAll(TICKETS_IN_TEXT)].some((m) => tickets.has(m[1]));
   const answers: string[] = [], keys: string[] = [];
-  for (const one of whole) {
+  for (const { one, key } of read) {
     if (keys.length >= SUBJECT_SET_MAX) break;
     answers.push(cutByCodePoint(one, 200));
-    const key = subjectKey(one, named);
-    if (key !== null && !keys.includes(key)) keys.push(key);
+    if (key !== null && !echoes(key) && !keys.includes(key)) keys.push(key);
   }
   return { raw, answers, keys };
 }

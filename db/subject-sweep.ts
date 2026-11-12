@@ -68,7 +68,7 @@
  * under the pool's key: one the model named nothing for is not asked again until its text, the ticket it is filed under
  * or the key changes ("asked, got nothing"), and the out-of-date subjects standing on it are closed through
  * close_thought_subjects (130), which closes them only while they are still the set read at the text read, so a subject
- * a pass wrote since stands. An answer that is not JSON with a subject, a timeout (a following run's when a one-token
+ * a pass wrote since stands. An answer that is not JSON with subjects, a timeout (a following run's when a one-token
  * call answers after it, or a stopping run's) or the provider refusing the thought's length, a row the egress gate
  * refuses, and a key the door refuses each fail the claim, counted, the subject standing; `--retry-failed` puts them
  * back in the pool. A judge model 10 of whose last 48 answers gave no subject — unread, or naming nothing — stops the
@@ -398,7 +398,7 @@ class TimedOutDown extends ProviderDown {
  * What record_thought_subjects answers (130): `added` when it wrote and closed nothing, `closed` when it closed and
  * wrote nothing (a set narrowed), `replaced` when it did both, `kept` when it did neither.
  */
-export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; ids?: string[]; stale?: boolean; gone?: boolean };
+export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; ids?: string[]; added?: number; stale?: boolean; gone?: boolean };
 
 /**
  * One thought's subjects through 130's door, one way's set (SMD-3306 PR 7a-3b-1: a set of one until PR 7a-3b-2's rules
@@ -1543,8 +1543,8 @@ async function sweep(
    * provider again, their claims marked hung (HUNG_MARK), failed — one whose call was aborted in hand counted there,
    * out of setBack, as the probe after the abort finds it so, its place under --limit taken again. `pollsLost`, no
    * thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed back taken twice, as an edited
-   * one is. `subjects`, no thoughts' count either: the subjects the recorded ones were given, each of a set (SMD-3306 PR
-   * 7a-3b-2). `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
+   * one is. `subjects`, no thoughts' count either: the subjects written on the recorded ones, each of a set, one kept
+   * standing not counted (SMD-3306 PR 7a-3b-2). `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
    * named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
    * when it released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and
    * those whose failure's release a lost poll handed back, which the failure count leaves out.
@@ -2544,9 +2544,12 @@ async function sweep(
     if (w.action === "kept") n.kept++;
     else if (w.action === "added" || w.action === "replaced" || w.action === "closed") {
       // `closed`: a set narrowed to the keys found, the rest closed — a replacement, as a one-key door's answer said.
+      // `added` beside a standing set is one widened, its keys kept and more written: a replacement too, as the dry run
+      // counts one, and of the subjects only those written count (PR 7a-3b-2's review pass 1, cold read and run-it: a
+      // widened set read as new, and a set's kept keys as recorded).
       n[by]++;
-      n.subjects += keys.length;
-      if (w.action !== "added") {
+      n.subjects += w.added ?? keys.length;
+      if (row.standing_keys !== null) {
         n.replaced++;
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
         // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key).
@@ -2877,14 +2880,15 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's tickets"], [n.model, `by ${cfg.judgeModel}`]]);
-  // A set of several keys counted as its subjects, on the thoughts the clauses after count (SMD-3306 PR 7a-3b-2): the
-  // words of one-key sets as before.
-  const recordedWords = n.subjects === recorded ? `${recorded} subject(s) recorded` : `${n.subjects} subject(s) recorded on ${recorded} thought(s)`;
+  // The thoughts recorded, and the subjects written on them where those differ, as a set's can (SMD-3306 PR 7a-3b-2):
+  // the words of one-key sets as before.
+  const recordedWords = n.subjects === recorded ? `${recorded} subject(s) recorded${by ? ` (${by})` : ""}`
+    : `${recorded} thought(s)' subjects recorded (${by ? `${by}; ` : ""}${n.subjects} subject(s) written)`;
   const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.deadlocked, "failed on a write the server rolled back to break a deadlock"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const pollsLost = n.pollsLost ? `; ${n.pollsLost} poll(s) lost to the scheduler's statement_timeout` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";
-  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recordedWords}${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}${pollsLost}`);
+  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recordedWords}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}${pollsLost}`);
   if (endedBy) {
     err(endedBy.line);
     return endedBy.code;

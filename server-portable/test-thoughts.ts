@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -2735,9 +2735,9 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     && H(hook("SMD-2125", ["look at SMD-21250, smd-2125x and xsmd-2125"])) === "" && H(hook("SMD-2125", [], "", "")) === ""
     && H(hook("SMD-2125", [], "", "SMD-2125 implementation")) === "" && H(hook("SMD-2125", ["continue"], "", "Continue SMD-2125 work")) === "",
     "…none when only the outcome names it (its `- ` lines included), when a prompt names only a longer id, with no prompt, or when only the title does: the harness's own title may name the branch's ticket (review pass 3)");
-  assert(H(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === "SMD-2615" && H(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614"
+  assert(H(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === "SMD-2615,SMD-2614" && H(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614"
       && H(hook("FY-2026, CWE-79, SMD-12", ["FY-2026 and CWE-79 for SMD-12, then SMD-13"])) === "SMD-12",
-    "…of a header naming several, those a prompt names (version 2 left them to the model); a denied prefix the hook listed beside one is no second ticket; a full list of three is read (version 2: none, as one may have been left out)");
+    "…of a header naming several, every one once a listed prompt names one, the header the prompts' own (review pass 1: a ticket only a prompt the summary does not list named was left out; version 2 left them all to the model); a denied prefix the hook listed beside one is no second ticket; a full list of three is read (version 2: none, as one may have been left out)");
   assert(H(hook("SMD-3, SMD-1, SMD-2", ["start smd-1", "then SMD-3 and SMD-2"])) === "SMD-3,SMD-1,SMD-2" && H(hook("SMD-1, SMD-2", ["smd-2 and smd-1"])) === "SMD-1,SMD-2"
       && H(hook("SMD-1, SMD-1", ["smd-1"])) === "SMD-1" && H(hook("SMD-1, SMD-2, SMD-3, SMD-4", ["smd-1"])) === "" && H(hook("SMD-1, SMD-2", ["neither"])) === "",
     "…every ticket of the header a prompt names, a full list of three, in the header's order, each once; none from a header listing more than the hook's three, or none a prompt names");
@@ -2765,6 +2765,12 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   const branchOnly = renderSummary(hookSession("michaelharris/smd-55-x", ["continue"], [], "Continue SMD-55 work"));
   assert(H(fromHook) === "SMD-2125" && /^Session summary — SMD-55 — /.test(branchOnly) && H(branchOnly) === "",
     `…as the hook's own renderSummary writes a session: its prompts' ticket keyed; the branch's, named by its title alone, not (${JSON.stringify(fromHook.split("\n")[0])})`);
+  // Review pass 1 (PR 7a-3b-2, run-it): a ticket named only by a prompt the summary does not list — the 13th, or past
+  // the 200th character of a long one — is on the header, and keyed with the rest.
+  const late = renderSummary(hookSession("michaelharris/smd-1-x", ["start smd-1", ...Array.from({ length: 11 }, (_, i) => `step ${i + 2}`), "and SMD-2 too"], ["SMD-1", "SMD-2"]));
+  const longPrompt = renderSummary(hookSession("michaelharris/smd-3-x", [`${"x".repeat(230)} SMD-4`, "SMD-3 too"], ["SMD-4", "SMD-3"]));
+  assert(/^Session summary — SMD-1, SMD-2 — /.test(late) && !/and SMD-2 too/.test(late) && H(late) === "SMD-1,SMD-2" && /^Session summary — SMD-4, SMD-3 — /.test(longPrompt) && H(longPrompt) === "SMD-4,SMD-3",
+    `…a ticket only an unlisted prompt names, or one past a long prompt's cut, keyed with the header's rest (${H(late)} | ${H(longPrompt)})`);
   // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
   const two = hook("SMD-7, SMD-8", ["start smd-8", "and smd-7"]);
   assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" })
@@ -2871,7 +2877,8 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   const answers = ['{"subjects":["PR 727"],"deliverables":[]}', '{"subjects":[],"deliverables":[]}', "not json", JSON.stringify({ subjects: [`${"x ".repeat(97)}SMD-12345 work`], deliverables: [] }),
     '{"subjects":["SMD-123"],"deliverables":[]}', '{"subjects":["OB1 release 2.0.0"],"deliverables":[]}', '{"subjects":["PR 727"],"deliverables":[]}', '{"subjects":["v02.0.0"],"deliverables":[]}',
     '{"subjects":["PR 727"],"deliverables":[]}',
-    '{"subjects":["SMD-1","PR 9","SMD-1\'s tests","SMD-2","SMD-3"],"deliverables":[]}', '{"subjects":["SMD-999","the dashboard review","SMD-5"],"deliverables":[]}', '{"subject":"SMD-5","deliverables":[]}'];
+    '{"subjects":["SMD-1","PR 9","SMD-1\'s tests","SMD-2","SMD-3"],"deliverables":[]}', '{"subjects":["SMD-999","the dashboard review","SMD-5"],"deliverables":[]}', '{"subject":"SMD-5","deliverables":[]}',
+    '{"subjects":["smd-8 tests","SMD-8","smd-8","PR 3"],"deliverables":[]}', JSON.stringify({ subjects: [...Array.from({ length: 8 }, (_, i) => `SMD-90${i}`), "SMD-5"], deliverables: [] })];
   const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   /** An answer's subjects and keys, each list comma-joined, null when none was read. */
   const got = (a: { answers: string[] | null; keys: string[] }) => ({ answers: a.answers?.join(",") ?? null, keys: a.keys.join(",") });
@@ -2934,6 +2941,14 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
       `…a subject naming nothing the thought names dropped, the rest kept, every answer read kept (${JSON.stringify(got(dropped))})`);
     const legacy = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(got(legacy).keys === "ticket:SMD-5" && got(legacy).answers === "SMD-5", `…and version 2's one subject read as a list of one (${JSON.stringify(got(legacy))})`);
+    // Review pass 1 (run-it, cold read): a phrase naming, in any case, a ticket the answer gives is that ticket again,
+    // left out, not a second subject; a PR beside a ticket is its own. Only the first SUBJECT_ANSWERS_READ are read.
+    const echo = await askOwnSubject(cfg, { content: "Work on smd-8, merged in PR 3.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(echo).keys === "ticket:SMD-8,pr:3" && got(echo).answers === "smd-8 tests,SMD-8,smd-8,PR 3",
+      `…a phrase echoing a ticket of the answer left out, its PR kept (${JSON.stringify(got(echo))})`);
+    const many = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(many).keys === "" && many.answers?.length === SUBJECT_ANSWERS_READ && SUBJECT_ANSWERS_READ === 8,
+      `…and an answer of many read to its eighth: the ninth's ticket, which the thought names, unread (${JSON.stringify(got(many))})`);
   } finally {
     stub.stop(true);
   }

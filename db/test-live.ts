@@ -9322,7 +9322,7 @@ if (want("10h")) {
     asked = ownCalls;
     const narrowed = await sweep({ limit: 3 });
     const narrowLeft = (await subjects()).filter((x) => x.thought === narrow && x.standing).map((x) => x.key).join(",");
-    assert(narrowed.code === 0 && tally(narrowed) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (0 with a new key)"
+    assert(narrowed.code === 0 && tally(narrowed) === "1 thought(s)' subjects recorded (1 by stub-judge; 0 subject(s) written), 1 in place of a standing one (0 with a new key)"
         && narrowLeft === "pr:727" && ownCalls === asked + 1,
       `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
     await sql`DELETE FROM thoughts WHERE id = ${narrow}::uuid`;
@@ -9357,9 +9357,9 @@ if (want("10h")) {
       const [headerLeft, oldLeft, manyLeft] = [await standingKeys(header), await standingKeys(old), await standingKeys(many)];
       const setsWould = setsDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
       assert(/^would: of 3 thought\(s\), record 2 by its session header's tickets \(1 in place of a standing subject, 0 with a new key\); ask stub-judge about 1\./.test(setsWould)
-          && setsRun.code === 0 && tally(setsRun) === "6 subject(s) recorded on 3 thought(s) (2 by the session header's tickets, 1 by stub-judge), 1 in place of a standing one (0 with a new key)"
+          && setsRun.code === 0 && tally(setsRun) === "3 thought(s)' subjects recorded (2 by the session header's tickets, 1 by stub-judge; 6 subject(s) written), 1 in place of a standing one (0 with a new key)"
           && ownCalls === asked + 1,
-        `a header's set, a version 2 header subject and a model's set: counted by the subjects recorded on the thoughts (exit ${setsRun.code}, ${ownCalls - asked} asked: ${tally(setsRun)}; dry: ${setsWould.slice(0, 200)})`);
+        `a header's set, a version 2 header subject and a model's set: the thoughts recorded, and the subjects written on them (exit ${setsRun.code}, ${ownCalls - asked} asked: ${tally(setsRun)}; dry: ${setsWould.slice(0, 200)})`);
       assert(JSON.stringify(headerLeft.map((x) => x.key).sort()) === JSON.stringify(["ticket:SMD-78", "ticket:SMD-79"]) && headerLeft.every((x) => x.by === "first_line" && x.judge === "subject:first_line@r3")
           && oldLeft.length === 1 && oldLeft[0].key === "ticket:SMD-77" && oldLeft[0].judge === "subject:first_line@r3",
         `the header's two tickets one rule's set; the version 2 subject found again under version 3 (${JSON.stringify([headerLeft, oldLeft].map((l) => l.map((x) => [x.key, x.judge])))})`);
@@ -9367,6 +9367,46 @@ if (want("10h")) {
           && manyLeft.every((x) => x.by === "model" && x.judge === "subject:stub-judge@p3r" && x.recipe?.prompt_version === 3 && JSON.stringify(x.recipe?.answers) === JSON.stringify(["SMD-71", "SMD-72", "SMD-71's tests", "SMD-73"])),
         `the model's set: its first three keys, each once, the fourth answer unread, the answers read on each recipe (${JSON.stringify(manyLeft.map((x) => [x.key, x.recipe?.answers]))})`);
       await sql`DELETE FROM thoughts WHERE id IN (${header}::uuid, ${old}::uuid, ${many}::uuid)`;
+      // A set widened at the same rule and pass: the header's one ticket standing, current, at a text whose header now
+      // lists two. The door keeps it and writes the other (`added`, beside a standing set): the run counts a replacement
+      // with a new key, one subject written, as the dry run does (review pass 1, cold read: the run counted neither).
+      const widen = await seed(twoTickets("SMD-80", "SMD-81"));
+      await sql`SELECT record_thought_subjects(${widen}::uuid, ARRAY['ticket:SMD-80'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${await fpOf(widen)}, NULL)`;
+      const widenDry = await sweep({ dryRun: true });
+      asked = ownCalls;
+      const widenRun = await sweep({ limit: 3 });
+      const widenWould = widenDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
+      const widenLeft = (await standingKeys(widen)).map((x) => x.key).sort();
+      assert(/^would: of 1 thought\(s\), record 1 by its session header's tickets \(1 in place of a standing subject, 1 with a new key\);/.test(widenWould)
+          && widenRun.code === 0 && tally(widenRun) === "1 subject(s) recorded (1 by the session header's tickets), 1 in place of a standing one (1 with a new key)"
+          && JSON.stringify(widenLeft) === JSON.stringify(["ticket:SMD-80", "ticket:SMD-81"]) && ownCalls === asked,
+        `a set widened at the same rule: a replacement with a new key, its one subject written counted, the dry run and the run alike (exit ${widenRun.code}: ${tally(widenRun)}; dry: ${widenWould.slice(0, 160)})`);
+      // …pooled again at the same text, its set current: finished as current, not written again (review pass 1, mutant:
+      // rulesAgree on the first key alone lived).
+      await sql`SELECT requeue_thought_work(${POOL}, ${widen}::uuid)`;
+      const widenAgain = await sweep({ limit: 1 });
+      assert(tally(widenAgain) === "0 subject(s) recorded; 1 already current", `a current set pooled again is finished as current (${tally(widenAgain)})`);
+      // …and at a moved text the rule finding the same set: kept, by a dry run and a run, no subject counted recorded
+      // (review pass 1, mutant: the dry run's kept on the first key alone lived).
+      await sql`SELECT update_thought(${widen}::uuid, ${twoTickets("SMD-80", "SMD-81") + "\n\nEdited."})`;
+      const keptDry = await sweep({ dryRun: true });
+      const keptRun = await sweep({ limit: 1 });
+      assert(/would: of 1 thought\(s\), record none by the rules, keep 1 found the same way at the text read now/.test(keptDry.stdout)
+          && tally(keptRun) === "0 subject(s) recorded; 1 kept, at the text read now" && (await standingKeys(widen)).length === 2,
+        `a set the rule finds again at a moved text is kept, run and dry run alike (${tally(keptRun)}; dry: ${keptDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
+      await sql`DELETE FROM thoughts WHERE id = ${widen}::uuid`;
+      // The upgrade's own path: version 2's model keyed one ticket of a two-ticket session; version 3's header rule finds
+      // both, no model asked — a replacement with a new key, two subjects written on one thought, the key held among
+      // them (review pass 1, mutant: the new key counted only when every key was new lived).
+      const upgraded = await seed(twoTickets("SMD-68", "SMD-69"));
+      await sql`SELECT record_thought_subjects(${upgraded}::uuid, ARRAY['ticket:SMD-68'], 'model', 'subject:stub-judge@p2r', NULL, ${await fpOf(upgraded)}, NULL)`;
+      const upgradedDry = await sweep({ dryRun: true });
+      asked = ownCalls;
+      const upgradedRun = await sweep({ limit: 1 });
+      assert(/record 1 by its session header's tickets \(1 in place of a standing subject, 1 with a new key\)/.test(upgradedDry.stdout)
+          && tally(upgradedRun) === "1 thought(s)' subjects recorded (1 by the session header's tickets; 2 subject(s) written), 1 in place of a standing one (1 with a new key)" && ownCalls === asked,
+        `a model's one key replaced by the header rule's two: a new key, run and dry run alike (${tally(upgradedRun)}; dry: ${upgradedDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
+      await sql`DELETE FROM thoughts WHERE id = ${upgraded}::uuid`;
     })();
     // In a function of its own: test-live's module body is past the size TypeScript's control flow analysis takes
     // (TS2563).
@@ -9459,7 +9499,7 @@ if (want("10h")) {
     const ruleSetLeft = (await subjects()).filter((x) => x.thought === ruleSet && x.standing).map((x) => x.key);
     const ruleSetWould = ruleSetDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
     assert(/^would: of 1 thought\(s\), record 1 by its session header's tickets \(1 in place of a standing subject, 0 with a new key\)/.test(ruleSetWould)
-        && ruleSetSwept.code === 0 && tally(ruleSetSwept) === "1 subject(s) recorded (1 by the session header's tickets), 1 in place of a standing one (0 with a new key)"
+        && ruleSetSwept.code === 0 && tally(ruleSetSwept) === "1 thought(s)' subjects recorded (1 by the session header's tickets; 0 subject(s) written), 1 in place of a standing one (0 with a new key)"
         && JSON.stringify(ruleSetLeft) === JSON.stringify(["ticket:SMD-92"]) && ownCalls === asked,
       `a rule's set holding the rule's key and another is narrowed to the rule's key, a replacement and no new key, a dry run alike (exit ${ruleSetSwept.code}: ${tally(ruleSetSwept)}; left ${ruleSetLeft.join(",")}; dry: ${ruleSetWould.slice(0, 160)})`);
     await sql`DELETE FROM thoughts WHERE id = ${ruleSet}::uuid`;
