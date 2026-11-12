@@ -1500,8 +1500,8 @@ export const CONTRIB_DIR = join(HERE, "..");
  * `views.sql` is one, so it is here. Every `extensions/<name>/schema.sql` would be here ([50]
  * checks; none is left since SMD-2311 made the six plugins), and the order among them is free — no file references another's
  * table — but ops-views.sql reads columns enhanced-thoughts adds to `thoughts`,
- * and its three guarded views exist only over smart-ingest's and
- * entity-extraction's tables, so the community files must come first.
+ * and its two guarded views exist only over entity-extraction's tables, so
+ * the community files must come first.
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
   "recipes/adaptive-capture-classification/schema.sql",

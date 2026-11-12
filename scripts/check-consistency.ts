@@ -11815,7 +11815,6 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["schemas/provenance-chains/README.md", { name: { why: KEPT.UPSTREAM, lines: 2 } }],
   ["schemas/provenance-chains/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["schemas/readwise-books/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
-  ["schemas/smart-ingest/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["schemas/thought-audit/README.md", { name: { why: KEPT.TRACKER, lines: 1 } }],
   ["schemas/typed-reasoning-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 4 } }],
   ["schemas/typed-reasoning-edges/schema.sql", { name: { why: KEPT.UPSTREAM, lines: 1 } }],

@@ -12,7 +12,7 @@ import { PLUGIN_NAME_RE } from "../../db/config.mjs";
 import { PLUGINS } from "../../plugins/registry.ts";
 import type { Principal } from "../auth.ts";
 import { mayCall, scopeOf, TOOL_NAMES, type ToolName } from "../tools.ts";
-import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape } from "../plugin-sdk.ts";
+import type { GuiPage, HookAnswer, HookRequest, Method, PluginContext, PluginHook, PluginManifest, PluginOperation, PluginOutcome, PluginScope, Shape, Trust } from "../plugin-sdk.ts";
 import { CALLS, pathFields, type CallOptions } from "./calls.ts";
 import { failure } from "./refusal.ts";
 import { withSpan } from "../spans.ts";
@@ -301,7 +301,10 @@ export function contextFor(plugin: string, { core, principal, track }: OpDeps): 
   return {
     // Read when the handler asks, so an operation that touches no table never reaches the store.
     db: { tx: (fn) => core.pluginTx(plugin, fn) },
-    caller: { name: principal.name, scope: principal.scope as PluginScope, ...(principal.agentId ? { agentId: principal.agentId } : {}) },
+    caller: {
+      name: principal.name, scope: principal.scope as PluginScope, ...(principal.agentId ? { agentId: principal.agentId } : {}),
+      trust: (declared?: Trust | null) => core.trustOf(principal, declared ?? null) as Promise<Trust | null>,
+    },
     // The brain's model, as the caller for this plugin (core/model.ts): the gate reads the caller's key and the plugin.
     model: { chat: (req) => core.pluginChat({ actor: principal.name, plugin }, req) },
     call: async <K extends ToolName>(name: K, input: unknown) => {
