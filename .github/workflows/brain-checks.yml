@@ -280,6 +280,12 @@ jobs:
       # environment failure). No key; the live run that calls it is cut 2c-3.
       - name: The agent runner's Linear moves
         run: bun scripts/agent-runner/board-check.ts --self-check
+      # SMD-4087 cut 2c-3: the live run's wiring on stubs — the claim (claims.ts), the Linear
+      # moves (board.ts), the hand-back comment and the release wrapped around run.ts, with a
+      # stubbed fetch, a stubbed GraphQL client and a stub run() returning each outcome. No key,
+      # no network, no model; the run with the real keys and a model needs stable's /api route.
+      - name: The agent runner's live run
+        run: bun scripts/agent-runner/live-check.ts --self-check
       # SMD-4089: the runner's identity setup tool on a temp directory — the shape
       # gate, the 0600 write, the no-symlink write (O_NOFOLLOW), the owner-only read
       # and the directory check. No clipboard, no network, no key; placing the real

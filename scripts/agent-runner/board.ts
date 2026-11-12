@@ -31,6 +31,8 @@ export const STATES_QUERY = `query($team: String!, $name: String!) {
 export const ISSUE_QUERY = `query($id: String!) { issue(id: $id) { id labelIds } }`;
 /** One move: set the state, and the labels when they change. `labelIds` replaces the issue's whole set. */
 export const ISSUE_UPDATE = `mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`;
+/** One comment on the issue, by its uuid: the runner's computed hand-back text (decision 12). */
+export const COMMENT_CREATE = `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`;
 
 /** A one-line, shortened fragment of an error, for a result's detail. */
 const oneLine = (v: unknown): string => {
@@ -88,5 +90,22 @@ export async function handBack(gql: Gql, cfg: Config, input: { identifier: strin
     return await update(gql, issue.uuid, mutation);
   } catch (e) {
     return { ok: false, detail: `handing ${input.identifier} back (${input.kind}) failed: ${oneLine(e)}` };
+  }
+}
+
+/**
+ * Comment on the ticket on a hand-back (docs, "On a failure"; decision 12): the runner's computed text, no model text,
+ * one `commentCreate` over the runner's key. Resolves the issue's uuid first (`CommentCreateInput.issueId` is the uuid,
+ * as the update's `id` is). Never throws — a Linear outage is a `{ ok: false }` the orchestrator records as owed. The
+ * caller (cut 2c-3) computes the body from the run's own fields and applies the secret scan before it reaches here.
+ */
+export async function comment(gql: Gql, identifier: string, body: string): Promise<MoveResult> {
+  try {
+    const issue = await issueFacts(gql, identifier);
+    if (!issue.ok) return issue;
+    const data = await strict<{ commentCreate: { success: boolean } | null }>(gql, COMMENT_CREATE, { input: { issueId: issue.uuid, body } });
+    return data.commentCreate?.success === true ? { ok: true } : { ok: false, detail: `Linear refused the comment on ${identifier}` };
+  } catch (e) {
+    return { ok: false, detail: `commenting on ${identifier} failed: ${oneLine(e)}` };
   }
 }
