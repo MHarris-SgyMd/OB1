@@ -664,11 +664,21 @@ await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
   ask(c, "c1", "background"); await c.next("queued", "c1");
   await s.close();
   const s2 = await connect(b, KEYS.stable);
-  s2.send({ op: "synced", id: "n2" });
-  ok(!(await c.next("go", "c1", 400)), "another relay's synced (another prefix) leaves this relay's kept grants kept");
   s2.send({ op: "synced", id: "n1" });
   ok(!!(await c.next("go", "c1", 1000)), "its own relay's synced, naming no held, gives them back at once, not at the keeping's end");
-  await s2.close(); await c.close();
+  await s2.close();
+  // A coordinator replaced: its kept grant (prefix n3) is given back at the new relay's synced (n4), no open socket
+  // speaking for n3.
+  const s3 = await connect(b, KEYS.stable);
+  done(c, "c1");
+  ask(s3, "n3:g", "background"); await s3.next("go", "n3:g");
+  ask(c, "c2", "background"); await c.next("queued", "c2");
+  await s3.close();
+  const s4 = await connect(b, KEYS.stable);
+  s4.send({ op: "synced", id: "n4" });
+  ok(!!(await c.next("go", "c2", 1000)), "a replaced coordinator's kept grants are given back at its successor's synced, not kept 5 s");
+  await s4.close();
+  await c.close();
 }, 5000);
 
 await withBroker(registry({ slots: 1, reserve: 0 }), async (b) => {
@@ -786,6 +796,74 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 8 }), async (b) => {
   raw.destroy();
   await c.close();
 });
+
+/** A brain's socket that stops answering when told: a raw client that never answers pings, its frames sent by hand. */
+async function rawBrain(b: Broker, key: string) {
+  const net = await import("node:net");
+  const frame = (text: string) => { const body = Buffer.from(text), mask = Buffer.from([1, 2, 3, 4]); return Buffer.concat([Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]), mask, Buffer.from(body.map((x, i) => x ^ mask[i % 4]))]); };
+  const sock = net.connect(b.port, "127.0.0.1");
+  let got = "", closed = false;
+  sock.on("data", (d: Buffer) => { got += d.toString("latin1"); });
+  sock.on("close", () => { closed = true; });
+  sock.on("error", () => {});
+  await new Promise<void>((r) => sock.on("connect", () => r()));
+  sock.write(`GET /v1/slots HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-brain-key: ${key}\r\n\r\n`);
+  await until(() => got.includes(" 101 "), 3000);
+  return { send: (m: object) => sock.write(frame(JSON.stringify(m))), saw: (s: string) => got.includes(s), closed: () => closed, destroy: () => sock.destroy() };
+}
+
+await withBroker(registry({ slots: 2, reserve: 1, idle: 8 }), async (b) => {
+  // A brain's ask moved off its silent old socket (a raw one, skipped once silent) onto a new socket while the pool held
+  // nothing else: the pool is kept, the new ask granted there, and the next waits within background's room of one.
+  const old = await rawBrain(b, KEYS.third);
+  const s = await connect(b, KEYS.third);
+  ask(s, "g", "background"); await s.next("go", "g");
+  old.send({ op: "ask", id: "x", base: BASE, model: "qwen3:8b", cls: "background" });
+  await until(() => pool(b).waiting.third === 1, 2000);
+  await sleep(4500);
+  done(s, "g");
+  await sleep(200);
+  ask(s, "x", "background");
+  ok(!!(await s.next("go", "x")), "the moved ask is granted on the new socket");
+  ask(s, "y", "background");
+  ok(!!(await s.next("queued", "y", 1000)) && !s.seen("go", "y") && Object.keys(b.snapshot()).length === 1 && pool(b).background === 1, "one pool for the key, background within its room of one: the next waits", b.snapshot());
+  old.destroy(); await s.close();
+});
+
+await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
+  // The dead side of a link a brain replaces: pinged as its new socket opens, ended within PROBE_MS, not at idle_s.
+  const old = await rawBrain(b, KEYS.third);
+  old.send({ op: "ask", id: "g", base: BASE, model: "qwen3:8b", cls: "background" });
+  await until(() => old.saw("go"), 2000);
+  const t0 = performance.now();
+  const s = await connect(b, KEYS.third);
+  ok(await until(() => old.closed(), 5000) && performance.now() - t0 < 4000, `the brain's older socket, unanswering, is ended at its new one's open (${Math.round(performance.now() - t0)} ms)`, performance.now() - t0);
+  const c = await connect(b, KEYS.canary);
+  ask(c, "c1", "background");
+  ok(!!(await c.next("go", "c1", 3000)), "its grant given back for another brain");
+  await s.close(); await c.close();
+});
+
+{
+  // Slot time charged only to a socket's last sign of life: a grant into a socket that then went dead, the test's clock
+  // moved 100 s on before it ends, charges its brain nothing past its last frame.
+  let t = 1_000_000;
+  const b = startBroker(registry({ slots: 2, reserve: 0, idle: 30 }), { port: 0, log: () => {}, now: () => t, orphanMs: 0 });
+  try {
+    const old = await rawBrain(b, KEYS.third);
+    old.send({ op: "ask", id: "g", base: BASE, model: "qwen3:8b", cls: "background" });
+    await until(() => old.saw("go"), 2000);
+    const keep = await connect(b, KEYS.canary);
+    ask(keep, "k", "live"); await keep.next("go", "k");
+    t += 100_000;
+    const s = await connect(b, KEYS.third);
+    await until(() => old.closed(), 5000);
+    await sleep(100);
+    const used = pool(b).used.third ?? 0;
+    ok(used < 1000, `the dead socket's grant charged its brain only to its last frame, not the 100 s after (${used} ms)`, used);
+    await s.close(); await keep.close();
+  } finally { await b.stop(); }
+}
 
 section("[14] the base is the brain's, read the same way");
 for (const base of ["http://Host.Containers.Internal:11434/v1/", "https://openrouter.ai/api/v1", "http://u:p@h:1/v1//", "not a url/", "http://[::1]:11434/v1"]) {

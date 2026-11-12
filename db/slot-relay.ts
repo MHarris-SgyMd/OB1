@@ -56,7 +56,7 @@ export type ChildFrame =
   | { slot: "running"; id: string; base: string; model?: string | null; cls: "live" | "background" }
   | { slot: "done"; id: string };
 /** What the relay sends a child. */
-export type RelayFrame = { slot: "go" | "queued" | "own" | "lapsed" | "back"; id: string };
+export type RelayFrame = { slot: "go" | "queued" | "own" | "lapsed" | "back"; id: string; why?: "away" };
 
 /** One child's link to the relay: messages from it, and the channel to send it on while it runs. */
 export type RelayPort = {
@@ -144,10 +144,11 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   const saidOnce = new Set<string>();
   const once = (what: string, line: string) => { if (!saidOnce.has(what)) { saidOnce.add(what); log(line); } };
 
-  const tell = (e: Entry, slot: RelayFrame["slot"]) => {
+  /** `away` on an `own` given for want of a broker — the grace, or past it — which the child asks again at `back`. */
+  const tell = (e: Entry, slot: RelayFrame["slot"], away = false) => {
     const send = senders.get(e.child);
     if (!send) return;
-    try { send({ slot, id: e.childId }); } catch { /* the child is going: its detach clears it */ }
+    try { send({ slot, id: e.childId, ...(away ? { why: "away" as const } : {}) }); } catch { /* the child is going: its detach clears it */ }
   };
   const forget = (relayId: string) => {
     const e = entries.get(relayId);
@@ -168,9 +169,11 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     if (!open) return;
     // A live call refused for the limit, counted once room frees (review pass 4: it waited for the next socket).
     for (const [relayId, e] of entries) if (e.kind === "own" && e.retry) { e.retry = false; e.on = epoch; toBroker({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls }); }
-    for (const [relayId, e] of entries) {
+    // Oldest first, by when each began waiting: asks asked again after a back carry their age (review pass 5).
+    const parked = [...entries].filter(([, e]) => e.kind === "parked").sort((x, y) => x[1].at - y[1].at);
+    for (const [relayId, e] of parked) {
       if (atBroker >= maxWaiting) return;
-      if (e.kind === "parked") askOf(relayId, e);
+      askOf(relayId, e);
     }
   };
   /** Past the grace with no broker: asks take their own shares at once (the grace's timer, not the clock, decides). */
@@ -179,7 +182,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   const graceOver = () => {
     grace = null;
     if (open) return;
-    for (const [relayId, e] of [...entries]) if (e.kind === "parked") { forget(relayId); tell(e, "own"); }
+    for (const [relayId, e] of [...entries]) if (e.kind === "parked") { forget(relayId); tell(e, "own", true); }
   };
   const helloOf = (sock: WebSocket, m: { boot?: string; idle_s?: number; max_waiting?: number }) => {
     const restarted = boot !== null && m.boot !== boot;
@@ -383,7 +386,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
             return;
           }
           // No broker past the grace: its own share at once.
-          if (pastGrace()) { send?.({ slot: "own", id: f.id }); return; }
+          if (pastGrace()) { send?.({ slot: "own", id: f.id, why: "away" }); return; }
           entries.set(relayId, e);
           mine.set(f.id, relayId);
           if (open && atBroker < maxWaiting) askOf(relayId, e);

@@ -47,8 +47,8 @@
 // idle_s (pings unanswered), or not reading its frames (1 MiB backed up in the broker, past the kernel's buffers) —
 // withdraws every ask it had waiting, and keeps its grants counted ORPHAN_MS (5 s): a brain back within it takes each
 // again with `held`, same id, counted once (PR 3b-1's relay re-registers its running calls so); after it, they are
-// given back. A brain asks its asks again on its next socket; an ask or held naming a grant or ask on another of its
-// sockets still open moves it. The broker keeps its own liveness, on real time: it pings a socket quiet a third of
+// given back. A brain asks its asks again on its next socket; an ask naming a grant or ask on another of its sockets
+// still open moves it, and a held naming a grant. The broker keeps its own liveness, on real time: it pings a socket quiet a third of
 // idle_s, ends one silent idle_s (Bun's own idle clock is reset by every send, so a dead socket being granted to never
 // closed), and grants nothing into one silent half of it.
 // GET /health answers `ok`, with no key and no figures.
@@ -101,6 +101,8 @@ export const MAX_HELD = 4096;
  * frees them after this.
  */
 export const ORPHAN_MS = 5000;
+/** How long a brain's older socket, pinged as its newer one opens, may go unanswering before it is ended. */
+export const PROBE_MS = 2000;
 
 /** A brain's background slot time is remembered with this half-life, so the turn evens slot time over the last
  *  minutes: longer than most calls, since a call is never cut short (review pass 3: at 60 s, a brain of 71 s calls had
@@ -226,6 +228,10 @@ type Conn = {
   end: () => void;
   /** The id prefix of the relay that sent `synced` on it, once it has. */
   syncedPrefix?: string;
+  /** heardAt on the test's clock, which charges slot time; when the brain's newer socket asked it whether it lives. */
+  heardClock: number;
+  probedAt?: number;
+  closed?: boolean;
   ping?: () => void;
 };
 type Ask = { kind: "ask"; conn: Conn; id: string; pool: Pool; first: boolean; maxWaitMs: number; at: number };
@@ -297,7 +303,11 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     if (!p) { p = { key, server, live: new Set(), bg: new Set(), liveBy: reg.brains.map(() => 0), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 }; pools.set(key, p); }
     return p;
   };
-  const prune = (p: Pool) => { if (p.live.size === 0 && p.bg.size === 0 && p.queues.every((q) => q.size === 0)) pools.delete(p.key); };
+  // Only the pool the map holds: a pool pruned while a move still had it in hand must not drop its successor (review
+  // pass 5: a moved ask's withdrawal pruned the pool the new ask then queued into, unseen, over-granted).
+  const prune = (p: Pool) => { if (pools.get(p.key) === p && p.live.size === 0 && p.bg.size === 0 && p.queues.every((q) => q.size === 0)) pools.delete(p.key); };
+  /** An ask taken out of its queue without a prune: its pool may be in hand. */
+  const withdraw = (x: Ask) => { if (x.conn.held.get(x.id) === x) x.conn.held.delete(x.id); if (x.pool.queues[x.conn.brainAt].delete(x)) x.conn.waiting--; };
   const room = (p: Pool) => p.bg.size < Math.max(1, p.server.slots - p.server.reserve) && p.live.size + p.bg.size < p.server.slots;
   const warming = () => clock() < warmUntil;
 
@@ -403,7 +413,10 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       if (!x.pool.bg.delete(x)) return;
       const now = clock();
       decay(x.pool, now);
-      x.pool.used[x.conn.brainAt] += now - x.at;
+      // Charged up to its socket's last sign of life, not past it: a grant into a socket that died, or kept for one that
+      // never came back, is no slot time the brain had (review pass 5: two dead grants of 15 s starved it 40 s after).
+      const until = x.conn.closed ? Math.min(now, x.conn.heardClock) : now;
+      x.pool.used[x.conn.brainAt] += Math.max(0, until - x.at);
     }
     watch(x.pool);
     pump(x.pool);
@@ -422,7 +435,13 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     // two coordinators on one key, one's synced freed the other's, which its held then counted past the room).
     if (m.op === "synced") {
       conn.syncedPrefix = id;
-      for (const oid of [...orphansBy[conn.brainAt].keys()]) if (oid.startsWith(`${id}:`)) freeOrphan(conn.brainAt, oid);
+      // Its own kept grants no held named; and any of a relay no open socket of the brain speaks for — a coordinator
+      // replaced, whose old calls ended with it (review pass 5: kept 5 s past a restart).
+      const speaking = new Set([...connsBy[conn.brainAt]].map((c) => c.syncedPrefix).filter((x): x is string => !!x));
+      for (const oid of [...orphansBy[conn.brainAt].keys()]) {
+        const pre = oid.includes(":") ? oid.slice(0, oid.indexOf(":")) : "";
+        if (pre === id || !speaking.has(pre)) freeOrphan(conn.brainAt, oid);
+      }
       return;
     }
     // A brain's liveness check (SMD-3379 PR 3b-1): answered, nothing else.
@@ -437,7 +456,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     if (conn.held.size >= MAX_HELD || (m.op === "ask" && cls === "background" && conn.waiting >= MAX_WAITING)) { conn.sent({ op: "no", id, why: "limit" }); return; }
     const server = serverOf.get(normalisedBase(m.base));
     if (!server) { conn.sent({ op: "no", id, why: "server" }); return; }
-    const p = poolFor(server, model);
+    let p = poolFor(server, model);
     // A `held` outside the warm-up — a brain back after its socket dropped, its calls still running — is counted as
     // it is: those calls run whether counted or not. Said once a socket, since it can take background past its room.
     if (m.op === "held" && !warming() && !conn.heldLate) { conn.heldLate = true; log(`brain ${conn.brain.name} (socket ${conn.id}) re-registers held slots outside the warm-up: counted, past the room if need be`); }
@@ -455,6 +474,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
           return;
         }
         release(o);
+        p = poolFor(server, model);
       }
       // Its grant on another socket of its own still open — a half-open one the broker has not yet closed — moved, not
       // counted twice (review pass 3).
@@ -477,7 +497,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       if (c === conn) continue;
       const x = c.held.get(id);
       if (x?.kind === "grant" && x.pool === p && !x.live) { c.held.delete(id); x.conn = conn; conn.held.set(id, x); conn.sent({ op: "go", id }); return; }
-      if (x?.kind === "ask" && x.pool === p) { olderAt = Math.min(olderAt, x.at); release(x); }
+      if (x?.kind === "ask" && x.pool === p) { olderAt = Math.min(olderAt, x.at); withdraw(x); }
     }
     // A brain coming to a pool where others are at work starts level with the least of them, not at nothing: else it
     // would hold every background slot until its time caught up with theirs, a half-life of the others waiting (review
@@ -505,7 +525,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       if (!brain) return new Response("no brain has that key\n", { status: 401 });
       const brainAt = reg.brains.indexOf(brain);
       if (sockets[brainAt] >= MAX_SOCKETS) return new Response(`brain ${brain.name} has ${MAX_SOCKETS} sockets open already\n`, { status: 429 });
-      const conn: Conn = { id: nextConn++, brain, brainAt, heldLate: false, waiting: 0, sent: () => {}, held: new Map(), heardAt: performance.now(), end: () => {} };
+      const conn: Conn = { id: nextConn++, brain, brainAt, heldLate: false, waiting: 0, sent: () => {}, held: new Map(), heardAt: performance.now(), heardClock: clock(), end: () => {} };
       if (srv.upgrade(req, { data: conn })) return undefined;
       return new Response("a WebSocket upgrade, please\n", { status: 426 });
     },
@@ -526,12 +546,17 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         conn.end = () => { try { ws.terminate(); } catch { /* closing already */ } };
         conn.ping = () => { try { ws.ping(); } catch { /* closing */ } };
         conn.heardAt = performance.now();
+        conn.heardClock = clock();
+        // The brain's other sockets asked at once whether they live: one that is the dead side of the link this socket
+        // replaces is ended in 2 s, not at idle_s (review pass 5: a coordinator swapped behind one held the room 15 s).
+        for (const c of connsBy[conn.brainAt]) if (c !== conn) { c.probedAt = performance.now(); c.ping?.(); }
         sayConn(conn.brainAt, "open", `brain ${conn.brain.name} connected (socket ${conn.id})`);
         conn.sent({ op: "hello", brain: conn.brain.name, boot, lease_s: reg.leaseS, idle_s: reg.idleS, warm_s_left: Math.max(0, Math.ceil(warmUntil - clock()) / 1000), max_waiting: MAX_WAITING, max_held: MAX_HELD, max_sockets: MAX_SOCKETS, max_frame: MAX_FRAME, servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve, per_model: s.perModel })) });
       },
-      pong(ws: ServerWebSocket<Conn>) { ws.data.heardAt = performance.now(); },
+      pong(ws: ServerWebSocket<Conn>) { ws.data.heardAt = performance.now(); ws.data.heardClock = clock(); },
       message(ws: ServerWebSocket<Conn>, msg: string | Buffer) {
         ws.data.heardAt = performance.now();
+        ws.data.heardClock = clock();
         if (typeof msg !== "string") { ws.data.sent({ op: "no", id: null, why: "bad" }); return; }
         onFrame(ws.data, msg);
       },
@@ -540,6 +565,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         conn.sent = () => {};
         sockets[conn.brainAt]--;
         connsBy[conn.brainAt].delete(conn);
+        conn.closed = true;
         // Its asks first, then its grants: a grant given back first would be handed to the closing socket's own next
         // ask, a grant no one would give back (review pass 1: a background slot held for lease_s, the pool wedged).
         const all = [...conn.held.values()];
@@ -550,10 +576,12 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         // A relay already synced on a newer socket has named every call it still runs there: its grants left here are
         // given back, not kept (review pass 4).
         const synced = [...connsBy[conn.brainAt]].map((c) => c.syncedPrefix).filter((x): x is string => !!x);
+        // A brain whose relay has synced on another socket keeps nothing of this one: its own grants are there, and a
+        // replaced coordinator's never come back (review pass 5).
         const token = ++keepings;
         let kept = 0;
         for (const x of grants) {
-          if (!keep || x.kind !== "grant" || synced.some((pre) => x.id.startsWith(`${pre}:`))) { release(x); continue; }
+          if (!keep || x.kind !== "grant" || synced.length) { release(x); continue; }
           const mine = orphansBy[conn.brainAt];
           freeOrphan(conn.brainAt, x.id);
           mine.set(x.id, { g: x, token });
@@ -579,6 +607,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const now = performance.now();
     for (const set of connsBy) for (const c of [...set]) {
       if (now - c.heardAt > idleMs) { c.end(); continue; }
+      if (c.probedAt !== undefined && c.heardAt < c.probedAt && now - c.probedAt > PROBE_MS) { c.end(); continue; }
       if (now - c.heardAt > idleMs / 3) c.ping?.();
     }
     for (const p of [...pools.values()]) pump(p);
