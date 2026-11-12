@@ -8958,37 +8958,81 @@ if (want("10h")) {
         && narrowLeft === "pr:727" && ownCalls === asked + 1,
       `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
     await sql`DELETE FROM thoughts WHERE id = ${narrow}::uuid`;
-    // A set's close, or its write, the server rolls back to break a deadlock (40P01; 130's NOT HERE: a move across two
-    // keys can still deadlock with a delete at a thread's gap): each thought failed for --retry-failed, asked once, its
-    // set standing, said once and counted, and the run goes on (review pass 3, cold read: rethrown, it ended the run).
-    // Two out-of-date sets under an older question, one the model names nothing for (the close), one it names PR 727
-    // for (the door); a trigger refuses each update of their facets as the server's deadlock check would.
-    const deadSets: string[] = [];
-    for (const [text, keys] of [["[10h] a deadlocked set, nothing in it to name", ["phrase:a deadlocked set", "pr:7311"]],
-      ["[10h] a merged pull request 727, its set deadlocked", ["phrase:a deadlocked write", "pr:7312"]]] as const) {
-      const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
-      await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array([...keys], "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
-        (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
-      await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
-      deadSets.push(id);
-    }
-    await sql.unsafe(`CREATE FUNCTION zz_set_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01'; END $$;
-      CREATE TRIGGER zz_set_deadlock BEFORE UPDATE ON thought_facets FOR EACH ROW WHEN (OLD.thought_id IN ('${deadSets[0]}'::uuid, '${deadSets[1]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock()`);
-    asked = ownCalls;
-    let deadRun: Awaited<ReturnType<typeof sweep>>;
-    try {
-      deadRun = await sweep({ limit: 3 });
-    } finally {
-      await sql.unsafe(`DROP TRIGGER zz_set_deadlock ON thought_facets; DROP FUNCTION zz_set_deadlock()`);
-    }
-    const deadClaims = await Promise.all(deadSets.map((id) => claimOf(id)));
-    const deadStanding = (await subjects()).filter((x) => deadSets.includes(x.thought) && x.standing).length;
-    assert(deadRun.code === 1 && ownCalls === asked + 2 && deadStanding === 4
-        && deadClaims.every((c) => c?.status === "failed" && c.last_error?.startsWith("the server rolled its write back to break a deadlock (deadlock detected (the suite's))") === true)
-        && (deadRun.stderr.match(/: the server rolled its write back to break a deadlock/g) ?? []).length === 1
-        && tally(deadRun) === "0 subject(s) recorded; 2 failed on a write the server rolled back to break a deadlock — among them, 2 with an out-of-date subject still standing",
-      `a set's close or write rolled back to break a deadlock fails its thought, asked once, its set standing, said once, and the run goes on (exit ${deadRun.code}, ${ownCalls - asked} asked, ${deadStanding} standing, claims ${JSON.stringify(deadClaims)}: ${tally(deadRun)}; ${deadRun.stderr.trim().slice(0, 300)})`);
-    for (const id of deadSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+    // In a function of its own: test-live's module body is past the size TypeScript's control flow analysis takes
+    // (TS2563).
+    await (async () => {
+      // A set's close, or its write, the server rolls back to break a deadlock (40P01; 130's NOT HERE: a move across two
+      // keys can still deadlock at its commit) at each of its three tries: each thought failed for --retry-failed, asked
+      // once, its set standing, said once and counted, and the run goes on (review pass 3, cold read: rethrown, it ended
+      // the run; pass 4, cold read and run-it: failed at the first, a one-off left it failed under a scheduler). Two
+      // out-of-date sets under an older question, one the model names nothing for (the close), one it names PR 727 for
+      // (the door); a trigger refuses each update of their facets as the server's deadlock check would, counting.
+      const deadSets: string[] = [];
+      for (const [text, keys] of [["[10h] a deadlocked set, nothing in it to name", ["phrase:a deadlocked set", "pr:7311"]],
+        ["[10h] a merged pull request 727, its set deadlocked", ["phrase:a deadlocked write", "pr:7312"]]] as const) {
+        const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
+        await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array([...keys], "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
+          (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
+        await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
+        deadSets.push(id);
+      }
+      // …and a thought no subject stands on, its first write rolled back so: failed and counted, not as out of date
+      // (review pass 4, mutant: the "among them" count was unheld for a thought holding no subject).
+      deadSets.push((await sql`INSERT INTO thoughts (content, metadata) VALUES ('[10h] a merged pull request 727, never keyed, its write deadlocked', '{}'::jsonb) RETURNING id::text AS id`)[0].id as string);
+      await sql`SELECT requeue_thought_work(${POOL}, ${deadSets[2]}::uuid)`;
+      await sql.unsafe(`CREATE SEQUENCE zz_set_deadlock_tries;
+        CREATE FUNCTION zz_set_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('zz_set_deadlock_tries'); RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01'; END $$;
+        CREATE TRIGGER zz_set_deadlock BEFORE INSERT OR UPDATE ON thought_facets FOR EACH ROW WHEN (NEW.thought_id IN ('${deadSets[0]}'::uuid, '${deadSets[1]}'::uuid, '${deadSets[2]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock()`);
+      asked = ownCalls;
+      let deadRun: Awaited<ReturnType<typeof sweep>>;
+      let deadTries = 0;
+      try {
+        deadRun = await sweep({ limit: 4 });
+        deadTries = Number(((await sql`SELECT last_value FROM zz_set_deadlock_tries`) as { last_value: string }[])[0].last_value);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER zz_set_deadlock ON thought_facets; DROP FUNCTION zz_set_deadlock(); DROP SEQUENCE zz_set_deadlock_tries`);
+      }
+      const deadClaims = await Promise.all(deadSets.map((id) => claimOf(id)));
+      const deadStanding = (await subjects()).filter((x) => deadSets.includes(x.thought) && x.standing).length;
+      assert(deadRun.code === 1 && ownCalls === asked + 3 && deadStanding === 4 && deadTries === 9
+          && deadClaims.every((c) => c?.status === "failed" && c.last_error?.startsWith("the server rolled its write's transaction back to break a deadlock, 3 times (deadlock detected (the suite's))") === true)
+          && (deadRun.stderr.match(/: the server rolled its write's transaction back to break a deadlock, 3 times/g) ?? []).length === 1
+          && tally(deadRun) === "0 subject(s) recorded; 3 failed on a write the server rolled back to break a deadlock — among them, 2 with an out-of-date subject still standing",
+        `a set's close or write rolled back to break a deadlock at each of its three tries fails its thought, asked once, its set standing, said once, and the run goes on (exit ${deadRun.code}, ${ownCalls - asked} asked, ${deadTries} tries, ${deadStanding} standing, claims ${JSON.stringify(deadClaims)}: ${tally(deadRun)}; ${deadRun.stderr.trim().slice(0, 300)})`);
+      for (const id of deadSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+      // A deadlock as the server's come, at the commit (120's re-link is a deferred trigger), once: the transaction run
+      // again lands, the close's set closed and the door's subject written, each asked once, nothing failed (pass 4).
+      const onceSets: string[] = [];
+      for (const [text, keys] of [["[10h] a set deadlocked once, nothing in it to name", ["phrase:a set deadlocked once", "pr:7313"]],
+        ["[10h] a merged pull request 727, its set deadlocked once", ["phrase:a write deadlocked once", "pr:7314"]]] as const) {
+        const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
+        await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array([...keys], "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
+          (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
+        await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
+        onceSets.push(id);
+      }
+      await sql.unsafe(`CREATE SEQUENCE zz_set_deadlock_once;
+        CREATE FUNCTION zz_set_deadlock_once() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF nextval('zz_set_deadlock_once') = 1 THEN RAISE EXCEPTION 'deadlock detected (the suite''s, at the commit)' USING ERRCODE = '40P01'; END IF; RETURN NULL; END $$;
+        CREATE CONSTRAINT TRIGGER zz_set_deadlock_once AFTER UPDATE ON thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          WHEN (OLD.thought_id IN ('${onceSets[0]}'::uuid, '${onceSets[1]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock_once()`);
+      asked = ownCalls;
+      let onceRun: Awaited<ReturnType<typeof sweep>>;
+      let onceFired = 0;
+      try {
+        onceRun = await sweep({ limit: 3 });
+        onceFired = Number(((await sql`SELECT last_value FROM zz_set_deadlock_once`) as { last_value: string }[])[0].last_value);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER zz_set_deadlock_once ON thought_facets; DROP FUNCTION zz_set_deadlock_once(); DROP SEQUENCE zz_set_deadlock_once`);
+      }
+      const onceClaims = await Promise.all(onceSets.map((id) => claimOf(id)));
+      const onceLeft = (await subjects()).filter((x) => onceSets.includes(x.thought) && x.standing).map((x) => `${x.thought === onceSets[0] ? "close" : "door"}:${x.key}`).join(",");
+      assert(onceRun.code === 0 && ownCalls === asked + 2 && onceFired > 1 && onceClaims.every((c) => c?.status === "succeeded") && onceLeft === "door:pr:727"
+          && !/deadlock/.test(onceRun.stderr)
+          && tally(onceRun) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (1 with a new key); 1 the model named nothing for (2 out-of-date subject(s) closed)",
+        `a set's close or write rolled back at its commit to break a deadlock once is run again and lands, each asked once, nothing failed (exit ${onceRun.code}, ${ownCalls - asked} asked, the trigger ran ${onceFired} time(s), claims ${JSON.stringify(onceClaims)}, standing ${onceLeft}: ${tally(onceRun)}; ${onceRun.stderr.trim().slice(0, 300)})`);
+      for (const id of onceSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+    })();
     // The pass's rule narrowing a set its rule found: counted recorded (review pass 1, mutant: a `closed` answer went
     // uncounted). The pass's backlog drained first.
     await extractRun();
@@ -11212,6 +11256,39 @@ if (want("10h")) {
         `a finish past a scheduler's budget at the window's lock fails the thought, its out-of-date subject standing and counted, its answer judged after it neither finished nor closed (exit ${finishRun?.code ?? "still running at 30 s"}, its answer ${JSON.stringify(finishAnswer)}, ${finishStanding} standing): ${finishRun?.stdout.trim().slice(-200)} | ${finishRun?.stderr.trim().slice(0, 300)}`);
       await drop([finishT]);
 
+      await (async () => {
+        // …and a finish rolled back at its window's write to break a deadlock, beside a door's write past the budget in the
+        // same run: the answer, judged after its claim failed, neither finished nor closed, and each failure's line said,
+        // neither silencing the other (SMD-3306 PR 7a-3b-1's review pass 4, mutants: answer.f/c's reset on the deadlock
+        // and its own said flag were unheld).
+        const [deadFinT, deadDoorT] = await seedAll(["Budget note 20: nothing to name here, its finish's window write deadlocked.", "Budget note 21: sweep-pass-good work, its door held past the budget beside a deadlock."]);
+        const [{ f: deadFinF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${deadFinT}::uuid`) as { f: string }[];
+        await recordSubject(sql, { id: deadFinT, fingerprint: deadFinF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+        const dropDeadWindow = await caseTrigger("zz_window_deadlock", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value ~ '"t":"${deadFinT}","m":"[^"]*","f":true'`,
+          "RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01';");
+        const deadDoorHolder = new SQL({ url: URL_!, max: 1 });
+        const ddh = await deadDoorHolder.reserve();
+        let deadFinRun: SweepRun | null = null;
+        try {
+          await ddh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${deadDoorT}::uuid::text, 0))`;
+          deadFinRun = await orHung(settled(sweep({ session: BUDGET_SESSION, signal: backstop() })));
+        } finally {
+          await ddh`SELECT pg_advisory_unlock_all()`.catch(() => {});
+          ddh.release();
+          await deadDoorHolder.close({ timeout: 5 });
+          await dropDeadWindow();
+        }
+        const deadFinAnswer = (await windowOf())?.answers.find((a) => a.t === deadFinT);
+        const [{ standing: deadFinStanding }] = (await sql`SELECT count(*)::int AS standing FROM thought_facets WHERE thought_id = ${deadFinT}::uuid AND kind = 'subject' AND valid_until IS NULL`) as { standing: number }[];
+        const deadFinClaims = (await Promise.all([deadFinT, deadDoorT].map((id) => claimOf(id)))).map((c) => c?.status).join(",");
+        assert(deadFinRun?.code === 1 && deadFinClaims === "failed,failed" && deadFinAnswer?.g === "n" && deadFinAnswer.f === false && deadFinAnswer.c === false && deadFinStanding === 1
+            && (deadFinRun.stderr.match(/: the server rolled its write's transaction back to break a deadlock, 3 times/g) ?? []).length === 1
+            && (deadFinRun.stderr.match(/: its write passed the scheduler's statement_timeout/g) ?? []).length === 1
+            && tally(deadFinRun) === "0 subject(s) recorded; 1 failed on a write past the statement_timeout, 1 failed on a write the server rolled back to break a deadlock — among them, 1 with an out-of-date subject still standing",
+          `a finish rolled back at its window's write to break a deadlock fails the thought, its answer judged after neither finished nor closed, its line said beside a write past the budget's (exit ${deadFinRun?.code ?? "still running at 30 s"}, claims ${deadFinClaims}, its answer ${JSON.stringify(deadFinAnswer)}, ${deadFinStanding} standing): ${deadFinRun?.stdout.trim().slice(-200)} | ${deadFinRun?.stderr.trim().slice(0, 300)}`);
+        await drop([deadFinT, deadDoorT]);
+      })();
+
       // …and one elsewhere over a thought costs the run its poll, not its end, what it held back in the pool, said once:
       // its claim, the case holding the claims' table against writes from the claim's gate on, after which a following
       // run claims again a follow later, through the gate.
@@ -11498,6 +11575,38 @@ if (want("10h")) {
       assert(doorWaited && hardRun?.code === 130 && (await claimOf(hardT))?.status === "pending" && !/its write passed/.test(hardRun.stderr) && tally(hardRun) === "0 subject(s) recorded",
         `a hard stop while a thought's own write waits past a scheduler's budget leaves the thought to the stop's hand-back, not failed, counted or said (waited ${doorWaited}, exit ${hardRun?.code ?? "still running at 30 s"}): ${hardRun?.stdout.trim().slice(-200)} | ${hardRun?.stderr.trim().slice(0, 300)}`);
       await drop([hardT]);
+
+      await (async () => {
+        // …and a hard stop while a thought's own write waits, the write then rolled back to break a deadlock: the thought
+        // the stop's to hand back, neither failed nor counted nor said (SMD-3306 PR 7a-3b-1's review pass 4, mutant: the
+        // deadlock's hard-stop check was unheld).
+        const [hardDeadT] = await seedAll(["Budget note 19: sweep-pass-good work, its door held as the run stops twice, then deadlocked."]);
+        const dropHardDead = await caseTrigger("zz_hard_deadlock", "BEFORE INSERT OR UPDATE", "thought_facets", `NEW.thought_id = '${hardDeadT}'::uuid`,
+          "RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01';");
+        const hardDeadHolder = new SQL({ url: URL_!, max: 1 });
+        const hdh = await hardDeadHolder.reserve();
+        let hardDeadStopOf: PassStop | null = null;
+        let hardDeadRun: SweepRun | null = null;
+        let hardDeadWaited = false;
+        try {
+          await hdh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardDeadT}::uuid::text, 0))`;
+          const hardDeadRunning = settled(sweep({ onPass: (st) => { hardDeadStopOf = st; }, signal: backstop() }));
+          hardDeadWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
+          (hardDeadStopOf as PassStop | null)?.();
+          await (hardDeadStopOf as PassStop | null)?.();
+          await hdh`SELECT pg_advisory_unlock_all()`;
+          hardDeadRun = await orHung(hardDeadRunning);
+        } finally {
+          await hdh`SELECT pg_advisory_unlock_all()`.catch(() => {});
+          hdh.release();
+          await hardDeadHolder.close({ timeout: 5 });
+          await dropHardDead();
+        }
+        assert(hardDeadWaited && hardDeadRun?.code === 130 && (await claimOf(hardDeadT))?.status === "pending" && !/break a deadlock/.test(hardDeadRun.stderr)
+            && tally(hardDeadRun) === "0 subject(s) recorded",
+          `a hard stop while a thought's own write waits, the write then rolled back to break a deadlock, leaves the thought to the stop's hand-back, not failed, counted or said (waited ${hardDeadWaited}, exit ${hardDeadRun?.code ?? "still running at 30 s"}): ${hardDeadRun?.stdout.trim().slice(-200)} | ${hardDeadRun?.stderr.trim().slice(0, 300)}`);
+        await drop([hardDeadT]);
+      })();
 
       // A first stop there lets the thought in hand finish: failed, said and counted, the run then stopped, 0 (review
       // pass 7, run-it: no case held which a first stop gets).

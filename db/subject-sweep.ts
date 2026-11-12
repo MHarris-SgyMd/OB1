@@ -197,6 +197,11 @@ export const NAMING_WAIT = { sayMs: 30_000, quietMs: 1_000, pollMs: 250 };
  * run goes, so a test shortens `window`, as NAMING_WAIT is.
  */
 export const JUDGE_ALARM = { window: 48, share: 1 / 5 };
+/**
+ * The tries a thought's own write transaction gets when the server rolls it back to break a deadlock (40P01), as the
+ * pooling and db/threads.ts retry theirs three times: past them the thought fails, for --retry-failed.
+ */
+const DEADLOCK_TRIES = 3;
 
 /** Whether `noSubject` answers of a window trip the alarm: more than its share of the whole window. */
 export const judgeTrips = (noSubject: number, alarm: { window: number; share: number } = JUDGE_ALARM): boolean =>
@@ -2088,17 +2093,35 @@ async function sweep(
   }
 
   /**
+   * A thought's own write transaction — the door's, or the finish of one named nothing — run again when the server
+   * rolls it back to break a deadlock (40P01), up to DEADLOCK_TRIES in all: nothing of it landed, its checks read again
+   * under the door's lock, and the answer in hand needs no new call (SMD-3306 PR 7a-3b-1's review pass 4, cold read and
+   * run-it: failed at once, a one-off deadlock left the set standing under a scheduler, which never runs
+   * --retry-failed). `again` resets what an attempt set outside its transaction. Past the hard stop, not run again.
+   */
+  const beginRetried = async <T>(fn: (tx: SQL) => Promise<T>, again: () => void = () => {}): Promise<T> => {
+    for (let tries = 1; ; tries++) {
+      try {
+        return (await sql.begin(fn)) as T;
+      } catch (e) {
+        if (sqlState(e) !== "40P01" || tries >= DEADLOCK_TRIES || hardStop.signal.aborted) throw e;
+        again();
+      }
+    }
+  };
+
+  /**
    * A thought's own write — the door's, or the finish of one named nothing — the server rolled back to break a deadlock
-   * (40P01): since 130 a set's close or write moves several keys' threads, and a move across two keys can still
-   * deadlock with a delete at a thread's gap (130's NOT HERE). The thought failed, for --retry-failed, said once and
-   * counted, as one past the budget is, and the run goes on (SMD-3306 PR 7a-3b-1's review pass 3, cold read: rethrown,
-   * it ended the run, a scheduler's sleep with it).
+   * (40P01) each of DEADLOCK_TRIES times: since 130 a set's close or write moves several keys' threads, and a move
+   * across two keys can still deadlock at its commit (130's NOT HERE). The thought failed, for --retry-failed, said once
+   * and counted, as one past the budget is, and the run goes on, in any run (SMD-3306 PR 7a-3b-1's review pass 3, cold
+   * read: rethrown, it ended the run, a scheduler's sleep with it).
    */
   const deadlocked = (row: Candidate, e: unknown): Done | false => {
     if (hardStop.signal.aborted) return false;
     n.deadlocked++;
     if (row.standing_keys !== null) n.leftOutOfDate++;
-    const why = `the server rolled its write back to break a deadlock (${String((e as Error)?.message ?? e).slice(0, 200)})`;
+    const why = `the server rolled its write's transaction back to break a deadlock, ${DEADLOCK_TRIES} times (${String((e as Error)?.message ?? e).slice(0, 200)})`;
     return { release: "failed", error: why, say: () => sayOnce("deadlocked", `  ${row.id}: ${why}; --retry-failed returns it to the pool`) };
   };
 
@@ -2376,7 +2399,7 @@ async function sweep(
         let fin: string | { c: Close | null; stale: boolean; gone: boolean; written: boolean; held: boolean; judged: boolean; alarm: { code: number; line: string } | null };
         tripping = null;
         try {
-          fin = await sql.begin(async (tx: SQL) => {
+          fin = await beginRetried(async (tx: SQL) => {
             const moved = await poolMoved(tx, true);
             if (moved !== null) return moved;
             await tx`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${row.id}::uuid::text, 0))`;
@@ -2419,6 +2442,9 @@ async function sweep(
             answer.f = true;
             answer.c = c?.action === "closed";
             return { c, stale: false, gone: false, written, held, judged: true, alarm: await judgedIn(tx, answer, true) };
+          }, () => {
+            tripping = null;
+            answer.f = answer.c = false;
           });
         } catch (e) {
           if (e === ROLLED_BACK) return false;
@@ -2472,7 +2498,7 @@ async function sweep(
     if (hardStop.signal.aborted) return false;
     let w: SubjectWrite | string;
     try {
-      w = await sql.begin(async (tx: SQL) => (await poolMoved(tx, true)) ?? (await recordSubject(tx, row, [key], by, judge, recipe, agentId)));
+      w = await beginRetried(async (tx: SQL) => (await poolMoved(tx, true)) ?? (await recordSubject(tx, row, [key], by, judge, recipe, agentId)));
     } catch (e) {
       const state = sqlState(e);
       if (state === "22023") {

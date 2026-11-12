@@ -4030,9 +4030,11 @@ and a following run claims again after its follow or the provider's pause,
 whichever is longer, or ends at its limit, where one not following ends there,
 1; a stop before or during that hand-back ends the run there, said so. Only the
 budget's timeout is handled so: another error there, an operator's cancel among
-them, is thrown, but for a thought's own write the server rolls back to break a
-deadlock (since 130 a set's close or write moves several keys' threads), which
-fails the thought for `--retry-failed`, counted and said once. The run's hand-back of what it holds, at its end, a lost poll
+them, is thrown. In any run, not a scheduler's alone, a thought's own write
+the server rolls back to break a deadlock (since 130 a set's close or write
+moves several keys' threads, which can deadlock at its commit) is run again, the
+answer in hand, up to three tries in all; past them it fails the thought for
+`--retry-failed`, counted and said once. The run's hand-back of what it holds, at its end, a lost poll
 or a second stop, waits up to 30 s whatever the budget, so a row held past a
 short budget leaves no claim leased to its end, and one held longer holds the
 scheduler's stop no longer than 30 s, or 60 s when the stop lands during a lost

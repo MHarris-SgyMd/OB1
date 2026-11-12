@@ -19134,8 +19134,12 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   const lowFiled = await serves(await thought("filed under its ticket in lower case", { ticket: "smd-91714" }));
   const badTicket = await serves(await thought("a malformed ticket beside its issue", { ticket: "SMD 91715", issue: "SMD-91715" }));
   const issueOnly = await serves(await thought("an issue alone", { issue: "smd-91716" }));
-  assert(lowFiled === "ticket:SMD-91714" && badTicket === "ticket:SMD-91715" && issueOnly === "ticket:SMD-91716",
-    `131's filed-ticket arm as 122's: upper case, a malformed ticket passing to its issue, an issue alone (${lowFiled || "none"} | ${badTicket || "none"} | ${issueOnly || "none"})`);
+  // …and a malformed metadata.issue passes to the subjects (review pass 4, mutant: the issue's pattern unheld).
+  const badIssue = await thought("a malformed issue beside a ticket subject", { issue: "SMD 91717" });
+  await sets(badIssue, ["ticket:SMD-91717"]);
+  const badIssueServes = await serves(badIssue);
+  assert(lowFiled === "ticket:SMD-91714" && badTicket === "ticket:SMD-91715" && issueOnly === "ticket:SMD-91716" && badIssueServes === "ticket:SMD-91717",
+    `131's filed-ticket arm as 122's: upper case, a malformed ticket passing to its issue, an issue alone, a malformed issue passing to the subjects (${lowFiled || "none"} | ${badTicket || "none"} | ${issueOnly || "none"} | ${badIssueServes || "none"})`);
 
   // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
   // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
@@ -19197,8 +19201,21 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-91704', '[117] SMD-91704', 'text/markdown')`, [orphan]);
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }, { relation: "blocks", target: "SMD-91702" }])]);
   await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'link' AND payload->>'relation' = 'child_of'`, [orphan]);
+  // Another system's child_of link on the ticket's thought (review pass 4, mutant: the link's system filter unheld).
+  await db.query(`SELECT record_source_links($1::uuid, 'github', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91705" }])]);
   const orphanRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91704')`)).map((r) => `${r.kind}:${r.key}`).join(",");
-  assert(orphanRows === "", `a closed parent link serves nothing, nor a link of another relation (${orphanRows || "none"})`);
+  // A key another system's source row holds, its thought linked by Linear: no Linear ticket, so no parent (review pass 4,
+  // mutant: the source row's system filter unheld).
+  let elsewhere = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
+    elsewhere = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text`, ["[117] SMD-91706 held elsewhere"])).rows[0].id;
+  });
+  await db.query(`SELECT record_thought_source($1::uuid, 'github', 'SMD-91706', '[117] SMD-91706 held elsewhere', 'text/markdown')`, [elsewhere]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [elsewhere, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }])]);
+  const elsewhereRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91706')`)).map((r) => `${r.kind}:${r.key}`).join(",");
+  assert(orphanRows === "" && elsewhereRows === "",
+    `a closed parent link serves nothing, nor a link of another relation or another system, nor a key no Linear source row holds (${orphanRows || "none"} | ${elsewhereRows || "none"})`);
 
   // Re-applied, 131 changes nothing.
   await reapply(file.slice(0, 4));
