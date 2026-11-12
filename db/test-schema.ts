@@ -19111,6 +19111,19 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   assert(grownServes === "ticket:SMD-91701,ticket:SMD-91702" && narrowedServes === "ticket:SMD-91702" && oddServes === "" && volatility === "s",
     `a set written out of key order serves in key order; a ticket closed from it serves nothing; a phrase shaped like an id and a ticket key 122 refuses serve nothing; STABLE as 122's (${grownServes} | ${narrowedServes} | ${oddServes || "none"} | ${volatility})`);
 
+  // The ORDER BY, not the plan: a set of three written greatest key first, read with sorts priced out (a hashed
+  // DISTINCT), still serves in key order (review pass 2, mutant: without ORDER BY 2 the sorted DISTINCT hid it).
+  const hashed = await thought("a set of three, the greatest key first");
+  await sets(hashed, ["ticket:SMD-91713"]);
+  await sets(hashed, ["ticket:SMD-91712", "ticket:SMD-91713"]);
+  await sets(hashed, ["ticket:SMD-91711", "ticket:SMD-91712", "ticket:SMD-91713"]);
+  let hashedServes = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL enable_sort = off`);
+    hashedServes = (await tx.query<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('thought', $1)`, [hashed])).rows.map((r) => `${r.kind}:${r.key}`).join(",");
+  });
+  assert(hashedServes === "ticket:SMD-91711,ticket:SMD-91712,ticket:SMD-91713", `a set of three served in key order under a hashed DISTINCT too (${hashedServes})`);
+
   // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
   // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
   const put = async (key: string, level: number) => {
@@ -19148,7 +19161,7 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
       ["[117] SMD-91703", JSON.stringify({ source: "linear", issue: "SMD-91703", status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
   });
   await db.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-91703', '[117] SMD-91703', 'text/markdown')`, [child]);
-  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [child, JSON.stringify([{ relation: "child_of", target: "smd-91701" }, { relation: "child_of", target: "smd-91703" }])]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [child, JSON.stringify([{ relation: "child_of", target: "smd-91701" }, { relation: "child_of", target: "smd-91703" }, { relation: "child_of", target: "SMD-91701" }, { relation: "child_of", target: "smd-0" }])]);
   const parentRows = (await q<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('ticket', 'SMD-91703')`)).map((r) => `${r.kind}:${r.key}`).join(",");
   const [noOrigin, withOrigin] = ["00000000-0000-4000-8000-000000009171", "00000000-0000-4000-8000-000000009172"];
   await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq, origin_thought_id) VALUES ($1::uuid, 'open', '[117] no origin', now(), now(), 'raw-writer', now(), 0, NULL), ($2::uuid, 'open', '[117] an origin', now(), now(), 'raw-writer', now(), 0, $3::uuid)`, [noOrigin, withOrigin, session]);

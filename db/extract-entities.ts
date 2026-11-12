@@ -1356,7 +1356,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (!found) return;
     try {
       const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, [found.key], found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
-      // `closed`: a set narrowed to the rule's key (130), as recorded as a replacement.
+      // `closed`: a set narrowed to the rule's key (130), counted recorded, as a replacement is.
       if (w.action === "added" || w.action === "replaced" || w.action === "closed") subjects.recorded++;
       else if (w.action === "kept") subjects.kept++;
     } catch (e) {

@@ -7807,7 +7807,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 130's set close or set door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111 and 113, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 130's set close or set door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111, 113 and 130, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
   // The garbage-judge alarm's window is the pool's, kept across runs (PR 5b): the many empty answers of the cases
@@ -8969,12 +8969,13 @@ if (want("10h")) {
     assert(passNarrow.code === 0 && /; recorded 1 thought\(s\)' own subject by its ticket\n/.test(passNarrow.stdout) && JSON.stringify(passLeft) === JSON.stringify(["ticket:SMD-91"]),
       `the pass's rule narrowing a set is counted recorded (exit ${passNarrow.code}; ${/; recorded[^\n]*/.exec(passNarrow.stdout)?.[0] ?? "no recorded line"}; left ${passLeft.join(",")})`);
     await sql`DELETE FROM thoughts WHERE id = ${passSet}::uuid`;
-    // A rule's set at the text read, holding the rule's key and another: the rules agree only with their one key, so it
-    // is narrowed to it, a replacement and no new key, a dry run counting alike (review pass 1, mutants: a set compared
-    // as a subset, or its first key alone, was taken as current).
+    // A rule's set at the text read, holding the rule's key between two others: the rules agree only with their one key,
+    // so it is narrowed to it, a replacement and no new key, a dry run counting alike (review pass 1, mutants: a set
+    // compared as a subset, or its first key alone, was taken as current; pass 2, mutant: the dry run's new key read the
+    // set's first key alone, which the rule's key first hid).
     const ruleSet = await seed(summary("SMD-92", "start smd-92"));
     const [{ rf }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS rf FROM thoughts WHERE id = ${ruleSet}::uuid`) as { rf: string }[];
-    await sql`SELECT record_thought_subjects(${ruleSet}::uuid, ARRAY['ticket:SMD-92', 'version:v9.9.9'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${rf}, NULL)`;
+    await sql`SELECT record_thought_subjects(${ruleSet}::uuid, ARRAY['pr:92', 'ticket:SMD-92', 'version:v9.9.9'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${rf}, NULL)`;
     await sql`SELECT requeue_thought_work(${POOL}, ${ruleSet}::uuid)`;
     const ruleSetDry = await sweep({ dryRun: true });
     asked = ownCalls;
@@ -9853,7 +9854,7 @@ if (want("10h")) {
       const nothingOther = await otherStatus(nothingIds);
       assert(naming.code === 0 && older === "added" && nothingRun.code === 3 && ownCalls - asked === 2 && nothingClaims.every((c) => c === "pending") && nothingDue === 2 && nothingStanding === 0 && nothingOther === "succeeded,succeeded"
         && /\n {2}2 of the judge model's last 2 answers, across runs, gave no subject \(2 naming nothing a key holds\), more than 20% of the 5 the alarm reads \(db\/subject-sweep\.ts, JUDGE_ALARM\): the model, not the thoughts, is likely at fault, so the sweep stops here\./.test(nothingRun.stderr)
-        && /\n {4}Check OB1_JUDGE_MODEL \(stub-judge\), the chat endpoint and OB1_SUBJECT_REASONING\. The 2 thought\(s\) it named nothing for are back in the pool, and the out-of-date subject it closed on 1 of them stays closed until each is asked again\. Once the model is right, run it again\. The trip holds the pool's following runs, a scheduler's, of stub-judge: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold \(a run of another judge model is not held, and lifts nothing\)\. If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit 2 asks the 2 handed back, first in the pool, with the alarm off, lifting its hold too\.\n/.test(nothingRun.stderr),
+        && /\n {4}Check OB1_JUDGE_MODEL \(stub-judge\), the chat endpoint and OB1_SUBJECT_REASONING\. The 2 thought\(s\) it named nothing for are back in the pool, and the out-of-date subject\(s\) it closed on 1 of them stay closed until each is asked again\. Once the model is right, run it again\. The trip holds the pool's following runs, a scheduler's, of stub-judge: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold \(a run of another judge model is not held, and lifts nothing\)\. If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit 2 asks the 2 handed back, first in the pool, with the alarm off, lifting its hold too\.\n/.test(nothingRun.stderr),
         `a judge naming nothing, empty or a ticket the thought does not name, stops the run at its second answer of five, exit 3: the two claims it finished back in the pool, the four it never took still there, the two no later than now, the out-of-date subject it closed said, another work's claims as they were (the naming's exit ${naming.code}, the older subject ${older}; exit ${nothingRun.code}, ${ownCalls - asked} asked, claims ${nothingClaims.join(",")}, ${nothingDue} of 2 due, ${nothingStanding} standing, the other work's ${nothingOther}): ${nothingRun.stderr.trim().slice(0, 500)}`);
 
       // …and --judge-checked --limit 2, as the line offers, asks the two handed back, first in the pool, and no other

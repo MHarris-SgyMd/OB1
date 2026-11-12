@@ -592,7 +592,7 @@ const PAGE = 100;
  * date), and whether they are current at this text. Since 130 a thought's subjects are a set, one way's and one pass's
  * as every writer writes them (SMD-3306 PR 7a-3b-1); a raw writer's mix reads as the least way and pass by name, and
  * counts as current while any of its subjects is, so an out-of-date member a raw write left beside a current one stands
- * (as before 130: no door writes such a mix).
+ * (no door writes such a mix, and before 130 none could stand: 111 allowed one standing subject a thought).
  */
 type Candidate = {
   id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string; filed: string | null;
@@ -1708,7 +1708,7 @@ async function sweep(
    */
   const stampLine = (w: JudgeWindow, inHand: WindowAnswer | null) =>
     `\n  Another run's garbage-judge alarm tripped at ${cleanForDisplay(w.tripped)}${w.by.length ? `, on answers from ${andList(w.by.map(cleanForDisplay))}` : ""}, after this run began (db/subject-sweep.ts, JUDGE_ALARM), so this run, ${w.by.length === 0 || w.by.includes(cfg.judgeModel) ? "whose judge model is likely the same" : `of the same pool though its judge model, ${cfg.judgeModel}, gave none of those answers`}, stops here too` +
-    (inHand ? `, the claim in hand, which it named nothing for, back in the pool with that run's${inHand.c ? ` (the out-of-date subject it closed stays closed until it is asked again)` : ""}` : "") + "." +
+    (inHand ? `, the claim in hand, which it named nothing for, back in the pool with that run's${inHand.c ? ` (the out-of-date subject(s) it closed stay closed until it is asked again)` : ""}` : "") + "." +
     `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; ${runAgain("once the model is right,")}`;
 
   /** The line a database lost as a trip was written says: none of it, so the window still holds what tripped it. */
@@ -1786,7 +1786,7 @@ async function sweep(
       code: 3,
       line: `\n  ${unread + nothing} of the judge model's last ${w.answers.length} answers, across runs, gave no subject (${gave}), more than ${Math.round(JUDGE_ALARM.share * 100)}% of the ${window} the alarm reads (db/subject-sweep.ts, JUDGE_ALARM): the model, not the thoughts, is likely at fault, so the sweep stops here.` +
         `\n    Check OB1_JUDGE_MODEL (${models}), the chat endpoint and OB1_SUBJECT_REASONING. ` +
-        (back.size > 0 ? `The ${back.size} thought(s) it named nothing for are back in the pool${closed ? `, and the out-of-date subject it closed on ${closed} of them stays closed until each is asked again` : ""}. ` : "") +
+        (back.size > 0 ? `The ${back.size} thought(s) it named nothing for are back in the pool${closed ? `, and the out-of-date subject(s) it closed on ${closed} of them stay closed until each is asked again` : ""}. ` : "") +
         (retried > 0 ? `This run's --retry-failed returned ${retried} claim(s) chosen for failing: some of these thoughts may be at fault. ` : "") +
         runAgain("Once the model is right,") +
         // The hold's two ways out, whatever tripped it: a judge fixed but kept, a run of one thought checks it in, the
