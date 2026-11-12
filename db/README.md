@@ -2513,9 +2513,9 @@ statement on a deleted item with a new close reason, `deleted`, and re-project i
 `delete_thought`, a raw DELETE, a cascade and the extraction passes' pruning alike.
 The extraction group, whose pruning is the commonest entity delete, gains what
 closing takes, granted to the roles holding it already. Any other role without the
-priority grants deletes as before, the trigger skipping;
-`ob1_close_orphan_priorities()` closes what such a delete left, and runs once on
-upgrade for the items already gone. `merge_entities` restates the loser's statements
+priority grants, or a delete above READ COMMITTED, deletes as before, the trigger
+skipping; `ob1_close_orphan_priorities()` closes what such a delete left, and runs
+once on upgrade for the items already gone. `merge_entities` restates the loser's statements
 on the survivor by the same maker, the loser's closed as replaced; where the maker's
 latest word on the survivor is the later, it stands (a clear clears the loser's),
 and a restatement is the survivor's newest within its tier. A statement whose due

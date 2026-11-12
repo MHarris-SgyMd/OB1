@@ -19,9 +19,9 @@
 --     for `replaced` alone.
 --   * TRIGGERS, AFTER DELETE FOR EACH ROW on thoughts and on ob1_entities:
 --     every open statement on a deleted item closes as `deleted`, and the
---     item is re-projected (its priority_current row goes). Every delete path fires them:
---     delete_thought's projector, a raw DELETE, a cascade, and the extraction
---     passes' pruning. Row by row, each first asking whether its item has an
+--     item is re-projected (its priority_current row goes). Every delete path
+--     fires them: delete_thought's projector, a raw DELETE, a cascade, and the
+--     extraction passes' pruning. Row by row, each first asking whether its item has an
 --     open statement at all (review pass 2: a statement trigger's transition
 --     table copied every deleted row whole, a thought's vector included, to
 --     read its id). A delete in a transaction above READ COMMITTED skips, as
@@ -54,28 +54,30 @@
 --     itself). Its answer gains `priorities_moved`. Two words said at one
 --     instant (the clock's resolution) go to the loser's, restated: the merge
 --     compares times across two items, where no seq orders them (review pass
---     4, said). A restatement is written last, so within its tier it is the survivor's newest, and may outrank
---     another maker's statement written there after the original (the
---     maintainer, review pass 1: kept, merges being an operator's step). A
---     role that could not restate (no INSERT on priority_assertions) merges
---     as before, and the trigger or the sweep closes the loser's as
---     `deleted`.
+--     4, said). A restatement is written last, so within its tier it is the
+--     survivor's newest, and may outrank another maker's statement written
+--     there after the original (the maintainer, review pass 1: kept, merges
+--     being an operator's step). A role that could not restate (no INSERT on
+--     priority_assertions, no read of the registry), or a transaction above
+--     READ COMMITTED, merges as before, and the trigger or the sweep closes
+--     the loser's as `deleted`.
 --   * A due reference naming the deleted item is left as it is: its
 --     statement keeps its own level, and the read finds no due time through
 --     a missing reference (the maintainer: closing it would withdraw a level
 --     its maker never withdrew).
 --
 --   NOT CHANGED. Tickets: a ticket is no row of its own, its head is
---   rebuilt wholesale, and a deleted row deletes no ticket; that row's own
---   statements close as a thought's. Open items are never deleted (they are
---   dropped, a status). A ticket's own row deleted closes the statements made
---   on it, which counted as the ticket's while it stood; the read stopped
---   counting them once the row was gone, before 134 too (review pass 5,
---   said). A merge that clears a loser's statement because the maker's
---   latest word on the survivor is a clear records the clear at the merge's
---   time (review pass 5, said). A TRUNCATE fires no delete trigger, and leaves its
---   items' statements to the sweep. A reason's text stays: removing it is forgetting,
---   SMD-1723's, which relaxes 116's guard for it. Filed as SMD-4241 from
+--   rebuilt wholesale, and a deleted row deletes no ticket. A ticket's own
+--   row deleted closes the statements made on it, as a thought's: they
+--   counted as the ticket's while the row stood, and the read stopped
+--   counting them once it was gone, before 134 too (review pass 5, said).
+--   Open items are never deleted (they are dropped, a status). A merge that
+--   clears a loser's statement because the maker's latest word on the
+--   survivor is a clear records the clear at the merge's time (review pass
+--   5, said). A TRUNCATE fires no delete trigger, and leaves its items'
+--   statements to the sweep. A reason's text stays: removing it is
+--   forgetting, SMD-1723's, which relaxes 116's guard for it. Filed as
+--   SMD-4241 from
 --   review pass 1: an entity that extraction re-derives (pruned, then made
 --   again under a new id) closes as deleted rather than following its name; a
 --   merge leaves other statements' due references naming the loser, which
@@ -90,8 +92,10 @@
 --   closed by it; one that checked existence before the delete committed
 --   and commits after the trigger read leaves its statement open, for the
 --   sweep (review pass 1: locking every deleted key would take a lock per
---   row of a bulk delete). merge_entities takes both entities' priority
---   locks, in key order, before it reads. A delete's close takes no priority
+--   row of a bulk delete). merge_entities locks both entities' rows, in id
+--   order, then both their priority locks, in key order, before it reads
+--   (review pass 4: a prune of the loser beside it could deadlock with it).
+--   A delete's close takes no priority
 --   lock (review pass 3, reversing pass 2): held to commit, a lock per item
 --   would fill the shared lock table on a bulk delete or the upgrade's sweep,
 --   and failing a delete is not this file's to do. A close racing a writer's
@@ -101,15 +105,15 @@
 -- SAFETY
 --   One CHECK replaced with a wider one; four new functions and two
 --   triggers; merge_entities replaced with its signature; the extraction
---   group's priority grants carried. Rows change only
---   by closing a statement whose item is gone, or by a merge's restating.
+--   group's priority grants carried. Rows change only by closing a statement
+--   whose item is gone, or by a merge's restating.
 --   MINOR under FORK.md's version rules. test-schema [121], test-upgrade
 --   [20by].
 --
 -- Prerequisites
 --   016 (ob1_entities, merge_entities), 116 (priority_assertions,
---   ob1_priority_project, ob1_priority_isolation), 133 (ob1_priority_lock
---   by the pool's key). Applied by `bun db/migrate.ts`. Re-applied: the
+--   ob1_priority_project, ob1_priority_isolation, ob1_priority_is_maker),
+--   133 (ob1_priority_lock by the pool's key). Applied by `bun db/migrate.ts`. Re-applied: the
 --   CHECK, functions and triggers are replaced as they were; the sweep finds
 --   nothing left to close.
 -- =============================================================================
@@ -122,6 +126,7 @@ DECLARE
     ARRAY['merge_entities(uuid, uuid)', '016 (merge_entities)'],
     ARRAY['ob1_priority_project(text, text)', '116 (ob1_priority_project)'],
     ARRAY['ob1_priority_isolation(text)', '116 (ob1_priority_isolation)'],
+    ARRAY['ob1_priority_is_maker(priority_assertions, text, uuid)', '116 (ob1_priority_is_maker)'],
     ARRAY['ob1_priority_lock_key(text, text)', '133 (ob1_priority_lock_key)'],
     ARRAY['ob1_priority_lock(text, text)', '133 (ob1_priority_lock)']];
   i int;
@@ -433,7 +438,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION merge_entities(uuid, uuid) IS
-  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 134 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. A role that could not restate moves none, and the loser''s close as deleted. The one resolution step that is a human''s to take. Migration 016; priorities, migration 134 / SMD-3711.';
+  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 134 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. A role that could not restate, or a transaction above READ COMMITTED, moves none, and the loser''s close as deleted. Both rows are locked first, in id order. The one resolution step that is a human''s to take. Migration 016; priorities, migration 134 / SMD-3711.';
 
 -- ---------------------------------------------------------------------------
 -- The extraction group's priority grants, carried
