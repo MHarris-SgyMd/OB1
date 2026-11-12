@@ -2966,8 +2966,20 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   assert(misread.length === 0, `isoTime reads each of ${times.length} times as it should (${misread.join("; ") || "all"})`);
   assert(LEASE_S === 3600, "a claim whose capture never finished holds its id for an hour");
 
-  // The core's refusal, which no capture this hook sends can draw today: through a stub core, as [keepRowItem] does.
-  // One the core calls retryable is a 503 Readwise may send again, any other a 422; either way no row, and the id given back.
+  // The core's refusal: through a stub core, as [keepRowItem] does. One the core calls retryable is a 503 Readwise may
+  // send again, any other a 422; either way no row, and the id given back. The brain's embedding provider refusing
+  // its key or model (SMD-2892) is a 503 PROVIDER_REFUSED, sent again once an operator mends it; one that may be the
+  // text's own (a 400) a 422 as any final refusal.
+  for (const [code, status, retryable, want, wantStatus] of [["EMBEDDING_PROVIDER_ERROR", 401, false, "PROVIDER_REFUSED", 503], ["EMBEDDING_PROVIDER_ERROR", 400, false, "CORE_REFUSED", 422]] as const) {
+    const stubCtx = {
+      call: async () => ({ ok: false, refusal: { code, retryable, status, reason: `provider_${status}`, setting: "OB1_LLM_BASE_URL" } }),
+      db: { tx: async (fn: (sql: unknown) => Promise<unknown>) => fn(((strings: TemplateStringsArray) => Promise.resolve(strings.join("$").includes("RETURNING claimed_at") ? [{ claimed: "2026-11-05 00:00:00+00" }] : strings.join("$").includes("RETURNING id") ? [{ id: "9101" }] : [])) as unknown) },
+      secret: READWISE_SECRET, captureSeconds: 30, defer: () => undefined,
+    };
+    const answer = await manifest.hooks!.highlight.handler(stubCtx as never, { headers: {}, query: {}, body: new Uint8Array(), text: JSON.stringify(event({ id: 9101 })) });
+    assert(answer.status === wantStatus && answer.body?.code === want && answer.body?.refused === code && answer.body?.retryable === (wantStatus === 503),
+      `the embedding provider answering ${status}: ${wantStatus} ${want} (${JSON.stringify(answer)})`);
+  }
   for (const retryable of [true, false]) {
     const queries: string[] = [];
     const values: unknown[][] = [];
@@ -4207,6 +4219,23 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   }
   assert(searchDown.status === 503 && searchDown.body.code === "PROVIDER_UNAVAILABLE" && (await jobOf(searchDown.body))?.status === "failed",
     `the embedding provider down while deciding: 503 PROVIDER_UNAVAILABLE, the job failed (${JSON.stringify(searchDown.body)})`);
+  // The provider refusing the brain's key while deciding (SMD-2892): the job fails once, 422 PROVIDER_REFUSED naming the
+  // code and the status, and the same text, the key mended, runs as a new job (review pass 1: every item failed and the
+  // job answered complete, so the text was held by a dead job).
+  extraction = answering([{ content: "si_k2: the user waters the tomatoes before the sun is high.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  const keyText = doc([]).text;
+  embedStatus = 401;
+  let keyless: Called;
+  try {
+    keyless = await si("extract", { text: keyText, dry_run: true });
+  } finally {
+    embedStatus = null;
+  }
+  assert(keyless.status === 422 && keyless.body.code === "PROVIDER_REFUSED" && keyless.body.refused === "EMBEDDING_PROVIDER_ERROR" && keyless.body.provider_status === 401 && (await jobOf(keyless.body))?.status === "failed",
+    `the embedding provider refusing its key while deciding: 422 PROVIDER_REFUSED, the job failed (${JSON.stringify(keyless.body)})`);
+  const mended = await si("extract", { text: keyText, dry_run: true });
+  assert(mended.status === 200 && mended.body.existing === false && mended.body.job?.status === "dry_run_complete",
+    `…and the same text, the key mended, runs as a new job (${JSON.stringify(mended.body).slice(0, 160)})`);
   extraction = answering([{ content: "si_o1: the user fixes the bike on Saturdays after the market.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
   const faultText = doc([]).text;
   await sql`ALTER TABLE thoughts RENAME TO thoughts_hidden`;

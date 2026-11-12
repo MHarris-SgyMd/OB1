@@ -301,6 +301,24 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
   const emptyCompat = await tool("search", { query: "COMMON-1" }, "write-raw");
   assert(emptyCompat.isError && expectReply(emptyCompat, say.renderSearch({ ok: false, refusal: unavailable } as never)) && emptyCompat.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && /Too common to match exactly .*: COMMON-1/.test(emptyCompat.text),
     `an empty search answered without a vector: refused, said as in-process (${emptyCompat.text.slice(-120)})`);
+  // The brain's embedding provider refusing its key (SMD-2892): carried whole and said as in-process, and its line ends
+  // as an error, not a refusal, so the fault panels keep a refused key (review pass 1).
+  {
+    const { useRequestLog } = await import("../server-portable/telemetry.ts");
+    const lines: string[] = [];
+    const before = useRequestLog((l) => lines.push(l));
+    try {
+      const keyless = { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", base: "http://ollama:11434/v1" } as const;
+      answer = (n) => (n === "searchThoughts" ? { ok: false, refusal: keyless } as never : ok({}));
+      const refusedSt = await tool("search_thoughts", { query: "plain words" }, "write-raw");
+      const line = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.door === "mcp" && l.tool === "search_thoughts");
+      assert(refusedSt.isError && expectReply(refusedSt, say.renderSearchThoughts({ ok: false, refusal: keyless } as never, false)) && refusedSt.sc.code === "EMBEDDING_PROVIDER_ERROR"
+        && line?.outcome === "error" && line?.code === "EMBEDDING_PROVIDER_ERROR",
+        `an EMBEDDING_PROVIDER_ERROR said as in-process, its line \`error\` (${refusedSt.text.slice(0, 100)}; ${JSON.stringify(line)})`);
+    } finally {
+      useRequestLog(before);
+    }
+  }
   // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.
   answer = (n) => (n === "thoughtStats" ? ok({}) : ok({}));
   const unsayable = await tool("thought_stats", {});

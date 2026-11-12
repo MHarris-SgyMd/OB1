@@ -367,6 +367,16 @@ export class Unavailable {
   constructor(readonly facts: Record<string, unknown>) {}
 }
 
+/**
+ * The brain's embedding provider refused the search itself (EMBEDDING_PROVIDER_ERROR, final: its key, its model),
+ * while deciding: no item's fault, and every other item's search meets it too, so the job fails once, as a fault
+ * failed it before SMD-2892, and the same call runs again once an operator mends the provider (review pass 1: each
+ * item failed and the job answered complete, the text then held by a dead job).
+ */
+export class ProviderRefused {
+  constructor(readonly facts: Record<string, unknown>) {}
+}
+
 /** The trust words, lowest first (046's ladder, ob1_trust_ceiling's). */
 const TRUST_RANK: Record<string, number> = { ingested: 0, agent: 1, operator: 2 };
 /** The evidence entry's `source` when a lower-trust job's passage is appended to a higher-trust thought: a reader sees whose it is. */
@@ -400,6 +410,10 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   const found = await ctx.call("search_thoughts", { query: t.content, limit: SEARCH_HITS });
   if (!found.ok) {
     if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
+    if (found.refusal.code === "EMBEDDING_PROVIDER_ERROR") {
+      const r = found.refusal as { reason?: unknown; status?: unknown; setting?: unknown };
+      throw new ProviderRefused({ refused: found.refusal.code, ...(typeof r.reason === "string" ? { reason: r.reason } : {}), ...(typeof r.status === "number" ? { provider_status: r.status } : {}), ...(typeof r.setting === "string" ? { setting: r.setting } : {}) });
+    }
     return { ...t, ...none, action: "skip", reason: "search_refused", status: "failed", error: `search_thoughts refused: ${found.refusal.code}` };
   }
   const same = found.value.hits.find((h) => sameText(h.content) === key);
@@ -633,7 +647,7 @@ export default definePlugin({
   operations: {
     extract: operation({
       title: "Extract a document's thoughts",
-      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess (import_key counts as text alone); a failed job answers no one, so the same call after a refusal runs again. RESTRICTED_CONTENT (422) refuses, before any model sees it, a text holding what looks like a national id, a card or account number, a key or a password (the old server's patterns, read loosely). Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, or the core says a write may land a moment later (a thought kept busy), and EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest.`,
+      description: `Extracts the durable thoughts in a text (at most ${LIMITS.text.toLocaleString("en")} characters) with the brain's classifier model, then decides for each one, by its cosine similarity to the brain's closest thought: skip it (too short or weak, said twice, or above ${SIMILARITY.skip}: a duplicate), add it (below ${SIMILARITY.match}: new), or add to the thought it matches — as evidence when that thought is as long, as a revision of it when the new one says more. With dry_run the decisions are stored and nothing is written (get_job shows them, execute_job carries them out); without, they are carried out at once. The same text, or the same source_metadata.import_key, answers its earlier job (existing) unless reprocess (import_key counts as text alone); a failed job answers no one, so the same call after a refusal runs again. RESTRICTED_CONTENT (422) refuses, before any model sees it, a text holding what looks like a national id, a card or account number, a key or a password (the old server's patterns, read loosely). Refused PROVIDER_UNAVAILABLE (503, retryable) while the model or the embedding provider does not answer, or the core says a write may land a moment later (a thought kept busy), and PROVIDER_REFUSED (422: the embedding provider refuses the brain's key or model, an operator's to mend), EXTRACTION_FAILED, EXTRACTION_REFUSED (the egress gate: under deny, OB1_EGRESS_ALLOW needs plugin:smart-ingest) or BUDGET_REACHED (${LIMITS.budgetMs / 1000} s of extraction) with the job marked failed. Each count says what was done: existed_count is an add whose text was already a thought, or evidence the thought already held, and the six counts sum to extracted_count. A job is its creator's: the same text from another key is that key's own job. A job whose captures' trust (the declared trust capped at the key's kind) is below a matched thought's appends evidence, marked so, rather than supersede it; the cut-offs are uncalibrated for the brain's model, so a dry run first shows each decision. The call does all its work before it answers, which for a long document can take minutes: send it as a dry run and then execute_job, or split it. A 503 while executing pauses the job, a dry run's again: this same call, or execute_job, carries out the rest.`,
       scope: "write",
       annotations: { destructiveHint: false, openWorldHint: true },
       method: "POST",
@@ -754,6 +768,10 @@ export default definePlugin({
           try {
             for (const t of extracted) decided.push(await decide(ctx, t, seen, mine));
           } catch (e) {
+            if (e instanceof ProviderRefused) {
+              await failJob(ctx, job.job_id, "the brain's embedding provider refused the search while deciding", calls);
+              return refused(422, "PROVIDER_REFUSED", job.job_id, { message: "the brain's embedding provider refused the search (its key or its model, an operator's to mend); the same call runs again once it is", ...e.facts });
+            }
             if (!(e instanceof Unavailable)) throw e;
             await failJob(ctx, job.job_id, "the search was unavailable while deciding", calls);
             return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, e.facts);

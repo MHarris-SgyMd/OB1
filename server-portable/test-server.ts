@@ -3935,7 +3935,9 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
 {
   const { outcomeOf, requestLine, useRequestLog } = await import("./telemetry.ts");
   const cells: [number, string | undefined, string][] = [[200, undefined, "ok"], [202, undefined, "ok"], [404, "NO_ROUTE", "refused"], [503, "BUSY", "refused"],
-    [501, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "refused"], [503, "STORE_UNAVAILABLE", "error"], [500, "FAILED", "error"], [500, undefined, "error"]];
+    [501, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "refused"], [503, "STORE_UNAVAILABLE", "error"], [500, "FAILED", "error"], [500, undefined, "error"],
+    // The brain's own embedding provider failing (SMD-2892): coded as a refusal, counted as the brain's fault.
+    [503, "EMBEDDING_PROVIDER_ERROR", "error"]];
   const wrong = cells.filter(([s, c, want]) => outcomeOf(s, c) !== want);
   assert(wrong.length === 0, `an answer's outcome: a fault's 5xx (or a codeless one) \`error\`, any other 4xx or 5xx \`refused\`, else \`ok\` (wrong: ${JSON.stringify(wrong)})`);
   const at = new Date("2026-10-08T00:00:00.000Z");

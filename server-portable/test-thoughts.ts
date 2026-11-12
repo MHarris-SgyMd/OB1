@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, refuseRedirect, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
 import { createProviderHealth, DEFAULT_REPROBE_INTERVAL_S, heardFrom, inContainer, isLoopback, probeable, probeClears, probeProvider, reprobeIntervalFrom, startProviderReprobe, startsDegraded } from "./provider-health.ts";
@@ -963,7 +963,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   assert(providerFault(http(429))?.status === 429 && providerFault(refused)?.status === undefined, "…an outage carries the provider's status when it answered one");
   for (const [what, e, reason, detail] of [
     ["a 401", http(401, "{\"error\":\"bad key\"}"), "provider_401", "it answered 401 (its credential was refused)"], ["a 403", http(403), "provider_403", "it answered 403 (its credential was refused)"],
-    ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400"],
+    ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400 (it refused the request: this text, or a setting sent with it such as the model)"],
     ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200, "<html>"), "provider_body", "it answered 200 with a body that is not JSON"],
   ] as [string, ProviderError, string, string][]) {
     const f = providerFault(e);
@@ -972,6 +972,14 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   }
   for (const [what, e] of [["an egress refusal", new ProviderError("refused by the egress gate", "egress")], ["the width mismatch", new Error("Embedding width mismatch")], ["a TypeError with no code", new TypeError("x")], ["null", null]] as [string, unknown][])
     assert(providerFault(e) === null, `providerFault: ${what} is no provider's answer, so null: still a fault (${fault(e)})`);
+  // A 200 holding no embedding (a gateway's error object): a body error, said so (review pass 1: a plain Error, raw).
+  const empty = providerFault(new ProviderError("http://x/v1 returned no embedding for model m", "body", 200, '{"error":{"message":"No successful provider responses."}}'));
+  assert(empty?.retryable === false && empty.reason === "provider_body" && empty.detail === "it answered 200 with no embedding in its answer" && /No successful provider/.test(empty.provider ?? ""),
+    `providerFault: a 200 with no embedding is final, provider_body, said so, the gateway's words kept (${JSON.stringify(empty)})`);
+  // A redirect: never followed, and where it points is the provider's words, for a reader to set the base (review pass 1).
+  const moved = providerFault(refuseRedirect("Embeddings", "http://x/v1", new Response(null, { status: 307, headers: { location: "https://user:pw@y.example/v1?key=k" } })));
+  assert(moved?.retryable === false && moved.reason === "provider_307" && moved.detail === "it answered 307 (a redirect, never followed)" && moved.provider === "redirecting to https://***@y.example/v1?…",
+    `providerFault: a 307 is final, and where it points is its words, userinfo and query masked (${JSON.stringify(moved)})`);
 
   for (const code of ["ETIMEDOUT", "ENETUNREACH", "ETIMEOUT"]) assert(providerDown(Object.assign(new Error("x"), { code }))?.reason === "provider_unreachable", `${code} is an outage`);
   assert(providerDown(Object.assign(new Error("x"), { syscall: "getaddrinfo" }))?.detail === "its name does not resolve" && providerDown(Object.assign(new Error("x"), { code: "ENOTFOUND" }))?.detail === "its name does not resolve (ENOTFOUND)",
@@ -1130,6 +1138,22 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     // The handshake's own error, whatever the platform calls it (EPROTO on macOS), not some other throw in capture.
     const tlsSaid = `${String(eTls)} ${(eTls as { code?: unknown })?.code ?? ""}`;
     assert(eTls !== undefined && providerDown(eTls) === null && /TLS|SSL|EPROTO|handshake/i.test(tlsSaid) && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${tlsSaid})`);
+    // The same misconfigured chat while the embeddings refuse the brain's key (SMD-2892 review pass 1): the chat's throw
+    // no longer wins the race — the capture is refused coded, the provider's verdict, and still nothing is written.
+    const keyless = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "bad key" }), { status: 401 }) });
+    try {
+      const written3: unknown[] = [];
+      const ctx3 = createContext({
+        env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${keyless.port}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+        store: async () => ({ captureThought: async (args: unknown) => { written3.push(args); return { id: "00000000-0000-4000-8000-0000000000b3", existed: false }; } }) as never,
+        door: "test",
+      });
+      const both = await capture(ctx3, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought both endpoints fail" } as never).then((o) => o, (e) => e);
+      assert(both?.ok === false && both.refusal.code === "EMBEDDING_PROVIDER_ERROR" && both.refusal.status === 401 && written3.length === 0,
+        `a chat call's runtime throw beside the embeddings' 401: refused EMBEDDING_PROVIDER_ERROR, nothing written (${JSON.stringify(both).slice(0, 200)})`);
+    } finally {
+      keyless.stop(true);
+    }
   } finally {
     plain.stop(true);
   }

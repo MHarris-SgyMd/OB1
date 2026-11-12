@@ -69,8 +69,16 @@ export type Door = "mcp" | "api";
  */
 export type RequestOutcome = "ok" | "refused" | "error" | "unrun" | "abandoned" | "cut" | "stalled";
 
-/** The codes a fault is answered with — `failure()`'s, and capture's retryable one — as against a refusal's. */
-const FAULT_CODES: ReadonlySet<string> = new Set(["FAILED", "STORE_UNAVAILABLE"]);
+/**
+ * The codes a fault is answered with — `failure()`'s, and capture's retryable one — as against a refusal's; and the
+ * brain's own embedding provider failing (EMBEDDING_PROVIDER_ERROR, SMD-2892), a refusal by its shape but the brain's
+ * fault, not the caller's: a key or a model refused stays on the fault panels and logs at ERROR, as it did when it
+ * was thrown (review pass 1).
+ */
+const FAULT_CODES: ReadonlySet<string> = new Set(["FAILED", "STORE_UNAVAILABLE", "EMBEDDING_PROVIDER_ERROR"]);
+
+/** Whether an answer's code is a fault's (FAULT_CODES): a tool reply carrying one ends as an error, not a refusal. */
+export const isFaultCode = (code: string | undefined): boolean => code !== undefined && FAULT_CODES.has(code);
 
 /**
  * A request's outcome from its status and its answer's code, for one that

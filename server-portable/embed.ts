@@ -201,10 +201,18 @@ export function providerFault(e: unknown): { retryable: boolean; reason: string;
   if (down) return { retryable: true, ...down, ...(e instanceof ProviderError && e.status !== undefined ? { status: e.status } : {}) };
   if (!(e instanceof ProviderError) || e.kind === "egress") return null;
   const provider = e.body ? { provider: e.body } : {};
-  if (e.kind === "body") return { retryable: false, reason: "provider_body", detail: `it answered ${e.status ?? "2xx"} with a body that is not JSON`, ...(e.status !== undefined ? { status: e.status } : {}), ...provider };
+  if (e.kind === "body") {
+    // A 2xx with no embedding in it (a gateway's error object, an empty `data`) or no JSON at all (a proxy's page).
+    const what = /returned no embedding/.test(e.message) ? "with no embedding in its answer" : "with a body that is not JSON";
+    return { retryable: false, reason: "provider_body", detail: `it answered ${e.status ?? "2xx"} ${what}`, ...(e.status !== undefined ? { status: e.status } : {}), ...provider };
+  }
   const s = e.status;
   if (s === undefined) return null;
-  const why = s === 401 || s === 403 ? " (its credential was refused)" : s === 404 ? " (the path or the model is not there)" : "";
+  // Why, where the status says it: the key or the model (an operator's), a redirect never followed (where it points
+  // is the provider's words: refuseRedirect), or the request — this text, or a setting it is sent with.
+  const why = s === 401 || s === 403 ? " (its credential was refused)" : s === 404 ? " (the path or the model is not there)"
+    : isRedirect(s) ? " (a redirect, never followed)"
+    : s === 400 || s === 413 || s === 422 ? " (it refused the request: this text, or a setting sent with it such as the model)" : "";
   return { retryable: false, reason: `provider_${s}`, detail: `it answered ${s}${why}`, status: s, ...provider };
 }
 
@@ -380,9 +388,12 @@ export function refuseRedirect(what: string, base: string, r: Response, opts: { 
   if (!isRedirect(r.status)) return null;
   const to = r.headers.get("location");
   void r.body?.cancel().catch(() => {});
+  // Where it points, as the message prints it, is also the error's provider words: providerFault hands those to a
+  // reader, so a refused search or capture still says where to set the base (SMD-2892; SETUP.md, SMD-2908).
+  const shown = to ? shownLocation(to, r.url || base, opts) : "";
   return new ProviderError(
-    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shownLocation(to, r.url || base, opts)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
-    "http", r.status);
+    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shown}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
+    "http", r.status, shown ? `redirecting to ${shown}` : "");
 }
 
 /** How long a redirect's target may print: a hostile endpoint's `Location` lands in every log line naming it. */
@@ -1017,7 +1028,11 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     }, subject, signal);
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
-      throw new Error(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`);
+      // The provider's answer, not this server's fault (SMD-2892): a gateway answering 200 with an error object, or
+      // an empty `data`. A body error, as a 2xx that is not JSON is, so a caller is refused coded rather than told the
+      // base in a raw message; its words kept (capped) for a reader. The message's phrase is reembed's and the
+      // orchestration runner's to match (deploy/orchestration/runner.ts REEMBED_PHRASES).
+      throw new ProviderError(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`, "body", 200, JSON.stringify(d ?? null).slice(0, PROVIDER_ERROR_CHARS));
     }
 
     // Refuse a width the column cannot hold. Postgres would reject the insert

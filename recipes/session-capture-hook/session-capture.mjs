@@ -1621,6 +1621,16 @@ const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "
  * exists — the existence-oracle rule); `on` marks a pointer the server could not
  * judge, which postPending counts. The hook keys on this, not on English.
  */
+/**
+ * Whether a refusal is the brain's embedding provider refusing what an operator mends (SMD-2892): its key, its
+ * model, a redirect, a gateway's answer — EMBEDDING_PROVIDER_ERROR with any status but 400, 413 or 422, which may be
+ * the text's own. Such a payload is kept, as a transient is, until the mend lands it or the week is up.
+ */
+export function providerMends(result) {
+  const sc = result?.structuredContent;
+  return sc?.code === "EMBEDDING_PROVIDER_ERROR" && ![400, 413, 422].includes(sc.status);
+}
+
 export function verdictOf(result, text) {
   const sc = result?.structuredContent;
   if (sc && typeof sc.code === "string") {
@@ -1636,7 +1646,7 @@ export function verdictOf(result, text) {
     const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
       : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
       : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
-        : (sc.retryable !== true && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2)
+        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2)
           : null;
     return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
   }
@@ -1721,8 +1731,9 @@ export async function postCapture(cfg, payload) {
     const v = verdictOf(result, text);
     // Kept by its code too (SMD-2892): the brain's embedding provider refusing it — a key or a model an operator
     // mends — is final for the call and no fault of the summary's, so the payload waits for the mend as an outage's
-    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal.
-    const kept = v.retryable || v.code === "EMBEDDING_PROVIDER_ERROR";
+    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal. One that may be the text's own (a 400, 413 or
+    // 422) is final as any refusal is.
+    const kept = v.retryable || providerMends(result);
     const err = new CaptureError(kept ? "failed" : "refused", `capture ${kept ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
     // A pointer the server could not judge: a failure ON the pointer, counted by
     // postPending so the last attempt can drop it (eighth review pass).
@@ -2683,7 +2694,9 @@ export async function postWrite(cfg, op) {
       if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, supersedes, names no thought there` };
       continue;
     }
-    if (v.retryable) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    // The receiving brain's embedding provider refusing it (a key or a model its operator mends, SMD-2892): held as a
+    // fault is, not given up — its edits and delete would otherwise meet NOT_FOUND there (review pass 1).
+    if (v.retryable || providerMends(result)) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
     return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}` };
   }
   return { dead: true, line: `not copied (given up): ${opLabel(op)} — still refused after dropping ${dropped.join(", ")}` };

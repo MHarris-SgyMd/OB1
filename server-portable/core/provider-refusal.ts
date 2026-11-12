@@ -1,7 +1,8 @@
 // An embedding call's failure as a coded refusal (SMD-2892), for the three
 // request-time callers that cannot do without the vector: a search whose
 // provider answered an error that is no outage, a capture likewise, and an
-// edit whose provider failed in any way. Before it the provider's error was
+// edit whose provider did not answer or answered an error. A gate's refusal, a
+// width mismatch or a runtime error no outage names is still thrown. Before it the provider's error was
 // thrown, and reached the caller raw: a search's FAILED 500, a capture's
 // STORE_UNAVAILABLE (retryable, naming the store), each carrying the
 // provider's body under the base it was sent to.

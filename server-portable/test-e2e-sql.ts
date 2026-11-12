@@ -70,13 +70,16 @@ const stubBodies: string[] = [];
 // The provider down, for [20] (SMD-2888): "refused" throws what Bun's fetch
 // throws for a closed port (a TypeError with code ECONNREFUSED, measured on
 // Bun 1.4.3); a status answers every call with it. Null: the stub answers.
-// "not-json": a 200 whose body is no JSON (SMD-2892), on the embedding route alone.
-let stubDown: null | "refused" | "not-json" | number = null;
+// "not-json": a 200 whose body is no JSON (SMD-2892), on the embedding route alone; "no-embedding": a 200 JSON with
+// none in it (a gateway's error object); "redirect": a 307 pointing elsewhere.
+let stubDown: null | "refused" | "not-json" | "no-embedding" | "redirect" | number = null;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
     if (stubDown === "refused") throw Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED" });
     if (stubDown === "not-json" && url.endsWith("/embeddings")) return new Response("<html>a login page</html>", { status: 200, headers: { "Content-Type": "text/html" } });
+    if (stubDown === "no-embedding" && url.endsWith("/embeddings")) return Response.json({ error: { message: "No successful provider responses.", code: 404 } });
+    if (stubDown === "redirect" && url.endsWith("/embeddings")) return new Response(null, { status: 307, headers: { location: "https://moved.invalid/v1/embeddings" } });
     if (typeof stubDown === "number") return new Response(`{"error":"stub answers ${stubDown}"}`, { status: stubDown, headers: { "Content-Type": "application/json" } });
     stubBodies.push(String(init?.body ?? ""));
     const body = JSON.parse(String(init?.body ?? "{}"));
@@ -3588,6 +3591,18 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     const garbled = await captureRaw("e2e-key", "[20] a thought captured while the provider answers a page");
     assert(garbled.isError && garbled.sc?.code === "EMBEDDING_PROVIDER_ERROR" && garbled.sc?.reason === "provider_body" && garbled.sc?.retryable === false && /with a body that is not JSON/.test(garbled.text),
       `a body that is no JSON: refused coded, provider_body, final (${garbled.text.slice(0, 160)})`);
+    // A 200 JSON holding no embedding (a gateway's error object), to a capture key (review pass 1): refused coded, not
+    // the store's STORE_UNAVAILABLE carrying the endpoint in a raw message.
+    stubDown = "no-embedding";
+    const gatewayed = await captureRaw(CAPTURE_KEY, "[20] a session summary sent while a gateway answers for the provider");
+    assert(gatewayed.isError && gatewayed.sc?.code === "EMBEDDING_PROVIDER_ERROR" && gatewayed.sc?.reason === "provider_body" && /no embedding in its answer/.test(gatewayed.text)
+      && !/stub\.invalid|No successful/.test(gatewayed.text),
+      `a 200 with no embedding, to a capture key: refused coded, provider_body, no endpoint or gateway words (${gatewayed.text.slice(0, 200)})`);
+    // A redirect: refused, and a write key told where it points, to set the base there (review pass 1; SETUP.md).
+    stubDown = "redirect";
+    const moved = await captureRaw("e2e-key", "[20] a thought captured while the provider redirects");
+    assert(moved.isError && moved.sc?.code === "EMBEDDING_PROVIDER_ERROR" && moved.sc?.status === 307 && /redirecting to https:\/\/moved\.invalid\/v1\/embeddings/.test(moved.text) && /sets OB1_LLM_BASE_URL where it points/.test(moved.text),
+      `a 307: refused, the write key told where it points (${moved.text.slice(0, 260)})`);
 
     // update_thought with content (SMD-2892): the provider away is retryable, said as an Error; its other answers final.
     // Either way the edit is not made, and nothing of the runtime's text or the store's code reaches the caller.
@@ -3596,7 +3611,7 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     stubDown = "refused";
     const editDown = await result("update_thought", { id: target, content: "[20] the edit made while the provider is down" });
     assert(editDown.isError && editDown.sc?.code === "EMBEDDING_PROVIDER_ERROR" && editDown.sc?.retryable === true && editDown.sc?.reason === "provider_unreachable" && editDown.sc?.setting === "OB1_LLM_BASE_URL"
-      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 did not answer \(the connection was refused\)/.test(editDown.text)
+      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable \(the connection was refused\)/.test(editDown.text)
       && !/Unable to connect|STORE_UNAVAILABLE/.test(editDown.text),
       `an edit while the provider is down: coded, retryable, said as an Error naming the endpoint, no Bun text (${editDown.text.slice(0, 200)})`);
     stubDown = 401;

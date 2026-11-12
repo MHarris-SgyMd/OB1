@@ -341,8 +341,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     const embedStarted = performance.now();
     // The capture's own day, from which the inference resolves a due phrase (SMD-3670).
     const capturedAt = new Date();
-    const [embedded, metadata, genre, inferred] = await Promise.all([
-      gate.embeddings.allowed
+    // Its own promise, so a sibling's throw (a chat call's runtime error) still waits for it and the provider's coded
+    // refusal is answered, not the sibling's raw fault (SMD-2892 review pass 1).
+    const embedding = gate.embeddings.allowed
         ? ctx.embedder.embedCapture(content, subject).then((v) => {
             heardFrom(ctx.providerHealth, embedStarted);
             return v;
@@ -360,7 +361,20 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
             vectorFailed = down;
             return undefined;
           })
-        : Promise.resolve(undefined),
+        : Promise.resolve(undefined);
+    let settled: Awaited<ReturnType<typeof gatherCapture>>;
+    try {
+      settled = await gatherCapture();
+    } catch (e) {
+      await embedding.catch(() => {});
+      if (providerRefused) return refuse(providerRefused);
+      throw e;
+    }
+    const [embedded, metadata, genre, inferred] = settled;
+    if (providerRefused) return refuse(providerRefused);
+    function gatherCapture() {
+      return Promise.all([
+      embedding,
       // A chat provider that did not answer at the socket (extractMetadata
       // throws the runtime's error, so board-sync retries the item) is the
       // marker alone here: with one provider down, this call fails beside the
@@ -395,8 +409,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
               return null;
             })
         : Promise.resolve(null),
-    ]);
-    if (providerRefused) return refuse(providerRefused);
+      ]);
+    }
     const chunks = embedded?.chunks ?? [];
     const contextFailures = embedded?.contextFailures ?? 0;
 
@@ -764,7 +778,7 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
   // An edit whose provider does not answer is still refused whole; the provider's state hears it either way (SMD-2890, review pass 1).
   // Refused coded (SMD-2892): retryable while the provider is away, final on its other answers — never the provider's
-  // raw error, which reached the caller as the store's STORE_UNAVAILABLE.
+  // raw error, which reached the caller as a FAILED fault (500) carrying the provider's words under its base.
   const embedStarted = performance.now();
   let embedded: EmbeddedCapture | undefined;
   if (content !== undefined && gate?.embeddings.allowed) {

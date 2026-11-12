@@ -74,13 +74,18 @@ audit row records the word (`thought_audit.actor_context.vector_failed`:
 write's call failed, which on a re-capture is not that the row has no vector),
 and `search_thoughts_keyword` finds it at once. The vector mender gives it its
 vector once the provider answers (below); so does the same text captured again,
-or a re-embed pass. Any other
-embedding failure still fails the capture — a 4xx (an input the model refuses, a
-credential, a model that is not there), a body that is not JSON, a vector of the
-wrong width — because those say the brain is misconfigured, and a thought with
-no vector is invisible to semantic search. An edit (`update_thought`) whose
-provider does not answer is refused whole, as before: nothing is lost, and
-storing the new text would clear a vector the thought had.
+or a re-embed pass. The provider's
+other answers still fail the capture — a 4xx (an input the model refuses, a
+credential, a model that is not there), a redirect, a 2xx that is not JSON or
+holds no embedding — because those say the brain is misconfigured, and a thought
+with no vector is invisible to semantic search: refused `EMBEDDING_PROVIDER_ERROR`
+(SMD-2892), final, naming the word (`provider_401` …), the provider's status and
+the setting to check, and to a key that can read the endpoint and the provider's
+own words (REST 503, no `Retry-After`). A vector of the wrong width is still a
+fault. An edit (`update_thought`) whose provider fails is refused whole, as
+before, coded the same way: retryable while the provider does not answer (REST
+503 with `Retry-After`), final otherwise. Nothing is lost, and storing the new
+text would clear a vector the thought had.
 
 A search whose query embedding the provider does not answer (the same
 `providerDown` outages) is answered by the hybrid's exact-literal arm alone —
@@ -96,8 +101,9 @@ held only by thoughts outside the search's filter, `said_by`, `actor` or
 search unavailable]` and adds `vectorFailed` and a `note`; with nothing found it
 is refused `EMBEDDING_PROVIDER_UNAVAILABLE` (retryable; REST 503), saying the
 same of its literals, since an empty list would read as nothing stored. The query log records the
-search as arm `literal` (migration 106). Any other embedding failure still
-fails the search.
+search as arm `literal` (migration 106). The provider's other answers refuse
+the search `EMBEDDING_PROVIDER_ERROR`, final, as a capture's do (SMD-2892) —
+`search_thoughts`, `search` and `plan_context` alike.
 
 The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
 no vector its vector, by itself — one the provider did not answer for, one the
@@ -1557,7 +1563,8 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
   `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
   `citedBy`), and `REFUSED` for a refusal the store names that this server does not
-  know. A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
+  know. A search's, a capture's and an edit's: `EMBEDDING_PROVIDER_ERROR` (with its
+  `reason`, the provider's `status` and the `setting`, SMD-2892). A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
   `REFUSED_WRITER` (each with the proposal's `id`, the WRITER and lineage ones with the
   `flags` force would also waive), `REFUSED_REVIEW_ARGUMENT` (with its `problem`),
   `REFUSED_DIRECTION_REQUIRED` (with the `verdict`), `REFUSED_ALREADY_ACCEPTED`,
@@ -1652,7 +1659,8 @@ stripped (`X-Forwarded-Prefix`).
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
-  not built, 503 retry. Carried by a forwarder, a revoked or busy caller's key is
+  not built, 503 retry, or the brain waiting on its operator (with no `Retry-After`:
+  a refused key or model, a registry it cannot reach). Carried by a forwarder, a revoked or busy caller's key is
   named (`name`), for the MCP server's line (SMD-2287 PR 4b), and a refusal also holds itself whole
   as `refusal` — its words included, the caller's input quoted back and the
   store's or the egress gate's — so the MCP server says it as it always has
@@ -1661,8 +1669,8 @@ stripped (`X-Forwarded-Prefix`).
   bounds into its text. A refused input is a 400 `REFUSED_INPUT`
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
-  `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
-  carries `Retry-After`. Loose core inputs that reach Postgres (a non-UUID id
+  `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every
+  retryable 503 carries `Retry-After`. Loose core inputs that reach Postgres (a non-UUID id
   on update or delete) are still faults through both doors (SMD-2534);
   `list_thoughts`' limit, `days` and `after` are bounded in its schema since SMD-2995.
 - **The log** is one JSON line per request (`telemetry.ts`, SMD-1849) — the

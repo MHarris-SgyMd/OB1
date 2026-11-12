@@ -135,6 +135,9 @@ const noteOf = (e: HighlightEvent) => (e.note?.trim() ? e.note : null);
 /** A highlight's thought text: the passage, and the reader's note after it as the old server wrote it. */
 const contentOf = (e: HighlightEvent) => (noteOf(e) ? `${e.text}\n\n— ${noteOf(e)}` : e.text);
 
+/** A core refusal that is the brain's embedding provider refusing what an operator mends: its key, its model, a redirect, a gateway's answer (SMD-2892). */
+const providerMends = (r: { code: string; status?: unknown }) => r.code === "EMBEDDING_PROVIDER_ERROR" && ![400, 413, 422].includes(r.status as number);
+
 export default definePlugin({
   name: "readwise",
   title: "Readwise",
@@ -188,6 +191,9 @@ export default definePlugin({
         if ("duplicate" in once) return { status: 200, body: { id: once.duplicate, duplicate: true } };
         if ("inFlight" in once) return { status: 409, body: { code: "IN_FLIGHT", retryable: true } };
         const captured = once.ran;
+        // The brain's embedding provider refusing its key or its model (SMD-2892): no fault of the delivery's, and an
+        // operator's to mend, so a 503 the sender sends again — a 400, 413 or 422 may be the text's own, final as any.
+        if (!captured.ok && providerMends(captured.refusal)) return { status: 503, body: { code: "PROVIDER_REFUSED", retryable: true, refused: captured.refusal.code } };
         // The core's refusal: one it says is worth retrying is a 503 Readwise may send again.
         if (!captured.ok) return { status: captured.refusal.retryable ? 503 : 422, body: { code: "CORE_REFUSED", retryable: captured.refusal.retryable, refused: captured.refusal.code } };
         return { status: 200, body: { id: captured.value.id } };

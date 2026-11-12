@@ -117,10 +117,17 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  */
 function providerErrorText(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_ERROR" }>, what: string): string {
   const at = r.base ? `the embedding provider at ${r.base}` : "the brain's embedding provider";
-  if (r.retryable) return `Error: ${what} was not done — ${at} did not answer (${r.detail}). The same call can land once it answers.`;
-  const credential = r.status === 401 || r.status === 403 ? " and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY)" : r.status === 404 ? " and the embedding model it serves (OB1_EMBEDDING_MODEL)" : "";
+  if (r.retryable) return `Error: ${what} was not done — ${at} is unavailable (${r.detail}). The same call can land once it answers.`;
+  const s = r.status ?? 0;
+  // What to check, as the status says it (review pass 1: a 400 may be this text, not the brain's settings).
+  const advice = s === 401 || s === 403 ? `An operator checks ${r.setting} and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.`
+    : s === 404 ? `An operator checks ${r.setting} and the embedding model it serves (OB1_EMBEDDING_MODEL); retrying will not help until then.`
+    : s >= 300 && s < 400 ? `An operator sets ${r.setting} where it points; retrying will not help until then.`
+    : s === 400 || s === 413 || s === 422 ? `It may be this text (a shorter or plainer one may land), or a setting it is sent with (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM) an operator checks.`
+    : r.reason === "provider_body" ? `Something in front of the provider (a proxy, a gateway) may be answering for it: an operator checks ${r.setting}; retrying will not help until then.`
+    : `An operator checks ${r.setting}; retrying will not help until then.`;
   const said = r.provider ? ` It said: ${oneLine(snipText(r.provider, 200))}` : "";
-  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. An operator checks ${r.setting}${credential}; retrying will not help until then.${said}`;
+  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. ${advice}${said}`;
 }
 
 /**
