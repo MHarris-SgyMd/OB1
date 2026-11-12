@@ -169,7 +169,9 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     if (!open) return;
     // A live call refused for the limit, counted once room frees (review pass 4: it waited for the next socket).
     for (const [relayId, e] of entries) if (e.kind === "own" && e.retry) { e.retry = false; e.on = epoch; toBroker({ op: "held", id: relayId, base: e.base, model: e.model, cls: e.cls }); }
-    // Oldest first, by when each began waiting: asks asked again after a back carry their age (review pass 5).
+    // Oldest first, by when each began waiting: asks asked again after a back carry their age (review pass 5). Nothing
+    // to do with the broker's limit reached, so no sort on every grant then (review pass 6).
+    if (atBroker >= maxWaiting) return;
     const parked = [...entries].filter(([, e]) => e.kind === "parked").sort((x, y) => x[1].at - y[1].at);
     for (const [relayId, e] of parked) {
       if (atBroker >= maxWaiting) return;

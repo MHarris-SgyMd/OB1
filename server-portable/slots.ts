@@ -511,8 +511,9 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   };
   /**
    * The turn handed to the next call queued, or given up: the longest queued of those whose pass goes first or that
-   * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked, so the first
-   * such is the longest queued. The waiter is never passed over: a call queued after it waits for its slot. A call
+   * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked here, so the
+   * first such is the longest queued here; a call asked again after the relay's `back` carries its age from its first
+   * ask (`since`, SMD-3379 PR 3b-1), which counts toward --max-wait, not its place. The waiter is never passed over: a call queued after it waits for its slot. A call
    * passed over that has queued RECHECK_MS or more is told it waits — not only once a waiter finds no slot free, which a
    * share with slots to spare never does (review pass 2: an extraction call behind seven consolidation workers waited
    * 10 s on the hook untold, N12's clock, the stall clock and a stop's sweep reading it as running) — and one passed

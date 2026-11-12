@@ -865,6 +865,47 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
   } finally { await b.stop(); }
 }
 
+await withBroker(registry({ slots: 1, reserve: 0 }), async (b, lines) => {
+  // Two relays on one key (a misconfiguration): said once, and each keeps its own grants — one relay's close gives
+  // nothing back because the other has synced, so its held on its next socket counts the call once.
+  const a = await connect(b, KEYS.stable), z = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  a.send({ op: "synced", id: "A" }); z.send({ op: "synced", id: "Z" });
+  ask(a, "A:1", "background"); await a.next("go", "A:1");
+  ok(await until(() => lines.some((l) => /two relays speak on its key at once/.test(l))), "two relays on one key are said", lines);
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  await a.close();
+  ok(!(await c.next("go", "c1", 500)), "one twin's close keeps its grant, the other having synced");
+  z.send({ op: "synced", id: "Z" });
+  ok(!(await c.next("go", "c1", 500)), "and the other twin's synced, the first between sockets, leaves it kept");
+  const a2 = await connect(b, KEYS.stable);
+  a2.send({ op: "held", id: "A:1", base: BASE, model: "qwen3:8b", cls: "background" }); await a2.next("go", "A:1");
+  a2.send({ op: "synced", id: "A" });
+  ok(pool(b).background === 1 && !c.seen("go", "c1"), "and its held takes it back, the call counted once", pool(b));
+  await a2.close(); await z.close(); await c.close();
+}, 5000);
+
+await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
+  // A socket the probe found dead gives its grants back at once, not after the keeping.
+  const old = await rawBrain(b, KEYS.third);
+  old.send({ op: "ask", id: "g", base: BASE, model: "qwen3:8b", cls: "background" });
+  await until(() => old.saw("go"), 2000);
+  const c = await connect(b, KEYS.canary);
+  ask(c, "c1", "background"); await c.next("queued", "c1");
+  const t0 = performance.now();
+  const s = await connect(b, KEYS.third);
+  ok(!!(await c.next("go", "c1", 4500)) && performance.now() - t0 < 4500, `a probe-ended socket's grant is given back at its end, not kept ${5} s (${Math.round(performance.now() - t0)} ms)`, performance.now() - t0);
+  // Opens coming fast do not keep a dead socket alive: a second dead socket, new sockets opened every 1.5 s.
+  const dead = await rawBrain(b, KEYS.third);
+  dead.send({ op: "ask", id: "h", base: BASE, model: "qwen3:8b", cls: "background" });
+  await sleep(100);
+  const t1 = performance.now();
+  const opened: Client[] = [];
+  while (!dead.closed() && performance.now() - t1 < 8000) { opened.push(await connect(b, KEYS.third)); await sleep(1500); }
+  ok(dead.closed() && performance.now() - t1 < 5000, `a pending probe is not reset by later opens: the dead socket ended within ~2 s of the first (${Math.round(performance.now() - t1)} ms)`, performance.now() - t1);
+  for (const o of opened) await o.close();
+  old.destroy(); dead.destroy(); await s.close(); await c.close();
+}, 5000);
+
 section("[14] the base is the brain's, read the same way");
 for (const base of ["http://Host.Containers.Internal:11434/v1/", "https://openrouter.ai/api/v1", "http://u:p@h:1/v1//", "not a url/", "http://[::1]:11434/v1"]) {
   ok(normalisedBase(base) === slotsBase(base), `normalisedBase matches server-portable/slots.ts's for ${base}`, [normalisedBase(base), slotsBase(base)]);
