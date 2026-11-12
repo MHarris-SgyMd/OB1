@@ -3,6 +3,7 @@
 /** Each REST operation's method and path, by its operationId — the MCP tool's name for a core operation. */
 export const OPERATIONS = {
   agenda: { method: "GET", path: "/v1/agenda" },
+  append_thought_evidence: { method: "POST", path: "/v1/thoughts/{id}/evidence" },
   brain_info: { method: "GET", path: "/v1/brain" },
   capture_thought: { method: "POST", path: "/v1/thoughts" },
   claim_work: { method: "POST", path: "/v1/claims" },
@@ -39,6 +40,7 @@ export const OPERATIONS = {
   search_thoughts_keyword: { method: "POST", path: "/v1/search/keyword" },
   set_item_status: { method: "POST", path: "/v1/items/{id}/status" },
   set_priority: { method: "POST", path: "/v1/priorities/{kind}/{key}" },
+  set_priority_weights: { method: "POST", path: "/v1/priority-weights" },
   task_status: { method: "GET", path: "/v1/status" },
   thought_changes: { method: "GET", path: "/v1/changes" },
   thought_stats: { method: "GET", path: "/v1/stats" },

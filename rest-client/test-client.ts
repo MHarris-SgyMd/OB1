@@ -116,6 +116,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     update_thought: { id: ID, content: "new text", supersedes: null },
     delete_thought: { id: ID, detach_citations: true },
     reset_capture_stamp: { id: ID },
+    // SMD-2690 PR 3b: the thought in the path, the entry in the body.
+    append_thought_evidence: { id: ID, source_label: "a file & more?", excerpt: "the passage", source: "smart_ingest", extracted_at: "2026-11-10T09:00:00+01:00" },
     review_supersession_proposal: { id: ID, decision: "accept", direction: "older", note: "a note & more?", force: true },
     retry_failed: { work_type: "extract:x@p1" },
     release_stale_leases: { work_type: "extract:x@p1", include_live: false },
@@ -129,6 +131,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     set_priority: { kind: "ticket", key: "smd-3664", level: 4, due_at: "2027-03-01", not_before: "2027-02-01T09:00:00+01:00", due_ref: { kind: "thought", key: ID }, reason: "a reason & more?", inferred: false },
     clear_priority: { kind: "thought", key: ID },
     priority_history: { kind: "entity", key: ID },
+    // The operator's weights (SMD-4193 PR 2): the weights ride the POST body.
+    set_priority_weights: { weights: { overdue: 3, unblocks_many_at: 2, count_inferred: true } },
     // Open items (SMD-3665 PR 2): an item's or a proposal's id in the path; a null rides the PATCH body to clear.
     open_item: { text: "call the dentist & more?", owner: "me", due_at: "2027-03-01", origin_thought: ID, plugin_row: "task-1", proposed: true },
     update_item: { id: ID, text: "call the dentist", owner: null, due_at: "2027-03-02T09:00:00+01:00" },
@@ -265,6 +269,14 @@ console.log("\n[6b] An input a URL cannot carry is answered here, nothing sent: 
     ["a lone surrogate in an id", () => client.call("fetch", { id: "\uD800x" }, { key: "write-raw" }), "id"],
     ["a lone surrogate in a query field", () => client.call("list_thoughts", { topic: "a\uDC00" }, { key: "write-raw" }), "topic"],
     ["…and in a query list", () => client.call("thought_changes", { actions: ["capture", "\uD800"] as never }, { key: "write-raw" }), "actions"],
+    // SMD-4193: an object of one level rides as deepObject; one holding an object or a list, an object in a list, or a
+    // field name a URL would split, cannot.
+    ["an object holding an object in a query field", () => client.call("agenda", { weights: { overdue: { x: 1 } } } as never, { key: "write-raw" }), "weights"],
+    ["…holding a list", () => client.call("agenda", { weights: { overdue: [3] } } as never, { key: "write-raw" }), "weights"],
+    ["…holding null", () => client.call("agenda", { weights: { overdue: null } } as never, { key: "write-raw" }), "weights"],
+    ["…a field name a URL would split", () => client.call("agenda", { weights: { "a&b": 1 } } as never, { key: "write-raw" }), "weights"],
+    ["…a lone surrogate in a field", () => client.call("agenda", { weights: { overdue: "\uD800" } } as never, { key: "write-raw" }), "weights"],
+    ["an object in a query list", () => client.call("thought_changes", { actions: [{ a: 1 }] as never }, { key: "write-raw" }), "actions"],
   ];
   for (const [label, run, field] of cases) {
     seen.length = 0;
@@ -280,6 +292,14 @@ console.log("\n[6b] An input a URL cannot carry is answered here, nothing sent: 
   assert(body.status === 201 && body.sent && (calls[0]?.input as { content?: string } | undefined)?.content === "half \uD800 a pair", `a lone surrogate in a body arrives as sent (${body.status})`);
   const fine = await client.call("fetch", { id: "..." }, { key: "write-raw" });
   assert(fine.status === 200 && fine.sent, `three dots are no dot segment, and are sent (${fine.status})`);
+  // SMD-4193: an object of one level is sent as one parameter a field, weights[overdue]=3, and the core reads it back.
+  calls.length = 0;
+  seen.length = 0;
+  const deep = await client.call("agenda", { weights: { overdue: 3, count_inferred: true } } as never, { key: "write-raw" });
+  const url = decodeURIComponent(seen[0]?.url ?? "");
+  assert(deep.sent && deep.status === 200 && /weights\[overdue\]=3/.test(url) && /weights\[count_inferred\]=true/.test(url)
+      && JSON.stringify((calls[0]?.input as { weights?: unknown } | undefined)?.weights) === '{"overdue":3,"count_inferred":true}',
+    `an object of one level rides the query string as deepObject, and the core reads it back whole (${deep.status} ${url} | ${JSON.stringify(calls[0]?.input)})`);
 }
 
 console.log("\n[7] A job's stream: the response itself, unread, keyed");
@@ -448,7 +468,7 @@ console.log("\n[9] A key a header carries is sent, a bare ? is a query, no extra
   assert((await reading)?.name === "AbortError", "the caller's signal ends an open stream, its body read to an AbortError");
 }
 
-console.log("\n[10] A key is sent byte for byte or not at all; a base is http, credential-free and as written; an object rides no query string");
+console.log("\n[10] A key is sent byte for byte or not at all; a base is http, credential-free and as written; an object of one level rides the query string as deepObject (SMD-4193), one holding an object or a list none");
 {
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   // Headers strips a CR or LF at a value's ends (`\rwrite-raw` arrived as write-raw and authenticated), and passes the
@@ -472,9 +492,11 @@ console.log("\n[10] A key is sent byte for byte or not at all; a base is http, c
   const goodBases = ["http://[::1]:8000", "HTTP://LOCALHOST", "http://x/api%3F", "https://brain.example/api/", "http://x//"];
   const turned = goodBases.filter((baseUrl) => refuses({ baseUrl }) !== null);
   assert(turned.length === 0, `…and an IPv6 host, an upper-case scheme, an encoded ? in the path, a path and trailing slashes are taken (refused: ${JSON.stringify(turned)})`);
-  // An object has no form in a query string; openapi-fetch's serializer threw on one (review pass 4).
+  // An object in a list, a list in a list, or what an object of one level holds that a URL cannot carry, has no form
+  // in a query string; openapi-fetch's serializer threw on one (review pass 4). An object of one level rides as
+  // deepObject (SMD-4193): below, the core refuses one for a field that is not an object, naming it.
   for (const [label, run, field] of [
-    ["an object for a GET's field", () => client.call("list_thoughts", { topic: { a: 1 } } as never, { key: "write-raw" }), "topic"],
+    ["an object holding an object for a GET's field", () => client.call("list_thoughts", { topic: { a: { b: 1 } } } as never, { key: "write-raw" }), "topic"],
     ["an object in a GET's list", () => client.call("thought_changes", { actions: [{ a: 1 }] } as never, { key: "write-raw" }), "actions"],
     ["a lone surrogate inside an object in a GET", () => client.call("list_thoughts", { topic: { a: "\uD800" } } as never, { key: "write-raw" }), "topic"],
     ["a list inside a GET's list", () => client.call("thought_changes", { actions: [["capture"]] } as never, { key: "write-raw" }), "actions"],
@@ -484,6 +506,11 @@ console.log("\n[10] A key is sent byte for byte or not at all; a base is http, c
     const issue = (r.body as { issues?: { path: string }[] }).issues?.[0];
     assert(r.status === 400 && !r.sent && issue?.path === field && seen.length === 0, `${label}: 400 REFUSED_INPUT naming ${field}, sent nowhere (${r.status} ${JSON.stringify(r.body)})`);
   }
+  seen.length = 0;
+  const flat = await client.call("list_thoughts", { topic: { a: 1 } } as never, { key: "write-raw" });
+  const flatIssue = (flat.body as { issues?: { path: string; message: string }[] }).issues?.[0];
+  assert(flat.status === 400 && flat.sent && seen.length === 1 && flatIssue?.path === "topic" && /^topic is not an object: give it as one value, topic=value$/.test(flatIssue.message),
+    `an object of one level for a field that is not one: sent as deepObject, and the core's 400 REFUSED_INPUT names the field (${flat.status} ${JSON.stringify(flat.body)})`);
 }
 
 console.log("\n[11] A timeout a timer can hold, a query name a URL carries, a null key no key, a base with no control character anywhere");
@@ -581,8 +608,8 @@ console.log("\n[12] A plugin's operation by its route (callPath): its path fille
   const before = sent.length;
   a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: ".." }, { key: "write-raw" });
   assert(a.status === 400 && !a.sent && (a.body as { issues?: { path: string }[] }).issues?.[0]?.path === "item_id" && sent.length === before, `a path field a URL cannot carry: answered here, nothing sent (${JSON.stringify(a.body)})`);
-  a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "x", nested: { a: 1 } }, { key: "write-raw" });
-  assert(a.status === 400 && !a.sent && sent.length === before, "an object in a GET's query: answered here, nothing sent");
+  a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "x", nested: { a: { b: 1 } } }, { key: "write-raw" });
+  assert(a.status === 400 && !a.sent && sent.length === before, "an object holding an object in a GET's query: answered here, nothing sent");
   a = await client.callPath("GET", "/v1/plugins/probe-kit/items/{item_id}", { item_id: "x" }, { key: "k\nbad" });
   assert(a.status === 401 && !a.sent && sent.length === before, "a key no header carries: answered here, nothing sent");
   for (const [method, path] of [["GET", "/v1/thoughts"], ["GET", "/v1/plugins/probe-kit/../../v1/thoughts"], ["GET", "/v1/plugins/Probe/items"], ["GET", "http://elsewhere/v1/plugins/p/x"], ["PUT", "/v1/plugins/probe-kit/items/{item_id}"]] as const) {

@@ -38,7 +38,7 @@ const KEYED_ANSWERS = {
   "405": refusal("A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does."),
   "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
   "501": refusal(`A mode not built: ${codesAt(501)}.`),
-  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with \`credential: "token"\`, Retry-After 30), or ${codesAt(503)} — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for \`registry_away\` alone; their other causes, and CLAIMS_UNREADABLE (the database role lacks the claims group), wait on an operator and carry none.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
+  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with \`credential: "token"\`, Retry-After 30), or ${codesAt(503)} — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for \`registry_away\` alone; their other causes, and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
 };
 /** A keyed operation's answers: every one of KEYED_ANSWERS but 501, which only an operation with a mode not built (run_worker's drain) gives. */
 const answersFor = (name: ToolName) => {
@@ -67,6 +67,14 @@ const PLUGIN_ANSWERS = {
 };
 
 /**
+ * A query parameter: an object field as OpenAPI's deepObject, one parameter per field of it (`weights[overdue]=3`,
+ * SMD-4193), which openapi-fetch sends and the core reads (rest/app.ts, inputFromQuery).
+ */
+const queryParameter = (name: string, required: boolean, schema: Json): Json => ({
+  name, in: "query", required, schema, ...((schema as { type?: unknown }).type === "object" ? { style: "deepObject", explode: true } : {}),
+});
+
+/**
  * The document: every core operation, then the enabled plugins' (SMD-2310) —
  * each under its plugin's tag, its scope as a core operation's, and its
  * success described by the output schema its manifest declares.
@@ -80,7 +88,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
     const required = new Set((input.required ?? []) as string[]);
     const parameters: Json[] = fields.map((f) => ({ name: f, in: "path", required: true, schema: { type: "string" } }));
     if (readsQuery(op.method)) {
-      for (const [field, schema] of Object.entries(props)) parameters.push({ name: field, in: "query", required: required.has(field), schema });
+      for (const [field, schema] of Object.entries(props)) parameters.push(queryParameter(field, required.has(field), schema));
     }
     paths[op.path] ??= {};
     paths[op.path][op.method.toLowerCase()] = {
@@ -108,7 +116,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
     const required = new Set((input.required ?? []) as string[]);
     const parameters: Json[] = fields.map((f) => ({ name: f, in: "path", required: true, schema: { type: "string" } }));
     if (readsQuery(route.method)) {
-      for (const [field, schema] of Object.entries(props)) parameters.push({ name: field, in: "query", required: required.has(field), schema });
+      for (const [field, schema] of Object.entries(props)) parameters.push(queryParameter(field, required.has(field), schema));
     }
     paths[route.path] ??= {};
     paths[route.path][route.method.toLowerCase()] = {

@@ -483,6 +483,16 @@ window's own thoughts' effective priority once (`effective_priority`, migration
   priority is at least the level. Since migration 127 the level decides it: a
   High due tomorrow (3.4) passes at high, not at urgent. An unknown priority
   never passes.
+- **`weights`** (SMD-4193 PR 1) are this call's own, overriding the brain's
+  defaults by name (`docs/priority.md`'s table: `overdue`, `soon`, `unknown` and
+  the rest), checked as `effective_priority` checks them. They need
+  `priority_weight` above 0 or `min_priority`; alone they are refused 400
+  `REFUSED_WEIGHTS`. The window's read, the page's labels and the blend's scale
+  take them: the scale is `ob1_priority_span(weights)` (migration 131), 9 under
+  122's weights. A weight can make a term cross a level. An unknown name or a
+  value out of range is refused 400 `REFUSED_INPUT` naming the weight, and cap
+  below `unblocks_many_at` 400 `REFUSED_WEIGHTS`. The header names them and the
+  scale.
 
 Like `prefer_current`, it reorders the window and can surface no match past it.
 The header says what it read, how many carry a known priority and, with a
@@ -1090,6 +1100,30 @@ one told to use the operator's own key — and a database before 086 is named in
 fault; the REST core answers the code and its status. `thought_changes` reads the event
 as "reset by <key>", and a decline's line names the reset as the way out.
 
+## A thought's evidence (SMD-2690 PR 3b)
+
+**`append_thought_evidence(id, source_label, excerpt, source?, extracted_at?)`** is a
+**write-scoped** tool (`POST /v1/thoughts/{id}/evidence` over REST): it records that a
+source also says what an existing thought says, as one entry in the thought's
+`metadata.evidence` list — the source's label, the excerpt that says it, the kind of
+source, and when it was read (now, unless given). The smart-ingest plugin (SMD-2690 PR 4)
+calls it, through `ctx.call`, when a passage it extracts is close to a thought the brain
+already holds.
+
+The append is an edit through `update_thought`: it reads the list, adds the entry, and
+writes the list back with the row's stamp as `if_unchanged_since`, so the event log
+records it as any metadata edit, under the caller's key. A write between the read and
+the edit is a stale read, and it reads again after a short random wait (ten reads at
+most, then `THOUGHT_EVIDENCE_BUSY`, 503 and retryable), so appends at once each keep the
+others' entries. An entry's identity is the sha256 of its label, its excerpt and the
+thought's id, kept as `_identity` — the retired `schemas/smart-ingest` append's rule
+and shape — so the same entry is never added twice, and the reply says it already was.
+A label and a source are at most 200 characters and an excerpt 2,000; a thought keeps
+at most 100 entries, and `REFUSED_THOUGHT_EVIDENCE` (409) names a full list, a
+`metadata.evidence` another writer set to something that is no list, metadata that is
+no object, or a raw writer's row with neither an `updated_at` nor a `created_at`, which
+no edit can be checked against.
+
 ## Deciding a supersession proposal (SMD-3338)
 
 **`review_supersession_proposal(id, decision, direction?, note?, force?)`** is a
@@ -1266,13 +1300,32 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   its tier the key's (operator, a declared priority source, agent, inferred), never an
   argument's. The caller's new statement on an item replaces its earlier one there; the
   same statement again is `unchanged`, nothing written. The reply names what it
-  replaced and the item's winner, the lowest tier's newest statement.
+  replaced and the item's winner, the lowest tier's newest statement. A ticket and
+  its own board-sync rows are one item (SMD-4127, migration 133): a statement on
+  either replaces the caller's on the other, and the winner is the two's.
 - **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
-  the caller's own statement, never another key's, and names the winner after.
+  the caller's own statement, never another key's, and names the winner after. On a
+  ticket or one of its rows it closes the caller's statements on both.
 - **`priority_history`** (`GET /v1/priorities/{kind}/{key}`, read scope): the winner
   and its level (null: unknown, not low), and every statement in the order written,
-  each with its maker, tier, reason and how its window closed. `exists: false` is an
+  each with its maker, tier, reason and how its window closed. A ticket's history and
+  each of its rows' are one list, each statement naming its own item, and the text says
+  where one stands when it is not on the item asked. `exists: false` is an
   item since removed, whose statements are kept.
+- **`set_priority_weights`** (`POST /v1/priority-weights`, write scope; SMD-4193 PR 2,
+  migration 132): the operator's weights, which every read takes as its defaults (the
+  agenda, plan_context's board, search's `priority_weight` and `min_priority`), by
+  name over the built-in ones; `{}` clears them. A call's own `weights` still override
+  them. Past the scope, the database admits a key the operator classified `operator`,
+  by its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR` (403). A name
+  or a value out of range is refused `REFUSED_INPUT` (400), cap below
+  `unblocks_many_at` `REFUSED_WEIGHTS` (400). The answer is `{changed, weights,
+  previous, setAt, setBy, caller}`: `changed` false means the weights given were those
+  standing, and nothing was written; a replaced setting stays as history.
+  `brain_info`'s `database.priorityWeights` shows the one standing. A stored setting
+  the database refuses fails the agenda and a ranked search (500, its message naming
+  the setting and the weight) until an operator sets it again or clears it; a search's
+  priority labels and `plan_context`'s board say only that they were not read.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while
@@ -1314,8 +1367,8 @@ it, each over REST and MCP alike:
 | `decide_item_close` | `POST /v1/item-proposals/{id}/decision` | capture | `{outcome: accepted\|rejected, proposal, item, event}` |
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
-| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE` |
-| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values. One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
+| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, keyed, order, weights, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE`; `order=due` (migration 129, SMD-4192) lists the items with a due time first, soonest first, then the undated by priority (a stated None counts as undated), the answer's `order` saying which was applied; on a brain before 129 it is refused 503 `ORDER_UNAVAILABLE`; `weights[name]=value` (SMD-4193) overrides the default weights by name for this call, echoed as `weights` (null without), a bad one refused 400, naming it (`REFUSED_INPUT` for a name or a range, `REFUSED_WEIGHTS` for cap below `unblocks_many_at`) |
+| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values, little on this among them (SMD-4212: the best similarity of the first 8 hits under 0.74, the bar measured on qwen3-embedding:4b@1024; on another embedding a `little_not_measured` note says so, a note and not a coverage gap). One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
   `proposed` item for each distinct non-blank action item the extractor reads from it, at
@@ -1384,11 +1437,12 @@ MCP tools do rather than a copy of it:
   the manifest's names (`tools.ts`). `core/reads.ts` holds the read operations, each a
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
-  `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought` and
-  `reset_capture_stamp`: the shapes, a capture-only key's trimmed provenance and owned
-  pointers, the egress gate, the model calls, the write and its cites. `core/workers.ts` holds the worker actions
-  (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
-  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too.
+  `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought`,
+  `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
+  trimmed provenance and owned pointers, the egress gate, the model calls, the write and
+  its cites. `core/workers.ts` holds the worker actions (`retry_failed`,
+  `release_stale_leases`, `run_worker`'s dry run), which the keyed REST POSTs
+  (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too.
   `core/claims.ts` holds the work-claim tools (`claim_work`, `renew_claim`,
   `release_claim`, `list_claims`, SMD-3598) over migration 115's functions, and
   `core/priority.ts` and `core/items.ts` the priority and open-item tools over 116's and
@@ -1531,8 +1585,8 @@ stripped (`X-Forwarded-Prefix`).
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
-  /v1/thoughts/{id}/reset-capture-stamp`, `POST /v1/search` (and `/keyword`,
-  `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
+  /v1/thoughts/{id}/reset-capture-stamp` and `/evidence`, `POST /v1/search` (and
+  `/keyword`, `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET
   /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the

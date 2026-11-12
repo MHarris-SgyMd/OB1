@@ -108,7 +108,8 @@
  * outage past its pauses, or hung; the scheduler's session settings on its connections, a statement past its
  * statement_timeout thrown at its start or its naming, the pooling exempt while watched (PR 6b-1: a scan of every
  * thought, it can outlast the budget on a large brain, the pool never filled), and over a thought failing the thought
- * on its own write, else costing the run its poll, as a claim pass's; its start's lines left out; its start reported
+ * on its own write, else costing the run its poll, as a claim pass's did until SMD-2636 PR 4 (a claim pass's holds its
+ * pass now); its start's lines left out; its start reported
  * (onStart), each refusal by its kind, and its start check (check), the pool's name read and the judge model probed. As
  * a claim pass's follower does (PR 6b-1, the maintainer's choice), it waits out the provider's outage past its pauses,
  * or hung, a call timed out and a probe out too, the thought in hand back in the pool, a thought that errs so again
@@ -541,7 +542,7 @@ export interface SubjectSweepOptions {
    * budget, the pool then never filled and every sleep ending on it), its waits said and a stop cancelling it as
    * before, the budget set back after it; unwatched — its watching connection refused, as at a role's connection limit
    * — it keeps the budget, nothing else bounding it (review pass 1, run-it). One over a thought is the thought's or the
-   * poll's, as a claim pass's is, not the run's (review pass 6, run-it: thrown, it ended the scheduler's sleep on its
+   * poll's, as a claim pass's was until SMD-2636 PR 4 (now its follower ends), not the run's (review pass 6, run-it: thrown, it ended the scheduler's sleep on its
    * budget): its own write's fails it (overBudget); its claim's, its read's, a put-back's or set-back's or the claim's
    * state read after one, its release's or its answer's window's costs the run its poll (lostPoll). Only the budget's:
    * another error there, an operator's cancel among them, is thrown as before. The run's hand-back of what it holds, at
@@ -2130,7 +2131,8 @@ async function sweep(
 
   /**
    * A thought's own write — the door's, or the finish of one named nothing — past a scheduler's statement_timeout: the
-   * thought failed, for --retry-failed, as a claim pass fails one on its own write (sleep.ts), said once and counted,
+   * thought failed, for --retry-failed, as a claim pass failed one on its own write until SMD-2636 PR 4 (now its pass
+   * is held, sleep.ts), said once and counted,
    * and the run goes on, an answer it was asked judged as a failed one's is (review pass 6, run-it: thrown, it ended
    * the scheduler's sleep on its budget, cutting the other passes); past the hard stop, the stop's to hand back.
    */
@@ -2145,7 +2147,7 @@ async function sweep(
   /**
    * A statement past a scheduler's statement_timeout over a thought but its own write — `what`: its claim, its read, a
    * put-back or set-back or the claim's state read after one, its release, its answer's window — costs the run its
-   * poll, not its end, as one on a claim costs a claim pass's worker its (sleep.ts; review pass 6, run-it: thrown, it
+   * poll, not its end, as one on a claim cost a claim pass's worker its until SMD-2636 PR 4 (sleep.ts; review pass 6, run-it: thrown, it
    * ended the scheduler's sleep on its budget, cutting the other passes): counted, and said once, naming the first.
    * What the run holds goes back, its attempt not counted, and the claim in hand not yet counted gives back its place
    * under --limit; a following run claims again through the gate after its follow or the provider's pause, the longer,

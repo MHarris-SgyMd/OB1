@@ -93,7 +93,7 @@ import {
   BLOCKED_WEIGHT, DEFAULT_OPTIONS, DONE_WEIGHT, FUZZY_FLOOR, LIFECYCLE_FILTERS, LIFECYCLE_TYPES, dependencyCaveat, coverage as graphCoverage, lifecycleCaveat, neighbourhood, parseArgs, pgArray, rankedSubjects, render, report as graphReport,
   resolveSubject, schemaProblem, subjectThoughts, topEntities, topThoughts, weightsSql, type Options as GraphOptions, type Runner,
 } from "./graph-centrality.ts";
-import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, renderReport, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
+import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, NOT_SEARCH_KINDS, queryLabels, renderReport, SEARCH_KINDS, SEARCH_KINDS_LITERAL, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
@@ -205,9 +205,11 @@ function definedIn(file: string): string[] {
  * entry. 120 is 102's record_thought_relation and 111's validator, each with
  * a thread's edge (SMD-3306), and carries both: 102 last states the comment
  * on supersession_proposals [74] reads, and 111 last defines
- * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]).
+ * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
+ * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
+ * whose door and thread functions it does not define.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -4738,6 +4740,30 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   const aligned = renderReport(summarise([...searches, search("s0", AG, 20, "empty", [], null)], actions, 30));
   const rowLines = aligned.split("\n").filter((l) => /^(search_thoughts|all|9999|\(anon)/.test(l));
   assert(rowLines.length >= 2 && new Set(rowLines.map((l) => l.length)).size === 1, `every table row is the same width (${[...new Set(rowLines.map((l) => l.length))].join(",")})`);
+
+  // SMD-2684 PR 2: a plan_context row is a search to the report and the export (its knowledge hits in result_ids), and
+  // every kind query_log allows is read as a search or named as not one — a new kind needs a decision. Neither reader
+  // runs in CI, so their search-row selects are held to SEARCH_KINDS_LITERAL by their source, and the literal on the
+  // database (review pass 2: the literal alone passed with either reader reverted to kind = 'search').
+  const picked = (await db.query<{ k: string }>(`SELECT k FROM unnest(ARRAY['search', 'plan_context', 'agenda', 'action']) AS k WHERE k = ANY($1::text[]) ORDER BY k`, [SEARCH_KINDS_LITERAL])).rows.map((r) => r.k);
+  assert(JSON.stringify(picked) === JSON.stringify(["plan_context", "search"]), `the readers' kinds literal picks search and plan_context rows, not agenda or action rows (${picked.join(",")})`);
+  const readerSrc = (f: string) => readFileSync(join(import.meta.dir, "..", "evals", f), "utf8");
+  const count = (s: string, needle: string) => s.split(needle).length - 1;
+  const util = readerSrc("eval-utilization.ts");
+  const exp = readerSrc("export-queries.ts");
+  assert(count(util, "kind = ANY(${SEARCH_KINDS_LITERAL}::text[])") === 1 && count(util, "kind = 'search'") === 0, "eval-utilization.ts selects its search rows by SEARCH_KINDS_LITERAL, and nowhere by kind = 'search'");
+  assert(count(exp, "kind = ANY(${SEARCH_KINDS_LITERAL}::text[])") === 1 && count(exp, "kind = 'search'") === 1, "export-queries.ts attributes over SEARCH_KINDS_LITERAL's rows, and keeps kind = 'search' for its baselines alone");
+  // The export's labels: a fetch after a plan_context call is its use, and labels no query; a search's use labels its query.
+  const labelSearches = [search("ls1", AG, 0, "what about X", [A], null), search("lpc", AG, 1, "go ahead with X", [A], null, "plan_context"), search("ls2", AG, 2, "and Y", [B], null)];
+  const labelUses = attribute(labelSearches, [act(AG, 3, "fetch", A), act(AG, 4, "fetch", B)], 30).bySearch;
+  assert(JSON.stringify(queryLabels(labelSearches, labelUses)) === JSON.stringify([{ query: "and Y", target_id: B }]), `the export labels a search's use under its query, and none from a plan_context request (${JSON.stringify(queryLabels(labelSearches, labelUses))})`);
+  // A plan_context row's hits are cut to a budget, so the stored text estimates nothing it returned.
+  assert(dbRow({ tool: "plan_context" }).resultTokens === null && dbRow().resultTokens === 300, "a plan_context row carries no token estimate; a search row keeps its own");
+  const [{ def }] = (await db.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'query_log_kind_check' AND conrelid = 'query_log'::regclass`)).rows;
+  const allowed = [...def.matchAll(/'([a-z_]+)'::text/g)].map((m) => m[1]).sort();
+  const decided = [...SEARCH_KINDS, ...NOT_SEARCH_KINDS].sort();
+  assert(allowed.length > 0 && JSON.stringify(allowed) === JSON.stringify(decided), `every query_log kind is read as a search or named as not one (allowed ${allowed.join(",")}; decided ${decided.join(",")})`);
+  assert((SEARCH_KINDS as readonly string[]).includes("plan_context"), "plan_context is among the search kinds");
 }
 
 // ── 40. The community schemas on a plain-Postgres brain ──────────────────────
@@ -4756,7 +4782,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   // nothing does now.
   const SCHEMAS = SCHEMAS_DIR;
   const schemaFiles = communitySchemaFiles();
-  assert(schemaFiles.length >= 12 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064, 12 after SMD-2690 made agent-memory a plugin; the set otherwise grows), the four with prerequisites among them`);
+  assert(schemaFiles.length >= 11 && SCHEMA_FILES_FIRST.every((f) => schemaFiles.includes(f)), `${schemaFiles.length} SQL files under schemas/ (17 when written, 14 after SMD-1924 removed three, 13 after SMD-1812 moved wiki-pages into core as 064, 12 after SMD-2690 made agent-memory a plugin, 11 after it made smart-ingest one; the set otherwise grows), the four with prerequisites among them`);
 
   // The rule check-consistency holds these files to, from inside the
   // suite: none runs a Supabase-ism, comments excepted. And the strip's teeth,
@@ -4827,7 +4853,7 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedSeqs = new Set(grantedSequences(["community"]));
   const serialSeqs = seqs.filter((s) => !s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
   const identitySeqs = seqs.filter((s) => s.identity && communityTables.has(s.tbl)).map((s) => s.seq);
-  assert(serialSeqs.length === 6 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
+  assert(serialSeqs.length === 4 && serialSeqs.every((s) => listedSeqs.has(s)) && listedSeqs.size === serialSeqs.length,
     `the community group names exactly the bigserial sequences the files created (${serialSeqs.length}: ${serialSeqs.sort().join(", ")})`);
   assert(identitySeqs.length === 1 && identitySeqs.join() === "thought_audit_seq_seq" && identitySeqs.every((s) => !listedSeqs.has(s)),
     `…and not the one identity column's — 050's thought_audit.seq, the table schemas/thought-audit shares (wiki-pages' was the other until SMD-1812 moved it into core, where [59] measures 064's) (${identitySeqs.join(", ")})`);
@@ -4874,8 +4900,8 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
-  // measurement db/README.md and ROLE_GRANTS.community cite for why six
-  // sequences are listed and the seventh is not.
+  // measurement db/README.md and ROLE_GRANTS.community cite for why four
+  // sequences are listed and the fifth is not.
   const present = new Set(presence.map((r) => r.name));
   const statements = grantStatements("ob1_community", { groups: ["community"], present });
   const tableGrants = statements.filter((s) => !/ ON (SEQUENCE|FUNCTION) /.test(s));
@@ -4896,11 +4922,11 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
          notHeld.length === listedSeqs.size * 2 + listedFns.length && notHeld.every((r) => r.kind === "sequence" || r.kind === "function") &&
          partial.filter((r) => r.kind === "table" || r.kind === "view").every((r) => r.held),
     `grantVerifySql reports one row per privilege (${partial.length}): with tables and view granted it holds every table, view and schema privilege and none of the ${notHeld.length} sequence and function ones`);
-  const serialOnly = await asRole(`INSERT INTO ingestion_jobs DEFAULT VALUES`);
-  assert(serialOnly.code === "42501" && /sequence ingestion_jobs_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
+  const serialOnly = await asRole(`INSERT INTO consolidation_log DEFAULT VALUES`);
+  assert(serialOnly.code === "42501" && /sequence consolidation_log_id_seq/.test(serialOnly.message), `with the tables granted and the sequences not, an INSERT into a bigserial table is refused on the sequence (${serialOnly.code}: ${serialOnly.message})`);
   const stillDenied = [...(await insertCodes())].filter(([, r]) => r.code === "42501").map(([t]) => t).sort();
-  assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "ingestion_items", "ingestion_jobs", "thought_edges"]),
-    `exactly the six bigserial tables are still refused (${stillDenied.join(", ")})`);
+  assert(JSON.stringify(stillDenied) === JSON.stringify(["consolidation_log", "edges", "entities", "thought_edges"]),
+    `exactly the four bigserial tables are still refused (${stillDenied.join(", ")})`);
   for (const s of restGrants) await cdb.exec(s);
   const full = await verify();
   assert(full.every((r) => r.held), `…and with the whole group granted every privilege is held (${full.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none missing"})`);
@@ -7072,7 +7098,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111 and 120, its last definer (053's body plus the relation kind, [74], with distinct, [92], and the subject kind, [98])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 134, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [121])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -7375,8 +7401,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   // auth.uid(), GRANTs TO service_role or authenticated, one REFERENCES
   // auth.users and three `EXECUTE 'GRANT …'` strings. A third PGlite:
   // ops-views.sql reads columns enhanced-thoughts adds to `thoughts`, and its
-  // three guarded views exist only over smart-ingest's and entity-extraction's
-  // tables, so the community files go first and all eight views are measured.
+  // two guarded views exist only over entity-extraction's tables, so the
+  // community files go first and all seven views are measured.
   const contribFiles = CONTRIB_SCHEMA_FILES;
   const extensionSchemas = readdirSync(join(CONTRIB_DIR, "extensions"), { withFileTypes: true })
     .filter((d) => d.isDirectory() && existsSync(join(CONTRIB_DIR, "extensions", d.name, "schema.sql"))).map((d) => `extensions/${d.name}/schema.sql`).sort();
@@ -7435,7 +7461,7 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   const objects = grantedObjects([...GROUPS]);
   const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
   const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
-  assert(presence.length === objects.length && objects.length === 28 && absent.length === 0, `every object the recipes group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  assert(presence.length === objects.length && objects.length === 27 && absent.length === 0, `every object the recipes group names exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
   const listedTables = new Set(grantedTables([...GROUPS]));
   const listedViews = new Set(grantedViews([...GROUPS]));
   const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
@@ -7445,8 +7471,8 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   assert(newTables.every((t) => !grantedTables(["community"]).includes(t)) && !(ROLE_GRANT_GROUPS as readonly string[]).includes("extensions") && Object.hasOwn(RETIRED_GRANT_GROUPS, "extensions"),
     "…none of them a community table under another name, and the extensions group out of ROLE_GRANT_GROUPS and in RETIRED_GRANT_GROUPS since SMD-2311 (test-preflight asserts --groups refusing it)");
   const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
-  assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
-    `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
+  assert(newViews.length === 14 && listedViews.size === 14 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 7 && lintViews.length === 7,
+    `…and exactly the fourteen views — seven ops_* (the ingestion summary retired with schemas/smart-ingest, SMD-2690) and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
   const newSeqs = [...(await seqsNow())].filter((s) => !baseSeqs.has(s));
   const newLocked = [...(await lockedFnsNow())].filter((f) => !baseLocked.has(f));
   assert(newSeqs.length === 0 && grantedSequences([...GROUPS]).length === 0, `no sequence was created (every id is a uuid or text), so the groups list none (${newSeqs.join(", ") || "none"})`);
@@ -7476,7 +7502,7 @@ console.log("\n[50] Every recipe schema applies to a migrated brain carrying the
   assert(before.length === 0, `ungranted, the role's INSERT into every listed table and SELECT from every listed view is refused with 42501 (${listedTables.size + listedViews.size} objects; exceptions: ${before.join(", ") || "none"})`);
   const present = new Set(presence.map((r) => r.name));
   const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
-  assert(statements.length === 28 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
+  assert(statements.length === 27 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
          statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
     `--grant's statements for the recipes group: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
   for (const s of statements) await xdb.exec(s);
@@ -15086,8 +15112,8 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   // both ([108]); the sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && lastDefinerOf("record_thought_relation").startsWith("120"),
-    `120 is the last definer of the door and of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && lastDefinerOf("record_thought_relation").startsWith("120"),
+    `120 is the last definer of the door and 134 of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
     "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
@@ -15152,7 +15178,7 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
   assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("102")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
     `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 102; 102 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
-  // 102 re-applied holds 102's validator and door; 120 is their last definer, so the sections after run on its bodies.
+  // 102 re-applied holds 102's validator and door; 134 and 120 are their last definers, so the sections after run on their bodies.
   await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -15775,7 +15801,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   // which 120 carries with a thread's edge ([108]); the sentinels; the trigger; the indexes (one standing per thought,
   // since 130 per thought and key); the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "120" : "111";
+    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "134" : "111";
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
@@ -15795,8 +15821,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
     assert(/111/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 111 and the ticket`);
   }
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
-  assert(/four kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
-    "thought_facets' comment registers the fourth kind, and the validator's names 111");
+  assert(/five kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
+    "thought_facets' comment registers the subject kind (five since 134), and the validator's names 111");
 
   // The key's shape: one rule, four namespaces.
   const valid = async (k: string | null) => (await one<{ v: boolean | null }>(`SELECT subject_key_valid($1) AS v`, [k])).v === true;
@@ -17210,7 +17236,8 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   // A role granted the priority group as 116 listed it, not re-granted after 117: every priority call it made still answers; only an item of kind item reaches open_items (review pass 2).
   const OLDROLE = "ob1_test_priority_at_116";
   await db.exec(`CREATE ROLE ${OLDROLE} NOLOGIN`);
-  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON open_item/.test(st));
+  // 117's open items, 132's weights and 133's thought_sources joined the group later.
+  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON (?:open_item|priority_weight_settings|thought_sources)/.test(st));
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${OLDROLE}`, ...grantStatements(OLDROLE, { groups: ["capture", "server"] }), ...at116]) await db.exec(st);
   const capOld = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role granted at 116");
   const oldUse = async (sql: string, params: unknown[]) => {
@@ -17436,9 +17463,11 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   // constraint triggers, deferred to the writer's commit, the indexes, the sentinels, SECURITY INVOKER throughout, the
   // comments.
   // (The trigger function's last definer is 130, which takes its locks for a set: [116].)
-  for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink"]) {
+  for (const fn of ["record_thought_relation", "thread_relink"]) {
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
   }
+  // The validator's last definer is 134, which carries 120's with the deliverable kind ([121]).
+  assert((await functionsNamed("thought_facets_validate")) === 1 && lastDefinerOf("thought_facets_validate").startsWith("134"), `one thought_facets_validate, 134 its last definer (${lastDefinerOf("thought_facets_validate")})`);
   assert((await functionsNamed("ob1_thread_relink_subject")) === 1 && lastDefinerOf("ob1_thread_relink_subject").startsWith("130"), `one ob1_thread_relink_subject, 130 its last definer (${lastDefinerOf("ob1_thread_relink_subject")})`);
   const [shape] = await q<{ written: string | null; closed: string | null; deleted: string | null; judged: string | null; thread: string | null; bykey: string | null }>(`SELECT
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_written' AND tgrelid = 'thought_facets'::regclass) AS written,
@@ -17469,15 +17498,15 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
     assert(/120/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 120 and the ticket`);
   }
   const validatorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? "";
-  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120\.$/.test(validatorComment),
-    `the validator's comment says what a thread's edge is and names its migrations, 120 the last (${validatorComment.slice(-60)})`);
+  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120, 134\.$/.test(validatorComment),
+    `the validator's comment says what a thread's edge is and names its migrations, 120 and 134 the last (${validatorComment.slice(-60)})`);
   const closeComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["close_thought_subject(uuid, uuid, text)"])).c ?? "";
   const indexComments = await q<{ c: string | null }>(`SELECT obj_description(to_regclass(n), 'pg_class') AS c FROM unnest(ARRAY['thought_facets_relation_active_uniq', 'thought_facets_relation_thread_uniq', 'thought_facets_thread_key_idx']) n`);
   const payloadComment = (await one<{ c: string | null }>(`SELECT col_description('thought_facets'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_facets'::regclass AND attname = 'payload'`)).c ?? "";
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   assert(/113/.test(closeComment) && /since 120 a close re-links the subject''?s thread/.test(closeComment) && indexComments.every((r) => /120/.test(r.c ?? ""))
-         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130 /.test(tableComment),
-    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130: [116]) (${closeComment.slice(-200)})`);
+         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130, 134 /.test(tableComment),
+    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130, [116], and 134, [121]) (${closeComment.slice(-200)})`);
 
   // A thread kept by the triggers, through the door: written, a thought come between, one re-keyed away, one closed.
   const a = await thought("a", "2026-11-01T00:00:00Z"), b = await thought("b", "2026-11-02T00:00:00Z"), c = await thought("c", "2026-11-03T00:00:00Z"), d = await thought("d", "2026-11-04T00:00:00Z");
@@ -18009,8 +18038,10 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const file = files.find((f) => /^\d{3}_agenda\.sql$/.test(f)) ?? "no NNN_agenda.sql";
   await reapply(file.slice(0, 4));
   // 124 (SMD-4162) replaced 123's agenda under a ninth argument; 123's re-apply puts its eight-argument one back beside
-  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's).
+  // it. This section holds 123's, so 124's goes until the section's end restores it ([111] holds 124's), and so
+  // does 129's ten-argument one (SMD-4192), so its shape row counts 123's alone; the restore makes both again.
   await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean)`);
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   // Earlier sections leave tickets and open items standing, so every read here is scoped to this section's project,
   // or compares this section's own items among themselves.
   const P = "Agenda [110]";
@@ -18263,7 +18294,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
-  // The shipped agenda back: 124's, which drops 123's eight-argument one.
+  // The shipped agenda back: the last definer's (129's), which drops 123's eight-argument one.
   await restoreShipped("agenda");
 }
 
@@ -18271,6 +18302,9 @@ console.log("\n[111] Migration 124: the agenda says each ticket's status, leaves
 {
   const file = files.find((f) => /^\d{3}_agenda_unstarted\.sql$/.test(f)) ?? "no NNN_agenda_unstarted.sql";
   await reapply(file.slice(0, 4));
+  // 129's ten-argument agenda (SMD-4192), which [110]'s restore made, goes while this section and [113] hold the
+  // nine-argument one, so their shape rows count one agenda. [117] puts it back.
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [111]";
   const NOW = "2027-03-10T15:00:00Z";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag111-op', 'operator')`);
@@ -18530,8 +18564,10 @@ console.log("\n[112] Migration 125: a note's open items reach its priority — a
 console.log("\n[113] Migration 126: the agenda's keys scope — the tickets named alone, no open item, under every other rule; a named ticket that is settled, or whose status type is unknown, and a key no thought records, said beside the list; query_log's plan_context kind and its shape; a re-apply a no-op (SMD-2684)");
 {
   const file = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
-  // [111] re-applied 124's agenda over this one (one signature): put 126's back first.
+  // [111] re-applied 124's agenda over this one (one signature): put 126's back first. 129's ten-argument one
+  // stays away until [117] ([111] dropped it).
   await reapply(file.slice(0, 4));
+  await db.exec(`DROP FUNCTION IF EXISTS agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text)`);
   const P = "Agenda [113]";
   const NOW = "2027-03-10T15:00:00Z";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag112-op', 'operator')`);
@@ -18724,7 +18760,7 @@ console.log("\n[115] Migration 128: the default weights in one function — ob1_
   // commented; effective_priority reads the defaults and holds no literal.
   const fns = (await db.query<{ n: string; v: string; c: string | null }>(
     `SELECT p.proname AS n, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
-      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') ORDER BY 1`)).rows;
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_defaults', 'ob1_priority_span') AND p.pronargs = 0 ORDER BY 1`)).rows;  // 128's; 131's span of a read's weights is [118]'s
   const def = (await db.query<{ d: string }>(`SELECT pg_get_functiondef('effective_priority(jsonb, jsonb, timestamptz)'::regprocedure) AS d`)).rows[0].d;
   assert(fns.length === 2 && fns.every((f) => f.v === "s" && /Migration 128 \/ SMD-4194/.test(f.c ?? "")) && /c_defaults CONSTANT jsonb := ob1_priority_defaults\(\);/.test(def) && !/"overdue":/.test(def),
     `ob1_priority_defaults and ob1_priority_span are STABLE and commented; effective_priority reads its defaults from the function and holds no literal (${fns.map((f) => `${f.n}:${f.v}`).join(", ")})`);
@@ -19053,27 +19089,832 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 }
 
-console.log("\n[117] Migration 131: a thought serves every ticket of its subject set — ob1_item_serves returns each standing ticket subject, distinct, in key order, a filed ticket still serving alone and a subject of another kind none; effective_priority inherits from the best of them; 122's other arms as they were; a re-apply a no-op (SMD-3306)");
+console.log("\n[117] Migration 129: the agenda takes an order — priority, the default, 126's order unchanged; due, the dated items first, soonest first so the longest overdue leads, a tie on the due time to the higher priority, then the undated by priority; the order applied before the limit; the answer says it; any other order refused; query_log.filter's comment names it; the shape; a re-apply a no-op (SMD-4192)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_order\.sql$/.test(f)) ?? "no NNN_agenda_order.sql";
+  // [111] and [113] re-applied 124's and 126's nine-argument agenda: put 129's back first, its wrapper in their place.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [117]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag116-op', 'operator')`);
+  const OP = { name: "ag116-op", scope: "write" };
+  type Ag = { items: { key: string; effective: number; due_at: string | null }[]; total: number; order?: string };
+  const ticket = async (issue: string, level: number | null, due: string | null) => {
+    const content = `${issue} — [117] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag116-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (level !== null || due !== null) {
+      await db.query(`SELECT assert_priority('ticket', $1, $2::int, $3::timestamptz, NULL, NULL, NULL, NULL, false, $4::jsonb)`, [issue, level, due, JSON.stringify(OP)]);
+    }
+  };
+  // An Urgent with no date; a High due tomorrow; a Medium and a Low overdue at one moment; a Medium due within the
+  // week; a High with no date.
+  await ticket("SMD-9951", 4, null); await ticket("SMD-9952", 3, "2027-03-11T00:00:00Z");
+  await ticket("SMD-9953", 2, "2027-03-01T00:00:00Z"); await ticket("SMD-9954", 1, "2027-03-01T00:00:00Z");
+  await ticket("SMD-9955", 2, "2027-03-15T00:00:00Z"); await ticket("SMD-9956", 3, null);
+  // A stated None due long ago (review pass 3): undated under due, as 122 gives it no urgency; last under both orders.
+  await ticket("SMD-9957", 0, "2027-02-01T00:00:00Z");
+  const scope = JSON.stringify({ project: P });
+  const nine = async (limit = 100) => (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false) AS a`, [scope, limit, NOW])).rows[0].a;
+  const ten = async (order: string | null, limit = 100) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, $2, false, false, false, NULL, $3::timestamptz, false, $4) AS a`, [scope, limit, NOW, order])).rows[0].a;
+  const keys = (a: Ag) => a.items.map((i) => i.key.slice(4)).join(" ");
+
+  // The shape (review pass 2): the ten-argument agenda, plpgsql, no argument defaulted; and the nine-argument one, a
+  // SQL wrapper with 126's defaults calling it with priority. Both STABLE, each commented for 129.
+  const fns = (await db.query<{ n: number; v: string; l: string; d: string | null; c: string | null }>(
+    `SELECT p.pronargs::int AS n, p.provolatile::text AS v, l.lanname AS l, pg_get_function_arguments(p.oid) AS d, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname = 'agenda' ORDER BY p.pronargs`)).rows;
+  assert(fns.map((f) => `${f.n}:${f.l}:${f.v}`).join(" ") === "9:sql:s 10:plpgsql:s"
+      && /p_include_started boolean DEFAULT false$/.test(fns[0].d ?? "") && !/DEFAULT/.test(fns[1].d ?? "") && /p_order text$/.test(fns[1].d ?? "")
+      && /The agenda in the priority order: the ten-argument agenda with p_order priority/.test(fns[0].c ?? "") && /Migration 129 \(SMD-4192\)/.test(fns[0].c ?? "")
+      && /126 \(SMD-2684\) and 129 \(SMD-4192\)/.test(fns[1].c ?? "") && /sorted by p_order: priority by effective/.test(fns[1].c ?? ""),
+    `two agendas: nine arguments, a SQL wrapper with 126's defaults; ten, plpgsql, none defaulted; both STABLE and commented for 129 (${fns.map((f) => `${f.n}:${f.l}:${f.v}:${(f.d ?? "").slice(-36)}`).join(", ")})`);
+
+  // priority: 126's order, as a nine-argument call gets it — the Urgent, the High due tomorrow, the High, the
+  // overdue Medium (2.6), the Medium due within the week (2.2), the overdue Low.
+  const byNine = await nine(), byPriority = await ten("priority");
+  const strip = (a: Ag) => JSON.stringify({ ...a, order: undefined, now: undefined });
+  assert(keys(byNine) === "9951 9952 9956 9953 9955 9954 9957" && strip(byPriority) === strip(byNine) && byNine.order === "priority" && byPriority.order === "priority",
+    `the priority order is 126's, and a nine-argument call gets it, the answer saying priority (${keys(byNine)} | ${keys(byPriority)} | ${byNine.order})`);
+
+  // due: the overdue two first, the Medium before the Low (one moment, the higher priority first), then tomorrow's,
+  // then the week's; the undated after, the Urgent before the High.
+  const byDue = await ten("due");
+  assert(keys(byDue) === "9953 9954 9952 9955 9951 9956 9957" && byDue.order === "due" && byDue.total === 7,
+    `the due order: the dated first, soonest first, a tie on the moment to the higher priority, then the undated by priority, the stated None among them; the answer says due (${keys(byDue)} | ${byDue.order})`);
+
+  // The order is applied before the limit: due's first two are the overdue ones, not priority's first two re-sorted.
+  const dueTwo = await ten("due", 2), priorityTwo = await ten("priority", 2);
+  assert(keys(dueTwo) === "9953 9954" && keys(priorityTwo) === "9951 9952" && dueTwo.total === 7,
+    `the order is applied before the limit (${keys(dueTwo)} | ${keys(priorityTwo)})`);
+
+  // Refused 22023: any other order, NULL, a different case, padding, an empty string.
+  const code = async (order: string | null) => { try { await ten(order); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const refused = [await code("Due"), await code(null), await code("due "), await code(""), await code("soonest")];
+  assert(refused.join(",") === "22023,22023,22023,22023,22023", `an order that is not priority or due is refused 22023 (${refused.join(",")})`);
+
+  // query_log.filter's comment names the agenda row's order.
+  const filterComment = (await db.query<{ f: string | null }>(
+    `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
+  assert(/its order \(priority or due; migration 129\)/.test(filterComment) && /On a plan_context row/.test(filterComment),
+    `query_log.filter's comment names the agenda row's order, and keeps plan_context's row (${filterComment.slice(-160)})`);
+
+  // 126 re-applied alone after 129 (review pass 2): it replaces the wrapper with its own body, so a nine-argument
+  // call still names one function and reads in the priority order, and the ten-argument one still answers.
+  const the126 = files.find((f) => /^\d{3}_plan_context\.sql$/.test(f)) ?? "no NNN_plan_context.sql";
+  await reapply(the126.slice(0, 4));
+  let after126 = "";
+  try { after126 = `${keys(await nine())} | ${keys(await ten("due"))}`; } catch (e) { after126 = `threw: ${(e as Error).message}`; }
+  const count126 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'agenda'`)).rows[0].n;
+  assert(after126 === `${keys(byNine)} | ${keys(byDue)}` && count126 === 2,
+    `126 re-applied after 129: a nine-argument call names one function, in the priority order, and due still answers (${after126}; ${count126} agendas)`);
+
+  // A re-apply is a no-op: the same reads.
+  await reapply(file.slice(0, 4));
+  assert(strip(await ten("due")) === strip(byDue) && strip(await nine()) === strip(byNine), "a re-apply is a no-op: the same reads under both orders");
+}
+
+console.log("\n[118] Migration 131: the span under a read's own weights — ob1_priority_span(jsonb), 128's composition over the defaults with the weights laid over them, NULL the defaults' span; a bad weight refused 22023 by effective_priority's rule, naming it, cap below unblocks_many_at among them; 128's ob1_priority_span() unchanged; query_log.filter's comment names the agenda row's weights; the shape; a re-apply a no-op (SMD-4193)");
+{
+  const file = files.find((f) => /^\d{3}_priority_span_weights\.sql$/.test(f)) ?? "no NNN_priority_span_weights.sql";
+  await reapply(file.slice(0, 4));
+  // 122's own weights (migration 122, before SMD-4177 scaled the terms by 0.2).
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const span = async (w: unknown) =>
+    String((await db.query<{ s: string | null }>(`SELECT ob1_priority_span($1::jsonb)::text AS s`, [w === null ? null : JSON.stringify(w)])).rows[0].s);
+  const span0 = async () => String((await db.query<{ s: string | null }>(`SELECT ob1_priority_span()::text AS s`)).rows[0].s);
+
+  // The shape: 128's function and 131's beside it, both STABLE, each commented by its migration.
+  const fns = (await db.query<{ a: string; v: string; c: string | null }>(
+    `SELECT pg_get_function_identity_arguments(p.oid) AS a, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace WHERE s.nspname = 'public' AND p.proname = 'ob1_priority_span' ORDER BY 1`)).rows;
+  assert(fns.length === 2 && fns[0].a === "" && fns[1].a === "p_weights jsonb" && fns.every((f) => f.v === "s")
+         && /Migration 128 \/ SMD-4194/.test(fns[0].c ?? "") && /Migration 131 \/ SMD-4193/.test(fns[1].c ?? ""),
+    `ob1_priority_span() is 128's and ob1_priority_span(jsonb) 131's, both STABLE and commented (${fns.map((f) => `(${f.a}):${f.v}`).join(", ")})`);
+
+  // The values: the defaults' span with none or none overridden; 122's weights 5 + overdue 3 + unblocks_many 1; unknown
+  // past a critical level taken; every term zeroed leaves the level's 5. 128's function unchanged.
+  const vals = [await span(null), await span({}), await span(W122), await span({ unknown: 7 }), await span({ soon: 0, week: 0, overdue: 0, unblocks_one: 0, unblocks_many: 0 }), await span({ soon: 4 }), await span0()].map(Number);
+  assert(vals.join(" ") === "5.8 5.8 9 7.8 5 9.2 5.8",
+    `the span: the defaults' 5.8 for NULL and {}, 9 under 122's weights, 7.8 with unknown 7, 5 with every term zeroed, 9.2 with soon 4 (the largest urgency term), and ob1_priority_span() still 5.8 (${vals.join(" ")})`);
+
+  // Refused 22023 by effective_priority's own rule, in its words, naming the weight.
+  const refusal = async (w: unknown) => {
+    try { await span(w); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split(" (")[0]}`; }
+  };
+  const refused = [await refusal({ overdu: 1 }), await refusal({ overdue: 11 }), await refusal({ hops: 1.5 }), await refusal({ cap: 2 }), await refusal([])];
+  assert(refused[0] === "22023 not a weight: overdu" && refused[1] === "22023 a weight out of range: overdue" && refused[2] === "22023 a weight out of range: hops"
+         && /^22023 a weight out of range: cap is below unblocks_many_at/.test(refused[3]) && /^22023 effective_priority's weights are a JSON object/.test(refused[4]),
+    `a bad weight is refused 22023 in effective_priority's words, naming it: an unknown name, a value out of range, a fraction where a whole number goes, cap below the default unblocks_many_at, an array (${refused.join(" | ")})`);
+
+  // query_log.filter's comment names the agenda row's weights, and keeps 129's order and 126's plan_context row.
+  const filterComment = async () => (await db.query<{ f: string | null }>(
+    `SELECT col_description('query_log'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'query_log'::regclass AND attname = 'filter')::int) AS f`)).rows[0].f ?? "";
+  const comment = await filterComment();
+  assert(/the weights it overrode, when it passed any \(migration 131\)/.test(comment) && /its order \(priority or due; migration 129\)/.test(comment) && /On a plan_context row/.test(comment),
+    `query_log.filter's comment names the agenda row's weights, and keeps its order and plan_context's row (${comment.slice(-200)})`);
+
+  // A re-apply is a no-op: the same spans, the same comment.
+  await reapply(file.slice(0, 4));
+  assert(Number(await span(W122)) === 9 && Number(await span0()) === 5.8 && (await filterComment()) === comment, "a re-apply is a no-op: the same spans, the same comment");
+}
+
+console.log("\n[119] Migration 132: the operator's priority weights — priority_weight_settings, one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_priority_builtin() 127's weights; ob1_priority_weights_refusal held to effective_priority's checks at each weight's edges; ob1_priority_defaults() the built-in weights under the standing setting, so every read and both spans take it and a call's own weights still override it; set_priority_weights an operator key's alone, by its agent id, refusing bad weights in effective_priority's words, writing nothing for the weights standing, {} clearing; a stored setting the refusal names failing every read 22000, naming it; priority_weight_setting() saying it without raising; the shape; a re-apply a no-op (SMD-4193)");
+{
+  const file = files.find((f) => /^\d{3}_priority_weight_setting\.sql$/.test(f)) ?? "no NNN_priority_weight_setting.sql";
+  // [115] re-applies 128's ob1_priority_defaults, which 132 replaces: this section holds 132's.
+  await restoreShipped("ob1_priority_defaults");
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const BUILT_IN = { cap: 50, hop: 1, hops: 2, soon: 0.4, week: 0.2, depth: 3, overdue: 0.6, unknown: 2, soon_days: 1, week_days: 7, unblocks_one: 0.1, unblocks_many: 0.2, count_inferred: false, unblocks_many_at: 3 };
+  const W122 = { soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 };
+  const W127 = { soon: 0.4, week: 0.2, overdue: 0.6, unblocks_one: 0.1, unblocks_many: 0.2 };
+  // [114]'s ladder, as [115] reads it: the High due tomorrow and the overdue Medium.
+  const NOW = "2027-03-10T15:00:00Z";
+  const eff = async (w: unknown = null) => (await q<{ item_key: string; effective: string }>(`SELECT item_key, effective::text AS effective FROM effective_priority($1::jsonb, $2::jsonb, $3::timestamptz)`,
+    [JSON.stringify([{ kind: "ticket", key: "SMD-9964" }, { kind: "ticket", key: "SMD-9967" }]), w === null ? null : JSON.stringify(w), NOW])).map((r) => `${r.item_key} ${Number(r.effective)}`).join(", ");
+  const span = async (w: unknown = undefined) => String((await one<{ s: string | null }>(w === undefined ? `SELECT ob1_priority_span()::text AS s` : `SELECT ob1_priority_span($1::jsonb)::text AS s`, w === undefined ? [] : [JSON.stringify(w)])).s);
+  const defaults = async () => (await one<{ d: Record<string, unknown> }>(`SELECT ob1_priority_defaults() AS d`)).d;
+  const set = async (w: unknown, actor: unknown) => (await one<{ r: Record<string, unknown> }>(`SELECT set_priority_weights($1::jsonb, $2::jsonb) AS r`, [w === null ? null : JSON.stringify(w), actor === null ? null : JSON.stringify(actor)])).r;
+  const rows = async () => q<{ id: string; weights: Record<string, unknown>; set_by: string; ended_by: string | null; ended_by_agent_id: string | null; standing: boolean }>(
+    `SELECT id::text AS id, weights, set_by, ended_by, ended_by_agent_id::text AS ended_by_agent_id, ended_at IS NULL AS standing FROM priority_weight_settings ORDER BY id`);
+
+  // The shape: the table, its key and one-standing index, two triggers; six functions, each commented by 132, the reads
+  // STABLE, none SECURITY DEFINER; 132 the last definer of each.
+  const cols = (await q<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'priority_weight_settings'::regclass AND attnum > 0 AND NOT attisdropped`))[0].c;
+  const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('priority_weight_settings_one_standing')) AS d`)).d ?? "";
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'priority_weight_settings'::regclass AND NOT tgisinternal`)).t;
+  const FNS = ["ob1_priority_builtin()", "ob1_priority_weights_refusal(jsonb)", "ob1_priority_weight_settings_guard()", "ob1_priority_defaults()", "set_priority_weights(jsonb, jsonb)", "priority_weight_setting()"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  assert(cols === "id bigint not null, weights jsonb not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
+         && /UNIQUE INDEX priority_weight_settings_one_standing ON public\.priority_weight_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
+         && trig === "priority_weight_settings_history:31 priority_weight_settings_no_truncate:34"
+         && fns.length === 6 && fns.every((f) => !f.d && /[Mm]igration 132 \/ SMD-4193/.test(f.c ?? ""))
+         && vol["ob1_priority_builtin()"] === "s" && vol["ob1_priority_weights_refusal(jsonb)"] === "s" && vol["ob1_priority_defaults()"] === "s" && vol["priority_weight_setting()"] === "s"
+         && vol["set_priority_weights(jsonb,jsonb)"] === "v"
+         && ["ob1_priority_builtin", "ob1_priority_weights_refusal", "ob1_priority_weight_settings_guard", "ob1_priority_defaults", "set_priority_weights", "priority_weight_setting"].every((f) => lastDefinerOf(f) === file),
+    `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; six functions commented by 132, the reads STABLE, none SECURITY DEFINER, 132 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+
+  // No setting: the defaults are the built-in weights, 127's; every number and both spans as before 132.
+  await db.exec(`DELETE FROM priority_weight_settings WHERE false`);
+  const none = { d: await defaults(), b: (await one<{ b: Record<string, unknown> }>(`SELECT ob1_priority_builtin() AS b`)).b, e: await eff(), s: await span(), sw: await span(W122), r: (await one<{ r: unknown }>(`SELECT priority_weight_setting() AS r`)).r };
+  assert(JSON.stringify(none.b) === JSON.stringify(BUILT_IN) && JSON.stringify(none.d) === JSON.stringify(BUILT_IN) && none.e === "SMD-9964 3.4, SMD-9967 2.6" && Number(none.s) === 5.8 && Number(none.sw) === 9 && none.r === null
+         && (await rows()).every((r) => !r.standing),
+    `with no setting standing the defaults are the built-in weights, 127's: the ladder at 3.4 and 2.6, the span 5.8 and 9 under 122's weights, and no setting said (${none.e}; ${none.s})`);
+
+  // The refusal is effective_priority's, word for word, at each weight's edges: every probe answered alike by both.
+  const probes: unknown[] = [[], "x", 3, { overdu: 1 }, { overdue: 1, nope: 2 }, { cap: 2 }, { cap: 5, unblocks_many_at: 6 }, { cap: 6, unblocks_many_at: 6 }, {}];
+  for (const n of ["unknown", "hop", "soon", "week", "overdue", "unblocks_one", "unblocks_many"]) probes.push({ [n]: -0.001 }, { [n]: 0 }, { [n]: 10 }, { [n]: 10.001 }, { [n]: "1" }, { [n]: true }, { [n]: null });
+  const whole: [string, number, number][] = [["hops", 0, 2], ["soon_days", 0, 366], ["week_days", 0, 366], ["unblocks_many_at", 1, 366], ["depth", 0, 5], ["cap", 1, 1000]];
+  for (const [n, lo, hi] of whole) probes.push({ [n]: lo - 1 }, { [n]: lo }, { [n]: hi }, { [n]: hi + 1 }, { [n]: lo + 0.5 }, { [n]: `${lo}` });
+  probes.push({ count_inferred: true }, { count_inferred: false }, { count_inferred: 1 }, { count_inferred: "true" }, { unblocks_many_at: 50 }, { unblocks_many_at: 51 });
+  const differ: string[] = [];
+  let refusedN = 0;
+  for (const p of probes) {
+    const refusal = (await one<{ r: string | null }>(`SELECT ob1_priority_weights_refusal($1::jsonb) AS r`, [JSON.stringify(p)])).r;
+    let raised: string | null = null;
+    try { await db.query(`SELECT count(*) FROM effective_priority('[]'::jsonb, $1::jsonb, now())`, [JSON.stringify(p)]); } catch (e) { raised = String((e as Error).message).split("\n")[0]; }
+    // A null weight is the one place the two part: effective_priority reads it as a weight its defaults lack (22000,
+    // a fault: no client sends one, the schema refusing it), and the refusal as a value out of range, so a stored
+    // setting never holds one.
+    const isNull = p !== null && typeof p === "object" && !Array.isArray(p) && Object.values(p).includes(null);
+    if (isNull ? !/^a weight out of range: /.test(refusal ?? "") || !/lacks weight\(s\)/.test(raised ?? "") : refusal !== raised) differ.push(`${JSON.stringify(p)}: ${refusal} | ${raised}`);
+    if (refusal !== null) refusedN++;
+  }
+  assert(differ.length === 0 && probes.length === 100 && refusedN === 71 && (await one<{ r: string | null }>(`SELECT ob1_priority_weights_refusal(NULL) AS r`)).r === null,
+    `ob1_priority_weights_refusal answers each of ${probes.length} probes at the weights' edges as effective_priority does, word for word (${refusedN} refused, the rest taken), a null weight refused as out of range where effective_priority faults, and NULL for NULL (${differ.slice(0, 3).join(" ; ")})`);
+
+  // Who may: an operator key by its agent id; a name alone, an agent's key, an unclassified key refused, saying what it
+  // is; no envelope raises.
+  await db.exec(`SELECT set_agent_kind('[119] op', 'operator'); SELECT set_agent_kind('[119] agent', 'agent'); INSERT INTO ob1_agents (label) VALUES ('[119] plain') ON CONFLICT DO NOTHING`);
+  const idOf = async (label: string) => (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).id;
+  const OP = { name: "[119] op", agent_id: await idOf("[119] op") };
+  const refusedBy = [await set(W122, { name: "[119] op" }), await set(W122, { name: "[119] agent", agent_id: await idOf("[119] agent") }), await set(W122, { name: "[119] plain", agent_id: await idOf("[119] plain") })];
+  const noEnvelope = await failure(`SELECT set_priority_weights('{"overdue": 3}'::jsonb)`);
+  assert(refusedBy.every((r) => r.ok === false && r.error === "NOT_OPERATOR") && refusedBy[0].kind === null && /named by its name alone$/.test(String(refusedBy[0].message))
+         && refusedBy[1].kind === "agent" && refusedBy[2].kind === null && /is unclassified$/.test(String(refusedBy[2].message))
+         && /^42501 set_priority_weights needs a maker/.test(noEnvelope) && (await rows()).every((r) => !r.standing),
+    `only an operator key by its agent id: a name alone, an agent's key and an unclassified key answer NOT_OPERATOR with what each is, no envelope raises 42501, and nothing is written (${refusedBy.map((r) => `${r.error}:${r.kind}`).join(", ")}; ${noEnvelope.slice(0, 60)})`);
+  const bad = [await set({ overdu: 3 }, OP), await set({ cap: 2 }, OP), await set([], OP)];
+  assert(bad.every((r) => r.ok === false && r.error === "BAD_WEIGHTS") && /^not a weight: overdu \(/.test(String(bad[0].message))
+         && /^a weight out of range: cap is below unblocks_many_at/.test(String(bad[1].message)) && /^effective_priority's weights are a JSON object/.test(String(bad[2].message)),
+    `bad weights answer BAD_WEIGHTS in effective_priority's words: an unknown name, cap below the built-in unblocks_many_at, not an object (${bad.map((r) => String(r.message).split(" (")[0]).join(" | ")})`);
+
+  // Set: every read and both spans take it — 122's weights put the overdue Medium beside the High at 5 (as [115]'s
+  // replaced defaults did) and the span at 9 — and a call's own weights still override it by name.
+  const first = await set(W122, OP);
+  const under = { d: await defaults(), e: await eff(), s: await span(), back: await eff(W127), sBack: await span(W127), setting: (await one<{ r: Record<string, unknown> }>(`SELECT priority_weight_setting() AS r`)).r };
+  assert(first.ok === true && first.changed === true && first.previous === null && first.set_by === "[119] op" && JSON.stringify(first.weights) === JSON.stringify({ soon: 2, week: 1, overdue: 3, unblocks_one: 0.5, unblocks_many: 1 })
+         && JSON.stringify(under.d) === JSON.stringify({ ...BUILT_IN, ...W122 }) && under.e === "SMD-9964 5, SMD-9967 5" && Number(under.s) === 9
+         && under.back === "SMD-9964 3.4, SMD-9967 2.6" && Number(under.sBack) === 5.8
+         && JSON.stringify(under.setting.weights) === JSON.stringify(first.weights) && under.setting.set_by === "[119] op" && under.setting.refused === null,
+    `the operator's 122's weights: the defaults the built-in under them, the ladder at 5 and 5, the span 9; a call's 127 weights read 3.4, 2.6 and 5.8 again; the setting said (${under.e}; ${under.s}; ${under.back})`);
+  // The weights standing again write nothing; another setting ends the first, by its key; a clear ends that, writing none.
+  const again = await set({ unblocks_many: 1, overdue: 3.0, soon: 2, week: 1, unblocks_one: 0.5 }, OP);
+  const before = (await rows()).length;
+  const second = await set({ soon: 1 }, OP);
+  const afterSecond = await rows();
+  assert(again.ok === true && again.changed === false && before === afterSecond.length - 1 && second.changed === true && JSON.stringify(second.previous) === JSON.stringify(first.weights)
+         && afterSecond.filter((r) => r.standing).length === 1 && afterSecond.at(-2)?.ended_by === "[119] op" && afterSecond.at(-2)?.ended_by_agent_id === OP.agent_id
+         && JSON.stringify(afterSecond.at(-1)?.weights) === '{"soon":1}',
+    `the weights standing again write nothing (changed false); a new setting ends the standing one, by the operator's key and agent id, and stands alone (${afterSecond.map((r) => `${JSON.stringify(r.weights)}:${r.standing ? "standing" : `ended by ${r.ended_by}`}`).join(", ")})`);
+
+  // History: a row changes only to end, once; a DELETE, a TRUNCATE refused; a raw row checked when written; one standing.
+  const hist = [
+    await failure(`UPDATE priority_weight_settings SET weights = '{"soon": 3}' WHERE ended_at IS NULL`),
+    await failure(`UPDATE priority_weight_settings SET ended_by = 'x' WHERE ended_at IS NOT NULL`),
+    await failure(`DELETE FROM priority_weight_settings WHERE ended_at IS NOT NULL`),
+    await failure(`TRUNCATE priority_weight_settings`),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"overdue": 11}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{}', 'x', $1::uuid, now())`, [OP.agent_id]),
+    // A raw row names an operator key, and stands when written (review pass 1): a role holding the group could
+    // otherwise write a setting under any name, or one already ended.
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', gen_random_uuid(), now())`),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at) VALUES ('{"soon": 3}', 'x', $1::uuid, now())`, [await idOf("[119] agent")]),
+    await failure(`INSERT INTO priority_weight_settings (weights, set_by, set_by_agent_id, set_at, ended_at, ended_by, ended_by_agent_id) VALUES ('{"soon": 3}', 'x', $1::uuid, now(), now(), 'x', $1::uuid)`, [OP.agent_id]),
+    await failure(`UPDATE priority_weight_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [await idOf("[119] agent")]),
+  ];
+  assert(/^23001 priority_weight_settings is history: a row changes only to end, once/.test(hist[0]) && /^23001 .* a row changes only to end, once/.test(hist[1])
+         && /^23001 priority_weight_settings is history: DELETE refused/.test(hist[2]) && /^23001 priority_weight_settings is history: TRUNCATE refused/.test(hist[3])
+         && /^22023 a weight out of range: overdue \(/.test(hist[4]) && /^23505 .*priority_weight_settings_one_standing/.test(hist[5]) && /^23514 /.test(hist[6])
+         && /^42501 priority_weight_settings: set_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[7]) && /^42501 priority_weight_settings: set_by_agent_id /.test(hist[8])
+         && /^23001 priority_weight_settings: a setting stands when written/.test(hist[9]) && /^42501 priority_weight_settings: ended_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[10])
+         && (await rows()).filter((r) => r.standing).length === 1,
+    `history: an UPDATE of a standing row's weights and of an ended row refused, a DELETE and a TRUNCATE refused (for the owner too); a raw row with a bad weight refused in effective_priority's words, a second standing row by the index, an empty one by the check; a raw row naming no operator key (an unknown id, an agent's) or written already ended refused, and an end by an agent's key; the setting stands (${hist.map((h) => h.slice(0, 40)).join(" | ")})`);
+
+  // A stored setting the refusal names (the trigger off, as a later migration narrowing a range would leave one): every
+  // read and both spans fail 22000 naming the setting and the weight; the setting said, not raised; a clear mends it.
+  await db.exec(`ALTER TABLE priority_weight_settings DISABLE TRIGGER priority_weight_settings_history; UPDATE priority_weight_settings SET weights = '{"soon": 20}' WHERE ended_at IS NULL; ALTER TABLE priority_weight_settings ENABLE TRIGGER priority_weight_settings_history`);
+  const broken = [await failure(`SELECT count(*) FROM effective_priority('[{"kind":"ticket","key":"SMD-9964"}]'::jsonb)`), await failure(`SELECT ob1_priority_span()`), await failure(`SELECT ob1_priority_span('{"soon": 1}'::jsonb)`)];
+  const said = (await one<{ r: Record<string, unknown> }>(`SELECT priority_weight_setting() AS r`)).r;
+  const mended = await set({}, OP);
+  assert(broken.every((b) => /^22000 the operator's priority weights \(set \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z by \[119\] op\) are refused, so no effective priority is read: a weight out of range: soon \(/.test(b))
+         && /^a weight out of range: soon \(/.test(String(said.refused)) && JSON.stringify(said.weights) === '{"soon":20}'
+         && mended.ok === true && mended.changed === true && mended.weights === null && JSON.stringify(mended.previous) === '{"soon":20}'
+         && JSON.stringify(await defaults()) === JSON.stringify(BUILT_IN) && await eff() === "SMD-9964 3.4, SMD-9967 2.6" && Number(await span()) === 5.8
+         && (await one<{ r: unknown }>(`SELECT priority_weight_setting() AS r`)).r === null && (await rows()).every((r) => !r.standing),
+    `a stored setting the refusal names fails the read and both spans 22000, naming the setting, its key and the weight; priority_weight_setting says it without raising; {} clears it and every number is 127's again (${broken[0].slice(0, 120)})`);
+  const clearAgain = await set(null, OP);
+  assert(clearAgain.ok === true && clearAgain.changed === false && clearAgain.weights === null, `clearing with none standing writes nothing (${JSON.stringify(clearAgain)})`);
+
+  // A re-apply is a no-op: the rows kept, the same reads.
+  await set(W122, OP);
+  const kept = (await rows()).length;
+  await reapply(file.slice(0, 4));
+  assert((await rows()).length === kept && await eff() === "SMD-9964 5, SMD-9967 5" && Number(await span()) === 9, "a re-apply is a no-op: the rows kept, the setting standing, the same reads");
+  await set({}, OP);
+}
+
+console.log("\n[120] Migration 133: a ticket and its own rows are one item to the writers — a maker's new statement on either closes its statement on the other, a clear naming either closes both, the same words on the item named unchanged and on another item of the pool moved; another maker's untouched; the pool's winner, priority_of and history (its lock: test-upgrade [20bx], on Postgres); each exact item's projection re-made, no drift; an item that is no ticket's row a pool of one; on upgrade a maker's older open statements across a pool closed as replaced by its newest; the group's thought_sources grant carried; a re-apply a no-op (SMD-4127)");
+{
+  type Assertion = { id: string; item: { kind: string; key: string }; level: number; maker: { name: string }; tier_name: string; closed_at: string | null; close_reason: string | null; closed_by: string | null };
+  type Answer = { outcome: string; code: string | null; assertion: Assertion | null; replaced: Assertion | null; winner: Assertion | null };
+  const file = files.find((f) => /^\d{3}_priority_ticket_pool_writers\.sql$/.test(f)) ?? "no NNN_priority_ticket_pool_writers.sql";
+  // [104] and [105] re-apply 116 and 117, which put back their writers: 133 is applied again first, as a brain at 133 has it.
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[120] op', 'operator'), ('[120] bot', 'agent')`);
+  const OP = { name: "[120] op", scope: "write" }, BOT = { name: "[120] bot", scope: "write" };
+  const NOW = "2027-03-10T15:00:00Z";
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[120] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  // A ticket as board-sync writes it: its own row, a linear source row (053). Returns the row's id.
+  const ticket = async (issue: string) => {
+    const content = `[120] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    return id;
+  };
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: String((e as { code?: string }).code ?? "?"), assertion: null, replaced: null, winner: null }; }
+  };
+  const put = (kind: string, key: string, level: number, actor: object) =>
+    ans(`SELECT assert_priority($1, $2, $3, NULL, NULL, NULL, NULL, NULL, false, $4::jsonb) AS r`, [kind, key, level, JSON.stringify(actor)]);
+  const clear = (kind: string, key: string, actor: object) => ans(`SELECT clear_priority($1, $2, $3::jsonb) AS r`, [kind, key, JSON.stringify(actor)]);
+  // Every open statement on a set of exact items, in the order written, as "kind:maker:level".
+  const openOn = async (items: [string, string][]) =>
+    (await db.query<{ s: string }>(`SELECT a.item_kind || ':' || a.maker_name || ':' || a.level AS s FROM priority_assertions a
+       JOIN jsonb_to_recordset($1::jsonb) AS i(kind text, key text) ON a.item_kind = i.kind AND a.item_key = i.key WHERE a.closed_at IS NULL ORDER BY a.seq`,
+      [JSON.stringify(items.map(([kind, key]) => ({ kind, key })))])).rows.map((r) => r.s);
+  const history = async (kind: string, key: string) => (await db.query<{ r: Assertion[] }>(`SELECT priority_history($1, $2) AS r`, [kind, key])).rows[0].r;
+  const of = async (kind: string, key: string) =>
+    (await db.query<{ level: number | null; winner: Assertion | null; assertions: Assertion[] }>(`SELECT * FROM priority_of($1::jsonb)`, [JSON.stringify([{ kind, key }])])).rows[0];
+  const effLevel = async (kind: string, key: string) =>
+    (await db.query<{ level: number | null }>(`SELECT level FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`, [JSON.stringify([{ kind, key }]), NOW])).rows[0].level;
+  const current = async (kind: string, key: string) =>
+    (await db.query<{ level: number; open_count: number }>(`SELECT level, open_count FROM priority_current WHERE item_kind = $1 AND item_key = $2`, [kind, key])).rows[0] ?? null;
+  const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
+
+  // The shape: the two new functions STABLE and commented; the replaced ones say 133; the lock PL/pgSQL.
+  const fns = (await db.query<{ n: string; v: string; l: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, l.lanname AS l, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_pool_items', 'ob1_priority_lock_key', 'ob1_priority_lock', 'ob1_priority_winner', 'ob1_priority_project', 'ob1_rebuild_priority_projection', 'assert_priority', 'clear_priority', 'priority_of', 'priority_history', 'ob1_priority_counted') ORDER BY 1`)).rows;
+  assert(fns.length === 11 && fns.every((f) => /[Mm]igration 133 \/ SMD-4127/.test(f.c ?? "")) && fns.find((f) => f.n === "ob1_priority_pool_items")?.v === "s" && fns.find((f) => f.n === "ob1_priority_lock_key")?.v === "s"
+         && fns.find((f) => f.n === "ob1_priority_lock")?.l === "plpgsql",
+    `eleven functions name 133: two new (STABLE), eight replaced, and ob1_priority_counted's comment; the lock now PL/pgSQL (${fns.map((f) => `${f.n}:${f.v}:${f.l}`).join(", ")})`);
+
+  const rowA = await ticket("SMD-9985");
+  const rowB = await ticket("SMD-9986");
+  const T: [string, string] = ["ticket", "SMD-9985"], R: [string, string] = ["thought", rowA];
+
+  // The ticket's Verify, first: an operator's Critical on the ticket's row, then Low on the ticket — one stays open, the Low.
+  const crit = await put("thought", rowA, 5, OP);
+  const botRow = await put("thought", rowA, 3, BOT);
+  const low = await put("ticket", "SMD-9985", 1, OP);
+  const critNow = (await history(...R)).find((h) => h.id === crit.assertion?.id);
+  assert(crit.outcome === "asserted" && low.outcome === "asserted" && low.replaced?.id === crit.assertion?.id
+         && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] bot:3", "ticket:[120] op:1"])
+         && critNow?.close_reason === "replaced" && critNow?.closed_by === low.assertion?.id,
+    `Critical on the row, then Low on the ticket: one of the operator's stays open, the Low; the Critical closed as replaced by it and named as replaced; the agent's statement on the row untouched (${JSON.stringify(await openOn([T, R]))})`);
+  // The pool's winner in each reply: the agent's High on the row named the operator's Critical; the Low names itself.
+  assert(botRow.winner?.id === crit.assertion?.id && low.winner?.id === low.assertion?.id,
+    `each reply's winner is the pool's: the agent's High on the row named the operator's Critical, then on the row; the Low on the ticket names itself (${botRow.winner?.level}, ${low.winner?.level})`);
+  // Each exact item's projection re-made: the row's winner now the agent's, the ticket's the Low; no drift.
+  assert(JSON.stringify(await current(...R)) === JSON.stringify({ level: 3, open_count: 1 }) && JSON.stringify(await current(...T)) === JSON.stringify({ level: 1, open_count: 1 }) && await drift() === 0,
+    `priority_current is re-made for the row whose statement closed and for the ticket, keyed by the exact item; no drift (${JSON.stringify(await current(...R))}, ${JSON.stringify(await current(...T))})`);
+
+  // The history, named either way, is the pool's: every statement, closed ones included, each naming its own item.
+  const hT = await history(...T), hR = await history(...R);
+  assert(JSON.stringify(hT) === JSON.stringify(hR) && JSON.stringify(hT.map((h) => `${h.item.kind}:${h.level}:${h.closed_at === null ? "open" : h.close_reason}`)) === JSON.stringify(["thought:5:replaced", "thought:3:open", "ticket:1:open"]),
+    `priority_history on the ticket and on its row is one list, oldest first, each statement naming its item (${hT.map((h) => `${h.item.kind}:${h.level}`).join(", ")})`);
+  // priority_of and the winner, named either way: the pool's open statements, the operator's Low first.
+  const oT = await of(...T), oR = await of(...R);
+  assert(oT.level === 1 && oR.level === 1 && oT.winner?.id === low.assertion?.id && oR.winner?.id === low.assertion?.id && oT.assertions.length === 2 && oR.assertions.length === 2
+         && oT.assertions[0]?.id === low.assertion?.id,
+    `priority_of names the pool's winner and lists its open statements in the rule's order whichever item is asked (${oT.level}/${oR.level}, ${oT.assertions.length}/${oR.assertions.length})`);
+
+  // The same words again on the item named are unchanged; on the other item of the pool they move there.
+  const again = await put("ticket", "SMD-9985", 1, OP);
+  const moved = await put("thought", rowA, 1, OP);
+  assert(again.outcome === "unchanged" && moved.outcome === "asserted" && moved.replaced?.id === low.assertion?.id
+         && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] bot:3", "thought:[120] op:1"]),
+    `the same statement on the ticket again is unchanged; the same words on its row move it there, the ticket's closed (${again.outcome}, ${moved.outcome}; ${JSON.stringify(await openOn([T, R]))})`);
+
+  // The ticket's Verify, second and third: clearing the ticket closes the operator's statement on the row, leaving none of
+  // its own open, the agent's on the row untouched; once the agent clears too, effective_priority reads unknown.
+  const cleared = await clear(...T, OP);
+  const opOpen = await openOn([T, R]);
+  // The row's projection re-made by the clear naming the ticket: its winner now the agent's.
+  const rowAfterClear = await current(...R), driftAfterClear = await drift();
+  const levelWithBot = await effLevel(...T);
+  await clear(...R, BOT);
+  const levelNone = await effLevel(...T), levelNoneRow = await effLevel(...R);
+  assert(cleared.outcome === "cleared" && cleared.assertion?.id === moved.assertion?.id && cleared.assertion?.item.kind === "thought"
+         && JSON.stringify(opOpen) === JSON.stringify(["thought:[120] bot:3"]) && JSON.stringify(rowAfterClear) === JSON.stringify({ level: 3, open_count: 1 }) && driftAfterClear === 0
+         && levelWithBot === 3 && levelNone === null && levelNoneRow === null
+         && await current(...T) === null && await current(...R) === null && await drift() === 0,
+    `clearing the ticket closes the operator's statement on its row (named in the reply), the agent's untouched (the row's projection re-made to it, no drift; the read then the agent's 3); once the agent clears, effective_priority reads unknown on the ticket and the row; no projection row, no drift (${cleared.outcome}, ${levelWithBot}, ${levelNone})`);
+  // A clear naming the row reaches the ticket's.
+  await put(...T, 4, OP);
+  const clearedViaRow = await clear(...R, OP);
+  const nothing = await clear(...T, OP);
+  assert(clearedViaRow.outcome === "cleared" && clearedViaRow.assertion?.item.kind === "ticket" && nothing.outcome === "nothing_to_clear" && (await openOn([T, R])).length === 0,
+    `a clear naming the row closes the maker's statement on the ticket; a second, on the ticket, has nothing to clear (${clearedViaRow.outcome}, ${nothing.outcome})`);
+
+  // Another ticket's pool is its own; a thought that is no ticket's row is a pool of one.
+  const loneA = await thoughtAs("[120] a note"), loneB = await thoughtAs("[120] another note");
+  await put("ticket", "SMD-9985", 2, OP); await put("ticket", "SMD-9986", 3, OP); await put("thought", rowB, 3, OP);
+  await put("thought", loneA, 2, OP); await put("thought", loneB, 4, OP);
+  const spread = await openOn([T, ["ticket", "SMD-9986"], ["thought", rowB], ["thought", loneA], ["thought", loneB]]);
+  assert(JSON.stringify(spread) === JSON.stringify(["ticket:[120] op:2", "thought:[120] op:3", "thought:[120] op:2", "thought:[120] op:4"])
+         && (await history("thought", loneA)).length === 1,
+    `another ticket's statements are its own pool (its ticket's closed by its row's); two notes that are no ticket's rows keep one each; a note's history is its own (${JSON.stringify(spread)})`);
+
+  // A due reference into the item's own pool is a reference to itself (review pass 2): the ticket from its row, the row
+  // from its ticket, refused alike; another ticket's row is another item.
+  const refAns = (kind: string, key: string, ref: [string, string]) =>
+    ans(`SELECT assert_priority($1, $2, 3, NULL, NULL, $3, $4, NULL, false, $5::jsonb) AS r`, [kind, key, ref[0], ref[1], JSON.stringify(OP)]);
+  const selfRefs = [await refAns(...T, R), await refAns(...R, T), await refAns(...T, ["thought", rowB])];
+  assert(selfRefs[0].code === "22023" && /^raised: an item's due reference may not name itself: a ticket and its own rows are one item/.test(selfRefs[0].outcome)
+         && selfRefs[1].code === "22023" && selfRefs[2].outcome === "asserted",
+    `a ticket's due reference to its own row, and its row's to the ticket, refused as naming itself; one to another ticket's row taken (${selfRefs.map((r) => r.code ?? r.outcome).join(", ")})`);
+  await put(...T, 2, OP);
+
+  // The winner counts an inferred statement, as 116's did: ob1_priority_counted with tier 4 counted.
+  const inferredOn = await thoughtAs("[120] a note only an inference speaks for");
+  const inferredPut = await ans(`SELECT assert_priority('thought', $1, 3, NULL, NULL, NULL, NULL, NULL, true, $2::jsonb) AS r`, [inferredOn, JSON.stringify(BOT)]);
+  const inferredOf = await of("thought", inferredOn);
+  assert(inferredPut.winner?.tier_name === "inferred" && inferredOf.level === 3 && inferredOf.winner?.tier_name === "inferred",
+    `an inferred statement alone is the winner the writers and priority_of name, tier 4 counted as in 116 (${inferredOf.level}, ${inferredOf.winner?.tier_name})`);
+
+  // The rebuild repairs a raw write whose thought key is no uuid (review pass 2): its lock is its own key, not a cast.
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_source, tier, asserted_at) VALUES ('thought', 'not-a-uuid', 2, '[120] raw', false, 4, now())`);
+  let rebuiltRaw = "";
+  try { rebuiltRaw = JSON.stringify((await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`)).rows[0]); } catch (e) { rebuiltRaw = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(rebuiltRaw === '{"written":1,"deleted":0}' && await drift() === 0 && JSON.stringify(await current("thought", "not-a-uuid")) === JSON.stringify({ level: 2, open_count: 1 }),
+    `the rebuild repairs a raw statement on a thought key that is no uuid, raising nothing (${rebuiltRaw})`);
+
+  // A thought that becomes a ticket's row after both were made joins the pool with both standing (not changed by 133): the
+  // winner takes the maker's newest alone, as the read does, though its older one was made at a lower tier before the
+  // key was reclassified; the maker's next write closes both, even one saying what its newest says (two open is no
+  // `unchanged`).
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[120] late', 'operator')`);
+  const LATE = { name: "[120] late", scope: "write" };
+  await ticket("SMD-9987");
+  const late = await thoughtAs("[120] a note that becomes SMD-9987's row");
+  await put("thought", late, 5, LATE);
+  await db.query(`SELECT set_agent_kind('[120] late', 'agent')`);
+  await put("ticket", "SMD-9987", 1, LATE);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[120] op" })]);
+    await tx.query(`UPDATE thoughts SET metadata = '{"source": "linear", "issue": "SMD-9987"}'::jsonb WHERE id = $1::uuid`, [late]);
+  });
+  const lateT: [string, string] = ["ticket", "SMD-9987"], lateR: [string, string] = ["thought", late];
+  const bothOpen = await openOn([lateT, lateR]);
+  const lateOf = await of(...lateT);
+  const lateEff = await effLevel(...lateT);
+  const lateNext = await put("ticket", "SMD-9987", 1, LATE);
+  assert(JSON.stringify(bothOpen) === JSON.stringify(["thought:[120] late:5", "ticket:[120] late:1"]) && lateOf.level === 1 && lateOf.winner?.tier_name === "agent"
+         && lateOf.assertions.length === 2 && lateOf.assertions[0]?.id === lateOf.winner?.id && lateOf.assertions[1]?.level === 5 && lateEff === 1
+         && lateNext.outcome === "asserted" && JSON.stringify(await openOn([lateT, lateR])) === JSON.stringify(["ticket:[120] late:1"]),
+    `a thought that becomes a ticket's row late joins its pool with the maker's two statements standing: the winner is its newest (the Low, at the agent tier it has since), not its older Critical made at the operator tier, as effective_priority reads it; priority_of lists the winner first, the older after; the maker's next write closes both, the same Low again included (${lateNext.outcome}; ${JSON.stringify(bothOpen)}, winner ${lateOf.level} ${lateOf.winner?.tier_name}, read ${lateEff})`);
+
+  // On upgrade: a maker's two open statements across a pool, written raw as 116's writers could leave them — the older (the
+  // ticket's) closes as replaced by the newest (the row's); another maker's lone statement untouched; no drift after.
+  const raw = async (kind: string, key: string, level: number, maker: string) =>
+    (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ($1, $2, $3, $4, (SELECT canonical_agent_id FROM ob1_agents WHERE label = $4), 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [kind, key, level, maker])).rows[0].id;
+  const onTicket = (await db.query<{ id: string }>(`SELECT id::text FROM priority_assertions WHERE item_kind = 'ticket' AND item_key = 'SMD-9985' AND closed_at IS NULL`)).rows[0].id;
+  const onRow = await raw("thought", rowA, 5, "[120] op");
+  // The agent's older statement made by name alone, before its key had an id, on another ticket: one maker with its
+  // newer by-id statement on that ticket's row, as the writers match them (review pass 3).
+  const byName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ('ticket', 'SMD-9986', 4, '[120] bot', NULL, 'agent', 'agent', 'write', false, 3, now()) RETURNING id::text`)).rows[0].id;
+  const botLone = await raw("thought", rowB, 2, "[120] bot");
+  // A raw write leaves its own item's projection behind: rebuilt first, so any drift after is the upgrade's.
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  const behind = await drift();
+  await reapply(file.slice(0, 4));
+  const after = (await db.query<{ id: string; close_reason: string | null; closed_by: string | null }>(`SELECT id::text, close_reason, closed_by::text FROM priority_assertions WHERE id = ANY($1::uuid[])`,
+    [[onTicket, onRow, byName, botLone]])).rows;
+  const byId = (id: string) => after.find((a) => a.id === id);
+  assert(behind === 0 && byId(onTicket)?.close_reason === "replaced" && byId(onTicket)?.closed_by === onRow && byId(onRow)?.close_reason === null && byId(botLone)?.close_reason === null
+         && byId(byName)?.close_reason === "replaced" && byId(byName)?.closed_by === botLone
+         && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
+    `on upgrade the operator's older open statement across SMD-9985's pool (the ticket's) closes as replaced by its newest (the row's, written raw); the agent's statement made by name before its key had an id closed by its newer one on that ticket's row, as the writers match a maker; the closed item's projection re-made, no drift (${byId(byName)?.close_reason}; ${JSON.stringify([byId(onTicket)?.close_reason, byId(onTicket)?.closed_by === onRow, byId(onRow)?.close_reason, byId(botLone)?.close_reason])}, ${JSON.stringify(await openOn([T, R]))}, drift ${await drift()})`);
+
+  // The group's grant: a role granted capture and priority states on a ticket and reads its history (thought_sources now
+  // the group's); a role holding 116's grants alone is given SELECT on thought_sources by 133.
+  const ROLE = "ob1_test_pool", OLD = "ob1_test_pool_old";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN; CREATE ROLE ${OLD} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${OLD}; GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ${OLD}; GRANT SELECT ON thoughts TO ${OLD}`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "priority"] })]) await db.exec(st);
+  let roleUse = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${ROLE}`);
+      roleUse = (await tx.query<{ r: Answer }>(`SELECT assert_priority('ticket', 'SMD-9986', 2, p_actor => $1::jsonb) AS r`, [JSON.stringify(BOT)])).rows[0].r.outcome;
+      await tx.query(`SELECT priority_history('thought', $1)`, [rowB]);
+      await tx.query(`SELECT clear_priority('ticket', 'SMD-9986', $1::jsonb)`, [JSON.stringify(BOT)]);
+    });
+  } catch (e) { roleUse = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const before = (await db.query<{ g: boolean }>(`SELECT has_table_privilege('${OLD}', 'thought_sources', 'SELECT') AS g`)).rows[0].g;
+  await reapply(file.slice(0, 4));
+  const carried = (await db.query<{ g: boolean }>(`SELECT has_table_privilege('${OLD}', 'thought_sources', 'SELECT') AS g`)).rows[0].g;
+  assert(roleUse === "asserted" && before === false && carried === true,
+    `a role granted capture and priority states, reads and clears on a ticket's pool; a role holding priority_assertions' grants before 133 is granted SELECT on thought_sources by it (${roleUse}, ${before} → ${carried})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ${OLD}; DROP ROLE ${OLD}`);
+
+  // A re-apply is a no-op: nothing more closed, the same statements open.
+  const closedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)).rows[0].n;
+  const closedBefore = await closedCount();
+  await reapply(file.slice(0, 4));
+  const closedAfter = await closedCount();
+  assert(closedAfter === closedBefore && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
+    `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} → ${closedAfter})`);
+}
+
+console.log("\n[121] Migration 134: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
+{
+  const file = files.find((f) => /^\d{3}_deliverables\.sql$/.test(f)) ?? "no NNN_deliverables.sql";
+  // Sections before re-apply 120's validator and 130's table comment, which 134 replaces: this section holds 134's.
+  await restoreShipped("thought_facets_validate");
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const thought = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text AS id`, [content])).id;
+  const MAKER_ID = "1715a000-0000-4000-8000-000000000001";
+  const MAKER = { name: "[121] maker", scope: "write", agent_id: MAKER_ID };
+  const CHECKER = { name: "[121] checker", scope: "write" };
+  type R = { outcome: string; code?: string; message?: string; from?: string; to?: string; deliverable?: Record<string, unknown> | null; event?: Record<string, unknown> };
+  const rec = async (t: string, s: string, c: string, a: unknown) =>
+    (await one<{ r: R }>(`SELECT record_deliverable($1, $2, $3, $4::jsonb) AS r`, [t, s, c, JSON.stringify(a)])).r;
+  const ver = async (t: string, st: string, a: unknown, method = "review", outcome = "read the diff against the spec") =>
+    (await one<{ r: R }>(`SELECT verify_deliverable($1, $2, $3, $4, $5::jsonb) AS r`, [t, st, method, outcome, JSON.stringify(a)])).r;
+  const facet = async (t: string) => (await one<{ p: Record<string, unknown> | null }>(`SELECT (SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'deliverable') AS p`, [t])).p;
+  const rawEvent = (t: string, event: string, status: string, spec: string, checkpoint: string) => failure(
+    `INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5, CASE WHEN $2 = 'verification' THEN 'm' END, CASE WHEN $2 = 'verification' THEN 'o' END, 'raw', false, now())`,
+    [t, event, status, spec, checkpoint]);
+
+  // The shape: the table, its indexes and triggers; the facet's index and delete trigger; twenty-two functions,
+  // each commented by 134, the reads STABLE, none SECURITY DEFINER; 134 the last definer of each and of the validator.
+  const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'deliverable_events'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
+  const idx = (await one<{ i: string }>(`SELECT string_agg(indexname, ' ' ORDER BY indexname) AS i FROM pg_indexes WHERE tablename = 'deliverable_events'`)).i;
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'deliverable_events'::regclass AND NOT tgisinternal`)).t;
+  const facetTrig = (await one<{ t: string | null }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ') AS t FROM pg_trigger WHERE tgrelid = 'thought_facets'::regclass AND tgname = 'thought_facets_deliverable_kept'`)).t;
+  const facetIdx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thought_facets_deliverable_uniq')) AS d`)).d ?? "";
+  const FNS = ["ob1_deliverable_events_guard()", "ob1_deliverable_transition_ok(text, text)", "ob1_deliverable_lock(uuid)", "ob1_deliverable_time(timestamp with time zone)",
+    "ob1_deliverable_payload(uuid)", "ob1_deliverable_event_check()", "ob1_deliverable_facet_kept()", "ob1_deliverable_id(text, text)", "ob1_deliverable_actor(jsonb, text)",
+    "ob1_deliverable_refused(text, text)", "ob1_deliverable_event_json(deliverable_events)", "ob1_deliverable_json(uuid)",
+    "ob1_deliverable_event(uuid, text, text, uuid, text, text, text, record)", "ob1_deliverable_project(uuid)", "ob1_deliverable_is_maker(deliverable_events, text, uuid)",
+    "ob1_deliverable_is_author(uuid, text, uuid)", "ob1_deliverable_event_projected()",
+    "record_deliverable(text, text, text, jsonb)", "verify_deliverable(text, text, text, text, jsonb)", "deliverable_history(text)",
+    "ob1_deliverable_projection_drift()", "ob1_rebuild_deliverable_projection()"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
+  const checkSrc = await src("ob1_deliverable_event_check()");
+  const shape: Record<string, boolean> = {
+    columns: cols === "id uuid not null, seq bigint not null, thought_id uuid not null, event text not null, status text not null, spec_ref uuid not null, checkpoint text not null, method text, outcome text, actor_name text not null, actor_agent_id uuid, actor_proved boolean not null, actor_kind text, actor_trust text, actor_scope text, at timestamp with time zone not null",
+    indexes: idx === "deliverable_events_one_capture deliverable_events_pkey deliverable_events_seq_key deliverable_events_spec deliverable_events_thought",
+    triggers: trig === "deliverable_events_append_only:27 deliverable_events_no_truncate:34 deliverable_events_projected:5 deliverable_events_transitions:7",
+    facetTrigger: facetTrig === "thought_facets_deliverable_kept:11",
+    facetIndex: /UNIQUE INDEX thought_facets_deliverable_uniq ON public\.thought_facets USING btree \(thought_id\) WHERE \(kind = 'deliverable'::text\)/.test(facetIdx),
+    commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 134 \/ SMD-1715\./.test(f.c ?? "")),
+    stable: ["ob1_deliverable_payload(uuid)", "deliverable_history(text)", "ob1_deliverable_projection_drift()", "ob1_deliverable_json(uuid)", "ob1_deliverable_is_author(uuid,text,uuid)"].every((f) => vol[f] === "s"),
+    definers: ["record_deliverable", "verify_deliverable", "deliverable_history", "ob1_deliverable_projection_drift", "ob1_rebuild_deliverable_projection", "thought_facets_validate"].every((f) => lastDefinerOf(f) === file),
+    sentinels: [/ob1:deliverable-facet-is-the-projection/, /ob1:subject-facet/, /ob1:link-facet/, /ob1:thread-edge/].every((r) => r.test(validator)) && /ob1:deliverable-transitions-on-the-event/.test(checkSrc)
+      && /ob1:deliverable-maker-from-the-envelope/.test(await src("ob1_deliverable_actor(jsonb, text)")),
+  };
+  const bad = Object.keys(shape).filter((k) => !shape[k]);
+  assert(bad.length === 0,
+    `the shape: the table's columns, its indexes and triggers; the facet's delete trigger and one-per-thought index; ${FNS.length} functions commented by 134, none SECURITY DEFINER, the reads STABLE; 134 the last definer of the writers, the read, the drift check, the rebuild and the validator, which carries 120's sentinels (failed: ${bad.join(", ") || "none"}; ${bad.includes("columns") ? cols : ""}${bad.includes("indexes") ? idx : ""}${bad.includes("triggers") ? trig : ""}${bad.includes("facetIndex") ? facetIdx : ""}${bad.includes("commented") ? fns.filter((f) => f.d || !/Migration 134 \/ SMD-1715\./.test(f.c ?? "")).map((f) => f.f).join() + ` ${fns.length}` : ""}${bad.includes("stable") ? JSON.stringify(vol) : ""}${bad.includes("definers") ? lastDefinerOf("record_deliverable") : ""})`);
+
+  // The rule: exactly the four moves.
+  const S = ["unverified", "verified", "corrected"];
+  const moves = (await q<{ m: string }>(`SELECT f || '>' || t AS m FROM unnest($1::text[]) f, unnest($1::text[]) t WHERE ob1_deliverable_transition_ok(f, t) ORDER BY 1`, [S])).map((r) => r.m).join(" ");
+  const nulls = (await one<{ a: boolean; b: boolean }>(`SELECT ob1_deliverable_transition_ok(NULL, 'verified') AS a, ob1_deliverable_transition_ok('unverified', NULL) AS b`));
+  assert(moves === "corrected>verified unverified>corrected unverified>verified verified>corrected" && nulls.a === false && nulls.b === false,
+    `the allowed moves are unverified -> verified, unverified -> corrected, verified -> corrected and corrected -> verified, and a NULL is false (${moves})`);
+
+  // record_deliverable: refusals as values, then the capture and its facet.
+  const spec = await thought("[121] the spec"), out = await thought("[121] the output"), other = await thought("[121] another thought");
+  const recRefusals = [
+    await rec(out, spec, "c0ffee", { name: "[121] reader", scope: "read" }),
+    await rec(out, spec, "c0ffee", { name: "[121] capturer", scope: "capture" }),
+    await rec(out, "00000000-0000-4000-8000-000000000120", "c0ffee", MAKER),
+    await rec(out, out, "c0ffee", MAKER),
+    await rec("00000000-0000-4000-8000-000000000121", spec, "c0ffee", MAKER),
+  ].map((r) => r.code);
+  const recRaised = [
+    await failure(`SELECT record_deliverable('not-a-uuid', $1, 'c', $2::jsonb)`, [spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, '   ', $3::jsonb)`, [out, spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, $3, $4::jsonb)`, [out, spec, "x".repeat(201), JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, E'a\\tb', $3::jsonb)`, [out, spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, 'c', '{"scope": "write"}'::jsonb)`, [out, spec]),
+  ];
+  const none = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events`)).n);
+  assert(recRefusals.join(" ") === "WRITE_SCOPE_REQUIRED WRITE_SCOPE_REQUIRED SPEC_NOT_FOUND SPEC_IS_SELF THOUGHT_NOT_FOUND"
+         && recRaised.slice(0, 4).every((r) => r.startsWith("22023 ")) && /^42501 record_deliverable needs a maker/.test(recRaised[4]) && none === 0,
+    `record_deliverable refuses a read key's and a capture key's call (WRITE_SCOPE_REQUIRED), a missing spec, the thought as its own spec and a missing thought as values; raises 22023 on a bad id, an empty, long or tabbed checkpoint, 42501 on an envelope naming nobody; writes nothing (${recRefusals.join(" ")} | ${recRaised.map((r) => r.slice(0, 40)).join(" | ")})`);
+
+  const captured = await rec(` ${out.toUpperCase()} `, spec, " c0ffee ", MAKER);
+  const unchanged = await rec(out, spec, "c0ffee", MAKER);
+  // Another key recording the same is refused, naming the maker: told `unchanged`, it read the deliverable as its own
+  // and could verify output it had submitted (review pass 3).
+  const otherKey = await rec(out, spec, "c0ffee", CHECKER);
+  const again = await rec(out, spec, "deadbeef", MAKER);
+  const p1 = await facet(out);
+  assert(captured.outcome === "captured" && captured.deliverable?.status === "unverified" && captured.deliverable?.checkpoint === "c0ffee" && captured.deliverable?.spec_ref === spec
+         && captured.deliverable?.captured_by === "[121] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
+         && unchanged.outcome === "unchanged" && unchanged.event?.id === captured.event?.id && again.code === "ALREADY_A_DELIVERABLE"
+         && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[121\] maker/.test(otherKey.message ?? "")
+         && p1?.status === "unverified" && JSON.stringify(p1) === JSON.stringify((await one<{ p: unknown }>(`SELECT ob1_deliverable_payload($1::uuid) AS p`, [out])).p),
+    `a capture: unverified, the id and checkpoint trimmed, the maker and its agent id stamped from the envelope, the facet the payload's projection; the same spec and checkpoint again unchanged for its maker and refused ALREADY_A_DELIVERABLE for another key, naming the maker; another checkpoint refused (${JSON.stringify([captured.outcome, unchanged.outcome, otherKey.code, again.code])})`);
+
+  // verify_deliverable: the moves, the maker's rule, the refusals.
+  const notOne = await ver(other, "verified", CHECKER);
+  const byMaker = await ver(out, "verified", MAKER);
+  const byMakerRenamed = await ver(out, "verified", { name: "[121] maker renamed", scope: "write", agent_id: MAKER_ID });
+  const byMakerNoId = await ver(out, "verified", { name: "[121] maker", scope: "write" });
+  const toSame = await ver(out, "unverified", CHECKER);
+  const readKey = await ver(out, "verified", { name: "[121] reader", scope: "read" });
+  const verRaised = [
+    await failure(`SELECT verify_deliverable($1, 'done', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', '', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', 'm', '  ', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', 'm', $2, $3::jsonb)`, [out, "o".repeat(4001), JSON.stringify(CHECKER)]),
+  ];
+  const ok = await ver(out, " Verified ", CHECKER);
+  const twice = await ver(out, "verified", CHECKER);
+  const back = await ver(out, "unverified", CHECKER);
+  const corrected = await ver(out, "corrected", MAKER, "rerun", "the check missed a failing case");
+  const reverified = await ver(out, "verified", CHECKER, "rerun", "the fix passes");
+  assert(notOne.code === "NOT_A_DELIVERABLE" && byMaker.code === "VERIFY_NOT_YOURS" && byMakerRenamed.code === "VERIFY_NOT_YOURS" && byMakerNoId.code === "VERIFY_NOT_YOURS"
+         && toSame.code === "ILLEGAL_TRANSITION" && toSame.from === "unverified" && toSame.to === "unverified" && readKey.code === "WRITE_SCOPE_REQUIRED"
+         && verRaised.every((r) => r.startsWith("22023 "))
+         && ok.outcome === "changed" && ok.from === "unverified" && ok.to === "verified" && (ok.deliverable?.verification as { by: string }).by === "[121] checker"
+         && twice.code === "ILLEGAL_TRANSITION" && twice.from === "verified" && twice.to === "verified"
+         && back.code === "ILLEGAL_TRANSITION" && back.from === "verified" && back.to === "unverified" && /does not move verified -> unverified/.test(back.message ?? "")
+         && corrected.outcome === "changed" && corrected.deliverable?.status === "corrected" && reverified.outcome === "changed" && reverified.deliverable?.status === "verified"
+         && (await facet(out))?.seq === reverified.event?.seq,
+    `verify_deliverable: a thought with no capture NOT_A_DELIVERABLE; the maker's move to verified refused VERIFY_NOT_YOURS by name and by agent id; unverified -> unverified, verified -> verified and verified -> unverified refused ILLEGAL_TRANSITION naming from and to; a read key WRITE_SCOPE_REQUIRED; a bad status, method or outcome raised 22023; another key verifies, the maker corrects, another verifies again (${JSON.stringify([byMaker.code, byMakerRenamed.code, toSame.code, ok.outcome, back.code, corrected.outcome, reverified.outcome])})`);
+
+  // The author: record_deliverable takes any thought, so the key that wrote it is refused its verification beside the
+  // key that recorded it (review pass 2, the maintainer's choice), and may still correct it.
+  // A key that rewrote the text after it was captured is one of its authors too (review pass 3: the first capture alone
+  // was read).
+  const AUTHOR = { name: "[121] author", scope: "write" }, EDITOR = { name: "[121] editor", scope: "write" }, THIRD = { name: "[121] third", scope: "write" };
+  const authored = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, NULL::vector) AS r`,
+    ["[121] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
+  const byRecorder = await rec(authored, spec, "a17", CHECKER);
+  const byAuthor = await ver(authored, "verified", AUTHOR);
+  const authorCorrects = await ver(authored, "corrected", AUTHOR);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(EDITOR)]);
+    await tx.query(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [authored, "[121] an author's own output, rewritten by an editor"]);
+  });
+  const editorRow = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND actor_name = $2 AND diff ? 'content'`, [authored, EDITOR.name])).n;
+  const byEditor = await ver(authored, "verified", EDITOR);
+  const byThird = await ver(authored, "verified", THIRD);
+  assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[121\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
+         && authorCorrects.outcome === "changed" && editorRow === 1 && byEditor.code === "VERIFY_NOT_YOURS" && /\[121\] editor wrote the thought/.test(byEditor.message ?? "")
+         && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
+    `a key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS, its first capture's key and a key that rewrote its text alike; the author may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, editorRow, byEditor.code, byThird.outcome])})`);
+
+  // A seq the insert brings is not the one it keeps: the trigger draws each event's under the lock (review pass 2: a raw
+  // insert's OVERRIDING SYSTEM VALUE named a seq above every later event's, and pass 1's stale-seq refusal then refused
+  // every verification after it, for good).
+  const offeredFor = await thought("[121] an output a raw seq is offered for");
+  await rec(offeredFor, spec, "5eq", MAKER);
+  const offered = await failure(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at, seq)
+    OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, '1999-01-01T00:00:00Z', 9000000000000000000)`, [offeredFor, spec]);
+  const offeredSeqs = (await q<{ s: string }>(`SELECT seq::text AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s);
+  // Its time is the trigger's too, and the facet is projected as it lands, with no rebuild (review pass 3).
+  const offeredAt = (await one<{ y: number }>(`SELECT extract(year FROM at)::int AS y FROM deliverable_events WHERE thought_id = $1::uuid AND event = 'verification'`, [offeredFor])).y;
+  const offeredFacet = await facet(offeredFor);
+  const offeredDrift = (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length;
+  const afterOffer = await ver(offeredFor, "verified", CHECKER).catch((e: Error) => ({ outcome: `raised ${e.message.split("\n")[0]}` }) as R);
+  const offeredStatuses = (await q<{ s: string }>(`SELECT status AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s).join(" ");
+  assert(offered === "taken" && offeredSeqs.length === 2 && offeredSeqs.every((s) => s !== "9000000000000000000" && BigInt(s) < 9000000000000000000n)
+         && offeredAt > 2000 && offeredFacet?.status === "corrected" && (offeredFacet?.verification as { by: string }).by === "raw" && offeredDrift === 0
+         && afterOffer.outcome === "changed" && offeredStatuses === "unverified corrected verified",
+    `a raw insert's own seq and time are replaced by the trigger's, its event is projected as it lands with no drift, the verification after it is taken and the events read in the order written (${offered.slice(0, 60)}; ${offeredSeqs.join(",")}; ${offeredAt}; ${offeredFacet?.status}, drift ${offeredDrift}; ${afterOffer.outcome}; ${offeredStatuses})`);
+
+  // Below the tools: a raw write is held to the same rules.
+  const before = JSON.stringify(await facet(out));
+  const raw = {
+    forbidden: await failure(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    allowed: await failure(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"corrected"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    closed: await failure(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    moved: await failure(`UPDATE thought_facets SET thought_id = $2::uuid WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out, other]),
+    noEvents: await failure(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'deliverable', $2::jsonb)`, [other, before]),
+    deleted: await failure(`DELETE FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    illegal: await rawEvent(out, "verification", "unverified", spec, "c0ffee"),
+    same: await rawEvent(out, "verification", "verified", spec, "c0ffee"),
+    checkpoint: await rawEvent(out, "verification", "corrected", spec, "deadbeef"),
+    recapture: await rawEvent(out, "captured", "unverified", spec, "c0ffee"),
+    orphan: await rawEvent(other, "verification", "verified", spec, "c0ffee"),
+    noSpec: await rawEvent(other, "captured", "unverified", "00000000-0000-4000-8000-000000000122", "c0ffee"),
+    eventUpdate: await failure(`UPDATE deliverable_events SET outcome = 'rewritten' WHERE thought_id = $1::uuid`, [out]),
+    eventDelete: await failure(`DELETE FROM deliverable_events WHERE thought_id = $1::uuid`, [out]),
+    eventTruncate: await failure(`TRUNCATE deliverable_events`),
+  };
+  assert(/^23514 a deliverable facet is the projection of its events: thought \S+ stands verified as of event \d+, and this row says unverified/.test(raw.forbidden)
+         && /^23514 a deliverable facet is the projection of its events: .* this row says corrected/.test(raw.allowed)
+         && /^23514 a deliverable facet stands while its thought does/.test(raw.closed) && /^23514 a deliverable facet stays on its thought/.test(raw.moved)
+         && /^23514 thought \S+ has no deliverable events/.test(raw.noEvents) && /^23001 the deliverable facet on thought \S+ is the projection of its events and goes only with its thought/.test(raw.deleted)
+         && /^23514 a deliverable's status does not move verified -> unverified/.test(raw.illegal) && /^23514 a deliverable's status does not move verified -> verified/.test(raw.same)
+         && /^23514 a deliverable keeps the spec_ref and checkpoint it was captured with/.test(raw.checkpoint) && /^23514 thought \S+ is a deliverable already/.test(raw.recapture)
+         && /^23514 thought \S+ is not a deliverable: a verification follows a capture/.test(raw.orphan) && /^23514 a deliverable's spec_ref \S+ is not a thought/.test(raw.noSpec)
+         && [raw.eventUpdate, raw.eventDelete, raw.eventTruncate].every((r) => /^23001 deliverable_events is append-only/.test(r))
+         && JSON.stringify(await facet(out)) === before,
+    `below the tools: a raw UPDATE of the facet's status refused whether the move is forbidden or allowed, a close and a move refused, a facet with no events refused, a DELETE of it alone refused; a raw event's forbidden move, a move to the same status, a changed checkpoint, a second capture, a verification with no capture and a capture of no spec refused; an event's UPDATE, DELETE and TRUNCATE refused; the facet as it was (${Object.values(raw).map((r) => r.slice(0, 30)).join(" | ")})`);
+
+  // READ COMMITTED alone: above it a read of the newest event is an older snapshot's, so the writers, a raw event and a
+  // raw facet write are each refused 0A000 (review pass 1: the trigger and the validator checked no isolation, and a raw
+  // insert under REPEATABLE READ wrote a move from a status since replaced). Two sessions are test-live [49]'s.
+  const above = async (sql: string, params: unknown[] = []) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(sql, params); });
+      return "taken";
+    } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const isolated = [
+    await above(`SELECT verify_deliverable($1, 'corrected', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await above(`SELECT record_deliverable($1, $2, 'c', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]),
+    await above(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+                 VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, 'c0ffee', 'm', 'o', 'raw', false, now())`, [out, spec]),
+    await above(`UPDATE thought_facets SET payload = payload WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+  ];
+  assert(/^0A000 verify_deliverable must run under READ COMMITTED/.test(isolated[0]) && /^0A000 record_deliverable must run under READ COMMITTED/.test(isolated[1])
+         && /^0A000 a deliverable event must run under READ COMMITTED/.test(isolated[2]) && /^0A000 a deliverable facet must run under READ COMMITTED/.test(isolated[3])
+         && JSON.stringify(await facet(out)) === before,
+    `above READ COMMITTED the writers, a raw event and a raw facet write are refused 0A000, and the facet stands as it was (${isolated.map((r) => r.slice(0, 60)).join(" | ")})`);
+
+  // The time zone: the payload's times are UTC text, so a session elsewhere computes the same projection.
+  await db.exec(`SET TimeZone = 'Asia/Kolkata'`);
+  const elsewhere = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);
+  const viaElsewhere = await failure(`UPDATE thought_facets SET payload = ob1_deliverable_payload(thought_id) WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]);
+  await db.exec(`RESET TimeZone`);
+  assert(elsewhere.length === 0 && viaElsewhere === "taken" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(String((await facet(out))?.captured_at)),
+    `the payload's times are UTC to the microsecond: no drift read from another time zone, and the projection written there admitted (${elsewhere.length}, ${viaElsewhere})`);
+
+  // Drift and the rebuild: a raw write with the validator off is found, and mended from the events.
+  await db.exec(`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`);
+  await db.query(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]);
+  await db.exec(`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`);
+  const drifted = await q<{ thought_id: string; problem: string }>(`SELECT thought_id::text AS thought_id, problem FROM ob1_deliverable_projection_drift()`);
+  const rebuilt = Number((await one<{ n: number }>(`SELECT ob1_rebuild_deliverable_projection() AS n`)).n);
+  const after = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);
+  assert(drifted.length === 1 && drifted[0].thought_id === out && drifted[0].problem === "differs" && rebuilt === 1 && after.length === 0 && JSON.stringify(await facet(out)) === before,
+    `a facet written with the validator off reads as drift (differs); the rebuild makes it the events' projection again (${JSON.stringify(drifted)}, ${rebuilt})`);
+
+  // The deliverables grant group: with capture alone beside it, it records, verifies and reads; it cannot change an event;
+  // without it, refused naming the table.
+  const ROLE = "ob1_test_deliverables";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "deliverables"] })]) await db.exec(st);
+  const asRole = async (body: (tx: { query: typeof db.query }) => Promise<unknown>) => {
+    try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
+    catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const roleOut = await thought("[121] a role's output");
+  const roleUse = await asRole(async (tx) => {
+    const r1 = (await tx.query<{ r: R }>(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb) AS r`, [roleOut, spec, JSON.stringify(MAKER)])).rows[0].r;
+    const r2 = (await tx.query<{ r: R }>(`SELECT verify_deliverable($1, 'verified', 'm', 'o', $2::jsonb) AS r`, [roleOut, JSON.stringify(CHECKER)])).rows[0].r;
+    await tx.query(`SELECT deliverable_history($1)`, [roleOut]);
+    return `${r1.outcome},${r2.outcome}`;
+  });
+  const roleUpdate = await asRole((tx) => tx.query(`UPDATE deliverable_events SET outcome = 'x' WHERE false`));
+  await db.exec(`REVOKE ALL ON deliverable_events FROM ${ROLE}`);
+  const roleWithout = await asRole((tx) => tx.query(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]));
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+  assert(roleUse.code === "" && roleUse.r === "captured,changed" && roleUpdate.code === "42501"
+         && roleWithout.code === "42501" && /permission denied for table deliverable_events/.test(roleWithout.message ?? ""),
+    `a role granted capture and deliverables alone records, verifies and reads a deliverable (the author read by the capture group's grant, the seq drawn by this group's); it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
+
+  // The thought deleted: the facet goes with it, the events stay as history; no more verifications; not drift.
+  const events = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);
+  await db.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [out]);
+  const gone = await facet(out);
+  const kept = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);
+  const late = await ver(out, "corrected", CHECKER);
+  const lateRaw = await rawEvent(out, "verification", "corrected", spec, "c0ffee");
+  const history = (await one<{ h: { deliverable: unknown; events: { event: string; status: string }[] } }>(`SELECT deliverable_history($1) AS h`, [out])).h;
+  assert(gone === null && kept === events && events === 4 && late.code === "NOT_A_DELIVERABLE" && /thought was deleted/.test(late.message ?? "") && /thought was deleted: it takes no more verifications/.test(lateRaw)
+         && history.deliverable === null && history.events.map((e) => `${e.event}:${e.status}`).join(" ") === "captured:unverified verification:verified verification:corrected verification:verified"
+         && (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length === 0,
+    `the thought deleted: its facet goes by the cascade, its ${kept} events stay; a verification refused NOT_A_DELIVERABLE as a value and as a raw event; the history the events in order with no deliverable; not drift (${JSON.stringify(history.events.map((e) => e.status))})`);
+
+  // A re-apply is a no-op: the events kept, the projection current, the rules the same.
+  const out2 = await thought("[121] a second output");
+  await rec(out2, spec, "f00d", MAKER);
+  const keptRows = JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`));
+  const keptFacet = JSON.stringify(await facet(out2));
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`)) === keptRows && JSON.stringify(await facet(out2)) === keptFacet
+         && (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length === 0 && (await ver(out2, "unverified", CHECKER)).code === "ILLEGAL_TRANSITION",
+    "a re-apply is a no-op: the events and the facet kept, no drift, the rules the same");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[122] Migration 135: a thought serves every ticket of its subject set — ob1_item_serves returns each standing ticket subject, distinct, in key order, a filed ticket still serving alone and a subject of another kind none; effective_priority inherits from the best of them; 122's other arms as they were; a re-apply a no-op (SMD-3306)");
 {
   const file = files.find((f) => /^\d{3}_item_serves_subject_set\.sql$/.test(f)) ?? "no NNN_item_serves_subject_set.sql";  // by name: renumbered when main takes its number
-  // [109] re-applied 122's ob1_item_serves, which 131 replaces: this section holds 131's.
+  // [109] re-applied 122's ob1_item_serves, which 135 replaces: this section holds 135's.
   await reapply(file.slice(0, 4));
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const NOW = "2027-03-10T15:00:00Z";
-  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[117]%'`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[122]%'`);
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('serves-op', 'operator') ON CONFLICT DO NOTHING`);
   const OP = { name: "serves-op", scope: "write" };
 
-  // The shape: 131 the last definer, the sentinel, the comment naming both migrations.
+  // The shape: 135 the last definer, the sentinel, the comment naming both migrations.
   const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_item_serves(text, text)'::regprocedure`)).s);
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_item_serves(text, text)"])).c ?? "";
   assert((await functionsNamed("ob1_item_serves")) === 1 && lastDefinerOf("ob1_item_serves") === file && /ob1:serves-subject-set/.test(src) && !/LIMIT 1/.test(src)
-         && /Migrations 122, 131 \/ SMD-3667, SMD-3306/.test(comment),
-    `one ob1_item_serves, ${file} its last definer, its sentinel and no LIMIT 1, its comment naming 122 and 131 (${comment.slice(-60)})`);
+         && /Migrations 122, 135 \/ SMD-3667, SMD-3306/.test(comment),
+    `one ob1_item_serves, ${file} its last definer, its sentinel and no LIMIT 1, its comment naming 122 and 135 (${comment.slice(-60)})`);
 
   const thought = async (content: string, metadata: object | null = null) =>
-    (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`, [`[117] ${content}`, metadata === null ? null : JSON.stringify(metadata)])).id;
+    (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`, [`[122] ${content}`, metadata === null ? null : JSON.stringify(metadata)])).id;
   const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
   const sets = async (id: string, keys: string[]) =>
     (await one<{ r: { action: string } }>(`SELECT record_thought_subjects($1::uuid, $2::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL, $3, NULL) AS r`, [id, keys, await fp(id)])).r;
@@ -19130,7 +19971,7 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   });
   assert(hashedServes === "ticket:SMD-91711,ticket:SMD-91712,ticket:SMD-91713", `a set of three served in key order under a hashed DISTINCT too (${hashedServes})`);
 
-  // 122's filed-ticket arm as 131 copies it ([109] re-applies 122's own, so only this section reads 131's): a ticket
+  // 122's filed-ticket arm as 135 copies it ([109] re-applies 122's own, so only this section reads 135's): a ticket
   // filed in lower case serves upper case, a malformed metadata.ticket passes to a valid issue, an issue alone serves
   // (review pass 3, mutants: each unheld).
   const lowFiled = await serves(await thought("filed under its ticket in lower case", { ticket: "smd-91714" }));
@@ -19141,13 +19982,13 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   await sets(badIssue, ["ticket:SMD-91717"]);
   const badIssueServes = await serves(badIssue);
   assert(lowFiled === "ticket:SMD-91714" && badTicket === "ticket:SMD-91715" && issueOnly === "ticket:SMD-91716" && badIssueServes === "ticket:SMD-91717",
-    `131's filed-ticket arm as 122's: upper case, a malformed ticket passing to its issue, an issue alone, a malformed issue passing to the subjects (${lowFiled || "none"} | ${badTicket || "none"} | ${issueOnly || "none"} | ${badIssueServes || "none"})`);
+    `135's filed-ticket arm as 122's: upper case, a malformed ticket passing to its issue, an issue alone, a malformed issue passing to the subjects (${lowFiled || "none"} | ${badTicket || "none"} | ${issueOnly || "none"} | ${badIssueServes || "none"})`);
 
   // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
   // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
   const put = async (key: string, level: number) => {
     const r = (await one<{ r: { outcome: string } }>(`SELECT assert_priority('ticket', $1, $2, NULL, NULL, NULL, NULL, NULL, false, $3::jsonb) AS r`, [key, level, JSON.stringify(OP)])).r;
-    if (r.outcome !== "asserted") throw new Error(`[117] fixture: assert_priority on ${key} answered ${JSON.stringify(r)}`);
+    if (r.outcome !== "asserted") throw new Error(`[122] fixture: assert_priority on ${key} answered ${JSON.stringify(r)}`);
   };
   /** A ticket's row as board-sync writes it ([109]'s way): its thought, open, and its Linear source row. */
   const ticketRow = async (issue: string) => {
@@ -19155,9 +19996,9 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
     await db.transaction(async (tx) => {
       await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
       id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
-        [`[117] ${issue}`, JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+        [`[122] ${issue}`, JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
     });
-    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, `[117] ${issue}`]);
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, `[122] ${issue}`]);
     return id;
   };
   // The two tickets, open.
@@ -19180,13 +20021,13 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [child, JSON.stringify([{ relation: "child_of", target: "smd-91701" }, { relation: "child_of", target: "smd-91703" }, { relation: "child_of", target: "SMD-91701" }, { relation: "child_of", target: "smd-0" }])]);
   const parentRows = await serves("SMD-91703", "ticket");
   const [noOrigin, withOrigin] = ["00000000-0000-4000-8000-000000009171", "00000000-0000-4000-8000-000000009172"];
-  await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq, origin_thought_id) VALUES ($1::uuid, 'open', '[117] no origin', now(), now(), 'raw-writer', now(), 0, NULL), ($2::uuid, 'open', '[117] an origin', now(), now(), 'raw-writer', now(), 0, $3::uuid)`, [noOrigin, withOrigin, session]);
+  await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq, origin_thought_id) VALUES ($1::uuid, 'open', '[122] no origin', now(), now(), 'raw-writer', now(), 0, NULL), ($2::uuid, 'open', '[122] an origin', now(), now(), 'raw-writer', now(), 0, $3::uuid)`, [noOrigin, withOrigin, session]);
   const itemRows = [await serves(noOrigin, "item"), await serves(withOrigin, "item")];
   await db.query(`DELETE FROM open_items WHERE item_id IN ($1::uuid, $2::uuid)`, [noOrigin, withOrigin]);
   assert(parentRows === "ticket:SMD-91701" && itemRows[0] === "" && itemRows[1] === `thought:${session}`,
     `a child serves its parent alone, upper case, not itself; an item with no origin nothing, one with an origin its thought, as under 122 (${parentRows} | ${itemRows.map((r) => r || "none").join(" | ")})`);
 
-  // The ticket arm as 131 copies it: a closed child_of link serves nothing, nor an active link of another relation
+  // The ticket arm as 135 copies it: a closed child_of link serves nothing, nor an active link of another relation
   // (review pass 3, mutants: each unheld once [109] re-applies 122's own).
   const orphan = await ticketRow("SMD-91704");
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }, { relation: "blocks", target: "SMD-91702" }])]);
@@ -19199,19 +20040,19 @@ console.log("\n[117] Migration 131: a thought serves every ticket of its subject
   let elsewhere = "";
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
-    elsewhere = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text`, ["[117] SMD-91706 held elsewhere"])).rows[0].id;
+    elsewhere = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text`, ["[122] SMD-91706 held elsewhere"])).rows[0].id;
   });
-  await db.query(`SELECT record_thought_source($1::uuid, 'github', 'SMD-91706', '[117] SMD-91706 held elsewhere', 'text/markdown')`, [elsewhere]);
+  await db.query(`SELECT record_thought_source($1::uuid, 'github', 'SMD-91706', '[122] SMD-91706 held elsewhere', 'text/markdown')`, [elsewhere]);
   await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [elsewhere, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }])]);
   const elsewhereRows = await serves("SMD-91706", "ticket");
   assert(orphanRows === "" && elsewhereRows === "",
     `a closed parent link serves nothing, nor a link of another relation or another system, nor a key no Linear source row holds (${orphanRows || "none"} | ${elsewhereRows || "none"})`);
 
-  // Re-applied, 131 changes nothing.
+  // Re-applied, 135 changes nothing.
   await reapply(file.slice(0, 4));
-  assert((await serves(session)) === two && (await functionsNamed("ob1_item_serves")) === 1, "131 applied again changes nothing");
+  assert((await serves(session)) === two && (await functionsNamed("ob1_item_serves")) === 1, "135 applied again changes nothing");
 
-  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[117]%'`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[122]%'`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

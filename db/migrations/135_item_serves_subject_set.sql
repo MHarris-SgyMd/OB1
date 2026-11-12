@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 131: a thought serves every ticket of its subject set — 122's
+-- Migration 135: a thought serves every ticket of its subject set — 122's
 --                ob1_item_serves read one ticket subject (LIMIT 1, no order),
 --                and since 130 a thought's subjects are a set
 --                (SMD-3306 PR 7a-3b-1)
@@ -50,7 +50,7 @@ BEGIN
   END;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = format('migration 131 needs %s; this schema lacks it', v_missing),
+      MESSAGE = format('migration 135 needs %s; this schema lacks it', v_missing),
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url ... --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -111,4 +111,4 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_serves(text, text) IS
-  'One hop of what a normalised item serves, for inheritance (docs/priority.md''s weights table): a ticket, its parent (an active Linear child_of link its linear source row holds); a thought, the ticket it is about (metadata ticket, else issue, as node_state reads them; else every standing ticket subject, distinct, in key order — 111''s subject, a set since 130); an open item, its origin thought. An entity serves nothing yet; the spec an item names waits for SMD-2683. Migrations 122, 131 / SMD-3667, SMD-3306.';
+  'One hop of what a normalised item serves, for inheritance (docs/priority.md''s weights table): a ticket, its parent (an active Linear child_of link its linear source row holds); a thought, the ticket it is about (metadata ticket, else issue, as node_state reads them; else every standing ticket subject, distinct, in key order — 111''s subject, a set since 130); an open item, its origin thought. An entity serves nothing yet; the spec an item names waits for SMD-2683. Migrations 122, 135 / SMD-3667, SMD-3306.';

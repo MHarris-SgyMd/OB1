@@ -27,9 +27,10 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
-import type { AgendaCode, AgendaResult } from "./core/agenda.ts";
+import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
+import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
@@ -38,7 +39,7 @@ import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
-import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, EvidenceAppended, EvidenceCode, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
@@ -68,6 +69,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** An embedding as `<model>@<dim>` (qwen3-embedding:4b@1024, an OpenAI or Ollama name, Cloudflare's leading @): no space, so no sentence. */
+const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -96,6 +99,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
   if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
+  // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
+  if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -371,13 +376,23 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
   );
 }
 
-/** The refusals the search tools share: the gate's, and a filter's (said as the fault it was, `Error:`). */
+/** The refusals the search tools share: the gate's, a filter's (said as the fault it was, `Error:`), and search_thoughts' weights' (SMD-4193). */
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
   if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
+  if (r.code === "REFUSED_WEIGHTS") return weightsRefusal(r);
   return unknownRefusal(r);
 }
+
+/** A read's weights refused (SMD-4193): the database's words, naming the weight, or why nothing would read them. */
+const weightsRefusal = (r: Extract<Refusal, { code: "REFUSED_WEIGHTS" }>): string =>
+  r.problem === "unranked"
+    ? "Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither; add priority_weight above 0 or min_priority, or drop weights"
+    : `Refused: ${oneLine(snipText(r.message, 300))}`;
+
+/** A call's own weights in words (SMD-4193), as given: `overdue 3, soon 2`. */
+export const weightsText = (w: Record<string, unknown>): string => Object.entries(w).map(([k, v]) => `${k} ${String(v)}`).join(", ");
 
 /**
  * The `By:` line under a hit — who wrote its current text, from the two keys
@@ -407,6 +422,7 @@ export { INGESTED_NOTICE, ingestedNotice };
 // decision's guard (proposal-review.ts) reads without this file's imports.
 export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
 import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { dueText, LEVEL_WORDS } from "./priority-scale.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
 export function standingFlagText(f: StandingFlag): string {
@@ -555,7 +571,9 @@ export function priorityNote(p: PriorityRanking | null | undefined): string | nu
   const floor = p.min === null ? "" : `; kept ${p.kept} at ${levelText(p.min)} or above (min_priority, a known priority alone)`;
   // Not full: the window held every match there was, so nothing past it was missed.
   const past = p.read < p.window ? "" : ` A match past the top ${p.read} was not read${p.window < 100 ? " — raise limit to read further" : " — the window is capped at 100"}.`;
-  return `${ranked}; ${known}${floor}.${past}`;
+  // A call's own weights (SMD-4193): absent from a REST core older than this server, said only when given.
+  const weights = p.weights ? ` Under this call's weights, ${weightsText(p.weights)} (the rest the brain's defaults)${p.span !== null && p.span !== undefined ? `, the blend's scale ${p.span}` : ""}; a term may cross a level.` : "";
+  return `${ranked}; ${known}${floor}.${past}${weights}`;
 }
 
 /**
@@ -585,13 +603,19 @@ export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolea
  * a ranking it could not read would be no ranking, so the search fails, saying how to mend it.
  */
 export function priorityHint(msg: string): string {
-  // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span.
-  return /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
+  // The operator's stored weights refused, or unreadable (migration 132): every ranked read fails alike.
+  const setting = weightSettingHint(msg);
+  if (setting) return setting;
+  // priority_weight's scale is the brain's (migration 128, SMD-4194): a brain short of it lacks ob1_priority_span. Under
+  // a call's own weights (SMD-4193) the scale is 131's ob1_priority_span(jsonb): a brain before 131 lacks that alone.
+  return /ob1_priority_span\(jsonb\)/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — priority_weight under weights reads its scale from ob1_priority_span(jsonb), migration 131 (db/migrations/131_priority_span_weights.sql), which is not applied; search without weights, or with min_priority alone, meanwhile"
+    : /ob1_priority_span/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — priority_weight reads the brain's scale, ob1_priority_span, migration 128 (db/migrations/128_priority_defaults.sql), which is not applied; search without it meanwhile"
     : /permission denied for function ob1_priority_(span|defaults)\b/i.test(msg)
     ? " — priority_weight and min_priority read ob1_priority_defaults and ob1_priority_span (migration 128), which 128 leaves to PUBLIC's EXECUTE: the database's default privileges or a REVOKE took it from the server's role, so grant EXECUTE on both to it (migrate.ts --grant does not); search without them meanwhile"
     : /ob1_priority_defaults/.test(msg) && /does not exist|could not find|lacks weight/i.test(msg)
-    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128), which is missing or lacks a weight; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
+    ? " — priority_weight and min_priority read ob1_priority_defaults (migration 128; since 132 the built-in weights ob1_priority_builtin under the operator's setting), which is missing or lacks a weight; re-apply every migration, so the last to define each stands (cd db && bun migrate.ts --url <url> --reapply); search without them meanwhile"
     : /ob1_priority_span answered no span/.test(msg)
     ? " — ob1_priority_span (migration 128) answered no positive number: ob1_priority_defaults was replaced by hand with weights no read can use; re-apply every migration, so the last to define it stands (cd db && bun migrate.ts --url <url> --reapply); search without priority_weight meanwhile"
     : /effective_priority/.test(msg) && /does not exist|could not find/i.test(msg)
@@ -1917,32 +1941,108 @@ export function renderResetCaptureStamp(o: Outcome<StampReset, StampResetCode>):
       + "Until you do, the next classified key that can read to re-capture it is the one weighed. fetch's label, or thought_changes, shows which way it went.";
   }, (r) => {
     switch (r.code) {
-      case "REFUSED_NOT_OPERATOR": {
-        // The fix depends on what the key is (review pass 2): an unclassified
-        // key may be the operator's, and its line is given; a key classified
-        // otherwise is someone else's, and classifying it operator would
-        // raise the trust of everything it writes.
-        const key = snipText(r.key, 80);
-        const lead = "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.";
-        if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
-        // The line only for a name set_agent_kind takes as written — no
-        // control character, nothing it trims — or the line would classify
-        // another label (review pass 3: a mangled name created an operator row).
-        const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
-        if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
-        return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
-      }
+      case "REFUSED_NOT_OPERATOR": return notOperatorText(r, "Refused: only a key the operator classified `operator` may reset a label, and not a capture-only key.");
       case "REFUSED_NOT_CAPTURE_STAMP": return `Refused: ${r.id}'s label is not one a reset can put back — a capture-only key did not capture it (or captured it before the server marked such captures), or its text was changed since. Its label is its writer's: a text edit restamps it.`;
       default: return mutationRefusalText(r);
     }
   }, (v) => ({ id: v.id, reset: v.reset, restored: v.restored, declines: v.declines, actorKind: oneOf(SAID_BY, v.stamp.actorKind), trust: oneOf(TRUST, v.stamp.trust) }));
 }
 
+/**
+ * An operator-only call refused (086's reset, 132's weights): what the key is, and the fix that fits it (review pass
+ * 2): an unclassified key may be the operator's, and its line is given; a key classified otherwise is someone else's,
+ * and classifying it operator would raise the trust of everything it writes.
+ */
+function notOperatorText(r: Extract<Refusal, { code: "REFUSED_NOT_OPERATOR" }>, lead: string): string {
+  const key = snipText(r.key, 80);
+  if (r.kind === "capture-only") return `${lead} This key, ${key}, is capture-only.`;
+  // The line only for a name set_agent_kind takes as written — no
+  // control character, nothing it trims — or the line would classify
+  // another label (review pass 3: a mangled name created an operator row).
+  const exact = /^[^\u0000-\u001f\u007f\s](?:[^\u0000-\u001f\u007f]*[^\u0000-\u001f\u007f\s])?$/.test(r.key);
+  if (r.kind === null) return `${lead} This key, ${key}, is unclassified. If it is the operator's own, classify it${exact ? `: SELECT set_agent_kind('${r.key.replace(/'/g, "''")}', 'operator')` : " with set_agent_kind and the key's exact name"} (db/README.md).`;
+  return `${lead} This key, ${key}, is classified ${oneOf(SAID_BY, r.kind) ?? "otherwise"}: use the operator's own key — classifying this one operator would raise the trust of everything it writes.`;
+}
+
+/**
+ * The operator's priority weights (SMD-4193 PR 2, migration 132): what every read now takes as its defaults, and what
+ * it replaced. A call's own weights still override them by name.
+ */
+export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>): Reply {
+  return render(o, (v) => {
+    const now = v.weights ? `${weightsText(v.weights)}, the rest built in` : "the built-in weights";
+    if (!v.changed) return `Unchanged: every read already takes ${now} as its defaults${v.weights && v.setAt ? ` (set ${v.setAt}${v.setBy ? ` by ${snipText(v.setBy, 80)}` : ""})` : ""}. Nothing was written.`;
+    const before = v.previous ? `${weightsText(v.previous)}, the rest built in` : "the built-in weights";
+    return `${v.weights ? "Set" : "Cleared"} the operator's priority weights: every read now takes ${now} as its defaults, and a call's own weights still override them by name. Before: ${before}.`
+      + (v.weights ? " A weight may make a term cross a level for every reader. brain_info shows the setting; {} clears it." : "");
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may set the priority weights, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the priority weights.")
+    : r.code === "PRIORITY_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+    : unknownRefusal(r),
+  (v) => ({ changed: v.changed, weights: v.weights, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
+}
+
+/** set_priority_weights' fault: a database before 132 has no such function. */
+export const setWeightsHint = (msg: string): string =>
+  /set_priority_weights/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 132 (db/migrations/132_priority_weight_setting.sql) is not applied"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — the server's role needs the priority group's grants on priority_weight_settings (migration 132; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
+/**
+ * The fault every ranked priority read gives while the operator's stored weights are refused (migration 132): a later
+ * migration narrowed a range under them, or a raw write. The read fails rather than order by weights the operator did
+ * not choose; this says how to mend it.
+ */
+export const weightSettingHint = (msg: string): string =>
+  /the operator's priority weights \(set .*\) are refused/.test(msg)
+    ? " — an operator key sets them again, or clears them with {}, through set_priority_weights (REST POST /v1/priority-weights); brain_info shows the setting"
+    : /permission denied for table priority_weight_settings/i.test(msg)
+    ? " — every effective priority takes the operator's weights from priority_weight_settings (migration 132), and the server's role needs the priority group's grants on it (db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
 /** reset_capture_stamp's fault: a database before 086 has no such function. */
 export const resetHint = (msg: string): string =>
   /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied"
     : "";
+
+// ── append_thought_evidence (SMD-2690 PR 3b) ─────────────────────────────────
+
+/**
+ * append_thought_evidence's reply: the entry added, or found there already,
+ * and the list's length — the thought by its id, lower-case as the brain
+ * writes it, and the client_key that named it. A refusal names what holds the
+ * list and what to do; a busy thought is other writers' edits in the way of
+ * each of the append's reads, never the caller's old read, and retryable.
+ */
+export function renderAppendThoughtEvidence(o: Outcome<EvidenceAppended, EvidenceCode>): Reply {
+  return render(o, (v) => {
+    const named = v.byClientKey ? `${v.id} (client_key ${v.byClientKey})` : v.id;
+    const count = `${v.evidenceCount} evidence entr${v.evidenceCount === 1 ? "y" : "ies"}`;
+    return v.action === "appended"
+      ? `Appended the evidence to ${named}: it holds ${count}.`
+      : `${named} already holds that evidence (the same source label and excerpt): nothing written. It holds ${count}.`;
+  }, (r) => {
+    switch (r.code) {
+      case "THOUGHT_EVIDENCE_BUSY":
+        return `Not yet: ${r.id} was edited by another write each of the ${EVIDENCE_LIMITS.tries} times the append read it. Retry in a moment: an entry already added is not added twice.`;
+      case "REFUSED_THOUGHT_EVIDENCE":
+        switch (r.problem) {
+          case "full": return `Refused: ${r.id} already holds ${r.count ?? EVIDENCE_LIMITS.entries} evidence entries, the most a thought keeps (${EVIDENCE_LIMITS.entries}). Its text is supported already; a write key may prune metadata.evidence with update_thought.`;
+          case "not_list": return `Refused: ${r.id}'s metadata.evidence is not a list, so no entry can join it. Another writer set it; update_thought's metadata_patch can set it to a list (or null) first.`;
+          case "metadata_not_object": return `Refused: ${r.id}'s metadata is not an object (a raw writer's), so it holds no evidence list.`;
+          case "unstamped": return `Refused: ${r.id} has neither an updated_at nor a created_at (a raw writer's row), so an append could not be checked against another at the same moment. An update_thought that changes it stamps it; then append again.`;
+        }
+      // falls through: a problem this server does not know is said as an edit's refusal
+      default: return mutationRefusalText(r);
+    }
+  }, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), action: v.action, evidenceCount: v.evidenceCount, ...(v.updatedAt ? { updatedAt: v.updatedAt } : {}) }));
+}
 
 // ── review_supersession_proposal (SMD-3338) ──────────────────────────────────
 
@@ -2242,32 +2342,28 @@ export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(
 // Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
 // null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
 
-const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 const itemText = (i: PriorityItem) => `${i.kind === "item" ? "open item" : i.kind} ${i.key}`;
 const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
-/**
- * A due time as a person reads it (SMD-3778): a date alone is stored as the next day's start in UTC, so a due time
- * exactly at midnight UTC is said as the end of the day before — the same instant, read as the day it was given —
- * and any other as the instant itself.
- */
-const dueText = (iso: string) => {
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
-};
 /** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
 const statementText = (a: PriorityAssertion) =>
   `${levelText(a.level)}${a.dueAt ? `, due ${dueText(a.dueAt)}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
   + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
   + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
-/** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
-const historyLine = (a: PriorityAssertion) =>
-  `- ${statementText(a)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
-/** The item's winner after a write, to a key shown it: its own statement, another's, or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null) =>
+/**
+ * Where a statement stands, when that is not the item asked about: a ticket and its own rows are one item (migration
+ * 133), so a ticket's statements and its rows' answer for either, each on its own item.
+ */
+const onOther = (a: PriorityAssertion, asked: PriorityItem) =>
+  a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
+/** One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open, replaced (by which) or cleared. */
+const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
+  `- ${statementText(a)}${onOther(a, asked)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
+/** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
-  : ` The item's winner is ${statementText(v.winner)}.`;
+  : ` The item's winner is ${statementText(v.winner)}${asked ? onOther(v.winner, asked) : ""}.`;
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
     ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
@@ -2281,21 +2377,21 @@ const priorityRefusal = (r: Refusal) =>
 
 export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
   v.outcome === "unchanged"
-    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id)}`
-    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id)}`,
+    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.assertion.item)}`
+    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement${onOther(v.replaced, v.assertion.item)}, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id, v.assertion.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
   v.assertion
-    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null)}`
-    : `You have no statement open on that item: nothing to clear.${winnerText(v, null)}`,
+    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null, v.assertion.item)}`
+    : `You have no statement open on that item: nothing to clear.${winnerText(v, null, null)}`,
   priorityRefusal, AS_JSON);
 
 export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>
   [
-    `${itemText(v.item)}${v.exists ? "" : " (no longer in this brain; its statements are kept)"}: ${v.winner ? `${levelText(v.winner.level)}, the winner ${statementText(v.winner)}.` : "no statement stands — its priority is unknown."}`,
+    `${itemText(v.item)}${v.exists ? "" : " (no longer in this brain; its statements are kept)"}: ${v.winner ? `${levelText(v.winner.level)}, the winner ${statementText(v.winner)}${onOther(v.winner, v.item)}.` : "no statement stands — its priority is unknown."}`,
     v.history.length ? `Every statement, oldest first (${v.history.length}):` : "Nobody has stated a priority on it.",
-    ...v.history.map(historyLine),
+    ...v.history.map((a) => historyLine(a, v.item)),
   ].join("\n"),
   priorityRefusal, AS_JSON);
 
@@ -2430,13 +2526,16 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   return title ? words : `${words}.`;
 }
 /** One agenda item's line: its place, what it is (a ticket's status quoted), its score, the terms behind it, and notes. Shared with plan_context's board (SMD-2684). */
-function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }): string {
+function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; lapsedClaim: number } = { blockers: 0, claimed: 0, lapsedClaim: 0 }, now = new Date().toISOString()): string {
   // `more`: what plan_context's budget left out of this line (SMD-4191), said as "and N more"; the agenda's own lines pass none.
   const and = (n: number) => (n > 0 ? ` and ${n} more` : "");
   // A ticket's status is its board's word (124): quoted and cut, as a title is.
   const what = i.kind === "ticket" ? `ticket ${i.key}${i.status ? ` (${quoted(i.status, 40)})` : ""}` : `${i.status === "proposed" ? "proposed " : ""}open item ${i.key}`;
   const notes = [
     i.overdue ? "OVERDUE" : null,
+    // A due time no urgency term states (past the week, or a level 0): said, so the due order's lead is seen (SMD-4192 review pass 1);
+    // a level 0's past date said past, as 122 never calls it overdue (review pass 3).
+    i.dueAt && !i.overdue && i.urgency === 0 ? `${Date.parse(i.dueAt) <= Date.parse(now) ? "was due" : "due"} ${dueText(i.dueAt)}` : null,
     i.claimed.length ? `claimed by ${i.claimed.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.claimed)}` : null,
     i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
@@ -2450,14 +2549,18 @@ function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; la
  * left out, how many carry no priority (stated or inherited), board-sync's last heartbeat, and whether claims were
  * read. A title, a holder and a blocker are other keys' words: quoted and cut, never a line of their own.
  */
-export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => render(o, (v) => {
+export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => render(o, (v) => {
   const lines = v.items.length === 0
     ? ["Nothing on the agenda in this scope."]
     : [
-        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, most pressing first:`,
+        `${v.items.length} of ${v.total} item${v.total === 1 ? "" : "s"}, ${v.order !== "due" ? "most pressing first"
+          // The undated named only when the list holds both kinds (review pass 2).
+          : v.items.every((i) => i.dueAt === null) ? "none due, most pressing first" : v.items.some((i) => i.dueAt === null) ? "soonest due first, the undated after" : "soonest due first"}:`,
         // Wrapped: map's index must never reach agendaLine's `more`.
-        ...v.items.map((i) => agendaLine(i)),
+        ...v.items.map((i) => agendaLine(i, undefined, v.now)),
       ];
+  // A call's own weights (SMD-4193), under the list or in place of one: a REST core older than this server sends none.
+  if (v.weights) lines.push(`Under this call's weights, ${weightsText(v.weights)} (the rest the brain's defaults): a term may cross a level.`);
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
@@ -2466,7 +2569,13 @@ export const renderAgenda = (o: Outcome<AgendaResult, AgendaCode>): Reply => ren
   if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
   else if (v.claimsLive === 0) lines.push("This brain records no live claim, so none left anything out: work claimed through another brain is not seen here.");
   return lines.join("\n");
-}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder" : unknownRefusal(r), AS_JSON);
+}, (r) => r.code === "CLAIMS_UNREADABLE" ? "Refused: holder mine needs the claims this server's database role cannot read (the claims group); ask without holder"
+  : r.code === "ORDER_UNAVAILABLE" ? "Refused: order due needs migration 129 (db/migrations/129_agenda_order.sql), which this brain lacks; ask with the priority order meanwhile"
+  : r.code === "REFUSED_WEIGHTS" ? weightsRefusal(r)
+  : unknownRefusal(r), AS_JSON);
+
+/** A similarity to three places, rounded down, so a value under a bar never prints as the bar (0.7399 is 0.739, not 0.740). */
+const simDown = (x: number): string => (Math.floor(x * 1000) / 1000).toFixed(3);
 
 /** A plan_context gap in words (SMD-2684): what the read could not find, a coverage signal, not a verdict. */
 const gapWords = (g: PlanGap): string => {
@@ -2475,6 +2584,8 @@ const gapWords = (g: PlanGap): string => {
     case "all_superseded": return `Every hit (${g.hits}) has been superseded by a newer thought: what the brain knows here may have moved on.`;
     case "ingested_only": return `Every hit (${g.hits}) is outside text an importer copied in: nothing here was said by the operator or an agent.`;
     case "semantic_unavailable": return `Semantic search was unavailable (${quoted(g.reason, 80)}): the knowledge is exact matches alone.`;
+    case "little": return `Little on this: ${g.topSimilarity === null ? "no hit has a similarity (exact matches alone)" : `the best hit's similarity is ${simDown(g.topSimilarity)}`}, under ${g.bar}, where the brain was measured to hold little that bears on a request (SMD-4212, on ${quoted(g.embeddingId, 80)}). A coverage signal, not a verdict: weigh the hits.`;
+    case "little_not_measured": return `A note, not a gap: whether the brain has little on this is not measured for this embedding (${quoted(g.embeddingId, 80)}; the bar was measured on ${quoted(g.measuredOn, 80)})${g.topSimilarity === null ? "; no hit has a similarity" : `; the best hit's similarity is ${simDown(g.topSimilarity)}, on that embedding's own scale`}.`;
     case "tickets_missing": return `Named but not in the brain: ${g.keys.join(", ")}${g.more ? ` and ${g.more} more` : ""}.`;
     case "tickets_not_read": return `${g.count} more ticket${g.count === 1 ? "" : "s"} the hits name not read (past the board's reach).`;
     case "trimmed": return `Cut to keep this reply readable: ${[
@@ -2551,7 +2662,8 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     "Tools another server serves (a vendored recipe's, an n8n workflow's) are unknown here: none is left out on purpose.");
   // No gap is no verdict on coverage: the search keeps its nearest matches, each saying its similarity.
   // A budget cut is no coverage gap (review pass 1): the weighing line stands whenever nothing else is found.
-  const found = v.gaps.filter((g) => g.gap !== "trimmed");
+  // Nor is a bar not measured for this embedding (SMD-4212): it finds nothing, so the weighing line stands beside it.
+  const found = v.gaps.filter((g) => g.gap !== "trimmed" && g.gap !== "little_not_measured");
   out.push("\n## Gaps", ...v.gaps.map((g) => `- ${gapWords(g)}`),
     ...(found.length ? [] : [`- ${v.gaps.length ? "Nothing else found" : "None found"}. How close the hits are to the request is each hit's match; weigh them before relying on them.`]));
   return out.join("\n");

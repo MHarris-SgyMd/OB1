@@ -8,7 +8,7 @@ import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { providerDown, shownBase } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
-import { ListCursorRefused, RELATIONS_FETCHED, storeKind, UUID_RE, type AuditChange, type EffectivePriority, type PriorityTerm, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { ListCursorRefused, RELATIONS_FETCHED, storeKind, UUID_RE, type AuditChange, type EffectivePriority, type PriorityTerm, type PriorityWeights, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, taskStates, type BrainInfo, type ReadOptions, type ServerFacts, type TaskStatusResult } from "../brain-info.ts";
@@ -23,6 +23,7 @@ import { parseSince } from "./since.ts";
 import { fetchedThreads, type FetchedThread } from "./threads.ts";
 import { relationsLabel, relationsOf, relationsResult } from "./relations.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
+import { weightsRefused } from "./weights.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
 
@@ -499,8 +500,12 @@ export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string
 /** The matches a priority-ranked search reads: prefer_current's window, min(100, 4 × limit) (077). */
 export const priorityWindow = (limit: number) => Math.min(100, 4 * limit);
 
-/** What a priority-ranked search did (SMD-3668): its weight and floor, how many matches it read, kept, and found a known priority on. */
-export type PriorityRanking = { weight: number; min: number | null; window: number; read: number; kept: number; known: number };
+/**
+ * What a priority-ranked search did (SMD-3668): its weight and floor, how many matches it read, kept, and found a known
+ * priority on; the call's own weights (SMD-4193), null for the brain's defaults, and the scale its blend divided by
+ * (null when no weight blended, or nothing was read).
+ */
+export type PriorityRanking = { weight: number; min: number | null; window: number; read: number; kept: number; known: number; weights: Partial<PriorityWeights> | null; span: number | null };
 /** A match's priority as the ranking reads it: the effective priority counted, and whether it is known (a level stated, read from its open items, or inherited). */
 export type MatchPriority = { effective: number; known: boolean };
 
@@ -574,7 +579,7 @@ type PriorityRow = { id: string; content: string; metadata?: Record<string, unkn
  * on a failure, so a ticket only a row it drops names can neither cost it nor fail it (review pass 1). `have` holds
  * answers already read, not asked again: the label of a ranked page reuses the window's. Nothing to ask, no call.
  */
-export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority> } = {}): Promise<PriorityRead> {
+export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority>; weights?: Partial<PriorityWeights> } = {}): Promise<PriorityRead> {
   const have = opts.have ?? new Map<string, EffectivePriority>();
   const ids = [...new Set(rows.map((r) => r.id))].filter((id) => !have.has(`thought:${id}`));
   const tickets: string[] = [];
@@ -601,7 +606,9 @@ export async function readPriorities(store: Pick<ThoughtStore, "effectivePriorit
   const by = new Map(have);
   if (ids.length + tickets.length === 0) return { by, keyed };
   // 122 answers each item as asked, normalised: a thought by its id, lower-case, as the store's ids are; a ticket upper-case.
-  const read = await store.effectivePriority([...ids.map((key) => ({ kind: "thought", key })), ...tickets.map((key) => ({ kind: "ticket", key }))]);
+  // A call's own weights (SMD-4193) when it passed any; else the store's call is as it was, the defaults.
+  const items = [...ids.map((key) => ({ kind: "thought", key })), ...tickets.map((key) => ({ kind: "ticket", key }))];
+  const read = await (opts.weights === undefined ? store.effectivePriority(items) : store.effectivePriority(items, { weights: opts.weights }));
   for (const p of read) by.set(`${p.item.kind}:${p.item.key}`, p);
   return { by, keyed };
 }
@@ -654,11 +661,12 @@ export function priorityLabels(read: PriorityRead, rows: readonly { id: string }
 /**
  * The priority label (SMD-3668 PR 2) for a page: one read, best-effort, as claimedOf — a brain before 122, a server
  * role without its grants, or a read that fails gives null, which the replies say. A ranked page passes its window's
- * answers (`have`), so only its tickets are asked; an empty page asks nothing (review pass 1).
+ * answers (`have`), so only its tickets are asked; an empty page asks nothing (review pass 1). `weights`: the ranked
+ * search's own (SMD-4193), so its tickets read as its window did.
  */
-export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>): Promise<Record<string, PriorityHit> | null> {
+export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>, weights?: Partial<PriorityWeights>): Promise<Record<string, PriorityHit> | null> {
   try {
-    return priorityLabels(await readPriorities(store, rows, { have }), rows);
+    return priorityLabels(await readPriorities(store, rows, { have, ...(weights === undefined ? {} : { weights }) }), rows);
   } catch (e) {
     const err = e as { errno?: unknown; code?: unknown; message?: unknown };
     console.error(`priority: the effective priority read failed (${String(err.errno ?? err.code ?? "no code")}): ${String(err.message ?? e).slice(0, 200)}; results carry priority: null`);
@@ -719,8 +727,13 @@ export async function labelHits(ctx: Ctx, principal: Principal, data: readonly T
 
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
   const { query, limit, threshold, recency_weight, prefer_current, min_trust, priority_weight, min_priority } = input;
+  // The call's own weights (SMD-4193): none given, or an empty set, is the defaults.
+  const weights = input.weights && Object.keys(input.weights).length ? input.weights : undefined;
   // SMD-3668: a weight above 0 or a floor reads a window and its priorities; neither is today's search, untouched.
   const ranked = priority_weight > 0 || min_priority !== undefined;
+  // SMD-4193: a call's own weights reweigh that read; with no ranking nothing would read them, so they are refused,
+  // before the search runs, rather than ignored.
+  if (weights !== undefined && !ranked) return refuse({ code: "REFUSED_WEIGHTS", retryable: false, problem: "unranked", message: "weights given without priority_weight above 0 or min_priority", named: [] });
   const window = ranked ? priorityWindow(limit) : limit;
   // parseFilter refuses a shape jsonb should not run.
   const f = searchFilter(input);
@@ -741,17 +754,24 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // The blend's scale is the brain's own (SMD-4194): read beside the window, and only when a weight blends; a floor
     // alone at weight 0 never divides. The window read's failure is the one said when both fail (review pass 1: on a
     // brain before 122 the span's failed first, and the hint named 128 alone).
-    const [allRead, spanRead] = await Promise.allSettled([readPriorities(store, data, { tickets: false }), priority_weight > 0 ? store.prioritySpan() : Promise.resolve(1)]);
+    // A call's own weights (SMD-4193) read the window and scale the blend: 131's span under them, 128's without.
+    const blends = priority_weight > 0;
+    const [allRead, spanRead] = await Promise.allSettled([readPriorities(store, data, { tickets: false, ...(weights === undefined ? {} : { weights }) }), blends ? store.prioritySpan(weights) : Promise.resolve(1)]);
+    // 122's refusal of the weights (22023, naming the weight), from either read: the caller's to mend, not a fault.
+    for (const s of [allRead, spanRead]) {
+      const bad = s.status === "rejected" ? weightsRefused(s.reason, weights) : null;
+      if (bad) return refuse(bad);
+    }
     if (allRead.status === "rejected") throw allRead.reason;
     if (spanRead.status === "rejected") throw spanRead.reason;
     const all = allRead.value, span = spanRead.value;
     const prio = prioritiesOf(all, data);
     const read = data.length;
     data = rankByPriority(data, prio, priority_weight, min_priority ?? null, limit, span);
-    labels = priorityOf(store, data, all.by);
-    priority = { weight: priority_weight, min: min_priority ?? null, window, read, kept: data.length, known: Object.values(prio).filter((p) => p.known).length };
+    labels = priorityOf(store, data, all.by, weights);
+    priority = { weight: priority_weight, min: min_priority ?? null, window, read, kept: data.length, known: Object.values(prio).filter((p) => p.known).length, weights: weights ?? null, span: blends ? span : null };
   } else if (ranked) {
-    priority = { weight: priority_weight, min: min_priority ?? null, window, read: 0, kept: 0, known: 0 };
+    priority = { weight: priority_weight, min: min_priority ?? null, window, read: 0, kept: 0, known: 0, weights: weights ?? null, span: null };
   }
   const failed = r.vectorFailed ? { vectorFailed: r.vectorFailed } : {};
 

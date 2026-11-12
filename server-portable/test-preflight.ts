@@ -3332,10 +3332,11 @@ else {
       assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim and release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
-      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing.
-      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
+      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing; 132's
+      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE: set_priority and clear_priority fail naming the table; set_priority_weights fails naming priority_weight_settings \(migration 132\), and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
-             "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
+             `…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it (${missingBoth.out.split("\n").find((l) => /!  priority\s/.test(l))?.trim()})`);
       // 117's items group (SMD-3665 PR 2): soft too — the writes it lacks named, the open-item writers alone failing.
       assert(/!  open items\s+the server's role holds no open_item_events INSERT, open_items INSERT, open_items UPDATE, open_items DELETE, open_item_close_proposals INSERT, open_item_close_proposals UPDATE: the open-item writers \(open_item, update_item, set_item_status, propose_item_close and decide_item_close\) fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups items/.test(missingBoth.out),
@@ -3354,6 +3355,15 @@ else {
       await claims.unsafe("REVOKE SELECT ON open_items FROM ob1_pf_capture");
       const noItems = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON open_items TO ob1_pf_capture");
+      // 132's operator's weights (SMD-4193 PR 2): without SELECT on them every ranked priority read fails, and the row says so.
+      await claims.unsafe("REVOKE SELECT ON priority_weight_settings FROM ob1_pf_capture");
+      const noWeights = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_weight_settings TO ob1_pf_capture");
+      // 133's pool (SMD-4127): without SELECT on thought_sources every priority call on a thought or a ticket fails, and the
+      // agenda with it; the row says so in a clause of its own.
+      await claims.unsafe("REVOKE SELECT ON thought_sources FROM ob1_pf_capture");
+      const noSources = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON thought_sources TO ob1_pf_capture");
       // The threads row (SMD-3306 PR 7a-2c, review pass 4): without SELECT on thought_facets it warns with the grant, never
       // skips as if 120 were not applied — the read's unread entry reaches the row.
       await claims.unsafe("REVOKE SELECT ON thought_facets FROM ob1_pf_capture");
@@ -3363,9 +3373,14 @@ else {
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
-      assert(/, and so does agenda \(SMD-3669\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\); plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
+      // 132's setting's writes, missing for this role too, are a clause of their own between (SMD-4193 PR 2).
+      assert(/, and so does agenda \(SMD-3669\); set_priority_weights fails naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\);.* plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
              && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
+      assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
+        `…and without SELECT on the operator's weights, the priority row says every ranked priority read fails (${rowOf(noWeights.out, "priority").trim().slice(-260)})`);
+      assert(/thought_sources SELECT[^:]*: [^;]*; set_priority, clear_priority and priority_history on a thought or a ticket \(or set_priority taking one's due time\), agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources \(migration 133\);.* plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noSources.out, "priority").trim()),
+        `…and without SELECT on thought_sources, the priority row says every priority call on a thought or a ticket fails, in a clause of its own (${rowOf(noSources.out, "priority").trim().slice(-260)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.
@@ -4433,6 +4448,26 @@ else {
       `a failed last pass and a malformed alarm each warn on a fresh heartbeat (${row(wrong.out, "workers")})`);
     assert(/board-sync's last pass failed — errors in its report, or Linear or the database out of reach: its log says why\. extract:qwen2\.5:7b@p2's model answered 12 of 50 malformed: check OB1_METADATA_MODEL.*The row carries the block until the follower judges its next block \(48 answers or more\)\. A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers\./.test(fix(wrong.out, "workers")),
       `…each with its own remedy (${fix(wrong.out, "workers")})`);
+    // Held by Linear's rate limit (SMD-4133): the row says the hold and its time left, the fix that it passes on its
+    // own and the hour's sum — not "its log says why".
+    {
+      const until = new Date(Date.now() + 20 * 60_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until, by: "linear" } }), 60);
+      const held = await run(SQL_ENV);
+      const at = until.replace(/\./g, "\\.");
+      assert(new RegExp(`!\\s+workers\\s+board-sync alive, its last pass rate-limited by Linear: no pass, and no request, until ${at} \\(in (19|20|21) min; the reset time Linear sent\\) \\(last stamped`).test(row(held.out, "workers")),
+        `a held board-sync's row says the hold and its time left (${row(held.out, "workers")})`);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: it sends no request until ${at} \\(the reset time Linear sent\\), then passes again on its own\\. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user`).test(fix(held.out, "workers"))
+          && !/its log says why/.test(fix(held.out, "workers")),
+        `…and its fix that it passes again on its own, with the hour's sum (${fix(held.out, "workers")})`);
+      // A hold already past is said as past, not "no request until" a time gone (review pass 1).
+      const gone = new Date(Date.now() - 30_000).toISOString();
+      await beat("heartbeat:board-sync", v({ outcome: "failed", limited: { until: gone, by: "backoff" } }), 60);
+      const past = await run(SQL_ENV);
+      assert(new RegExp(`board-sync's last pass was rate-limited by Linear: its hold ended at ${gone.replace(/\./g, "\\.")} \\(a backoff: Linear sent no reset time\\), and its next trigger passes\\.`).test(fix(past.out, "workers")),
+        `…and a hold already past is said as past (${fix(past.out, "workers")})`);
+      await beat("heartbeat:board-sync", v({ outcome: "failed" }), 60);
+    }
 
     // A custom --job: the restart names the job the follower works, not its key (review pass 1).
     await beat("heartbeat:extract:my-job", v({ job: "my-job", every_s: 60 }), 600);

@@ -28,7 +28,7 @@ import { OAUTH_SCOPES } from "./oauth-edge.ts";
 import { AUTH_JWKS_URL, cachedKeys, checkerOver, clientNameable, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
-type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
+type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; style?: string; explode?: boolean; schema: { type?: string; items?: { type?: string }; properties?: Record<string, { type?: string }> } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
 const doc = openApiDocument() as { openapi: string; paths: Record<string, Record<string, Op>> };
 
 // Every stub server here listens on 127.0.0.1, where it is reached, as each child serveChild starts does: on every
@@ -59,13 +59,18 @@ console.log("[1] Every tool in the manifest has one route, and no two routes sha
   }
   // A free-text read rides a body, so the query never sits in a URL a log keeps.
   for (const name of ["search", "search_thoughts", "search_thoughts_keyword"] as const) assert(ROUTES[name].method === "POST", `${name} reads its query from a body`);
-  // A GET or DELETE reads its input from the query string: every such field is a scalar or a list of scalars.
+  // A GET or DELETE reads its input from the query string: every such field is a scalar, a list of scalars, or an
+  // object of scalars given as a deepObject, one parameter a field (SMD-4193: the agenda's weights[overdue]=3).
+  const scalar = (s: { type?: string } | undefined) => s !== undefined && s.type !== "object" && s.type !== "array";
   for (const [name, r] of Object.entries(ROUTES)) {
     if (r.method !== "GET" && r.method !== "DELETE") continue;
     for (const p of doc.paths[r.path][r.method.toLowerCase()].parameters ?? []) {
       if (p.in !== "query") continue;
       const t = p.schema.type;
-      assert(t !== "object" && (t !== "array" || p.schema.items?.type !== "object"), `${name}: its query field ${p.name} is a scalar or a list of scalars (${t})`);
+      const props = Object.values(p.schema.properties ?? {});
+      const deepObject = t === "object" && p.style === "deepObject" && p.explode === true && props.length > 0 && props.every(scalar);
+      assert((t !== "object" || deepObject) && (t !== "array" || scalar(p.schema.items)),
+        `${name}: its query field ${p.name} is a scalar, a list of scalars, or a deepObject of scalars (${t}${t === "object" ? `, ${p.style}` : ""})`);
     }
   }
 }
