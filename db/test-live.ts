@@ -4427,6 +4427,13 @@ if (want("9f")) {
       await pollUntil(async () => (claim = await claimOf(id)) !== undefined && claim.status !== "claimed", 5_000);
       return claim;
     };
+    /** The "(n of 3 before it is recorded failed)" counts of a follower's lines, in order: "1,2" for a suspect failed at its third outage alone (SMD-2641 PR 2). */
+    const aloneOf = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the probe after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    /** Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (SMD-2641 PR 2; the mutant: no outage begun). */
+    const waitsAfterFailure = (lines: string[]) => {
+      const at = lines.findIndex((l) => /: provider error again with this thought alone in flight at 3 outages/.test(l));
+      return at >= 0 && lines.slice(at).some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
+    };
 
     // The provider not answering at the start is waited out, its line said; once it answers the follower pools.
     providerDown503 = true;
@@ -4702,11 +4709,8 @@ if (want("9f")) {
     const deadDownExit = await deadDown.stop();
     assert(downSentBack && deadDownExit === "exit 0",
       `a deadline whose probe gets no answer is an outage: the thought back in the pool unrecorded, said as the probe's 503 (sent back ${downSentBack}; ${deadDownExit})`);
-    const downWaitsAfter = (() => {
-      const at = deadDown.lines.findIndex((l) => /: provider error again with this thought alone in flight at 3 outages/.test(l));
-      return at >= 0 && deadDown.lines.slice(at).some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
-    })();
-    const downAlone = deadDown.lines.map((l) => /goes back to the pool unrecorded — alone in flight, the probe after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    const downWaitsAfter = waitsAfterFailure(deadDown.lines);
+    const downAlone = aloneOf(deadDown.lines);
     assert(downFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? "") && downAlone === "1,2" && downWaitsAfter,
       `…and, retried alone, the same again three times, its own probe unanswered each, is the suspect's own: recorded failed, the follower waiting after it (${JSON.stringify(downClaim)}; alone ${downAlone}; waits after ${downWaitsAfter})`);
     await sql`DELETE FROM thoughts WHERE id = ${downHangs}::uuid`;
@@ -4718,12 +4722,6 @@ if (want("9f")) {
     // and the drain after the isolated one takes the four behind with both workers at once.
     // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
     await (async () => {
-      const aloneOf = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the probe after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
-      /** Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (the mutant: no outage begun). */
-      const waitsAfterFailure = (lines: string[]) => {
-        const at = lines.findIndex((l) => /: provider error again with this thought alone in flight at 3 outages/.test(l));
-        return at >= 0 && lines.slice(at).some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
-      };
       const isolatedSaid = (lines: string[]) => lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the drain goes back to 2; one that errs again alone is blamed only on a probe made at once$/.test(l));
       try {
         inFlightMs = 1000;

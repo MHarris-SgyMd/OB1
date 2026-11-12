@@ -1894,7 +1894,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // is subsumed. The succeeded rows are the data rule's, on every run: back
       // to the pool when their thought is not at the target, and only then.
       const restarted = record ? await requeue(tx, staleUnderThisJob()) : 0;
-      // While the last outage's suspects are retried, behind them (review pass 1).
+      // While the last outage's suspects are retried, behind them (SMD-2641 PR 2, review pass 1).
       const movedSinceDone = await requeue(tx, doneButNotAtTarget(), !!FOLLOW && outage.isolating());
       const retriedFailed = first && retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
       // After the data rule, so a caveat row whose thought moved is counted once.
