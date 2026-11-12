@@ -40,7 +40,8 @@
 --   * clear_priority: closes the maker's open statements across the pool.
 --     `assertion` is the newest it closed.
 --   * ob1_priority_winner(kind, key): 122's ob1_priority_counted with tier
---     4 counted, the one copy of the rule (review pass 2): over the pool,
+--     4 counted, the pool rule's one copy (review pass 2; the projection and
+--     its drift check keep 116's rule for one exact item): over the pool,
 --     each maker's newest alone, then 116's rule (the lowest tier, then the
 --     later written). Both writers' replies, priority_of and the server's
 --     priority record name it.
@@ -52,7 +53,9 @@
 --   * ob1_rebuild_priority_projection: 116's, but the drifted items taken
 --     in the order of their locks' keys, each item's subject first (review
 --     pass 1: by item, a row of ZZZ-1 sorted before ticket BBB-1 and took
---     ZZZ-1's lock first, so two rebuilds could deadlock).
+--     ZZZ-1's lock first, so two rebuilds could deadlock), each locked by the
+--     key it was sorted by (review pass 3: read again, a row recorded
+--     meanwhile would move its lock out of the order).
 --   * priority_of: each item's open statements across its pool, the winner
 --     ob1_priority_winner names first and the rest in the rule's order, its
 --     level the item's (review pass 1: 116's "the winner its first" held,
@@ -61,10 +64,11 @@
 --     included, in the order written. Each statement names its own item.
 --   * ON UPGRADE: where one maker already holds two or more open statements
 --     across a ticket and its rows, each older one closes as replaced by its
---     newest, and each item is re-projected. A maker is its maker_key, as
---     122's read tells them apart: a statement made by name before the key
---     had an id is another maker's here, as there, until that key's next
---     write closes both (116's is_maker rule).
+--     newest, and each item is re-projected. A maker is as the writers match
+--     one (116's is_maker): its agent id, a statement made by name before the
+--     key had an id taking the id the registry now gives that name (review
+--     pass 3: by maker_key alone the two stayed open, and the read counted
+--     both).
 --   * ob1_priority_counted's comment: 122's no longer needs to say a clear
 --     reaches only the item it names.
 --
@@ -83,10 +87,14 @@
 --   Each writer and reader asks a thought or a ticket for its pool, so it
 --   reads thought_sources (and thoughts, the capture group's), as 122's read
 --   does. The `priority` group (db/config.mjs) gains SELECT on
---   thought_sources, and this file grants it to each role holding the
---   group's grants on priority_assertions already, as 132 carried its table
---   (no role's priority calls fail on the upgrade). An entity or an open
---   item reads neither.
+--   thought_sources, table-wide (the maintainer, 2026-11-11: a role making
+--   these calls reads thoughts, whose content carries the source's text),
+--   and this file grants it to each role holding the group's grants on
+--   priority_assertions and SELECT on thoughts already, as 132 carried its
+--   table, so no such role's calls fail on the upgrade; a role reading
+--   priorities without thoughts, which could make no call on a ticket or a
+--   thought before either, is given nothing (review pass 3). An entity or
+--   an open item reads neither.
 --
 -- CONCURRENCY
 --   One lock per pool, the subject's: two writers on one ticket's pool wait
@@ -230,8 +238,8 @@ COMMENT ON FUNCTION ob1_priority_lock(text, text) IS
 -- ---------------------------------------------------------------------------
 -- 122's ob1_priority_counted with tier 4 counted, as 116's winner counted
 -- it: each maker's newest across the pool alone, then the lowest tier, then
--- the later written. The rule's one copy (review pass 2). NULL when none is
--- open.
+-- the later written. The pool rule's one copy (review pass 2); the
+-- projection keeps 116's for one exact item. NULL when none is open.
 CREATE OR REPLACE FUNCTION ob1_priority_winner(p_kind text, p_key text)
 RETURNS priority_assertions
 LANGUAGE sql
@@ -298,10 +306,11 @@ BEGIN
   deleted := 0;
   -- Item by item under each item's pool's lock, the subjects in key order:
   -- one order for every rebuild, and a writer holds one pool's lock alone.
-  FOR r IN SELECT d.item_kind, d.item_key
+  -- Each locked by the key it was sorted by, read once (review pass 3).
+  FOR r IN SELECT d.item_kind, d.item_key, ob1_priority_lock_key(d.item_kind, d.item_key) AS lock_key
              FROM (SELECT DISTINCT x.item_kind, x.item_key FROM ob1_priority_projection_drift() x) d
-            ORDER BY ob1_priority_lock_key(d.item_kind, d.item_key), d.item_kind, d.item_key LOOP
-    PERFORM ob1_priority_lock(r.item_kind, r.item_key);
+            ORDER BY 3, 1, 2 LOOP
+    PERFORM pg_advisory_xact_lock(hashtextextended('ob1:priority:' || r.lock_key, 0));
     -- Counted only if still wrong under the lock: a writer may have fixed it
     -- since the drift was read (116's review pass 4).
     SELECT row(c.winner_id, c.level, c.tier, c.maker_name, c.asserted_at, c.open_count)::text INTO v_before
@@ -602,10 +611,11 @@ COMMENT ON FUNCTION ob1_priority_counted(text, text, boolean) IS
 -- ---------------------------------------------------------------------------
 -- On upgrade: a maker's older statements across one pool closed
 -- ---------------------------------------------------------------------------
--- Where one maker (maker_key, as 122's read tells makers apart) holds two or
--- more open statements across a ticket and its own rows, each older one
--- closes as replaced by its newest, which the read already counted alone;
--- each item is re-projected. A re-apply finds nothing left to close.
+-- Where one maker holds two or more open statements across a ticket and its
+-- own rows, each older one closes as replaced by its newest; each item is
+-- re-projected. A maker as the writers match one (116's is_maker): its agent
+-- id, a by-name statement taking the id the registry gives its name now. A
+-- re-apply finds nothing left to close.
 DO $close$
 DECLARE
   r     record;
@@ -613,7 +623,9 @@ DECLARE
 BEGIN
   FOR r IN
     WITH open AS (
-      SELECT a.id, a.seq, a.maker_key, a.item_kind, a.item_key,
+      SELECT a.id, a.seq, a.item_kind, a.item_key,
+             COALESCE(COALESCE(a.maker_agent_id, (SELECT g.canonical_agent_id FROM ob1_agents g WHERE g.label = a.maker_name))::text,
+                      'name:' || a.maker_name) AS maker,
              CASE WHEN a.item_kind = 'ticket' THEN a.item_key ELSE ob1_ticket_row_of(a.item_key::uuid) END AS ticket
         FROM priority_assertions a
        WHERE a.closed_at IS NULL
@@ -623,7 +635,7 @@ BEGIN
       SELECT o.*, first_value(o.id) OVER w AS newest, row_number() OVER w AS rn
         FROM open o
        WHERE o.ticket IS NOT NULL
-      WINDOW w AS (PARTITION BY o.ticket, o.maker_key ORDER BY o.seq DESC))
+      WINDOW w AS (PARTITION BY o.ticket, o.maker ORDER BY o.seq DESC))
     SELECT k.id, k.newest, k.item_kind, k.item_key FROM ranked k WHERE k.rn > 1 ORDER BY k.ticket, k.seq
   LOOP
     UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = r.newest
@@ -639,8 +651,10 @@ $close$;
 -- Every priority call on a thought or a ticket now reads thought_sources for
 -- the pool, as 122's read did: the group (db/config.mjs) gains SELECT on it,
 -- granted here to each role holding the group's grants on
--- priority_assertions already (132's carry), so no role's priority calls
--- fail on the upgrade. The owner holds it already; a re-apply grants what is
+-- priority_assertions and SELECT on thoughts already (132's carry), so no
+-- such role's priority calls fail on the upgrade; a role without thoughts
+-- could make no call on a ticket or a thought before, and is given nothing
+-- (review pass 3). The owner holds it already; a re-apply grants what is
 -- held, which changes nothing.
 DO $grant$
 DECLARE
@@ -650,6 +664,10 @@ BEGIN
     SELECT DISTINCT a.grantee
       FROM pg_class c, aclexplode(c.relacl) AS a
      WHERE c.oid = 'priority_assertions'::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('SELECT', 'INSERT')
+       AND CASE WHEN a.grantee = 0
+                THEN EXISTS (SELECT 1 FROM pg_class t, aclexplode(t.relacl) AS x
+                              WHERE t.oid = 'thoughts'::regclass AND x.grantee = 0 AND x.privilege_type = 'SELECT')
+                ELSE has_table_privilege(a.grantee, 'thoughts', 'SELECT') END
   LOOP
     EXECUTE format('GRANT SELECT ON thought_sources TO %s',
                    CASE WHEN v_role.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_role.grantee)) END);

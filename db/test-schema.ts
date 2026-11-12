@@ -19552,22 +19552,27 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
        VALUES ($1, $2, $3, $4, (SELECT canonical_agent_id FROM ob1_agents WHERE label = $4), 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [kind, key, level, maker])).rows[0].id;
   const onTicket = (await db.query<{ id: string }>(`SELECT id::text FROM priority_assertions WHERE item_kind = 'ticket' AND item_key = 'SMD-9985' AND closed_at IS NULL`)).rows[0].id;
   const onRow = await raw("thought", rowA, 5, "[120] op");
+  // The agent's older statement made by name alone, before its key had an id, on another ticket: one maker with its
+  // newer by-id statement on that ticket's row, as the writers match them (review pass 3).
+  const byName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ('ticket', 'SMD-9986', 4, '[120] bot', NULL, 'agent', 'agent', 'write', false, 3, now()) RETURNING id::text`)).rows[0].id;
   const botLone = await raw("thought", rowB, 2, "[120] bot");
   // A raw write leaves its own item's projection behind: rebuilt first, so any drift after is the upgrade's.
   await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
   const behind = await drift();
   await reapply(file.slice(0, 4));
   const after = (await db.query<{ id: string; close_reason: string | null; closed_by: string | null }>(`SELECT id::text, close_reason, closed_by::text FROM priority_assertions WHERE id = ANY($1::uuid[])`,
-    [[onTicket, onRow, botLone]])).rows;
+    [[onTicket, onRow, byName, botLone]])).rows;
   const byId = (id: string) => after.find((a) => a.id === id);
   assert(behind === 0 && byId(onTicket)?.close_reason === "replaced" && byId(onTicket)?.closed_by === onRow && byId(onRow)?.close_reason === null && byId(botLone)?.close_reason === null
+         && byId(byName)?.close_reason === "replaced" && byId(byName)?.closed_by === botLone
          && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
-    `on upgrade the operator's older open statement across SMD-9985's pool (the ticket's) closes as replaced by its newest (the row's, written raw); the agent's lone statement on another ticket's row untouched; the closed item's projection re-made, no drift (${JSON.stringify([byId(onTicket)?.close_reason, byId(onTicket)?.closed_by === onRow, byId(onRow)?.close_reason, byId(botLone)?.close_reason])}, ${JSON.stringify(await openOn([T, R]))}, drift ${await drift()})`);
+    `on upgrade the operator's older open statement across SMD-9985's pool (the ticket's) closes as replaced by its newest (the row's, written raw); the agent's statement made by name before its key had an id closed by its newer one on that ticket's row, as the writers match a maker; the closed item's projection re-made, no drift (${byId(byName)?.close_reason}; ${JSON.stringify([byId(onTicket)?.close_reason, byId(onTicket)?.closed_by === onRow, byId(onRow)?.close_reason, byId(botLone)?.close_reason])}, ${JSON.stringify(await openOn([T, R]))}, drift ${await drift()})`);
 
   // The group's grant: a role granted capture and priority states on a ticket and reads its history (thought_sources now
   // the group's); a role holding 116's grants alone is given SELECT on thought_sources by 133.
   const ROLE = "ob1_test_pool", OLD = "ob1_test_pool_old";
-  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN; CREATE ROLE ${OLD} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${OLD}; GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ${OLD}`);
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN; CREATE ROLE ${OLD} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${OLD}; GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ${OLD}; GRANT SELECT ON thoughts TO ${OLD}`);
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "priority"] })]) await db.exec(st);
   let roleUse = "";
   try {

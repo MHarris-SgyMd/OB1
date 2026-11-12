@@ -6099,7 +6099,8 @@ console.log("\n[20bx] Migration 133: onto a populated brain at the file before i
       WHERE a.closed_at IS NULL AND (a.item_key IN ('SMD-9781', ${row}, ${note})) ORDER BY a.seq`) as { s: string }[]).map((r) => r.s);
   const before = await open();
   for (const r of ["ob1_upgrade_133_writer", "ob1_upgrade_133_reader", "ob1_upgrade_133_none"]) await sql.unsafe(`CREATE ROLE ${r} NOLOGIN`);
-  await sql.unsafe(`GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ob1_upgrade_133_writer; GRANT SELECT ON priority_assertions TO ob1_upgrade_133_reader`);
+  // A writer reading thoughts (as the capture group grants), and a role reading priorities alone (review pass 3).
+  await sql.unsafe(`GRANT SELECT, INSERT, UPDATE ON priority_assertions TO ob1_upgrade_133_writer; GRANT SELECT ON thoughts TO ob1_upgrade_133_writer; GRANT SELECT ON priority_assertions TO ob1_upgrade_133_reader`);
   const held = async (role: string) => (await sql`SELECT has_table_privilege(${role}, 'thought_sources', 'SELECT') AS h`)[0].h as boolean;
   const pool = async () => (await sql`SELECT to_regprocedure('ob1_priority_pool_items(text, text)') IS NOT NULL AS p`)[0].p as boolean;
 
@@ -6121,8 +6122,8 @@ console.log("\n[20bx] Migration 133: onto a populated brain at the file before i
          && replaced?.close_reason === "replaced" && replaced?.by_kind === "ticket" && drift === 0,
     `applied: the operator's older statement across SMD-9781's pool (the Critical on its row) closed as replaced by its newest (the Low on the ticket); the agent's on the row and the operator's on a note untouched; no drift (${JSON.stringify(after)})`);
   const grants = { writer: await held("ob1_upgrade_133_writer"), reader: await held("ob1_upgrade_133_reader"), none: await held("ob1_upgrade_133_none") };
-  assert(grants.writer && grants.reader && !grants.none,
-    `the file grants SELECT on thought_sources to the roles holding the priority group already, a writer and a reader, and none to a role without it (${JSON.stringify(grants)})`);
+  assert(grants.writer && !grants.reader && !grants.none,
+    `the file grants SELECT on thought_sources to a role holding the priority group and SELECT on thoughts already; none to a role reading priorities without thoughts, nor to one without the group (${JSON.stringify(grants)})`);
 
   // The pool's lock, on Postgres: a write naming the row takes the ticket's key (116's hash of 'ticket:SMD-9781'), so a
   // writer naming the ticket waits on it; a note's lock is its own.
@@ -6162,7 +6163,14 @@ console.log("\n[20bx] Migration 133: onto a populated brain at the file before i
   await other.begin(async (tx) => {
     await tx`SELECT ob1_priority_lock('ticket', 'SMD-9782')`;
     rebuilt = sql`SELECT * FROM ob1_rebuild_priority_projection()`.then((r) => r);
-    await Bun.sleep(750);
+    // Probed only once the rebuild waits on an advisory lock, never on a guess at its timing (review pass 3: a slow
+    // start would find the lock free under either order).
+    let waiting = false;
+    for (let i = 0; i < 200 && !waiting; i++) {
+      waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0].n) > 0;
+      if (!waiting) await Bun.sleep(50);
+    }
+    if (!waiting) throw new Error("[20bx] the rebuild never waited on SMD-9782's lock within 10 s");
     freeWhileWaiting = Boolean((await tx`SELECT pg_try_advisory_xact_lock(hashtextextended('ob1:priority:ticket:SMD-9789', 0)) AS got`)[0].got);
   });
   await rebuilt;
