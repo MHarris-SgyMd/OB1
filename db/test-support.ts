@@ -90,7 +90,7 @@ const TABLES = [
   "open_item_events",
   "open_items",
   "open_item_close_proposals",
-  // 133's deliverable events (SMD-1715): no foreign key either way — an event
+  // 134's deliverable events (SMD-1715): no foreign key either way — an event
   // names its thought and spec by id, and outlives a deleted thought — so its
   // place is free. Its CASCADE takes the helpers whose arguments or result are
   // its row type, and its triggers.
@@ -508,7 +508,7 @@ const FUNCTIONS = [
   "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)",
   "close_thought_subjects(uuid, uuid[], text)",
   "ob1_thread_lock_keys(text[])",
-  // 133 (SMD-1715): the deliverables' writers, read, drift check, rebuild and helpers (those taking or returning a
+  // 134 (SMD-1715): the deliverables' writers, read, drift check, rebuild and helpers (those taking or returning a
   // deliverable_events row go with its CASCADE); the facet's triggers and index go with thought_facets.
   "ob1_deliverable_events_guard()",
   "ob1_deliverable_transition_ok(text, text)",

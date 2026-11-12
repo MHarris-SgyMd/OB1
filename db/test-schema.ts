@@ -205,10 +205,10 @@ function definedIn(file: string): string[] {
  * entry. 120 is 102's record_thought_relation and 111's validator, each with
  * a thread's edge (SMD-3306), and carries both: 102 last states the comment
  * on supersession_proposals [74] reads, and 111 last defines
- * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 133 is 120's validator with the
+ * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134 is 120's validator with the
  * deliverable kind (SMD-1715) and carries 120, whose door and thread functions it does not define.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "133": ["120"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -7097,7 +7097,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("133") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 133, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [120])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 134, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [121])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -15111,8 +15111,8 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   // both ([108]); the sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("133") && lastDefinerOf("record_thought_relation").startsWith("120"),
-    `120 is the last definer of the door and 133 of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && lastDefinerOf("record_thought_relation").startsWith("120"),
+    `120 is the last definer of the door and 134 of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
     "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
@@ -15177,7 +15177,7 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
   assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("102")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
     `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 102; 102 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
-  // 102 re-applied holds 102's validator and door; 133 and 120 are their last definers, so the sections after run on their bodies.
+  // 102 re-applied holds 102's validator and door; 134 and 120 are their last definers, so the sections after run on their bodies.
   await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -15800,7 +15800,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   // which 120 carries with a thread's edge ([108]); the sentinels; the trigger; the indexes (one standing per thought,
   // since 130 per thought and key); the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "133" : "111";
+    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "134" : "111";
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
@@ -15821,7 +15821,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   }
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   assert(/five kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
-    "thought_facets' comment registers the subject kind (five since 133), and the validator's names 111");
+    "thought_facets' comment registers the subject kind (five since 134), and the validator's names 111");
 
   // The key's shape: one rule, four namespaces.
   const valid = async (k: string | null) => (await one<{ v: boolean | null }>(`SELECT subject_key_valid($1) AS v`, [k])).v === true;
@@ -17465,8 +17465,8 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   for (const fn of ["record_thought_relation", "thread_relink"]) {
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
   }
-  // The validator's last definer is 133, which carries 120's with the deliverable kind ([120]).
-  assert((await functionsNamed("thought_facets_validate")) === 1 && lastDefinerOf("thought_facets_validate").startsWith("133"), `one thought_facets_validate, 133 its last definer (${lastDefinerOf("thought_facets_validate")})`);
+  // The validator's last definer is 134, which carries 120's with the deliverable kind ([121]).
+  assert((await functionsNamed("thought_facets_validate")) === 1 && lastDefinerOf("thought_facets_validate").startsWith("134"), `one thought_facets_validate, 134 its last definer (${lastDefinerOf("thought_facets_validate")})`);
   assert((await functionsNamed("ob1_thread_relink_subject")) === 1 && lastDefinerOf("ob1_thread_relink_subject").startsWith("130"), `one ob1_thread_relink_subject, 130 its last definer (${lastDefinerOf("ob1_thread_relink_subject")})`);
   const [shape] = await q<{ written: string | null; closed: string | null; deleted: string | null; judged: string | null; thread: string | null; bykey: string | null }>(`SELECT
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_written' AND tgrelid = 'thought_facets'::regclass) AS written,
@@ -17497,15 +17497,15 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
     assert(/120/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 120 and the ticket`);
   }
   const validatorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? "";
-  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120, 133\.$/.test(validatorComment),
-    `the validator's comment says what a thread's edge is and names its migrations, 120 and 133 the last (${validatorComment.slice(-60)})`);
+  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120, 134\.$/.test(validatorComment),
+    `the validator's comment says what a thread's edge is and names its migrations, 120 and 134 the last (${validatorComment.slice(-60)})`);
   const closeComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["close_thought_subject(uuid, uuid, text)"])).c ?? "";
   const indexComments = await q<{ c: string | null }>(`SELECT obj_description(to_regclass(n), 'pg_class') AS c FROM unnest(ARRAY['thought_facets_relation_active_uniq', 'thought_facets_relation_thread_uniq', 'thought_facets_thread_key_idx']) n`);
   const payloadComment = (await one<{ c: string | null }>(`SELECT col_description('thought_facets'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_facets'::regclass AND attname = 'payload'`)).c ?? "";
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   assert(/113/.test(closeComment) && /since 120 a close re-links the subject''?s thread/.test(closeComment) && indexComments.every((r) => /120/.test(r.c ?? ""))
-         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130, 133 /.test(tableComment),
-    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130, [116], and 133, [120]) (${closeComment.slice(-200)})`);
+         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130, 134 /.test(tableComment),
+    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130, [116], and 134, [121]) (${closeComment.slice(-200)})`);
 
   // A thread kept by the triggers, through the door: written, a thought come between, one re-keyed away, one closed.
   const a = await thought("a", "2026-11-01T00:00:00Z"), b = await thought("b", "2026-11-02T00:00:00Z"), c = await thought("c", "2026-11-03T00:00:00Z"), d = await thought("d", "2026-11-04T00:00:00Z");
@@ -19378,10 +19378,10 @@ console.log("\n[119] Migration 132: the operator's priority weights — priority
   await set({}, OP);
 }
 
-console.log("\n[120] Migration 133: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
+console.log("\n[121] Migration 134: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
 {
   const file = files.find((f) => /^\d{3}_deliverables\.sql$/.test(f)) ?? "no NNN_deliverables.sql";
-  // Sections before re-apply 120's validator and 130's table comment, which 133 replaces: this section holds 133's.
+  // Sections before re-apply 120's validator and 130's table comment, which 134 replaces: this section holds 134's.
   await restoreShipped("thought_facets_validate");
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -19391,8 +19391,8 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   };
   const thought = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text AS id`, [content])).id;
   const MAKER_ID = "1715a000-0000-4000-8000-000000000001";
-  const MAKER = { name: "[120] maker", scope: "write", agent_id: MAKER_ID };
-  const CHECKER = { name: "[120] checker", scope: "write" };
+  const MAKER = { name: "[121] maker", scope: "write", agent_id: MAKER_ID };
+  const CHECKER = { name: "[121] checker", scope: "write" };
   type R = { outcome: string; code?: string; message?: string; from?: string; to?: string; deliverable?: Record<string, unknown> | null; event?: Record<string, unknown> };
   const rec = async (t: string, s: string, c: string, a: unknown) =>
     (await one<{ r: R }>(`SELECT record_deliverable($1, $2, $3, $4::jsonb) AS r`, [t, s, c, JSON.stringify(a)])).r;
@@ -19405,7 +19405,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     [t, event, status, spec, checkpoint]);
 
   // The shape: the table, its indexes and triggers; the facet's index and delete trigger; twenty functions, each
-  // commented by 133, the reads STABLE, none SECURITY DEFINER; 133 the last definer of each and of the validator.
+  // commented by 134, the reads STABLE, none SECURITY DEFINER; 134 the last definer of each and of the validator.
   const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
       FROM pg_attribute WHERE attrelid = 'deliverable_events'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
   const idx = (await one<{ i: string }>(`SELECT string_agg(indexname, ' ' ORDER BY indexname) AS i FROM pg_indexes WHERE tablename = 'deliverable_events'`)).i;
@@ -19430,7 +19430,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     triggers: trig === "deliverable_events_append_only:27 deliverable_events_no_truncate:34 deliverable_events_projected:5 deliverable_events_transitions:7",
     facetTrigger: facetTrig === "thought_facets_deliverable_kept:11",
     facetIndex: /UNIQUE INDEX thought_facets_deliverable_uniq ON public\.thought_facets USING btree \(thought_id\) WHERE \(kind = 'deliverable'::text\)/.test(facetIdx),
-    commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 133 \/ SMD-1715\./.test(f.c ?? "")),
+    commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 134 \/ SMD-1715\./.test(f.c ?? "")),
     stable: ["ob1_deliverable_payload(uuid)", "deliverable_history(text)", "ob1_deliverable_projection_drift()", "ob1_deliverable_json(uuid)", "ob1_deliverable_is_author(uuid,text,uuid)"].every((f) => vol[f] === "s"),
     definers: ["record_deliverable", "verify_deliverable", "deliverable_history", "ob1_deliverable_projection_drift", "ob1_rebuild_deliverable_projection", "thought_facets_validate"].every((f) => lastDefinerOf(f) === file),
     sentinels: [/ob1:deliverable-facet-is-the-projection/, /ob1:subject-facet/, /ob1:link-facet/, /ob1:thread-edge/].every((r) => r.test(validator)) && /ob1:deliverable-transitions-on-the-event/.test(checkSrc)
@@ -19438,7 +19438,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   };
   const bad = Object.keys(shape).filter((k) => !shape[k]);
   assert(bad.length === 0,
-    `the shape: the table's columns, its indexes and triggers; the facet's delete trigger and one-per-thought index; ${FNS.length} functions commented by 133, none SECURITY DEFINER, the reads STABLE; 133 the last definer of the writers, the read, the drift check, the rebuild and the validator, which carries 120's sentinels (failed: ${bad.join(", ") || "none"}; ${bad.includes("columns") ? cols : ""}${bad.includes("indexes") ? idx : ""}${bad.includes("triggers") ? trig : ""}${bad.includes("facetIndex") ? facetIdx : ""}${bad.includes("commented") ? fns.filter((f) => f.d || !/Migration 133 \/ SMD-1715\./.test(f.c ?? "")).map((f) => f.f).join() + ` ${fns.length}` : ""}${bad.includes("stable") ? JSON.stringify(vol) : ""}${bad.includes("definers") ? lastDefinerOf("record_deliverable") : ""})`);
+    `the shape: the table's columns, its indexes and triggers; the facet's delete trigger and one-per-thought index; ${FNS.length} functions commented by 134, none SECURITY DEFINER, the reads STABLE; 134 the last definer of the writers, the read, the drift check, the rebuild and the validator, which carries 120's sentinels (failed: ${bad.join(", ") || "none"}; ${bad.includes("columns") ? cols : ""}${bad.includes("indexes") ? idx : ""}${bad.includes("triggers") ? trig : ""}${bad.includes("facetIndex") ? facetIdx : ""}${bad.includes("commented") ? fns.filter((f) => f.d || !/Migration 134 \/ SMD-1715\./.test(f.c ?? "")).map((f) => f.f).join() + ` ${fns.length}` : ""}${bad.includes("stable") ? JSON.stringify(vol) : ""}${bad.includes("definers") ? lastDefinerOf("record_deliverable") : ""})`);
 
   // The rule: exactly the four moves.
   const S = ["unverified", "verified", "corrected"];
@@ -19448,10 +19448,10 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     `the allowed moves are unverified -> verified, unverified -> corrected, verified -> corrected and corrected -> verified, and a NULL is false (${moves})`);
 
   // record_deliverable: refusals as values, then the capture and its facet.
-  const spec = await thought("[120] the spec"), out = await thought("[120] the output"), other = await thought("[120] another thought");
+  const spec = await thought("[121] the spec"), out = await thought("[121] the output"), other = await thought("[121] another thought");
   const recRefusals = [
-    await rec(out, spec, "c0ffee", { name: "[120] reader", scope: "read" }),
-    await rec(out, spec, "c0ffee", { name: "[120] capturer", scope: "capture" }),
+    await rec(out, spec, "c0ffee", { name: "[121] reader", scope: "read" }),
+    await rec(out, spec, "c0ffee", { name: "[121] capturer", scope: "capture" }),
     await rec(out, "00000000-0000-4000-8000-000000000120", "c0ffee", MAKER),
     await rec(out, out, "c0ffee", MAKER),
     await rec("00000000-0000-4000-8000-000000000121", spec, "c0ffee", MAKER),
@@ -19476,7 +19476,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   const again = await rec(out, spec, "deadbeef", MAKER);
   const p1 = await facet(out);
   assert(captured.outcome === "captured" && captured.deliverable?.status === "unverified" && captured.deliverable?.checkpoint === "c0ffee" && captured.deliverable?.spec_ref === spec
-         && captured.deliverable?.captured_by === "[120] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
+         && captured.deliverable?.captured_by === "[121] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
          && unchanged.outcome === "unchanged" && unchanged.event?.id === captured.event?.id && again.code === "ALREADY_A_DELIVERABLE"
          && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[120\] maker/.test(otherKey.message ?? "")
          && p1?.status === "unverified" && JSON.stringify(p1) === JSON.stringify((await one<{ p: unknown }>(`SELECT ob1_deliverable_payload($1::uuid) AS p`, [out])).p),
@@ -19485,10 +19485,10 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   // verify_deliverable: the moves, the maker's rule, the refusals.
   const notOne = await ver(other, "verified", CHECKER);
   const byMaker = await ver(out, "verified", MAKER);
-  const byMakerRenamed = await ver(out, "verified", { name: "[120] maker renamed", scope: "write", agent_id: MAKER_ID });
-  const byMakerNoId = await ver(out, "verified", { name: "[120] maker", scope: "write" });
+  const byMakerRenamed = await ver(out, "verified", { name: "[121] maker renamed", scope: "write", agent_id: MAKER_ID });
+  const byMakerNoId = await ver(out, "verified", { name: "[121] maker", scope: "write" });
   const toSame = await ver(out, "unverified", CHECKER);
-  const readKey = await ver(out, "verified", { name: "[120] reader", scope: "read" });
+  const readKey = await ver(out, "verified", { name: "[121] reader", scope: "read" });
   const verRaised = [
     await failure(`SELECT verify_deliverable($1, 'done', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
     await failure(`SELECT verify_deliverable($1, 'verified', '', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
@@ -19503,7 +19503,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   assert(notOne.code === "NOT_A_DELIVERABLE" && byMaker.code === "VERIFY_NOT_YOURS" && byMakerRenamed.code === "VERIFY_NOT_YOURS" && byMakerNoId.code === "VERIFY_NOT_YOURS"
          && toSame.code === "ILLEGAL_TRANSITION" && toSame.from === "unverified" && toSame.to === "unverified" && readKey.code === "WRITE_SCOPE_REQUIRED"
          && verRaised.every((r) => r.startsWith("22023 "))
-         && ok.outcome === "changed" && ok.from === "unverified" && ok.to === "verified" && (ok.deliverable?.verification as { by: string }).by === "[120] checker"
+         && ok.outcome === "changed" && ok.from === "unverified" && ok.to === "verified" && (ok.deliverable?.verification as { by: string }).by === "[121] checker"
          && twice.code === "ILLEGAL_TRANSITION" && twice.from === "verified" && twice.to === "verified"
          && back.code === "ILLEGAL_TRANSITION" && back.from === "verified" && back.to === "unverified" && /does not move verified -> unverified/.test(back.message ?? "")
          && corrected.outcome === "changed" && corrected.deliverable?.status === "corrected" && reverified.outcome === "changed" && reverified.deliverable?.status === "verified"
@@ -19514,15 +19514,15 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   // key that recorded it (review pass 2, the maintainer's choice), and may still correct it.
   // A key that rewrote the text after it was captured is one of its authors too (review pass 3: the first capture alone
   // was read).
-  const AUTHOR = { name: "[120] author", scope: "write" }, EDITOR = { name: "[120] editor", scope: "write" }, THIRD = { name: "[120] third", scope: "write" };
+  const AUTHOR = { name: "[121] author", scope: "write" }, EDITOR = { name: "[121] editor", scope: "write" }, THIRD = { name: "[121] third", scope: "write" };
   const authored = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, NULL::vector) AS r`,
-    ["[120] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
+    ["[121] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
   const byRecorder = await rec(authored, spec, "a17", CHECKER);
   const byAuthor = await ver(authored, "verified", AUTHOR);
   const authorCorrects = await ver(authored, "corrected", AUTHOR);
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(EDITOR)]);
-    await tx.query(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [authored, "[120] an author's own output, rewritten by an editor"]);
+    await tx.query(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [authored, "[121] an author's own output, rewritten by an editor"]);
   });
   const editorRow = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND actor_name = $2 AND diff ? 'content'`, [authored, EDITOR.name])).n;
   const byEditor = await ver(authored, "verified", EDITOR);
@@ -19535,7 +19535,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   // A seq the insert brings is not the one it keeps: the trigger draws each event's under the lock (review pass 2: a raw
   // insert's OVERRIDING SYSTEM VALUE named a seq above every later event's, and pass 1's stale-seq refusal then refused
   // every verification after it, for good).
-  const offeredFor = await thought("[120] an output a raw seq is offered for");
+  const offeredFor = await thought("[121] an output a raw seq is offered for");
   await rec(offeredFor, spec, "5eq", MAKER);
   const offered = await failure(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at, seq)
     OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, '1999-01-01T00:00:00Z', 9000000000000000000)`, [offeredFor, spec]);
@@ -19629,7 +19629,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
     catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
   };
-  const roleOut = await thought("[120] a role's output");
+  const roleOut = await thought("[121] a role's output");
   const roleUse = await asRole(async (tx) => {
     const r1 = (await tx.query<{ r: R }>(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb) AS r`, [roleOut, spec, JSON.stringify(MAKER)])).rows[0].r;
     const r2 = (await tx.query<{ r: R }>(`SELECT verify_deliverable($1, 'verified', 'm', 'o', $2::jsonb) AS r`, [roleOut, JSON.stringify(CHECKER)])).rows[0].r;
@@ -19658,7 +19658,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     `the thought deleted: its facet goes by the cascade, its ${kept} events stay; a verification refused NOT_A_DELIVERABLE as a value and as a raw event; the history the events in order with no deliverable; not drift (${JSON.stringify(history.events.map((e) => e.status))})`);
 
   // A re-apply is a no-op: the events kept, the projection current, the rules the same.
-  const out2 = await thought("[120] a second output");
+  const out2 = await thought("[121] a second output");
   await rec(out2, spec, "f00d", MAKER);
   const keptRows = JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`));
   const keptFacet = JSON.stringify(await facet(out2));

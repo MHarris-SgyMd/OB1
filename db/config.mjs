@@ -2669,7 +2669,7 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "open_items",                privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "117" }),
     Object.freeze({ table: "open_item_close_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "117" }),
   ]),
-  // Deliverables (133, SMD-1715): a unit of agent output tied to a spec, with a
+  // Deliverables (134, SMD-1715): a unit of agent output tied to a spec, with a
   // checkpoint and a status. Written only through record_deliverable and
   // verify_deliverable (SECURITY INVOKER, PUBLIC's EXECUTE), read through
   // deliverable_history. No UPDATE or DELETE on the events: a trigger refuses
@@ -2681,10 +2681,10 @@ export const ROLE_GRANTS = Object.freeze({
   // capture group's SELECT and UPDATE. Soft: a role without the group is refused the
   // deliverable calls, naming the table, and nothing else.
   deliverables: Object.freeze([
-    Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "133" }),
+    Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "134" }),
     // The trigger draws each event's seq under the deliverable's lock, by nextval, which an identity's implicit draw
     // does not need (review pass 2).
-    Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "133" }),
+    Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "134" }),
     Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the

@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 133: deliverables — a unit of agent output tied to the spec it
+-- Migration 134: deliverables — a unit of agent output tied to the spec it
 --                was meant to meet, with a checkpoint and a status that moves
 --                only through the allowed transitions; the events are the
 --                record and a `deliverable` facet on the thought is their
@@ -159,7 +159,7 @@ BEGIN
   END;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = format('migration 133 needs %s; this schema lacks it', v_missing),
+      MESSAGE = format('migration 134 needs %s; this schema lacks it', v_missing),
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url ... --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -206,25 +206,25 @@ CREATE TABLE IF NOT EXISTS deliverable_events (
   CONSTRAINT deliverable_events_scope      CHECK (actor_scope IS NULL OR (actor_scope <> '' AND length(actor_scope) <= 40))
 );
 COMMENT ON TABLE deliverable_events IS
-  'Every event of a deliverable (SMD-1715), in the order written (seq): its capture, then each verification, each carrying the deliverable''s whole state after it (spec_ref, checkpoint, status) and its maker, which the writers stamp from the call''s actor envelope (never an argument; a role with INSERT on the table writes any maker it names, as on 117''s events); a verification its method and outcome. The status moves only unverified -> verified, unverified -> corrected, verified -> corrected or corrected -> verified (ob1_deliverable_transition_ok), checked on every insert by deliverable_events_transitions. Never changed: a trigger refuses UPDATE, DELETE and TRUNCATE. Written through record_deliverable and verify_deliverable; the thought''s `deliverable` facet is its projection. Migration 133 / SMD-1715.';
+  'Every event of a deliverable (SMD-1715), in the order written (seq): its capture, then each verification, each carrying the deliverable''s whole state after it (spec_ref, checkpoint, status) and its maker, which the writers stamp from the call''s actor envelope (never an argument; a role with INSERT on the table writes any maker it names, as on 117''s events); a verification its method and outcome. The status moves only unverified -> verified, unverified -> corrected, verified -> corrected or corrected -> verified (ob1_deliverable_transition_ok), checked on every insert by deliverable_events_transitions. Never changed: a trigger refuses UPDATE, DELETE and TRUNCATE. Written through record_deliverable and verify_deliverable; the thought''s `deliverable` facet is its projection. Migration 134 / SMD-1715.';
 COMMENT ON COLUMN deliverable_events.spec_ref IS
-  'The thought the deliverable was meant to meet: the spec, any thought''s id (SMD-2683''s spec record is a thought too). Fixed at the capture. Migration 133 / SMD-1715.';
+  'The thought the deliverable was meant to meet: the spec, any thought''s id (SMD-2683''s spec record is a thought too). Fixed at the capture. Migration 134 / SMD-1715.';
 COMMENT ON COLUMN deliverable_events.checkpoint IS
-  'What the output was handed back at: a commit hash or a content fingerprint, at most 200 characters, no control characters. Fixed at the capture. Migration 133 / SMD-1715.';
+  'What the output was handed back at: a commit hash or a content fingerprint, at most 200 characters, no control characters. Fixed at the capture. Migration 134 / SMD-1715.';
 COMMENT ON COLUMN deliverable_events.outcome IS
-  'A verification''s finding, at most 4000 characters. May hold personal data, so forget_thought (SMD-1723) must reach a forgotten thought''s deliverable events. Migration 133 / SMD-1715.';
+  'A verification''s finding, at most 4000 characters. May hold personal data, so forget_thought (SMD-1723) must reach a forgotten thought''s deliverable events. Migration 134 / SMD-1715.';
 COMMENT ON COLUMN deliverable_events.actor_proved IS
-  'Whether the maker''s agent id came from the envelope itself (061''s ob1_actor_agent_id), not the registry''s for its name (117''s column). Migration 133 / SMD-1715.';
+  'Whether the maker''s agent id came from the envelope itself (061''s ob1_actor_agent_id), not the registry''s for its name (117''s column). Migration 134 / SMD-1715.';
 
 CREATE INDEX IF NOT EXISTS deliverable_events_thought ON deliverable_events (thought_id, seq);
 COMMENT ON INDEX deliverable_events_thought IS
-  'A deliverable''s events in the order written: its history, its projection and the newest event a transition is checked from. Migration 133 / SMD-1715.';
+  'A deliverable''s events in the order written: its history, its projection and the newest event a transition is checked from. Migration 134 / SMD-1715.';
 CREATE UNIQUE INDEX IF NOT EXISTS deliverable_events_one_capture ON deliverable_events (thought_id) WHERE event = 'captured';
 COMMENT ON INDEX deliverable_events_one_capture IS
-  'One capture per deliverable. Migration 133 / SMD-1715.';
+  'One capture per deliverable. Migration 134 / SMD-1715.';
 CREATE INDEX IF NOT EXISTS deliverable_events_spec ON deliverable_events (spec_ref) WHERE event = 'captured';
 COMMENT ON INDEX deliverable_events_spec IS
-  'The deliverables meant to meet one spec: what SMD-2683''s "met" reads. Migration 133 / SMD-1715.';
+  'The deliverables meant to meet one spec: what SMD-2683''s "met" reads. Migration 134 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Never changed
@@ -240,7 +240,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_events_guard() IS
-  'Refuses every UPDATE and DELETE of deliverable_events, and every TRUNCATE — for the owner too. SMD-1723 relaxes it for forgetting. Migration 133 / SMD-1715.';
+  'Refuses every UPDATE and DELETE of deliverable_events, and every TRUNCATE — for the owner too. SMD-1723 relaxes it for forgetting. Migration 134 / SMD-1715.';
 
 DROP TRIGGER IF EXISTS deliverable_events_append_only ON deliverable_events;
 CREATE TRIGGER deliverable_events_append_only
@@ -266,7 +266,7 @@ AS $$
                                      ('verified', 'corrected'), ('corrected', 'verified')), false)
 $$;
 COMMENT ON FUNCTION ob1_deliverable_transition_ok(text, text) IS
-  'Whether a deliverable''s status may move from p_from to p_to: unverified -> verified, unverified -> corrected, verified -> corrected and corrected -> verified, and nothing else (nothing returns to unverified, and no status moves to itself); false, never NULL. Migration 133 / SMD-1715.';
+  'Whether a deliverable''s status may move from p_from to p_to: unverified -> verified, unverified -> corrected, verified -> corrected and corrected -> verified, and nothing else (nothing returns to unverified, and no status moves to itself); false, never NULL. Migration 134 / SMD-1715.';
 
 CREATE OR REPLACE FUNCTION ob1_deliverable_lock(p_thought uuid)
 RETURNS void
@@ -275,7 +275,7 @@ AS $$
   SELECT pg_advisory_xact_lock(hashtextextended('ob1:deliverable:' || p_thought::text, 0))
 $$;
 COMMENT ON FUNCTION ob1_deliverable_lock(uuid) IS
-  'Takes the transaction advisory lock on one deliverable (its thought''s id): the writers and the event trigger take it before they read its events. Migration 133 / SMD-1715.';
+  'Takes the transaction advisory lock on one deliverable (its thought''s id): the writers and the event trigger take it before they read its events. Migration 134 / SMD-1715.';
 
 -- A time as the payload holds it: UTC, to the microsecond, whatever the
 -- session's time zone, so the projection a session writes is the one any
@@ -288,7 +288,7 @@ AS $$
   SELECT to_char(p_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
 $$;
 COMMENT ON FUNCTION ob1_deliverable_time(timestamptz) IS
-  'A time in a deliverable''s payload: ISO 8601 in UTC to the microsecond, the same text whatever the session''s time zone. Migration 133 / SMD-1715.';
+  'A time in a deliverable''s payload: ISO 8601 in UTC to the microsecond, the same text whatever the session''s time zone. Migration 134 / SMD-1715.';
 
 -- The projection: the facet's payload as the thought's events make it, or
 -- NULL for a thought with none. The validator, the writers' projector and the
@@ -316,7 +316,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_payload(uuid) IS
-  'The `deliverable` facet''s payload as a thought''s events make it: the newest event''s spec_ref, checkpoint and status, who captured it and when, the newest verification''s method, outcome, maker and time when the newest event is one (else null), and the newest event''s seq; NULL for a thought with no capture. The projection''s one rule: thought_facets_validate admits a deliverable facet only when its payload is this. Migration 133 / SMD-1715.';
+  'The `deliverable` facet''s payload as a thought''s events make it: the newest event''s spec_ref, checkpoint and status, who captured it and when, the newest verification''s method, outcome, maker and time when the newest event is one (else null), and the newest event''s seq; NULL for a thought with no capture. The projection''s one rule: thought_facets_validate admits a deliverable facet only when its payload is this. Migration 134 / SMD-1715.';
 
 -- The transitions, on every insert: the writers' and a raw one alike.
 CREATE OR REPLACE FUNCTION ob1_deliverable_event_check()
@@ -326,7 +326,7 @@ AS $$
 DECLARE
   p deliverable_events;
 BEGIN
-  -- ob1:deliverable-transitions-on-the-event (133)
+  -- ob1:deliverable-transitions-on-the-event (134)
   -- READ COMMITTED alone: above it the newest event read after the lock is the
   -- transaction's old snapshot's, and a move from a status since replaced
   -- would be admitted for good (review pass 1).
@@ -389,7 +389,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_event_check() IS
-  'BEFORE INSERT on deliverable_events, under READ COMMITTED alone (0A000 above it) and the deliverable''s lock: its seq and its time (at) drawn here, after the lock, whatever the insert brought (the identity''s seq, or OVERRIDING SYSTEM VALUE''s, and any at), so a deliverable''s events are numbered in the order written; a capture is a thought''s first event, of a thought that exists, citing a spec_ref that exists (both locked FOR KEY SHARE); every later event is a verification of a thought still there, keeping the capture''s spec_ref and checkpoint, its status one allowed move from the newest event''s (ob1_deliverable_transition_ok). check_violation naming what was refused, for the writers'' inserts and a raw one alike. Migration 133 / SMD-1715.';
+  'BEFORE INSERT on deliverable_events, under READ COMMITTED alone (0A000 above it) and the deliverable''s lock: its seq and its time (at) drawn here, after the lock, whatever the insert brought (the identity''s seq, or OVERRIDING SYSTEM VALUE''s, and any at), so a deliverable''s events are numbered in the order written; a capture is a thought''s first event, of a thought that exists, citing a spec_ref that exists (both locked FOR KEY SHARE); every later event is a verification of a thought still there, keeping the capture''s spec_ref and checkpoint, its status one allowed move from the newest event''s (ob1_deliverable_transition_ok). check_violation naming what was refused, for the writers'' inserts and a raw one alike. Migration 134 / SMD-1715.';
 
 DROP TRIGGER IF EXISTS deliverable_events_transitions ON deliverable_events;
 CREATE TRIGGER deliverable_events_transitions
@@ -436,11 +436,11 @@ BEGIN
      AND NEW.kind IS DISTINCT FROM 'subject' AND NEW.kind IS DISTINCT FROM 'deliverable' THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('thought_facets.kind %L is not a registered facet kind', NEW.kind),
-      HINT = 'The registered kinds are: citation (migration 042), link (migration 053), relation (migration 084), subject (migration 111), deliverable (migration 133). A new kind is registered by a migration that extends thought_facets_validate.';
+      HINT = 'The registered kinds are: citation (migration 042), link (migration 053), relation (migration 084), subject (migration 111), deliverable (migration 134). A new kind is registered by a migration that extends thought_facets_validate.';
   END IF;
 
   IF NEW.kind = 'deliverable' THEN
-    -- ob1:deliverable-facet-is-the-projection (133)
+    -- ob1:deliverable-facet-is-the-projection (134)
     -- A deliverable (SMD-1715) is its events: the facet is admitted only as
     -- their projection of the newest one, so a status moves by an event
     -- (verify_deliverable), whose trigger checks the move, and never by an
@@ -733,7 +733,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate | distinct (distinct since 102), target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. For a subject (111): written standing, key a subject key (subject_key_valid), by one of metadata | first_line | model, judge_key a non-empty string of at most 200 characters; writes origin = derived; afterwards only its close, as a relation''s. For a relation since 120: one naming a subject key is a thread''s edge — relation evolves, the key a subject key (subject_key_valid), judge_key thread:<version>, no confidence — and writes origin = thread; any other must name no thread''s judge key, and writes origin = judged. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. For a deliverable (133): standing, on the thought it was written on, its payload exactly the projection of the thought''s deliverable_events (ob1_deliverable_payload), read under the deliverable''s lock and READ COMMITTED alone; a thought with no events has none, and an UPDATE of its status, forbidden or allowed, is refused unless an event moved it first. Migrations 042, 053, 084, 102, 111, 120, 133.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate | distinct (distinct since 102), target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. For a subject (111): written standing, key a subject key (subject_key_valid), by one of metadata | first_line | model, judge_key a non-empty string of at most 200 characters; writes origin = derived; afterwards only its close, as a relation''s. For a relation since 120: one naming a subject key is a thread''s edge — relation evolves, the key a subject key (subject_key_valid), judge_key thread:<version>, no confidence — and writes origin = thread; any other must name no thread''s judge key, and writes origin = judged. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. For a deliverable (134): standing, on the thought it was written on, its payload exactly the projection of the thought''s deliverable_events (ob1_deliverable_payload), read under the deliverable''s lock and READ COMMITTED alone; a thought with no events has none, and an UPDATE of its status, forbidden or allowed, is refused unless an event moved it first. Migrations 042, 053, 084, 102, 111, 120, 134.';
 
 
 -- One standing deliverable per thought: the projection's row.
@@ -741,7 +741,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS thought_facets_deliverable_uniq
   ON thought_facets (thought_id)
   WHERE kind = 'deliverable';
 COMMENT ON INDEX thought_facets_deliverable_uniq IS
-  'One deliverable facet per thought: the projection of its deliverable_events. Migration 133 / SMD-1715.';
+  'One deliverable facet per thought: the projection of its deliverable_events. Migration 134 / SMD-1715.';
 
 -- The facet goes only with its thought: a DELETE of it alone would leave
 -- events with no projection.
@@ -761,7 +761,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_facet_kept() IS
-  'BEFORE DELETE on thought_facets, a deliverable facet alone: refused (restrict_violation) while its thought exists; the cascade from the thought''s own delete passes. Migration 133 / SMD-1715.';
+  'BEFORE DELETE on thought_facets, a deliverable facet alone: refused (restrict_violation) while its thought exists; the cascade from the thought''s own delete passes. Migration 134 / SMD-1715.';
 
 DROP TRIGGER IF EXISTS thought_facets_deliverable_kept ON thought_facets;
 CREATE TRIGGER thought_facets_deliverable_kept
@@ -791,7 +791,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_id(text, text) IS
-  'A thought''s id from text for the deliverable writers: a uuid, trimmed and lower-cased; raises 22023 naming p_what and the input on anything else. Migration 133 / SMD-1715.';
+  'A thought''s id from text for the deliverable writers: a uuid, trimmed and lower-cased; raises 22023 naming p_what and the input on anything else. Migration 134 / SMD-1715.';
 
 -- The writers' common start: READ COMMITTED, the maker from the envelope
 -- (117's reader), and write scope alone: a deliverable is not a capture
@@ -801,7 +801,7 @@ CREATE OR REPLACE FUNCTION ob1_deliverable_actor(p_actor jsonb, p_what text,
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  -- ob1:deliverable-maker-from-the-envelope (133)
+  -- ob1:deliverable-maker-from-the-envelope (134)
   PERFORM ob1_priority_isolation(p_what);
   SELECT m.name, m.agent_id, m.env_agent_id, m.kind, m.trust, m.scope
     INTO name, agent_id, env_agent_id, kind, trust, scope
@@ -813,7 +813,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_actor(jsonb, text) IS
-  'The deliverable writers'' start: raises above READ COMMITTED (116''s ob1_priority_isolation), reads the maker (117''s ob1_actor_maker: name, agent id, the envelope''s own id, the registry''s kind and trust, the envelope''s scope), and refusal: a WRITE_SCOPE_REQUIRED outcome for an envelope stating any scope but write, else NULL. Migration 133 / SMD-1715.';
+  'The deliverable writers'' start: raises above READ COMMITTED (116''s ob1_priority_isolation), reads the maker (117''s ob1_actor_maker: name, agent id, the envelope''s own id, the registry''s kind and trust, the envelope''s scope), and refusal: a WRITE_SCOPE_REQUIRED outcome for an envelope stating any scope but write, else NULL. Migration 134 / SMD-1715.';
 
 CREATE OR REPLACE FUNCTION ob1_deliverable_refused(p_code text, p_message text)
 RETURNS jsonb
@@ -823,7 +823,7 @@ AS $$
   SELECT jsonb_build_object('outcome', 'refused', 'code', p_code, 'message', p_message)
 $$;
 COMMENT ON FUNCTION ob1_deliverable_refused(text, text) IS
-  'A deliverable writer''s refusal: {outcome: refused, code, message}. Migration 133 / SMD-1715.';
+  'A deliverable writer''s refusal: {outcome: refused, code, message}. Migration 134 / SMD-1715.';
 
 -- One event as the functions return it.
 CREATE OR REPLACE FUNCTION ob1_deliverable_event_json(e deliverable_events)
@@ -838,7 +838,7 @@ AS $$
     'at', ob1_deliverable_time(e.at)) END
 $$;
 COMMENT ON FUNCTION ob1_deliverable_event_json(deliverable_events) IS
-  'One deliverable event as the functions return it: its ids and seq, event, status, spec_ref, checkpoint, method, outcome, maker {name, agent_id, kind, trust, scope} and time; NULL for none. Migration 133 / SMD-1715.';
+  'One deliverable event as the functions return it: its ids and seq, event, status, spec_ref, checkpoint, method, outcome, maker {name, agent_id, kind, trust, scope} and time; NULL for none. Migration 134 / SMD-1715.';
 
 -- A deliverable as the functions return it: its thought's id beside the
 -- facet's payload, or NULL.
@@ -851,7 +851,7 @@ AS $$
     FROM thought_facets f WHERE f.thought_id = p_thought AND f.kind = 'deliverable'
 $$;
 COMMENT ON FUNCTION ob1_deliverable_json(uuid) IS
-  'A deliverable as the functions return it: {thought_id} and its facet''s payload (spec_ref, checkpoint, status, captured_by, captured_at, verification, seq); NULL for a thought with no deliverable facet. Migration 133 / SMD-1715.';
+  'A deliverable as the functions return it: {thought_id} and its facet''s payload (spec_ref, checkpoint, status, captured_by, captured_at, verification, seq); NULL for a thought with no deliverable facet. Migration 134 / SMD-1715.';
 
 -- One event written, its maker stamped alike for every writer.
 CREATE OR REPLACE FUNCTION ob1_deliverable_event(p_thought uuid, p_event text, p_status text, p_spec uuid, p_checkpoint text,
@@ -871,7 +871,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_event(uuid, text, text, uuid, text, text, text, record) IS
-  'Writes one deliverable event — the state after it, a verification''s method and outcome, and its maker (p_who: ob1_deliverable_actor''s row) — and returns it. The transitions are its trigger''s. Migration 133 / SMD-1715.';
+  'Writes one deliverable event — the state after it, a verification''s method and outcome, and its maker (p_who: ob1_deliverable_actor''s row) — and returns it. The transitions are its trigger''s. Migration 134 / SMD-1715.';
 
 -- The facet made current from the events: written, or replaced, with the
 -- payload ob1_deliverable_payload builds. Nothing for a thought deleted.
@@ -902,7 +902,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_project(uuid) IS
-  'Makes one thought''s deliverable facet current from its events (ob1_deliverable_payload): replaced when it differs, written when there is none; returns the deliverable (ob1_deliverable_json), NULL for a thought with no capture or one deleted. The thought is locked FOR KEY SHARE, so a delete in flight is waited out. Called by the writers under the deliverable''s lock, and by the rebuild. Migration 133 / SMD-1715.';
+  'Makes one thought''s deliverable facet current from its events (ob1_deliverable_payload): replaced when it differs, written when there is none; returns the deliverable (ob1_deliverable_json), NULL for a thought with no capture or one deleted. The thought is locked FOR KEY SHARE, so a delete in flight is waited out. Called by the writers under the deliverable''s lock, and by the rebuild. Migration 134 / SMD-1715.';
 
 -- Every event projected as it lands, a raw one too: the writers alone
 -- projected, so a raw event left the facet stale until someone ran the
@@ -918,7 +918,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_event_projected() IS
-  'AFTER INSERT on deliverable_events: makes the thought''s deliverable facet current from its events (ob1_deliverable_project), for the writers'' events and a raw one alike, so the facet is the events'' projection however an event was written. Migration 133 / SMD-1715.';
+  'AFTER INSERT on deliverable_events: makes the thought''s deliverable facet current from its events (ob1_deliverable_project), for the writers'' events and a raw one alike, so the facet is the events'' projection however an event was written. Migration 134 / SMD-1715.';
 
 DROP TRIGGER IF EXISTS deliverable_events_projected ON deliverable_events;
 CREATE TRIGGER deliverable_events_projected
@@ -938,7 +938,7 @@ AS $$
          OR COALESCE(c.actor_agent_id IS NOT NULL AND c.actor_agent_id = p_agent, false)
 $$;
 COMMENT ON FUNCTION ob1_deliverable_is_maker(deliverable_events, text, uuid) IS
-  'True when the call may be the key that captured the deliverable (c, its capture event): the same key name, or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses, beside ob1_deliverable_is_author. Migration 133 / SMD-1715.';
+  'True when the call may be the key that captured the deliverable (c, its capture event): the same key name, or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses, beside ob1_deliverable_is_author. Migration 134 / SMD-1715.';
 
 -- Whether the call is a key that wrote the deliverable's thought's text: one
 -- named, by name or agent id, on its capture in thought_audit, on an update
@@ -963,7 +963,7 @@ AS $$
             OR COALESCE(a.canonical_agent_id IS NOT NULL AND a.canonical_agent_id = p_agent, false)))
 $$;
 COMMENT ON FUNCTION ob1_deliverable_is_author(uuid, text, uuid) IS
-  'True when the call may be a key that wrote the text of the thought p_thought: a thought_audit row on it that captured it, changed its content, or re-captured it (082''s `recaptured`) names the same key name or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses, beside ob1_deliverable_is_maker. Migration 133 / SMD-1715.';
+  'True when the call may be a key that wrote the text of the thought p_thought: a thought_audit row on it that captured it, changed its content, or re-captured it (082''s `recaptured`) names the same key name or the same agent id; false otherwise, never NULL. What VERIFY_NOT_YOURS refuses, beside ob1_deliverable_is_maker. Migration 134 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 6. The writers
@@ -1026,7 +1026,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION record_deliverable(text, text, text, jsonb) IS
-  'Makes a thought a deliverable (SMD-1715): its capture event — status unverified, meant to meet the spec p_spec (a thought), handed back at p_checkpoint (a commit hash or content fingerprint, 1 to 200 characters) — and its facet. Returns {outcome: captured | unchanged | refused, deliverable, event}: unchanged, writing nothing, for the same spec and checkpoint again by the key that recorded it; refused WRITE_SCOPE_REQUIRED (an envelope stating no write scope), SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE (another spec or checkpoint, or another key) or SPEC_NOT_FOUND. A malformed id or checkpoint raises 22023, an envelope naming nobody 42501, a transaction above READ COMMITTED 0A000. The thought is written first by the capture path, in the same transaction. Migration 133 / SMD-1715.';
+  'Makes a thought a deliverable (SMD-1715): its capture event — status unverified, meant to meet the spec p_spec (a thought), handed back at p_checkpoint (a commit hash or content fingerprint, 1 to 200 characters) — and its facet. Returns {outcome: captured | unchanged | refused, deliverable, event}: unchanged, writing nothing, for the same spec and checkpoint again by the key that recorded it; refused WRITE_SCOPE_REQUIRED (an envelope stating no write scope), SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE (another spec or checkpoint, or another key) or SPEC_NOT_FOUND. A malformed id or checkpoint raises 22023, an envelope naming nobody 42501, a transaction above READ COMMITTED 0A000. The thought is written first by the capture path, in the same transaction. Migration 134 / SMD-1715.';
 
 CREATE OR REPLACE FUNCTION verify_deliverable(
   p_thought text,
@@ -1099,7 +1099,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION verify_deliverable(text, text, text, text, jsonb) IS
-  'One verification of a deliverable (SMD-1715): how it was checked (p_method, 1 to 200 characters) and what was found (p_outcome, 1 to 4000), moving its status to p_status (verified or corrected) by an allowed move. Returns {outcome: changed | refused, deliverable, event, from, to}: refused WRITE_SCOPE_REQUIRED (an envelope stating no write scope), NOT_A_DELIVERABLE (no capture, or its thought deleted), ILLEGAL_TRANSITION (with from and to) or VERIFY_NOT_YOURS (a move to verified by the key that recorded the deliverable or wrote its thought, by name or agent id; with from and to). A malformed id, status, method or outcome raises 22023, an envelope naming nobody 42501, a transaction above READ COMMITTED 0A000. Migration 133 / SMD-1715.';
+  'One verification of a deliverable (SMD-1715): how it was checked (p_method, 1 to 200 characters) and what was found (p_outcome, 1 to 4000), moving its status to p_status (verified or corrected) by an allowed move. Returns {outcome: changed | refused, deliverable, event, from, to}: refused WRITE_SCOPE_REQUIRED (an envelope stating no write scope), NOT_A_DELIVERABLE (no capture, or its thought deleted), ILLEGAL_TRANSITION (with from and to) or VERIFY_NOT_YOURS (a move to verified by the key that recorded the deliverable or wrote its thought, by name or agent id; with from and to). A malformed id, status, method or outcome raises 22023, an envelope naming nobody 42501, a transaction above READ COMMITTED 0A000. Migration 134 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 7. The read, the drift check and the rebuild
@@ -1117,7 +1117,7 @@ AS $$
     FROM (SELECT ob1_deliverable_id(p_thought, 'deliverable_history''s thought') AS id) t
 $$;
 COMMENT ON FUNCTION deliverable_history(text) IS
-  'A deliverable and its events in the order written: {deliverable, events}; deliverable NULL for a thought with no deliverable facet (none, or deleted, whose events stay as history). A malformed id raises 22023. No actor: which keys may read is the operations layer''s. Migration 133 / SMD-1715.';
+  'A deliverable and its events in the order written: {deliverable, events}; deliverable NULL for a thought with no deliverable facet (none, or deleted, whose events stay as history). A malformed id raises 22023. No actor: which keys may read is the operations layer''s. Migration 134 / SMD-1715.';
 
 CREATE OR REPLACE FUNCTION ob1_deliverable_projection_drift()
 RETURNS TABLE (thought_id uuid, problem text)
@@ -1137,7 +1137,7 @@ AS $$
   ORDER BY 1
 $$;
 COMMENT ON FUNCTION ob1_deliverable_projection_drift() IS
-  'Each thought whose deliverable facet is not the projection of its events: missing (events, a thought, no facet), differs (a facet whose payload is not ob1_deliverable_payload''s), or no events (a facet no event made). Empty when the projection is current. A deleted thought''s events are history and not drift. Migration 133 / SMD-1715.';
+  'Each thought whose deliverable facet is not the projection of its events: missing (events, a thought, no facet), differs (a facet whose payload is not ob1_deliverable_payload''s), or no events (a facet no event made). Empty when the projection is current. A deleted thought''s events are history and not drift. Migration 134 / SMD-1715.';
 
 CREATE OR REPLACE FUNCTION ob1_rebuild_deliverable_projection()
 RETURNS integer
@@ -1166,12 +1166,12 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_rebuild_deliverable_projection() IS
-  'Makes every drifted deliverable facet current from its events (ob1_deliverable_project, under each deliverable''s lock, taken in id order) and returns how many it wrote, not counting a thought deleted while it waited. A facet with no events is left for the operator: the validator admits none, so one is a raw write with the trigger off. Migration 133 / SMD-1715.';
+  'Makes every drifted deliverable facet current from its events (ob1_deliverable_project, under each deliverable''s lock, taken in id order) and returns how many it wrote, not counting a thought deleted while it waited. A facet with no events is left for the operator: the validator admits none, so one is a raw write with the trigger off. Migration 134 / SMD-1715.';
 
 -- ---------------------------------------------------------------------------
 -- 8. The catalog's copy of the vocabulary
 -- ---------------------------------------------------------------------------
 COMMENT ON COLUMN thought_facets.payload IS
-  'Shaped by kind. citation: text (non-empty), stance (stated | retrieved | inferred), source_id (an existing thought, not thought_id itself, stored lower-case); after the source is deleted, source_id null with source_deleted_id and source_deleted_at set by the guard — a shape a restore may insert whole, and that is never re-pointed at a new source. link (053): relation, system, target (an identity in the system), origin structured. relation (084): relation (related | evolves | duplicate | distinct — distinct since 102), target (the older thought''s id), judge_key, confidence, origin judged; inserted standing only, so a restore re-inserts a closed relation as standing or not at all. subject (111): key (ticket:<ID> | pr:<number> | version:<v> | phrase:<words>), by (metadata | first_line | model), judge_key, origin derived; inserted standing only, as a relation. Since 120 a relation may be a thread''s edge (SMD-3306): payload {relation evolves, target (the thought before it on the thread), judge_key thread:<version>, key (the thread''s subject key), origin thread}, written by thread_relink. deliverable (133): spec_ref, checkpoint, status (unverified | verified | corrected), captured_by, captured_at, verification (null | {method, outcome, by, at}), seq — the projection of the thought''s deliverable_events, one per thought (SMD-1715).';
+  'Shaped by kind. citation: text (non-empty), stance (stated | retrieved | inferred), source_id (an existing thought, not thought_id itself, stored lower-case); after the source is deleted, source_id null with source_deleted_id and source_deleted_at set by the guard — a shape a restore may insert whole, and that is never re-pointed at a new source. link (053): relation, system, target (an identity in the system), origin structured. relation (084): relation (related | evolves | duplicate | distinct — distinct since 102), target (the older thought''s id), judge_key, confidence, origin judged; inserted standing only, so a restore re-inserts a closed relation as standing or not at all. subject (111): key (ticket:<ID> | pr:<number> | version:<v> | phrase:<words>), by (metadata | first_line | model), judge_key, origin derived; inserted standing only, as a relation. Since 120 a relation may be a thread''s edge (SMD-3306): payload {relation evolves, target (the thought before it on the thread), judge_key thread:<version>, key (the thread''s subject key), origin thread}, written by thread_relink. deliverable (134): spec_ref, checkpoint, status (unverified | verified | corrected), captured_by, captured_at, verification (null | {method, outcome, by, at}), seq — the projection of the thought''s deliverable_events, one per thought (SMD-1715).';
 COMMENT ON TABLE thought_facets IS
-  'Typed rows on a thought, five kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), or since 102 its distinct (the pair it called unrelated: two near neighbours about different subjects, kept apart), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed; subject (111), payload {key, by, judge_key, origin} — the thought''s own subject, since 130 a set: one standing per thought and key (the index''s rule), at most three and one rule''s (record_thought_subjects''s), written by record_thought_subjects (record_thought_subject a set of one) and only ever closed. Since 120 a relation is also a work thread''s edge — origin thread, the key of the thread it links — kept by thread_relink as the subjects land and leave (SMD-3306), so a thought with a set stands in each key''s thread; deliverable (133), payload {spec_ref, checkpoint, status, captured_by, captured_at, verification, seq} — the thought as a deliverable meant to meet a spec (SMD-1715), the projection of its deliverable_events, one per thought, deleted only with it. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084, 102, 111, 120, 130, 133 / SMD-1712, SMD-1867, SMD-1873, SMD-3117, SMD-3306, SMD-1715.';
+  'Typed rows on a thought, five kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), or since 102 its distinct (the pair it called unrelated: two near neighbours about different subjects, kept apart), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed; subject (111), payload {key, by, judge_key, origin} — the thought''s own subject, since 130 a set: one standing per thought and key (the index''s rule), at most three and one rule''s (record_thought_subjects''s), written by record_thought_subjects (record_thought_subject a set of one) and only ever closed. Since 120 a relation is also a work thread''s edge — origin thread, the key of the thread it links — kept by thread_relink as the subjects land and leave (SMD-3306), so a thought with a set stands in each key''s thread; deliverable (134), payload {spec_ref, checkpoint, status, captured_by, captured_at, verification, seq} — the thought as a deliverable meant to meet a spec (SMD-1715), the projection of its deliverable_events, one per thought, deleted only with it. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084, 102, 111, 120, 130, 134 / SMD-1712, SMD-1867, SMD-1873, SMD-3117, SMD-3306, SMD-1715.';

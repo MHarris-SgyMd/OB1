@@ -18489,7 +18489,7 @@ if (want("16")) {
     // the shipped ones restored — 111's, with 113's door after it, which 111's re-apply replaces, and 120's validator
     // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
-    // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 133's validator, which
+    // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
     // carries 120's with the deliverable kind (SMD-1715).
     await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) });
 
@@ -19277,13 +19277,13 @@ if (want("18")) {
       // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
-      // A migration's own sequence is granted (133's deliverable_events seq, which its trigger draws by nextval: the
+      // A migration's own sequence is granted (134's deliverable_events seq, which its trigger draws by nextval: the
       // deliverables group, SMD-1715 review pass 2); no community sequence is.
       const seqGrants: string[] = notSkipped.match(/ON SEQUENCE [^\s]+/g) ?? [];
       assert(!/openbrain_agents/.test(notSkipped) && !grantedSequences(["community"]).some((s) => seqGrants.includes(`ON SEQUENCE ${s}`))
              && JSON.stringify(seqGrants) === JSON.stringify(["ON SEQUENCE deliverable_events_seq_seq"])
              && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             `…grants nothing of the community group, and grants the migrations' tables, 133's sequence and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
+             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
 
       const failed: string[] = [];
       // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges)
@@ -31584,7 +31584,7 @@ if (want("48")) {
 }
 
 if (want("49")) {
-  console.log("\n[49] Migration 133 on a real Postgres, beside other transactions: a second verification of one deliverable waits for the first and reads its status; a raw event that waited on the deliverable's lock while another was written is numbered after it, not sorted under it; the rebuild beside a delete of the thought waits it out, repairs the rest and counts only what it wrote (SMD-1715 review passes 1 and 2)");
+  console.log("\n[49] Migration 134 on a real Postgres, beside other transactions: a second verification of one deliverable waits for the first and reads its status; a raw event that waited on the deliverable's lock while another was written is numbered after it, not sorted under it; the rebuild beside a delete of the thought waits it out, repairs the rest and counts only what it wrote (SMD-1715 review passes 1 and 2)");
   const owner = new SQL({ url: URL_!, max: 1 });
   const A = new SQL({ url: URL_!, max: 1 }), B = new SQL({ url: URL_!, max: 1 });
   const W = (name: string) => JSON.stringify({ name, scope: "write" });
