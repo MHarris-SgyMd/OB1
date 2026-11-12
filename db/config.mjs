@@ -2676,8 +2676,9 @@ export const ROLE_GRANTS = Object.freeze({
   // them. The `deliverable` facet is their projection, written and replaced,
   // so INSERT on thought_facets, which only the structure group grants
   // otherwise; Postgres grants it per table, so a role holding this group
-  // writes any facet kind, as one holding structure does. A thought's existence and its KEY SHARE locks are the capture
-  // group's SELECT and UPDATE. Soft: a role without the group is refused the
+  // writes any facet kind, as one holding structure does. A thought's
+  // existence, its KEY SHARE locks and its author (thought_audit) are the
+  // capture group's SELECT and UPDATE. Soft: a role without the group is refused the
   // deliverable calls, naming the table, and nothing else.
   deliverables: Object.freeze([
     Object.freeze({ table: "deliverable_events", privileges: Object.freeze(["SELECT", "INSERT"]), since: "133" }),
@@ -2685,8 +2686,6 @@ export const ROLE_GRANTS = Object.freeze({
     // does not need (review pass 2).
     Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "133" }),
     Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
-    // A thought's author, for VERIFY_NOT_YOURS: the capture group holds INSERT there alone.
-    Object.freeze({ table: "thought_audit",      privileges: Object.freeze(["SELECT"]), since: "008" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`

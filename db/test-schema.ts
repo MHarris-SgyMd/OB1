@@ -19378,7 +19378,7 @@ console.log("\n[119] Migration 132: the operator's priority weights — priority
   await set({}, OP);
 }
 
-console.log("\n[120] Migration 133: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (READ_ONLY_KEY, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
+console.log("\n[120] Migration 133: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
 {
   const file = files.find((f) => /^\d{3}_deliverables\.sql$/.test(f)) ?? "no NNN_deliverables.sql";
   // Sections before re-apply 120's validator and 130's table comment, which 133 replaces: this section holds 133's.
@@ -19416,7 +19416,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     "ob1_deliverable_payload(uuid)", "ob1_deliverable_event_check()", "ob1_deliverable_facet_kept()", "ob1_deliverable_id(text, text)", "ob1_deliverable_actor(jsonb, text)",
     "ob1_deliverable_refused(text, text)", "ob1_deliverable_event_json(deliverable_events)", "ob1_deliverable_json(uuid)",
     "ob1_deliverable_event(uuid, text, text, uuid, text, text, text, record)", "ob1_deliverable_project(uuid)", "ob1_deliverable_is_maker(deliverable_events, text, uuid)",
-    "ob1_deliverable_is_author(uuid, text, uuid)",
+    "ob1_deliverable_is_author(uuid, text, uuid)", "ob1_deliverable_event_projected()",
     "record_deliverable(text, text, text, jsonb)", "verify_deliverable(text, text, text, text, jsonb)", "deliverable_history(text)",
     "ob1_deliverable_projection_drift()", "ob1_rebuild_deliverable_projection()"];
   const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
@@ -19427,7 +19427,7 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   const shape: Record<string, boolean> = {
     columns: cols === "id uuid not null, seq bigint not null, thought_id uuid not null, event text not null, status text not null, spec_ref uuid not null, checkpoint text not null, method text, outcome text, actor_name text not null, actor_agent_id uuid, actor_proved boolean not null, actor_kind text, actor_trust text, actor_scope text, at timestamp with time zone not null",
     indexes: idx === "deliverable_events_one_capture deliverable_events_pkey deliverable_events_seq_key deliverable_events_spec deliverable_events_thought",
-    triggers: trig === "deliverable_events_append_only:27 deliverable_events_no_truncate:34 deliverable_events_transitions:7",
+    triggers: trig === "deliverable_events_append_only:27 deliverable_events_no_truncate:34 deliverable_events_projected:5 deliverable_events_transitions:7",
     facetTrigger: facetTrig === "thought_facets_deliverable_kept:11",
     facetIndex: /UNIQUE INDEX thought_facets_deliverable_uniq ON public\.thought_facets USING btree \(thought_id\) WHERE \(kind = 'deliverable'::text\)/.test(facetIdx),
     commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 133 \/ SMD-1715\./.test(f.c ?? "")),
@@ -19464,19 +19464,23 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
     await failure(`SELECT record_deliverable($1, $2, 'c', '{"scope": "write"}'::jsonb)`, [out, spec]),
   ];
   const none = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events`)).n);
-  assert(recRefusals.join(" ") === "READ_ONLY_KEY READ_ONLY_KEY SPEC_NOT_FOUND SPEC_IS_SELF THOUGHT_NOT_FOUND"
+  assert(recRefusals.join(" ") === "WRITE_SCOPE_REQUIRED WRITE_SCOPE_REQUIRED SPEC_NOT_FOUND SPEC_IS_SELF THOUGHT_NOT_FOUND"
          && recRaised.slice(0, 4).every((r) => r.startsWith("22023 ")) && /^42501 record_deliverable needs a maker/.test(recRaised[4]) && none === 0,
-    `record_deliverable refuses a read key's and a capture key's call (READ_ONLY_KEY), a missing spec, the thought as its own spec and a missing thought as values; raises 22023 on a bad id, an empty, long or tabbed checkpoint, 42501 on an envelope naming nobody; writes nothing (${recRefusals.join(" ")} | ${recRaised.map((r) => r.slice(0, 40)).join(" | ")})`);
+    `record_deliverable refuses a read key's and a capture key's call (WRITE_SCOPE_REQUIRED), a missing spec, the thought as its own spec and a missing thought as values; raises 22023 on a bad id, an empty, long or tabbed checkpoint, 42501 on an envelope naming nobody; writes nothing (${recRefusals.join(" ")} | ${recRaised.map((r) => r.slice(0, 40)).join(" | ")})`);
 
   const captured = await rec(` ${out.toUpperCase()} `, spec, " c0ffee ", MAKER);
-  const unchanged = await rec(out, spec, "c0ffee", CHECKER);
+  const unchanged = await rec(out, spec, "c0ffee", MAKER);
+  // Another key recording the same is refused, naming the maker: told `unchanged`, it read the deliverable as its own
+  // and could verify output it had submitted (review pass 3).
+  const otherKey = await rec(out, spec, "c0ffee", CHECKER);
   const again = await rec(out, spec, "deadbeef", MAKER);
   const p1 = await facet(out);
   assert(captured.outcome === "captured" && captured.deliverable?.status === "unverified" && captured.deliverable?.checkpoint === "c0ffee" && captured.deliverable?.spec_ref === spec
          && captured.deliverable?.captured_by === "[120] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
          && unchanged.outcome === "unchanged" && unchanged.event?.id === captured.event?.id && again.code === "ALREADY_A_DELIVERABLE"
+         && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[120\] maker/.test(otherKey.message ?? "")
          && p1?.status === "unverified" && JSON.stringify(p1) === JSON.stringify((await one<{ p: unknown }>(`SELECT ob1_deliverable_payload($1::uuid) AS p`, [out])).p),
-    `a capture: unverified, the id and checkpoint trimmed, the maker and its agent id stamped from the envelope, the facet the payload's projection; the same spec and checkpoint again unchanged, another refused ALREADY_A_DELIVERABLE (${JSON.stringify([captured.outcome, unchanged.outcome, again.code])})`);
+    `a capture: unverified, the id and checkpoint trimmed, the maker and its agent id stamped from the envelope, the facet the payload's projection; the same spec and checkpoint again unchanged for its maker and refused ALREADY_A_DELIVERABLE for another key, naming the maker; another checkpoint refused (${JSON.stringify([captured.outcome, unchanged.outcome, otherKey.code, again.code])})`);
 
   // verify_deliverable: the moves, the maker's rule, the refusals.
   const notOne = await ver(other, "verified", CHECKER);
@@ -19497,27 +19501,36 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   const corrected = await ver(out, "corrected", MAKER, "rerun", "the check missed a failing case");
   const reverified = await ver(out, "verified", CHECKER, "rerun", "the fix passes");
   assert(notOne.code === "NOT_A_DELIVERABLE" && byMaker.code === "VERIFY_NOT_YOURS" && byMakerRenamed.code === "VERIFY_NOT_YOURS" && byMakerNoId.code === "VERIFY_NOT_YOURS"
-         && toSame.code === "ILLEGAL_TRANSITION" && toSame.from === "unverified" && toSame.to === "unverified" && readKey.code === "READ_ONLY_KEY"
+         && toSame.code === "ILLEGAL_TRANSITION" && toSame.from === "unverified" && toSame.to === "unverified" && readKey.code === "WRITE_SCOPE_REQUIRED"
          && verRaised.every((r) => r.startsWith("22023 "))
          && ok.outcome === "changed" && ok.from === "unverified" && ok.to === "verified" && (ok.deliverable?.verification as { by: string }).by === "[120] checker"
          && twice.code === "ILLEGAL_TRANSITION" && twice.from === "verified" && twice.to === "verified"
          && back.code === "ILLEGAL_TRANSITION" && back.from === "verified" && back.to === "unverified" && /does not move verified -> unverified/.test(back.message ?? "")
          && corrected.outcome === "changed" && corrected.deliverable?.status === "corrected" && reverified.outcome === "changed" && reverified.deliverable?.status === "verified"
          && (await facet(out))?.seq === reverified.event?.seq,
-    `verify_deliverable: a thought with no capture NOT_A_DELIVERABLE; the maker's move to verified refused VERIFY_NOT_YOURS by name and by agent id; unverified -> unverified, verified -> verified and verified -> unverified refused ILLEGAL_TRANSITION naming from and to; a read key READ_ONLY_KEY; a bad status, method or outcome raised 22023; another key verifies, the maker corrects, another verifies again (${JSON.stringify([byMaker.code, byMakerRenamed.code, toSame.code, ok.outcome, back.code, corrected.outcome, reverified.outcome])})`);
+    `verify_deliverable: a thought with no capture NOT_A_DELIVERABLE; the maker's move to verified refused VERIFY_NOT_YOURS by name and by agent id; unverified -> unverified, verified -> verified and verified -> unverified refused ILLEGAL_TRANSITION naming from and to; a read key WRITE_SCOPE_REQUIRED; a bad status, method or outcome raised 22023; another key verifies, the maker corrects, another verifies again (${JSON.stringify([byMaker.code, byMakerRenamed.code, toSame.code, ok.outcome, back.code, corrected.outcome, reverified.outcome])})`);
 
   // The author: record_deliverable takes any thought, so the key that wrote it is refused its verification beside the
   // key that recorded it (review pass 2, the maintainer's choice), and may still correct it.
-  const AUTHOR = { name: "[120] author", scope: "write" }, THIRD = { name: "[120] third", scope: "write" };
+  // A key that rewrote the text after it was captured is one of its authors too (review pass 3: the first capture alone
+  // was read).
+  const AUTHOR = { name: "[120] author", scope: "write" }, EDITOR = { name: "[120] editor", scope: "write" }, THIRD = { name: "[120] third", scope: "write" };
   const authored = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, NULL::vector) AS r`,
     ["[120] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
   const byRecorder = await rec(authored, spec, "a17", CHECKER);
   const byAuthor = await ver(authored, "verified", AUTHOR);
   const authorCorrects = await ver(authored, "corrected", AUTHOR);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(EDITOR)]);
+    await tx.query(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [authored, "[120] an author's own output, rewritten by an editor"]);
+  });
+  const editorRow = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND actor_name = $2 AND diff ? 'content'`, [authored, EDITOR.name])).n;
+  const byEditor = await ver(authored, "verified", EDITOR);
   const byThird = await ver(authored, "verified", THIRD);
   assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[120\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
-         && authorCorrects.outcome === "changed" && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
-    `the key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS; it may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, byThird.outcome])})`);
+         && authorCorrects.outcome === "changed" && editorRow === 1 && byEditor.code === "VERIFY_NOT_YOURS" && /\[120\] editor wrote the thought/.test(byEditor.message ?? "")
+         && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
+    `a key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS, its first capture's key and a key that rewrote its text alike; the author may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, editorRow, byEditor.code, byThird.outcome])})`);
 
   // A seq the insert brings is not the one it keeps: the trigger draws each event's under the lock (review pass 2: a raw
   // insert's OVERRIDING SYSTEM VALUE named a seq above every later event's, and pass 1's stale-seq refusal then refused
@@ -19525,13 +19538,18 @@ console.log("\n[120] Migration 133: deliverables — deliverable_events append-o
   const offeredFor = await thought("[120] an output a raw seq is offered for");
   await rec(offeredFor, spec, "5eq", MAKER);
   const offered = await failure(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at, seq)
-    OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, now(), 9000000000000000000)`, [offeredFor, spec]);
+    OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, '1999-01-01T00:00:00Z', 9000000000000000000)`, [offeredFor, spec]);
   const offeredSeqs = (await q<{ s: string }>(`SELECT seq::text AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s);
+  // Its time is the trigger's too, and the facet is projected as it lands, with no rebuild (review pass 3).
+  const offeredAt = (await one<{ y: number }>(`SELECT extract(year FROM at)::int AS y FROM deliverable_events WHERE thought_id = $1::uuid AND event = 'verification'`, [offeredFor])).y;
+  const offeredFacet = await facet(offeredFor);
+  const offeredDrift = (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length;
   const afterOffer = await ver(offeredFor, "verified", CHECKER).catch((e: Error) => ({ outcome: `raised ${e.message.split("\n")[0]}` }) as R);
   const offeredStatuses = (await q<{ s: string }>(`SELECT status AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s).join(" ");
   assert(offered === "taken" && offeredSeqs.length === 2 && offeredSeqs.every((s) => s !== "9000000000000000000" && BigInt(s) < 9000000000000000000n)
+         && offeredAt > 2000 && offeredFacet?.status === "corrected" && (offeredFacet?.verification as { by: string }).by === "raw" && offeredDrift === 0
          && afterOffer.outcome === "changed" && offeredStatuses === "unverified corrected verified",
-    `a raw insert's own seq is replaced by one drawn under the lock, so the verification after it is taken and the events read in the order written (${offered.slice(0, 60)}; ${offeredSeqs.join(",")}; ${afterOffer.outcome}; ${offeredStatuses})`);
+    `a raw insert's own seq and time are replaced by the trigger's, its event is projected as it lands with no drift, the verification after it is taken and the events read in the order written (${offered.slice(0, 60)}; ${offeredSeqs.join(",")}; ${offeredAt}; ${offeredFacet?.status}, drift ${offeredDrift}; ${afterOffer.outcome}; ${offeredStatuses})`);
 
   // Below the tools: a raw write is held to the same rules.
   const before = JSON.stringify(await facet(out));

@@ -523,6 +523,7 @@ const FUNCTIONS = [
   "ob1_deliverable_json(uuid)",
   "ob1_deliverable_project(uuid)",
   "ob1_deliverable_is_author(uuid, text, uuid)",
+  "ob1_deliverable_event_projected()",
   "record_deliverable(text, text, text, jsonb)",
   "verify_deliverable(text, text, text, text, jsonb)",
   "deliverable_history(text)",

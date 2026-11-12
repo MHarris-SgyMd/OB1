@@ -750,7 +750,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 008, 046, 061, 116, 128 or 131 ([20bw]); 133 adds deliverables — an
   // append-only event table, its transitions checked on every insert, a
   // `deliverable` facet kind admitted only as the events' projection (120's
-  // validator carried with one kind more) and twenty-one functions — refusing by
+  // validator carried with one kind more) and twenty-two functions — refusing by
   // name without 042, 116, 117 or 120 ([20bx]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point

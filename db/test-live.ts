@@ -31625,8 +31625,8 @@ if (want("49")) {
 
     // A raw event that waited on the lock while a writer's event was written: its identity seq, drawn before it waited,
     // was below the writer's and sorted it under the move it follows (review pass 1). The trigger draws its seq under
-    // the lock (review pass 2), so it is numbered after the writer's and read as the last move; the raw insert leaves
-    // the facet behind it, which the rebuild makes current.
+    // the lock (review pass 2), so it is numbered after the writer's and read as the last move, and its trigger projects
+    // it as it lands, so the rebuild after it finds nothing to write (review pass 3).
     let txA!: SQL;
     const writer = holding(A, async (tx) => { txA = tx; await tx`SELECT ob1_deliverable_lock(${d}::uuid)`; });
     await writer.begun;
@@ -31642,8 +31642,8 @@ if (want("49")) {
     const mended = Number(((await owner`SELECT ob1_rebuild_deliverable_projection() AS n`)[0] as { n: number }).n);
     const dStatus = ((await owner`SELECT payload->>'status' AS s FROM thought_facets WHERE thought_id = ${d}::uuid AND kind = 'deliverable'`)[0] as { s: string }).s;
     assert(rawWaited && viaWriter.outcome === "changed" && writerEnd === "committed" && rawEnd === "inserted"
-           && rawOrder === "unverified verified corrected verified" && mended === 1 && dStatus === "verified",
-      `a raw event that waited on the lock while a writer wrote is numbered after it, the events read in the order written, and the rebuild projects it (waited ${rawWaited}; ${viaWriter.outcome}, ${writerEnd}; ${rawEnd.slice(0, 120)}; ${rawOrder}; rebuilt ${mended}, ${dStatus})`);
+           && rawOrder === "unverified verified corrected verified" && mended === 0 && dStatus === "verified",
+      `a raw event that waited on the lock while a writer wrote is numbered after it, the events read in the order written, and it is projected as it lands, the rebuild writing nothing (waited ${rawWaited}; ${viaWriter.outcome}, ${writerEnd}; ${rawEnd.slice(0, 120)}; ${rawOrder}; rebuilt ${mended}, ${dStatus})`);
 
     // The rebuild beside a delete of a drifted deliverable's thought: it waits the delete out, writes nothing for that
     // thought, and repairs the other in the same call (review pass 1: it saw the thought, its facet went by the cascade
@@ -31666,6 +31666,25 @@ if (want("49")) {
     assert(drifted === [gone, kept].sort().join(" ") && rebuildWaited && deleteEnd === "committed" && rebuildEnd === "rebuilt 1"
            && after.length === 0 && keptStatus === "unverified",
       `the rebuild beside a delete of one drifted thought waits it out, writes nothing for it, repairs the other and counts one (waited ${rebuildWaited}; ${deleteEnd}; ${rebuildEnd}; drift after ${after.length}; ${keptStatus})`);
+
+    // Two rebuilds at once over one drifted facet: the second waits on the first's lock, reads the facet again under it,
+    // finds it current and counts nothing (review pass 3: both counted one, though one wrote).
+    const twice = await thought("an output two rebuilds find drifted");
+    await owner`SELECT record_deliverable(${twice}, ${spec}, 'beef', (${W("[49] maker")}::text)::jsonb)`;
+    await owner`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`;
+    await owner`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"verified"') WHERE thought_id = ${twice}::uuid AND kind = 'deliverable'`;
+    await owner`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`;
+    let firstCount = -1;
+    const firstRebuild = holding(A, async (tx) => { firstCount = Number(((await tx`SELECT ob1_rebuild_deliverable_projection() AS n`)[0] as { n: number }).n); });
+    await firstRebuild.begun;
+    const secondRebuild = B`SELECT ob1_rebuild_deliverable_projection() AS n`
+      .then((rows) => Number((rows[0] as { n: number }).n), (e: { errno?: string; message: string }) => `${e.errno} ${e.message.split("\n")[0]}`);
+    const secondWaitedRebuild = await pollUntil(() => waits(bPid, "advisory"), 5000);
+    firstRebuild.release();
+    const [firstRebuildEnd, secondCount] = [await firstRebuild.ended, await secondRebuild];
+    assert(firstRebuildEnd === "committed" && firstCount === 1 && secondWaitedRebuild && secondCount === 0
+           && (await owner`SELECT * FROM ob1_deliverable_projection_drift()`).length === 0,
+      `two rebuilds at once: the first writes and counts one, the second waits, finds the facet current and counts none (${firstRebuildEnd} ${firstCount}; waited ${secondWaitedRebuild}; ${secondCount})`);
   } finally {
     await owner`DELETE FROM thoughts WHERE content LIKE '[49]%'`;
     await A.close();
