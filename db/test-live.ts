@@ -4239,6 +4239,28 @@ if (want("9f")) {
   let poison = false;
   let slowMs = 0;
   let probeCalls = 0;
+  /**
+   * The provider crashing, as [10]'s stub (SMD-2641 PR 2): a row whose text holds `crashMarker`, or, while `crashCycles` is
+   * above zero, the next row's call whatever its text, crashes it — it and every call after answer 500 until
+   * `crashProbes` probes have found it down — and while `inFlightMs` is set every other row's call it is up for takes that
+   * long, so the other worker's is in flight when one crashes. `crashedBy` names whose call crashed it; `peakAfterCrashes`
+   * is the most row calls in flight at once once the crashes are spent.
+   */
+  let crashMarker: string | null = null;
+  let crashCycles = 0;
+  let crashProbes = 1;
+  let crashLeft: number | null = null;
+  let inFlightMs = 0;
+  const crashedBy: string[] = [];
+  let upCallsNow = 0;
+  let peakAfterCrashes = 0;
+  /** Once a hemlock note's call has been made this many times, every probe answers 401: the blame probe of its retry alone, refused (SMD-2641 PR 2). */
+  let refuseProbeAtHemlock = 0;
+  let hemlockCalls = 0;
+  /** Once a hemlock note's call has been made this many times, every probe hangs (counted): the blame probe held (review pass 1). */
+  let hangProbeAtHemlock = 0;
+  /** From a hemlock note's this-many-th call it answers 503, backpressure, not its 500 (review pass 1). */
+  let hemlock503At = 0;
   const axisFor = (text: string) => {
     let h = 0;
     for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -4257,8 +4279,37 @@ if (want("9f")) {
         embedProbesHung++;
         return neverAnswers();
       }
+      // The provider crashed (SMD-2641 PR 2): down until its probes have found it so `crashProbes` times.
+      if (crashLeft !== null) {
+        if (!probe) return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+        if (crashLeft > 0) {
+          crashLeft--;
+          return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+        }
+        crashLeft = null;
+      }
+      if (!probe && ((crashMarker !== null && input.includes(crashMarker)) || crashCycles > 0)) {
+        if (crashCycles > 0) crashCycles--;
+        crashedBy.push(input);
+        crashLeft = crashProbes;
+        // Its own answer a beat late, so the other worker's call is made by then.
+        await Bun.sleep(400);
+        return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+      }
+      if (!probe && inFlightMs > 0) {
+        upCallsNow++;
+        if (crashCycles === 0 && crashMarker === null) peakAfterCrashes = Math.max(peakAfterCrashes, upCallsNow);
+        await Bun.sleep(inFlightMs);
+        upCallsNow--;
+        if (crashLeft !== null) return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+      }
       if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
       if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
+      if (probe && hangProbeAtHemlock > 0 && hemlockCalls >= hangProbeAtHemlock) {
+        embedProbesHung++;
+        return neverAnswers();
+      }
+      if (probe && refuseProbeAtHemlock > 0 && hemlockCalls >= refuseProbeAtHemlock) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
       // The probe's refusal past the 160 characters its words are cut at in the closing line (review pass 3).
       if (probe && probeRefused401) return Response.json({ error: { message: `stub: invalid api key — ${"the key was revoked by its owner; ".repeat(5)}` } }, { status: 401 });
       if (probe && probeDownNext) {
@@ -4286,6 +4337,8 @@ if (want("9f")) {
       if (input.includes("zz-overlong")) return Response.json({ error: { message: "stub: the input exceeds the model's context length" } }, { status: 400 });
       // A slow hemlock note answers its 500 after 1 s, so a second worker has claimed its own thought by then, on a slow runner too (review pass 4: 500 ms).
       if (poison && input.includes("hemlock")) {
+        hemlockCalls++;
+        if (hemlock503At > 0 && hemlockCalls >= hemlock503At) return Response.json({ error: { message: "stub: overloaded" } }, { status: 503 });
         if (input.includes("slow hemlock")) await Bun.sleep(1000);
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
       }
@@ -4374,6 +4427,13 @@ if (want("9f")) {
       await pollUntil(async () => (claim = await claimOf(id)) !== undefined && claim.status !== "claimed", 5_000);
       return claim;
     };
+    /** The "(n of 3 before it is recorded failed)" counts of a follower's lines, in order: "1,2" for a suspect failed at its third outage alone (SMD-2641 PR 2). */
+    const aloneOf = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the probe after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    /** Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (SMD-2641 PR 2; the mutant: no outage begun). */
+    const waitsAfterFailure = (lines: string[]) => {
+      const at = lines.findIndex((l) => /: provider error again with this thought alone in flight at 3 outages/.test(l));
+      return at >= 0 && lines.slice(at).some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
+    };
 
     // The provider not answering at the start is waited out, its line said; once it answers the follower pools.
     providerDown503 = true;
@@ -4415,7 +4475,8 @@ if (want("9f")) {
     assert(sentBackAgain && claimAgain?.status === "pending" && claimAgain.last_error === null && midAgain,
       `…and the thought, re-embedded since, is no suspect at the next outage: back to the pool unrecorded again, then re-embedded (sent back again ${sentBackAgain}, embedded ${midAgain}; claim ${JSON.stringify(claimAgain)})`);
 
-    // A row the provider fails again right after it answered a probe is the row's own: recorded failed, not cycled for ever.
+    // A row the provider fails again when it is retried alone, a probe made at once answering, is the row's own: recorded
+    // failed, not cycled for ever (SMD-2641 PR 2; before, again right after a probe answered).
     poison = true;
     const sick = liveFollower();
     await sick.idle();
@@ -4428,11 +4489,119 @@ if (want("9f")) {
     const sickExit = await sick.stop();
     poison = false;
     const sickWaits = waitsOf(sick.lines);
-    assert(recordedSick && /provider error again right after the provider answered a probe, so this thought's/.test(sickClaim?.last_error ?? "") && sickExit === "exit 0",
-      `a row that draws the provider's error again right after a probe answered is recorded failed as its own (${sickClaim?.last_error?.slice(0, 120)}; ${sickExit})`);
+    assert(recordedSick && /^provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: .*\(--retry-failed revisits it\)$/.test(sickClaim?.last_error ?? "") && sickExit === "exit 0",
+      `a row that draws the provider's error again, retried alone, a probe made at once answering, is recorded failed as its own (${sickClaim?.last_error?.slice(0, 120)}; ${sickExit})`);
     assert(recordedSick2 && sickWaits.length === 2 && sickWaits[1] === sickWaits[0],
       `…and the next poisoned thought's outage starts the schedule over, the one before recorded failed since (recorded ${recordedSick2}; waits ${JSON.stringify(sickWaits)})`);
     await sql`DELETE FROM thoughts WHERE id = ${sickThought}::uuid OR id = ${sickThought2}::uuid`;
+
+    // A suspect retried alone whose blame probe is refused — a key revoked while it was away — ends the follower with
+    // 2, refused provider, nothing failed: the request's, not the thought's (SMD-2641 PR 2). The stub refuses every
+    // probe once the hemlock note's second call is made, so the outage's wait answers first.
+    poison = true;
+    hemlockCalls = 0;
+    refuseProbeAtHemlock = 2;
+    let blameRefusedEnd: string | null = null;
+    let blameThought = "";
+    const blameRefused = liveFollower();
+    try {
+      await blameRefused.idle();
+      blameThought = await newThought("the hemlock note whose blame probe is refused");
+      blameRefusedEnd = await blameRefused.ended(20_000);
+    } finally {
+      poison = false;
+      refuseProbeAtHemlock = 0;
+    }
+    const blameRefusedClaim = await claimOf(blameThought);
+    assert(blameRefusedEnd === "exit 2" && blameRefusedClaim?.status === "pending" && hemlockCalls === 2
+        && blameRefused.lines.some((l) => /a probe's embedding call was refused \(Embeddings request .* 401 /.test(l)),
+      `a suspect retried alone whose blame probe is refused ends the follower with 2, the thought pending, the refusal said (${blameRefusedEnd}; claim ${JSON.stringify(blameRefusedClaim)}; ${hemlockCalls} hemlock call(s))`);
+    await sql`DELETE FROM thoughts WHERE id = ${blameThought}::uuid`;
+
+    // A suspect retried alone, its blame probe hung, the call in hand aborted by the pass's caller (abortInHand): set
+    // back, no outage counted against it, then re-embedded (review pass 1, mutant: the set-back after the probe dropped).
+    {
+      let abortBlame: InHandAbort | undefined;
+      poison = true;
+      hemlockCalls = 0;
+      hangProbeAtHemlock = 2;
+      const hungFrom = embedProbesHung;
+      const aborted = liveFollower({ onPass: (_st, a) => { abortBlame = a; } });
+      let abortedThought = "";
+      let abortedEmbedded = false;
+      try {
+        await aborted.idle();
+        abortedThought = await newThought("the hemlock note whose blame probe is aborted in hand");
+        await pollUntil(async () => embedProbesHung > hungFrom, 20_000);
+        poison = false;
+        hangProbeAtHemlock = 0;
+        abortBlame?.();
+        abortedEmbedded = await pollUntil(() => atModel(abortedThought), 20_000);
+      } finally {
+        poison = false;
+        hangProbeAtHemlock = 0;
+      }
+      const abortedExit = await aborted.stop();
+      const abortedAlone = aborted.lines.filter((l) => /alone in flight, the probe after it unanswered/.test(l)).length;
+      assert(embedProbesHung > hungFrom && abortedEmbedded && abortedAlone === 0 && abortedExit === "exit 0",
+        `a blame probe whose call the pass's caller aborts sets the suspect back, no outage counted, then re-embedded (hung ${embedProbesHung - hungFrom}; embedded ${abortedEmbedded}; alone lines ${abortedAlone}; ${abortedExit})`);
+      await sql`DELETE FROM thoughts WHERE id = ${abortedThought}::uuid`;
+    }
+
+    // A stop during a suspect's blame probe hands it back unrecorded, no outage counted (review pass 1, mutant: the
+    // stop's check after the probe dropped — at a third outage alone, a stop recorded the thought failed).
+    {
+      poison = true;
+      hemlockCalls = 0;
+      hangProbeAtHemlock = 2;
+      const hungFrom = embedProbesHung;
+      const stopped = liveFollower();
+      let stoppedThought = "";
+      let stoppedExit = "";
+      try {
+        await stopped.idle();
+        stoppedThought = await newThought("the hemlock note whose blame probe meets a stop");
+        await pollUntil(async () => embedProbesHung > hungFrom, 20_000);
+        stoppedExit = await stopped.stop();
+      } finally {
+        poison = false;
+        hangProbeAtHemlock = 0;
+      }
+      const stoppedClaim = await claimOf(stoppedThought);
+      const stoppedAlone = stopped.lines.filter((l) => /alone in flight, the probe after it unanswered/.test(l)).length;
+      assert(embedProbesHung > hungFrom && stoppedAlone === 0 && stoppedClaim?.status === "pending" && stoppedClaim.last_error === null && stoppedExit === "exit 0",
+        `a stop during a blame probe counts no outage against the suspect: back in the pool unrecorded (alone lines ${stoppedAlone}; claim ${JSON.stringify(stoppedClaim)}; ${stoppedExit})`);
+      await sql`DELETE FROM thoughts WHERE id = ${stoppedThought}::uuid`;
+    }
+
+    // A suspect retried alone that meets backpressure — a 503, no suspect's error — while the provider answers probes is
+    // not blamed: never failed, re-embedded once the 503s stop (review pass 1, mutant: the blame's gate on the suspect).
+    {
+      poison = true;
+      hemlockCalls = 0;
+      hemlock503At = 2;
+      const held = liveFollower();
+      let heldThought = "";
+      let heldEmbedded = false;
+      try {
+        await held.idle();
+        heldThought = await newThought("the hemlock note that meets a 503 when retried alone");
+        await pollUntil(async () => hemlockCalls >= 2, 20_000);
+        await Bun.sleep(500);
+        poison = false;
+        hemlock503At = 0;
+        heldEmbedded = await pollUntil(() => atModel(heldThought), 20_000);
+      } finally {
+        poison = false;
+        hemlock503At = 0;
+      }
+      // Out of hand: the vector is written before the claim's release reaches the row (SMD-3612; review pass 2, a flake).
+      const heldClaim = await claimOutOfHand(heldThought);
+      const heldExit = await held.stop();
+      assert(heldEmbedded && heldClaim?.status === "succeeded" && heldExit === "exit 0",
+        `a suspect retried alone that meets a 503 is not blamed: re-embedded once it stops (embedded ${heldEmbedded}; claim ${JSON.stringify(heldClaim)}; ${heldExit})`);
+      await sql`DELETE FROM thoughts WHERE id = ${heldThought}::uuid`;
+    }
 
     // The provider refusing the request itself mid-pass ends the follower, refused `provider`, nothing marked failed.
     const keyed = liveFollower();
@@ -4516,9 +4685,10 @@ if (want("9f")) {
     await sql`DELETE FROM thoughts WHERE id = ${refusedHangs}::uuid`;
 
     // A deadline whose probe gets no answer is the provider's outage, the thought back in the pool unrecorded, not the
-    // thought's (SMD-2636 PR 3b, the build's mutant: probedFault's outage read the thought's passed every row). Once
-    // the wait's probe answers, the same again is the suspect's own, recorded failed (review pass 1's mutants: the
-    // suspect dropped on this path, or the second round handed back, passed every row and cycled for ever).
+    // thought's (SMD-2636 PR 3b, the build's mutant: probedFault's outage read the thought's passed every row). Retried
+    // alone after the wait, the same again — its own deadline's probe unanswered, not probed twice — is an outage it was
+    // alone at, and at the third the suspect's own, recorded failed (SMD-2641 PR 2; review pass 1's mutants: the suspect
+    // dropped on this path, or the second round handed back, passed every row and cycled for ever).
     const deadDown = liveFollower();
     await deadDown.idle();
     probeDownAfterDeadline = true;
@@ -4530,7 +4700,7 @@ if (want("9f")) {
       downHangs = await newThought("a zz-deadline thought whose probe meets an outage");
       // In the probe's words, cut at 160 and marked (review pass 5: the mark was held by no row).
       downSentBack = await deadDown.saw(new RegExp(`the embedding provider is not answering \\(Embeddings request .* 503 .*…\\) — ${downHangs} goes back to the pool unrecorded`));
-      downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 20_000);
+      downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 60_000);
       downClaim = await claimOf(downHangs);
     } finally {
       probeDownAfterDeadline = false;
@@ -4539,9 +4709,116 @@ if (want("9f")) {
     const deadDownExit = await deadDown.stop();
     assert(downSentBack && deadDownExit === "exit 0",
       `a deadline whose probe gets no answer is an outage: the thought back in the pool unrecorded, said as the probe's 503 (sent back ${downSentBack}; ${deadDownExit})`);
-    assert(downFailed && /^provider error again right after the provider answered a probe, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? ""),
-      `…and, once the wait's probe answers, the same again is the suspect's own: recorded failed (${JSON.stringify(downClaim)})`);
+    const downWaitsAfter = waitsAfterFailure(deadDown.lines);
+    const downAlone = aloneOf(deadDown.lines);
+    assert(downFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? "") && downAlone === "1,2" && downWaitsAfter,
+      `…and, retried alone, the same again three times, its own probe unanswered each, is the suspect's own: recorded failed, the follower waiting after it (${JSON.stringify(downClaim)}; alone ${downAlone}; waits after ${downWaitsAfter})`);
     await sql`DELETE FROM thoughts WHERE id = ${downHangs}::uuid`;
+
+    // SMD-2641 PR 2: two workers, a poison thought crashing the provider beside an innocent one in flight: both suspects,
+    // retried one at a time, each handed back at the pool's front — the poison failed at its third outage alone, its probe
+    // unanswered each time, the innocent re-embedded, each claim's attempt refunded at every hand-back. Then a crash at the
+    // next call after each recovery, whatever is in flight, three times, twice on a suspect retried alone: nothing failed,
+    // and the drain after the isolated one takes the four behind with both workers at once.
+    // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+    await (async () => {
+      const isolatedSaid = (lines: string[]) => lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the drain goes back to 2; one that errs again alone is blamed only on a probe made at once$/.test(l));
+      try {
+        inFlightMs = 1000;
+        crashProbes = 1;
+        crashMarker = "crash-poison";
+        crashedBy.length = 0;
+        const pair = liveFollower({ workers: 2 });
+        await pair.idle();
+        // A thought re-embedded before the outage, its model moved during the wait: the poll after the wait returns it to
+        // the pool behind the suspects, not at the date it was first pooled — ahead of them, its claim ended the isolation
+        // (review pass 1, cold read).
+        const movedId = await newThought("a thought re-embedded before the outage");
+        const movedFirst = await pollUntil(() => atModel(movedId), 15_000);
+        // One statement, so one poll pools both and each worker claims one.
+        const [{ id: poisonId }, { id: innocentId }] = (await sql`INSERT INTO thoughts (content) VALUES ('a crash-poison thought takes the provider down'), ('an innocent thought beside it') RETURNING id::text AS id`) as { id: string }[];
+        const pairBack = await pair.saw(new RegExp(`${poisonId} goes back to the pool unrecorded`));
+        if (pairBack) await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${movedId}::uuid`;
+        const poisonFailed = await pollUntil(async () => (await claimOf(poisonId))?.status === "failed", 60_000);
+        const innocentDone = await pollUntil(() => atModel(innocentId), 30_000);
+        const movedAgain = await pollUntil(() => atModel(movedId), 30_000);
+        const poisonClaim = await claimOf(poisonId);
+        const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array([poisonId, innocentId], "TEXT")}::uuid[]) AND work_type = ${OWN_KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
+        const pairExit = await pair.stop();
+        assert(poisonFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* 500/.test(poisonClaim?.last_error ?? "")
+            && innocentDone && pairBack && movedFirst && movedAgain && aloneOf(pair.lines) === "1,2" && waitsAfterFailure(pair.lines) && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid(pair.lines) && attempts.join(",") === "1,1" && pairExit === "exit 0",
+          `two re-embed workers, a poison thought crashing the provider beside an innocent one: both suspects, retried one at a time — the poison failed at its third outage alone, the innocent re-embedded, each attempt refunded (SMD-2641 PR 2; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentDone}; alone ${aloneOf(pair.lines)}; ${crashedBy.length} crash(es); isolated said ${isolatedSaid(pair.lines)}; waits after the failure ${waitsAfterFailure(pair.lines)}; attempts ${attempts.join(",")}; ${pairExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ${poisonId}::uuid OR id = ${innocentId}::uuid OR id = ${movedId}::uuid`;
+
+        crashMarker = null;
+        crashedBy.length = 0;
+        crashCycles = 3;
+        peakAfterCrashes = 0;
+        // Polled every 30 s: the drains after each wait and after the isolated drain run at once (review pass 1, mutant: pollNow),
+        // timed from the first outage. The thoughts go in before the follower starts, so its first drain takes them.
+        const timerIds = ((await sql`INSERT INTO thoughts (content) VALUES ('a timer thought names the pager'), ('a timer thought names the runbook'),
+            ('a timer thought behind, one'), ('a timer thought behind, two'), ('a timer thought behind, three'), ('a timer thought behind, four') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const timer = liveFollower({ workers: 2, follow: 30 });
+        const timerFirst = await timer.saw(/goes back to the pool unrecorded/, 45_000);
+        const timerAt = Date.now();
+        const timerDone = await pollUntil(async () => (await Promise.all(timerIds.map(atModel))).every(Boolean), 60_000);
+        const timerMs = Date.now() - timerAt;
+        const timerFailed = (await Promise.all(timerIds.map(claimOf))).filter((c) => c?.status === "failed").length;
+        const timerExit = await timer.stop();
+        assert(timerFirst && timerDone && timerMs < 25_000 && timerFailed === 0 && crashCycles === 0 && crashedBy.length === 3 && aloneOf(timer.lines) === "1,2" && peakAfterCrashes === 2 && timerExit === "exit 0",
+          `a provider crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six re-embedded, the drain after the isolated one with both workers at once (SMD-2641 PR 2; done ${timerDone}, ${timerFailed} failed; ${crashedBy.length} crash(es); alone ${aloneOf(timer.lines)}; ${peakAfterCrashes} call(s) in flight at most; polled every 30 s, all within ${timerMs} ms of the first outage; ${timerExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(timerIds, "TEXT")}::uuid[])`;
+
+        // One worker, batch 2, a poison thought with two behind it: the isolated claim is one thought, so the ones behind
+        // never end the isolation and the poison is failed at its third outage alone (review pass 1, mutant: the batch of
+        // one). Its first outage down for four probes, so the two land in the pool before its wait answers.
+        crashMarker = "crash-poison";
+        crashedBy.length = 0;
+        crashProbes = 4;
+        const batched = liveFollower({ batch: 2 });
+        await batched.idle();
+        const [{ id: batchPoison }] = (await sql`INSERT INTO thoughts (content) VALUES ('a crash-poison thought in a batch of two') RETURNING id::text AS id`) as { id: string }[];
+        const batchFirstBack = await batched.saw(new RegExp(`${batchPoison} goes back to the pool unrecorded`));
+        const batchBehind = ((await sql`INSERT INTO thoughts (content) VALUES ('a thought behind it in the batch, one'), ('a thought behind it in the batch, two') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        crashProbes = 1;
+        const batchPoisonFailed = await pollUntil(async () => (await claimOf(batchPoison))?.status === "failed", 60_000);
+        crashMarker = null;
+        const batchBehindDone = await pollUntil(async () => (await Promise.all(batchBehind.map(atModel))).every(Boolean), 30_000);
+        const batchedExit = await batched.stop();
+        // One worker: the isolated line says no "one worker, before the drain goes back to" (review pass 3, mutant).
+        const batchLine = batched.lines.some((l) => l === "  retrying the last outage's 1 suspect thought(s) one at a time; one that errs again alone is blamed only on a probe made at once");
+        assert(batchFirstBack && batchPoisonFailed && batchBehindDone && batchLine && crashedBy.length === 4 && aloneOf(batched.lines) === "1,2" && batchedExit === "exit 0",
+          `batch 2, the isolated claim is one thought: the poison failed at its third outage alone, the two behind re-embedded after (failed ${batchPoisonFailed}; behind ${batchBehindDone}; one-worker line ${batchLine}; ${crashedBy.length} crash(es); alone ${aloneOf(batched.lines)}; ${batchedExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ${batchPoison}::uuid OR id = ANY(${sql.array(batchBehind, "TEXT")}::uuid[])`;
+
+        // Two workers, both suspects deleted during the outage: the isolated drain claims a thought no suspect, so the
+        // isolation ends and the four behind go two at a time (review pass 1, mutant: claimed() dropped).
+        crashedBy.length = 0;
+        // Down for three probes, answered at the fourth (~4.5 s in at a 300 ms first wait): time to delete the suspects first.
+        crashProbes = 3;
+        peakAfterCrashes = 0;
+        const gone = liveFollower({ workers: 2 });
+        await gone.idle();
+        crashCycles = 1;
+        const goneIds = ((await sql`INSERT INTO thoughts (content) VALUES ('a suspect deleted mid-outage, one'), ('a suspect deleted mid-outage, two') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const bothBack = await pollUntil(async () => goneIds.every((id) => gone.lines.some((l) => l.includes(`${id} goes back to the pool unrecorded`))), 15_000);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(goneIds, "TEXT")}::uuid[])`;
+        const behindIds = ((await sql`INSERT INTO thoughts (content) VALUES ('behind a deleted suspect, one'), ('behind a deleted suspect, two'), ('behind a deleted suspect, three'), ('behind a deleted suspect, four') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const behindDone = await pollUntil(async () => (await Promise.all(behindIds.map(atModel))).every(Boolean), 60_000);
+        const goneExit = await gone.stop();
+        assert(bothBack && behindDone && peakAfterCrashes === 2 && goneExit === "exit 0",
+          `both suspects deleted mid-outage, the isolation ends at the first claim of another: the four behind two at a time (back ${bothBack}; done ${behindDone}; ${peakAfterCrashes} call(s) in flight at most; ${goneExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(behindIds, "TEXT")}::uuid[])`;
+      } finally {
+        crashMarker = null;
+        crashCycles = 0;
+        crashLeft = null;
+        inFlightMs = 0;
+        crashProbes = 1;
+        hangProbeAtHemlock = 0;
+        hemlock503At = 0;
+      }
+    })();
 
     // Another worker's outage is joined unprobed (SMD-2636 PR 3b, as extract's, PR 3a's review pass 1): under two
     // workers a slow hemlock note's 500 begins an outage while a deadline thought's call is still in hand, which, met
@@ -4624,8 +4901,10 @@ if (want("9f")) {
     const limitedExit = await limited.stop();
     // Rows getting past the limit each cycle start the schedule over: the waits do not grow (review pass 3: they doubled at every cycle).
     const limitedWaits = waitsOf(limited.lines);
-    assert(limitedFailed === 0 && limitedDone === 6 && limitedExit === "exit 0",
-      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six (${limitedFailed} failed, ${limitedDone} done; ${limitedExit})`);
+    // …and makes no suspect, so no drain after its outages isolates (SMD-2641 PR 2, review pass 3, mutant: a 429's thought made a suspect).
+    const limitedIsolated = limited.lines.filter((l) => /retrying the last outage's/.test(l)).length;
+    assert(limitedFailed === 0 && limitedDone === 6 && limitedIsolated === 0 && limitedExit === "exit 0",
+      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six, no drain isolated (${limitedFailed} failed, ${limitedDone} done; ${limitedIsolated} isolated drain(s); ${limitedExit})`);
     assert(limitedWaits.length >= 2 && limitedWaits.every((w) => w === limitedWaits[0]),
       `…each cycle that re-embedded something starts the probe's schedule over, so the waits stay at the first (${JSON.stringify(limitedWaits)})`);
     for (const id of limitedThoughts) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
@@ -4777,6 +5056,26 @@ if (want("9f")) {
     assert(gatedIdle && gatedWaiting && gatedProbed && gatedClaimInOutage?.status !== "failed" && gatedEmbedded && gatedExit === "exit 0",
       `with the probe's own subject refused by the gate, an outage waits, probing under the thought's subject: nothing recorded failed through two probes' 503s, then re-embedded (idle ${gatedIdle}, waiting ${gatedWaiting}, probed ${gatedProbed}, embedded ${gatedEmbedded}; claim in the outage ${JSON.stringify(gatedClaimInOutage)}; ${gatedExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${gatedThought}::uuid`;
+
+    // The blame probe goes under the same subject (SMD-2641 PR 2, review pass 3, mutant: under the probe's own, which the
+    // gate refuses, the blame read a refusal and ended the follower with 2 at its first suspect retried alone): a hemlock
+    // note the gate passes by its type, retried alone, its blame probe answering — recorded failed, the follower running on.
+    poison = true;
+    const gatedPoison = liveFollower({ env: gatedEnv });
+    let gatedPoisonEnd: string | null = "running";
+    let gatedPoisonThought = "";
+    try {
+      await gatedPoison.idle();
+      [{ id: gatedPoisonThought }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('the gated hemlock note', ${{ type: "gated-outage" }}) RETURNING id::text AS id`;
+      await pollUntil(async () => (await claimOf(gatedPoisonThought))?.status === "failed", 20_000);
+    } finally {
+      poison = false;
+    }
+    const gatedPoisonClaim = await claimOf(gatedPoisonThought);
+    gatedPoisonEnd = await gatedPoison.stop();
+    assert(gatedPoisonClaim?.status === "failed" && /^provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: /.test(gatedPoisonClaim.last_error ?? "") && gatedPoisonEnd === "exit 0",
+      `with the probe's own subject refused by the gate, a suspect retried alone is blamed on a probe under its own subject: recorded failed as answered, the follower running on, a stop 0 (${gatedPoisonClaim?.status}: ${gatedPoisonClaim?.last_error?.slice(0, 100)}; ${gatedPoisonEnd})`);
+    await sql`DELETE FROM thoughts WHERE id = ${gatedPoisonThought}::uuid`;
 
     // A poll's statement past the session's statement_timeout ends the follower, its row failed — no longer swallowed.
     const timed = liveFollower({ session: { statement_timeout: "1s" } });
