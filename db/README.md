@@ -2513,8 +2513,8 @@ key: on 2026-11-12's board the Medium gating the most work came last of eleven a
 sooner due time and before kind and key, under both orders; the nine-argument
 wrapper and `plan_context`'s board section take it through it. No score moves,
 so search's priority blend and 127's level first are as they were, and no weight
-is added (the maintainer's choice, 2026-11-12, over a graded term). Two items past
-the cap of 50 still fall to the key. Needs 129; a re-apply is a no-op.
+is added (the maintainer's choice, 2026-11-12, over a graded term). Two items at or
+past the cap (50 by default) still fall to the key. Needs 129; a re-apply is a no-op.
 test-schema [124], test-upgrade [20cb].
 
 Migration 136 closes a deleted item's priority statements (SMD-3711). Until now

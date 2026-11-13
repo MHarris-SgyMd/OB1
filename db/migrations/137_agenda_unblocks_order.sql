@@ -6,7 +6,7 @@
 -- WHY
 --   122's unblocks term steps at 1 open item blocked (+0.1 since 127) and at
 --   unblocks_many_at, 3 (+0.2), and stops: past three the count is reported,
---   to its cap of 50, but never ordered on. The agenda (129) breaks a tie on
+--   to its cap (50 by default), but never ordered on. The agenda (129) breaks a tie on
 --   effective priority by the sooner due time, then kind and key, so among
 --   items of one level blocking three or more, the order was the key. On the
 --   dogfood board of 2026-11-12 eleven Medium tickets tied at 2.2, and the
@@ -23,7 +23,8 @@
 --     search's priority blend are untouched, so nothing moves between levels
 --     (127's level first) and no weight is added. Only an exact tie on
 --     effective (and the due time) is ordered by the count.
---   * Two items past the cap both count 50 and still fall to kind and key.
+--   * Two items at or past the cap (50 by default) count the same and still
+--     fall to kind and key.
 --   * The function's comment says the new order. Every filter, term and
 --     number is 129's, and so is the nine-argument wrapper, which calls this
 --     one and so takes the order too, as plan_context's board section does.
