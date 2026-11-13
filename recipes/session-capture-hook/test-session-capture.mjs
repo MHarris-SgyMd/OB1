@@ -2434,6 +2434,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
+  // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
+  assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
   const dryCp = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "auto"]);
   assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),

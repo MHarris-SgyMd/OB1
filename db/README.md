@@ -3849,15 +3849,17 @@ have given; that guess is for a summary without the hook's word, which says
 `place` for the branch's. A header listing a ticket of another team than the
 first ticket its own project and branch name is left to the model: the hook
 learns a team from each ticket-shaped word of a branch, so on
-`smd-610-bump-node-22` a prompt's `node-22` is a ticket to it; the team is read
-as the hook reads one (`hotfix-2026` names none). A summary the hook's model
-wrote (`metadata.summary_model`) keys no header: its prose is never the hook's
-layout. A prompt the user ended with `…` is no clip. Since the header rule's
-version 3 (SMD-3306 PR 7a-3b-2) a header listing several, its full three
-included, keys a set of one rule's (migration 130); version 2 keyed a header
-listing one alone, and left several to the model. A ticket-shaped word counts
-unless
-its prefix is on a fixed list of encodings, hashes, protocols, standards,
+`smd-610-bump-node-22` a prompt's `node-22` is a ticket to it; the team is the
+branch's first ticket, else the project's, read as the hook reads a place
+(`hotfix-2026` names none). The hook also learns teams from the session's other
+places and a directory's whole path, which the header does not show; that is
+SMD-4291's to fix in the hook. A summary the hook's model wrote
+(`metadata.summary_model`) keys no header: its prose is never the hook's layout.
+A prompt the user ended with `…` is no clip. Since the header rule's version 3
+(SMD-3306 PR 7a-3b-2) a header listing several, its full three included, keys a
+set of one rule's (migration 130); version 2 keyed a header listing one alone,
+and left several to the model. A ticket-shaped word counts unless its prefix is
+on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
 migration 130's `record_thought_subjects` at the text the claim read, under its

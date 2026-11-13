@@ -2822,6 +2822,19 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(["hotfix-2026", "release-2", "v2-26", "dependabot/npm/vite-5", "feat/x"].every((b) => HF(onBranch(b), "asks") === "SMD-55") && HF(onBranch("feat/x", "ob1-2"), "asks") === "SMD-55"
       && HF(onBranch("smd-610-bump-node-22").replace("SMD-55 —", "NODE-22 —").replace("SMD-55 please", "node-22 please"), "asks") === "",
     "…the team the header's own parts name read as the hook reads a ticket, two to five letters and two to six digits: `hotfix-2026`, `release-2` or `ob1-2` no team (review pass 5, run-it); `node-22` beside `smd-610` still another team's");
+  const onPlace = (ticket: string, ask: string, place: string) => `Session summary — ${ticket} — claude-code — ${place} — 2026-10-01\n\nAsked (1 prompt):\n- ${ask}`;
+  assert(HF(onPlace("SMD-55", "fix smd-55", "site-2025 (smd-55-fix)"), "asks") === "SMD-55" && HF(onPlace("SMD-55", "fix smd-55", "aoc-2024 (feature/smd-55-day1)"), "asks") === "SMD-55"
+      && HF(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)"), "asks") === "SMD-34" && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)")) === "SMD-34"
+      && ["ed-25519-keys", "md-12-render", "html-2026"].every((b) => HF(onPlace("SMD-55", "Work on SMD-55 please", `ob1 (${b})`), "asks") === "SMD-55")
+      && HF(onPlace("NODE-3", "x", "smd-12-wt (main)"), "asks") === "" && HF(onPlace("SMD-12", "start smd-12", "smd-12-wt (main)"), "asks") === "SMD-12"
+      && HF(onPlace("NODE-22, NODE-24", "bump node-22 to node-24", "ob1 (smd-610-bump-node-22)"), "asks") === "",
+    "…the branch's team first, then the project's, as the hook reads a place, no prefix either list denies: a project `site-2025` or a worktree of another team's ticket beside a ticket branch, and `ed-25519-keys`, keep the session (review pass 6, cold read)");
+  // Review pass 6 (mutants): the model's summary as the hook sends it, with no word (pass 4 keeps the word off it),
+  // keys no header; and the place's team read as the hook reads one, no wider: seven digits, a digit or `_` glued
+  // after the number, or a prefix the server denies (`sha-256`), name no team.
+  assert(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen" } }) === null
+      && ["build-1234567", "rel-2026a", "abc-12_x", "fix/sha-256-check"].every((b) => HF(onBranch(b), "asks") === "SMD-55"),
+    `…a model's summary with no word keys none; the place's team only as the hook reads one (review pass 6, mutants: ${["build-1234567", "rel-2026a", "abc-12_x", "fix/sha-256-check"].map((b) => HF(onBranch(b), "asks")).join("|")})`);
   assert(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen", tickets_from: "asks" } }) === null
       && JSON.stringify(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen", issue: "SMD-9" } })) === JSON.stringify({ keys: ["ticket:SMD-9"], by: "metadata" })
       && ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "" } }) !== null,

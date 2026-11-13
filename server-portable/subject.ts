@@ -181,6 +181,10 @@ const HEADER_TICKETS = /^\s*Session summary — ([A-Z][A-Z0-9]*-[0-9]+(?:, [A-Z]
 const HEADER_TICKETS_MAX = 3;
 /** A ticket-shaped word as the capture hook reads one in a branch or a directory (its TICKET_RE). */
 const HOOK_TICKETS = /\b([A-Za-z]{2,5})-([0-9]{2,6})\b/g;
+/** The prefixes the capture hook takes for no ticket (its NOT_TICKETS), beside this module's own (NOT_TICKET_PREFIXES). */
+const HOOK_NOT_TICKETS: ReadonlySet<string> = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
+/** The header's branch part, `(branch)` before the day: renderSummary writes `… project (branch) — day`. */
+const HEADER_BRANCH = /\(([^()]*)\)\s+—\s+[^—]*$/;
 /** The hook's own line breaks: a character LINE_BREAK also reads as one stays inside the prompt the hook wrote it in (review pass 2: a pasted NEL ended the read). */
 const HOOK_LINE = /\r\n|\n|\r/;
 /**
@@ -259,7 +263,12 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
   // Read with the hook's own shape, two to five letters and two to six digits: the server's wider one took
   // `hotfix-2026` or `release-2` for a team the hook never learned, sending its own sessions to the model (review pass
   // 5, run-it).
-  const home = [...rest.matchAll(HOOK_TICKETS)].map((m) => `${m[1].toUpperCase()}-${m[2]}`).find(isTicket);
+  // The branch's first, then the project's, as the hook's anchorOf reads a place, and no prefix either list denies
+  // (review pass 6, cold read: a project `site-2025` or a worktree named for another team's ticket was taken for the
+  // session's team ahead of its branch's ticket; `ed-25519-keys`, which the hook learns no team from, refused it).
+  const homeOf = (text: string) => [...text.matchAll(HOOK_TICKETS)].map((m) => `${m[1].toUpperCase()}-${m[2]}`)
+    .find((t) => isTicket(t) && !HOOK_NOT_TICKETS.has(t.slice(0, t.indexOf("-"))));
+  const home = homeOf(HEADER_BRANCH.exec(rest)?.[1] ?? "") ?? homeOf(rest);
   const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
   if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
   const anchored = tickets.every((t) => nameOf(t).test(rest));
