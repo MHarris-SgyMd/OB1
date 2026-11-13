@@ -418,10 +418,11 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
   - **A background call** (the vector mender's, a detached job's) waits its
     turn, as a pass's does.
 
-  When the api's socket is lost (a link cut, a coordinator recreated), its
-  waiting calls wait 2 s for the next socket and are asked again there, then
-  take the api's own share. The api dials again every second and counts its
-  calls still running once a socket is back. A coordinator that stays keeps
+  When the api's socket is lost (a link cut, a coordinator recreated), and
+  at its start, its waiting calls wait 2 s for the next socket and are asked
+  again there, then take the api's own share. Within those 2 s the api dials
+  every quarter second, then every second, and counts its calls still
+  running once a socket is back. A coordinator that stays keeps
   the api's running calls counted 5 s after its socket closes, for the next
   socket to take back. A recreated
   coordinator leaves them counted at the broker until the api's socket is

@@ -568,7 +568,9 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
   const open = new Set<Sock>();
   /** Each api process's open socket, and its port kept after a close, by its id. */
   const liveBy = new Map<string, Sock>();
-  const kept = new Map<string, { name: string; port: RelayPort; timer: ReturnType<typeof setTimeout> }>();
+  const kept = new Map<string, { name: string; port: RelayPort; timer: ReturnType<typeof setTimeout>; held: RelayFrame[] }>();
+  /** The most frames held for a kept port's api: past it, the oldest dropped (a `lapsed` is the one that matters). */
+  const HELD_FRAMES = 256;
   let refusedSaid = false;
   /** Stopping: the coordinator going, its relay with it; or giving every call back, its sockets cut (`detach`). */
   let stopping = false;
@@ -604,15 +606,20 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
         const k = c === null ? undefined : kept.get(c);
         const old = c === null ? undefined : liveBy.get(c);
         let port: RelayPort;
+        let held: RelayFrame[] = [];
         if (k) {
-          // Back within the keeping: its running calls still counted, its port its own again.
+          // Back within the keeping: its running calls still counted, its port its own again, and what the relay said to
+          // it meanwhile (a `lapsed`) said now (review pass 3 of 3b-2: lost on the closed socket, the call counted again).
           clearTimeout(k.timer);
           kept.delete(c!);
           port = k.port;
+          held = k.held;
         } else if (old?.data.port) {
           // Its last socket still open here (half-open: the api dropped it, this side has not yet): this one takes its
-          // port, the other closed without a word to the relay.
+          // port, the other closed without a word to the relay — its asks withdrawn first, as at a close, for the api asks
+          // again (review pass 3 of 3b-2: a re-ask met its old id, answered `own`, the old one's grant counted for good).
           port = old.data.port;
+          port.withdrawAsks?.();
           old.data.port = null;
           old.data.replaced = true;
           open.delete(old);
@@ -626,6 +633,7 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
         if (c !== null) liveBy.set(c, ws);
         ws.data.port = port;
         port.attach((m) => { ws.send(JSON.stringify(m)); });
+        for (const m of held) ws.send(JSON.stringify(m));
         relay.apiBack?.();
         opts.onChange?.();
       },
@@ -652,7 +660,9 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
         // A socket closed by the coordinator's stop leaves the api's calls as they are — still running there, and kept
         // counted at the broker by the relay's own close for the next coordinator to have named (review pass 1 of 3b-2: a
         // recreate's stop said each `done`, and their slots went to another brain while they ran).
-        if (!port || stopping) { opts.onChange?.(); return; }
+        // Its asks withdrawn all the same: no slot granted, through the stop's last seconds, into a socket that is gone
+        // (review pass 3 of 3b-2).
+        if (!port || stopping) { port?.withdrawAsks?.(); opts.onChange?.(); return; }
         if (c === null || detaching || ws.data.bye) release(ws.data.name, port);
         else {
           // An api's socket closed under a coordinator that stays (a link cut, an api stalled past the idle bound): its
@@ -661,7 +671,9 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
           // went to another brain while the calls ran, 7 calls on 2 slots).
           port.withdrawAsks?.();
           const name = ws.data.name;
-          kept.set(c, { name, port, timer: setTimeout(() => { if (kept.get(c)?.port === port) { kept.delete(c); release(name, port); opts.onChange?.(); } }, keepMs) });
+          const held: RelayFrame[] = [];
+          port.attach((m) => { held.push(m); if (held.length > HELD_FRAMES) held.shift(); });
+          kept.set(c, { name, port, held, timer: setTimeout(() => { if (kept.get(c)?.port === port) { kept.delete(c); release(name, port); opts.onChange?.(); } }, keepMs) });
         }
         opts.onChange?.();
       },

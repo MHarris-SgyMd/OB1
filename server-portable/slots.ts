@@ -360,6 +360,8 @@ export const RELAY_EASE_MS = 10_000;
 export const RELAY_EASED_MS = 5000;
 /** How long the api's asks wait for its next socket after one is lost, rather than taking its own share. */
 export const RELAY_GRACE_MS = 2000;
+/** How long a dial may take to open before it is dropped and tried again. */
+export const RELAY_DIAL_MS = 3000;
 /** A refused dial is asked why (a plain request) at most this often. */
 export const RELAY_WHY_MS = 30_000;
 /** A socket to the coordinator silent this long is dropped: the api pings every third of it, the listener answers. */
@@ -388,7 +390,12 @@ function relayCore(t: { send(m: object): void; reach(): Reach; grace(): boolean;
     // `held` for it; review pass 1 of 3b-2).
     if (f?.slot === "lapsed" && typeof f.id === "string") { running.delete(f.id); return; }
     if (typeof f?.id !== "string" || (f.slot !== "go" && f.slot !== "queued" && f.slot !== "own")) return;
-    waiting.get(f.id)?.answer(f.slot, f.why);
+    const w = waiting.get(f.id);
+    // A `go` for a call not waiting and not running — its ask answered otherwise meanwhile — is given back at once, so no
+    // grant sits counted with no call behind it (review pass 3 of 3b-2: a re-ask answered `own`, its first ask's later
+    // grant held a slot until the lease).
+    if (!w) { if (f.slot === "go" && !running.has(f.id)) t.send({ slot: "done", id: f.id }); return; }
+    w.answer(f.slot, f.why);
   };
   /** Every ask waiting answered `own`: asked again at the next `back` where `away`. */
   const answerAll = (away: boolean) => { for (const w of [...waiting.values()]) w.answer("own", away ? "away" : undefined); };
@@ -574,6 +581,10 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   const again = () => {
     if (closed) return;
     if (failingSince === null) failingSince = performance.now();
+    // Within the grace, every RELAY_RECONNECT_MS.first: a coordinator back in it is found before the parked asks take
+    // their own share (review pass 3 of 3b-2: dials at 1.75 and 2.75 s missed one back at 1.8 s), as the relay's
+    // GRACE_RETRY_MS for its broker.
+    if (performance.now() < graceUntil) { retry = setTimeout(() => { retry = null; connect(); }, RELAY_RECONNECT_MS.first); return; }
     retry = setTimeout(() => { retry = null; connect(); }, wait);
     // Quick through a recreate; past RELAY_EASE_MS of failing (no coordinator listening), every RELAY_EASED_MS.
     wait = performance.now() - failingSince < RELAY_EASE_MS ? Math.min(wait * 2, RELAY_RECONNECT_MS.max) : RELAY_EASED_MS;
@@ -591,7 +602,18 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     ws = sock;
     let opened = false;
     let heard = performance.now();
+    // A dial not open within RELAY_DIAL_MS is dropped and tried again (review pass 3 of 3b-2: a coordinator that takes the
+    // connection and never answers the upgrade held it for good, as the relay's HELLO_MS found of the broker's).
+    const dialing = setTimeout(() => {
+      if (opened || ws !== sock) return;
+      try { (sock as unknown as { terminate?: () => void }).terminate?.() ?? sock.close(); } catch { /* gone */ }
+      ws = null;
+      if (!graceTimer) core.answerAll(true);
+      once("dial", `background slots: the coordinator at ${url} took the connection but did not open the socket within ${RELAY_DIAL_MS / 1000} s — dialled again; said once`);
+      again();
+    }, RELAY_DIAL_MS);
     sock.onopen = () => {
+      clearTimeout(dialing);
       opened = true;
       up = true;
       wait = RELAY_RECONNECT_MS.first;
@@ -627,6 +649,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       core.heard(m);
     };
     sock.onclose = (ev) => {
+      clearTimeout(dialing);
       if (ws !== sock) return;
       if (opened) return lost(sock, `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`);
       ws = null;
@@ -662,6 +685,10 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     }
     again();
   };
+  // The first socket's dial is a grace of its own: a call made before it opens waits for it, rather than running on the
+  // own share and being counted past the room once it opens (review pass 3 of 3b-2: 6 calls on 2 slots at a start).
+  graceUntil = performance.now() + RELAY_GRACE_MS;
+  graceTimer = setTimeout(() => { graceTimer = null; if (!up) core.answerAll(true); }, RELAY_GRACE_MS);
   connect();
   return core.client;
 }

@@ -791,7 +791,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   const second = await startApi(lport);
   ok(await until(() => logsOf(second).some((l) => /holds its most sockets \(503\)/.test(l)), 5000) && listener.sockets() === 1, "a socket past the listener's most is refused (503), and the api says so", logsOf(second));
   second.cmd({ cmd: "call", id: "s1" });
-  ok(await second.wait("run", "s1", 800), "and its calls take its own share");
+  ok(await second.wait("run", "s1", 3000), "and its calls take its own share, past its start's grace");
   await kill(api);
   ok(await until(() => listener.sockets() === 1 && logsOf(second).some((l) => /asks the host's slot broker through the coordinator/.test(l)), 8000), "a killed api's socket closes at the coordinator, and its place is taken by the next to dial", { sockets: listener.sockets(), logs: logsOf(second) });
   await kill(second); await kill(pass1);
@@ -1020,6 +1020,105 @@ await withBroker(registry({ slots: 2 }), async (b) => {
   listener.stop({ detach: true });
   await relay.stop();
 });
+await withBroker(parseRegistry(`broker:\n  warm_s: 0\n  lease_s: 1\nservers:\n  ollama:\n    bases: [${BASE}]\n    slots: 2\n    reserve: 0\nbrains:\n  stable:\n    key: "${hashKey(KEYS.stable)}"\n`).registry!, async (b) => {
+  // Review pass 3 of 3b-2, with frames as the api sends them: a half-open socket's asks withdrawn at its takeover, a
+  // `lapsed` said while a port is kept delivered at the api's return, and a coordinator's stop withdrawing the asks.
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  let listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  const port = listener.port;
+  const dial = (client: string, heard: { slot: string; id: string }[] = []) => new Promise<WebSocket>((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${RELAY_PATH}`, { headers: { "x-brain-key": RKEY, "x-relay-client": client } } as unknown as string[]);
+    ws.onmessage = (ev) => heard.push(JSON.parse(String(ev.data)));
+    ws.onopen = () => resolve(ws);
+  });
+  const send = (ws: WebSocket, f: object) => ws.send(JSON.stringify(f));
+  const h1: { slot: string; id: string }[] = [];
+  const w1 = await dial("client-five-005", h1);
+  send(w1, { slot: "running", id: "x1", base: BASE, model: "m", cls: "background" });
+  send(w1, { slot: "running", id: "x2", base: BASE, model: "m", cls: "background" });
+  send(w1, { slot: "ask", id: "q1", base: BASE, model: "m", cls: "background" });
+  ok(await until(() => h1.some((m) => m.slot === "queued" && m.id === "q1")) && pool(b).background === 2 && pool(b).waiting.stable === 1, "two calls running fill the slots, a third asks and waits", b.snapshot());
+  const h2: { slot: string; id: string }[] = [];
+  const w2 = await dial("client-five-005", h2);
+  send(w2, { slot: "running", id: "x1", base: BASE, model: "m", cls: "background" });
+  send(w2, { slot: "running", id: "x2", base: BASE, model: "m", cls: "background" });
+  send(w2, { slot: "ask", id: "q1", base: BASE, model: "m", cls: "background" });
+  send(w2, { slot: "named", id: "" });
+  await sleep(300);
+  ok(!h2.some((m) => m.slot === "own") && pool(b).waiting.stable === 1 && relay.state().asks === 1 && pool(b).background === 2,
+    "the same api's newer socket, the old one half-open: its ask asked again waits, not answered own, and is counted once", { h2, pool: pool(b), relay: relay.state() });
+  // The calls' leases run out (lease_s 1) while the api's socket is closed and its port kept: told at its return.
+  send(w2, { slot: "done", id: "q1" });
+  w2.close();
+  ok(await until(() => pool(b).background === 0, 4000), "the broker takes the calls back at its lease, the port kept", b.snapshot());
+  const h3: { slot: string; id: string }[] = [];
+  const w3 = await dial("client-five-005", h3);
+  ok(await until(() => h3.filter((m) => m.slot === "lapsed").length === 2), "back within the keeping, the api is told of each lapse said meanwhile", h3);
+  w3.close();
+  // A coordinator's stop: the api's asks withdrawn at the broker, not left to be granted into a socket that is gone.
+  const w4 = await dial("client-six-0006");
+  send(w4, { slot: "running", id: "y1", base: BASE, model: "m", cls: "background" });
+  send(w4, { slot: "running", id: "y2", base: BASE, model: "m", cls: "background" });
+  send(w4, { slot: "ask", id: "y3", base: BASE, model: "m", cls: "background" });
+  ok(await until(() => pool(b).waiting.stable === 1), "an api ask waiting", b.snapshot());
+  listener.stop();
+  ok(await until(() => !pool(b).waiting.stable && pool(b).background === 2, 1000), "the coordinator's stop withdraws its asks, its running calls left counted", b.snapshot());
+  await relay.stop();
+  void w4;
+});
+{
+  // A coordinator that takes the connection and never opens the socket: dropped at 3 s and dialled again (review pass 3).
+  const sink = Bun.listen({ port: 0, hostname: "127.0.0.1", socket: { data() {} } });
+  const api = await startApi(sink.port);
+  ok(await until(() => logsOf(api).some((l) => /did not open the socket within 3 s/.test(l)), 5000), "a dial not open within 3 s is dropped, said", logsOf(api));
+  await kill(api);
+  sink.stop(true);
+}
+await withBroker(registry({ slots: 1 }), async (b) => {
+  // At the api's start, and within a grace after a loss (review pass 3 of 3b-2): a call made before the socket opens waits
+  // for it, and a coordinator back within the grace is found by a dial every 250 ms, its parked asks not on the own share.
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  const link = linkTo(listener.port);
+  link.refuse(true);
+  const api = await startApi(link.port);
+  api.cmd({ cmd: "call", id: "s1" });
+  await sleep(700);
+  link.refuse(false);
+  ok(await api.wait("run", "s1", 2000) && await until(() => relay.state().grants === 1 && relay.state().own === 0),
+    "a call made before the api's first socket opens waits for it, and runs on a grant", relay.state());
+  api.cmd({ cmd: "call", id: "s2" });
+  ok(await api.wait("waiting", "s2"), "a second waits at the broker");
+  link.refuse(true);
+  link.cut();
+  await sleep(1700);
+  link.refuse(false);
+  await sleep(600);
+  ok(!api.saw("run", "s2") && relay.state().own === 0 && pool(b).waiting.stable === 1, "back 1.7 s into the grace: found before it ends, the parked call asked again, not on the own share", { pool: pool(b), relay: relay.state() });
+  api.cmd({ cmd: "end", id: "s1" });
+  ok(await api.wait("run", "s2", 3000), "and granted as the first ends");
+  api.cmd({ cmd: "end", id: "s2" });
+  await api.wait("ended", "s2");
+  await kill(api);
+  link.stop();
+  listener.stop({ detach: true });
+  await relay.stop();
+});
+{
+  // A `go` for a call the api is not waiting on is given back at once (review pass 3 of 3b-2).
+  const frames: { slot?: string; id?: string }[] = [];
+  const stub = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })),
+    websocket: { open(ws) { ws.send(JSON.stringify({ slot: "go", id: "b999" })); }, message(_ws, m) { frames.push(JSON.parse(String(m))); } },
+  });
+  const api = await startApi(stub.port as number);
+  ok(await until(() => frames.some((f) => f.slot === "done" && f.id === "b999"), 3000), "a go for no call waiting is answered done", frames);
+  await kill(api);
+  void stub.stop(true);
+}
 {
   // The api's own refusals: another key (named), no coordinator listening (said), a key too short (never dialled).
   const relayless = startRelay({ url: "ws://127.0.0.1:1/v1/slots", key: KEYS.stable, log: () => {}, graceMs: 0 });
@@ -1036,7 +1135,7 @@ await withBroker(registry({ slots: 2 }), async (b) => {
   const wrong = await startApi(listener.port, { OB1_SLOT_RELAY_KEY: "relay-key-of-another-brain" });
   ok(await until(() => logsOf(wrong).some((l) => /refused OB1_SLOT_RELAY_KEY \(401\)/.test(l)), 5000), "an api with another key names it (401)", logsOf(wrong));
   wrong.cmd({ cmd: "call", id: "w1" });
-  ok(await wrong.wait("run", "w1", 800), "and its calls take its own share");
+  ok(await wrong.wait("run", "w1", 3000), "and its calls take its own share, past its start's grace");
   listener.stop({ detach: true });
   const nobody = await startApi(listener.port);
   ok(await until(() => logsOf(nobody).some((l) => /does not answer at/.test(l)), 5000), "an api with no coordinator listening says so", logsOf(nobody));
