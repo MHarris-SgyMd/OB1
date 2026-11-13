@@ -20,7 +20,9 @@
 import { chmodSync, existsSync, lchownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, runOnce, type Child } from "./coordinator.ts";
+import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, relaySettings, runOnce, type Child } from "./coordinator.ts";
+import type { Relay, RelayPort } from "./slot-relay.ts";
+import { hashKey, parseRegistry, startBroker } from "../deploy/federated/broker.ts";
 import { supervise } from "./supervise.ts";
 
 let pass = 0;
@@ -65,6 +67,7 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
     MCP_ACCESS_KEYS: "keys", OB1_WORKER_KEY: "wk", LINEAR_API_KEY: "lin", LINEAR_COMMENT_API_KEY: "linc", OB1_BOARD_SYNC_INTERVAL: "300",
     OB1_SLEEP_CAPTURE: "60", OB1_SLEEP_DUMP_DIR: "/d", OB1_EXTRACT_FOLLOW: "30", OB1_CONSOLIDATE_WORKERS: "2",
     OB1_PASSES: "sleep", PORT: "", UNSET: undefined,
+    OB1_SLOT_BROKER_URL: "ws://host.containers.internal:8095/v1/slots", OB1_SLOT_BROKER_KEY: "slot_brain",
   };
   const of = (name: keyof typeof CHILDREN) => childEnv(CHILDREN[name], env);
   const board = of("board-sync");
@@ -82,7 +85,8 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
     const e = of(name);
     ok(e.PATH === "/usr/bin" && e.DATABASE_URL === "postgres://x" && e.OB1_LLM_BASE_URL === "http://m" && e.OB1_EXTRACT_CHUNK_TOKENS === "900",
       `${name}: the shared settings, OB1_EXTRACT_CHUNK_TOKENS among them (the server's, though it starts like extract's own)`);
-    ok(!("OB1_PASSES" in e) && !("PORT" in e) && !("UNSET" in e), `${name}: never the coordinator's own settings, nor an unset one`);
+    ok(!("OB1_PASSES" in e) && !("PORT" in e) && !("UNSET" in e) && !("OB1_SLOT_BROKER_URL" in e) && !("OB1_SLOT_BROKER_KEY" in e) && !("OB1_SLOT_RELAY" in e),
+      `${name}: never the coordinator's own settings — the slot broker's URL and key among them (SMD-3379 PR 3b-1) — nor an unset one`);
   }
   ok(childEnv(CHILDREN.sleep, env, { HOME: "/tmp/ob1-sleep-x" }).HOME === "/tmp/ob1-sleep-x" && childHome(CHILDREN.sleep) === "/tmp/ob1-sleep-", "a HOME of its own, given, beneath its prefix");
   const uids = Object.values(CHILDREN).map((c) => c.uid);
@@ -204,6 +208,68 @@ if (!existsSync(composePath)) {
     rmSync(out, { recursive: true, force: true });
   }
   ok(!["sleep", "extract", "consolidate", "board-sync"].some((s) => s in compose.services), "the four services it replaced are gone");
+}
+
+// ---------------------------------------------------------------------------
+// The slot relay (SMD-3379 PR 3b-1): its settings read, and each child started
+// with a channel to it and told so, only where there is one.
+// ---------------------------------------------------------------------------
+{
+  const url = "ws://host.containers.internal:8095/v1/slots";
+  ok(relaySettings({}) === null && relaySettings({ OB1_SLOT_BROKER_URL: " ", OB1_SLOT_BROKER_KEY: "" }) === null, "no broker settings: no relay, and nothing said");
+  const both = relaySettings({ OB1_SLOT_BROKER_URL: ` ${url} `, OB1_SLOT_BROKER_KEY: " slot_k " });
+  ok(!!both && "url" in both && both.url === url && both.key === "slot_k", `both set: the URL and key, trimmed (${JSON.stringify(both)})`);
+  const halves = [relaySettings({ OB1_SLOT_BROKER_URL: url }), relaySettings({ OB1_SLOT_BROKER_KEY: "slot_k" })];
+  ok(halves.every((h) => !!h && "problem" in h && /is unset beside/.test(h.problem)) && /OB1_SLOT_BROKER_KEY is unset/.test((halves[0] as { problem: string }).problem),
+    `one without the other: said, naming the one unset, and no relay (${JSON.stringify(halves)})`);
+  ok(["http://host:8095/v1/slots", "not a url"].every((u) => { const r = relaySettings({ OB1_SLOT_BROKER_URL: u, OB1_SLOT_BROKER_KEY: "k" }); return !!r && "problem" in r && /no ws:\/\/ or wss:\/\//.test(r.problem); })
+      && (() => { const r = relaySettings({ OB1_SLOT_BROKER_URL: "wss://broker.example/v1/slots", OB1_SLOT_BROKER_KEY: "k" }); return !!r && "url" in r; })(),
+    "a URL that is no ws:// or wss:// one is said; wss is taken");
+
+  const dir = mkdtempSync(join(tmpdir(), "ob1-coordinator-relay-"));
+  const probe = join(dir, "probe.ts");
+  writeFileSync(probe, `import { writeFileSync } from "node:fs";\nwriteFileSync(process.env.PROBE_OUT, JSON.stringify({ relay: process.env.OB1_SLOT_RELAY ?? null, channel: typeof process.send, key: "OB1_SLOT_BROKER_KEY" in process.env }));\nif (typeof process.send === "function") process.send({ slot: "ask", id: "p1", base: "http://h:1/v1", model: "m", cls: "background" });\nsetInterval(() => {}, 1000);\nprocess.on("SIGTERM", () => process.exit(0));\n`);
+  const runWith = async (relay: Relay | null, out: string) => {
+    const frames: unknown[] = [];
+    let attached = 0, detached = 0;
+    const c = coordinate({
+      env: { PATH: process.env.PATH ?? "", PROBE_OUT: out, OB1_SLOT_BROKER_URL: url, OB1_SLOT_BROKER_KEY: "slot_k" }, sql: null, asOwnUsers: false,
+      children: [{ ...CHILDREN["board-sync"], script: probe, args: () => [] }], writer: { out: () => {}, err: () => {} },
+      relay: relay ? { ...relay, port: () => ({ onMessage: (m) => frames.push(m), attach: () => { attached++; }, detach: () => { detached++; } }) } : null,
+    });
+    for (let i = 0; i < 100 && !existsSync(out); i++) await Bun.sleep(50);
+    for (let i = 0; i < 40 && relay && frames.length === 0; i++) await Bun.sleep(50);
+    c.stop("SIGTERM");
+    await Promise.race([c.done, Bun.sleep(5000)]);
+    return { seen: existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : null, frames, attached, detached };
+  };
+  const fake: Relay = { port: () => ({ onMessage: () => {}, attach: () => {}, detach: () => {} }) as RelayPort, state: () => ({ broker: "up", boot: null, since: 0, asks: 0, parked: 0, grants: 0, own: 0 }), stop: async () => {} };
+  const withRelay = await runWith(fake, join(dir, "with.json"));
+  ok(withRelay.seen?.relay === "ipc" && withRelay.seen?.channel === "function" && withRelay.seen?.key === false,
+    `under a relay, a child is told OB1_SLOT_RELAY=ipc and has a channel — never the broker's key (${JSON.stringify(withRelay.seen)})`);
+  ok(withRelay.frames.length === 1 && (withRelay.frames[0] as { id?: string }).id === "p1" && withRelay.attached === 1 && withRelay.detached === 1,
+    `its frames reach the relay's port, attached at its start and detached at its end (${withRelay.frames.length} frame, ${withRelay.attached}/${withRelay.detached})`);
+  const without = await runWith(null, join(dir, "without.json"));
+  ok(without.seen?.relay === null && without.seen?.channel === "undefined", `without one, no flag and no channel (${JSON.stringify(without.seen)})`);
+
+  // The relay the coordinator opens itself, from its environment, to a real broker: the planted child's ask counted there.
+  const reg = parseRegistry(`broker:\n  warm_s: 0\nservers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\n    reserve: 0\nbrains:\n  b:\n    key: "${hashKey("slot_k")}"\n`).registry!;
+  const broker = startBroker(reg, { port: 0, log: () => {} });
+  try {
+    const out = join(dir, "real.json");
+    const c = coordinate({
+      env: { PATH: process.env.PATH ?? "", PROBE_OUT: out, OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${broker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k" }, sql: null, asOwnUsers: false,
+      children: [{ ...CHILDREN["board-sync"], script: probe, args: () => [] }], writer: { out: () => {}, err: () => {} },
+    });
+    let counted = false;
+    for (let i = 0; i < 100 && !counted; i++) { await Bun.sleep(50); counted = broker.snapshot()["o/m"]?.background === 1; }
+    c.stop("SIGTERM");
+    await Promise.race([c.done, Bun.sleep(5000)]);
+    let gone = false;
+    for (let i = 0; i < 40 && !gone; i++) { await Bun.sleep(50); gone = !("o/m" in broker.snapshot()); }
+    ok(counted && gone, `the coordinator opens the relay from OB1_SLOT_BROKER_URL and _KEY: its pass's ask is granted at the broker, and given back when the pass ends (${counted}, ${gone})`);
+  } finally { await broker.stop(); }
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------------------
