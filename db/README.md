@@ -5613,27 +5613,35 @@ on a stub of its own (SMD-3392).
 ### `backup.ts`
 
 ```bash
-bun backup.ts --url postgres://…                      # ./backup/<table>-YYYY-MM-DD.json
-bun backup.ts --url … --out /srv/brain-backups         # another directory
-#   exits 0 written · 1 not written (the database's reason; nothing renamed into place) · 2 usage or the URL
+bun backup.ts --url postgres://… --out /srv/brain-backups   # <out>/<table>-YYYY-MM-DD.json
+bun backup.ts --url …                                       # ./backup under the working directory (ignored by git here and at the root)
+#   --statement-timeout SECONDS (60; 0: none) — per page; the count(*)s run unbounded
+#   exits 0 written · 1 not written (the table and the reason; nothing renamed into place), or a rename failed (the files it replaced named) · 2 usage, the URL, or the connection reached another database than the URL names (PGDATABASE)
 ```
 
 The brain's `thoughts` and its entity graph (`ob1_entities`,
-`thought_entities`, `ob1_entity_edges`) as one JSON array per table, read in
-one REPEATABLE READ, READ ONLY transaction, so the four files agree. Each row is
-Postgres's own `to_jsonb(row)`: timestamps keep their microseconds and the
-vector its text, and `jsonb_populate_record` reads a row back into the same
-values. Pages of 1,000 follow each table's primary key, and each table's rows
-are compared with its `count(*)` in the same snapshot. Every file is written
-to a `.tmp` sibling and renamed only once all four are, so a failed run leaves
-the directory as it was. SELECT on the four tables is enough.
+`thought_entities`, `ob1_entity_edges`) as one JSON array per table, and the
+companion tables `entities`, `edges`, `ingestion_jobs` and `ingestion_items`
+when the brain has them, read in one REPEATABLE READ, READ ONLY transaction,
+so the files agree. Each row is Postgres's own `to_jsonb(row)`: timestamps keep
+their microseconds and the vector its text, and `jsonb_populate_record` reads a
+row back into the same values. Pages of 1,000 follow each table's primary key,
+and each table's rows are compared with its `count(*)` in the same snapshot.
+Every file is written new to a `.<pid>.tmp` of its own (never through an
+existing path) and renamed only once all are, so a failed run leaves the
+directory as it was, and removes it again if it made it; SIGINT and SIGTERM
+remove the run's files too. SELECT on the tables is enough. A page is held in
+memory whole, and the snapshot holds back vacuum's horizon for the run's
+length, as pg_dump's does.
 
 It is the `db/` home of `recipes/brain-backup`'s export (SMD-2144), which
 leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
 `pg_dump` is (`deploy/README.md`, the `postgres` service row). test-live
-[50] holds the round trip, the one snapshot under a write between tables,
-the all-or-nothing rename under a role that may not read one table, and the
-refusals.
+[50] holds the round trip, a companion table present and the others named
+absent, a page of three across composite keys, an empty table, the one
+snapshot under a write between tables, the refusals of a role that may not
+read a table, of a planted path and of another database, a failed rename, and
+the directory a failed run made removed.
 
 ## Extensions
 

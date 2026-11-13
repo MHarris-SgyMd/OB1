@@ -37,7 +37,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MIGRATE_LOCK, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, grantStatements, parseSetConfig, ROLE_GRANTS, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32216,12 +32216,13 @@ if (want("49")) {
 }
 
 if (want("50")) {
-  console.log("\n[50] db/backup.ts on a real Postgres: the four tables from one snapshot, every row once past a page, each read back unchanged; a table the role may not read fails the run with nothing written and an earlier backup of the date left as it was; SELECT on the four is enough (SMD-3318)");
+  console.log("\n[50] db/backup.ts on a real Postgres: the core's four tables and a companion table present, from one snapshot, every row once past a page, each read back unchanged; a table the role may not read, a planted .tmp or a failed connection writes nothing and leaves an earlier backup of the date as it was; a rename that fails says what it replaced; another database than the URL's is refused (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
     // The retired recipe's export (recipes/brain-backup, [26] until SMD-3318) as the db/ script: driven as deployed — `bun
     // db/backup.ts` with DATABASE_URL alone — and in process for what a spawn cannot reach, a page of two rows and a
-    // write between tables. The planted rows are the truth each file is held to, in Postgres: every row of the file is
+    // write between tables. A companion table (schemas/entity-extraction's `entities`, in a shape of its own here) is
+    // made when the database lacks one, and dropped after. The planted rows are the truth each file is held to, in Postgres: every row of the file is
     // a row of the table, none twice, as many as the table has, and each reads back through jsonb_populate_record into
     // the same JSON — a timestamp's microseconds and a vector included.
     const sql = new SQL({ url: URL_, max: 2 });
@@ -32230,6 +32231,7 @@ if (want("50")) {
     const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
     const backup = (dir: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(HERE, "backup.ts"), "--out", dir, ...flags], { cwd: scratch, env: env(extra) });
     const today = () => new Date().toISOString().slice(0, 10);
+    const modeOf = (f: string) => (statSync(f).mode & 0o777).toString(8);
     /** The file `table` of `dir` against the table: its rows, those not in the table, those twice, those changed by a read back; null with no file. */
     const held = async (dir: string, table: string, date: string) => {
       const f = join(dir, `${table}-${date}.json`);
@@ -32249,9 +32251,22 @@ if (want("50")) {
     const brief = (h: Awaited<ReturnType<typeof held>>) => (h === null ? "no file" : h.unread !== "" ? `not rows: ${h.unread}` : `${h.rows}/${h.n}, ${h.strays} stray, ${h.twice} twice, ${h.changed} changed`);
     const PROBE_ROLE = "ob1_live_backup_probe";
     const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
+    // A companion table this run makes, and so drops; one the database already has is left alone.
+    let madeEntities = false;
     try {
       await sql`DELETE FROM thoughts`;
       await sql`DELETE FROM ob1_entities`;
+      const [{ hasEntities }] = (await sql`SELECT to_regclass('entities') IS NOT NULL AS "hasEntities"`) as { hasEntities: boolean }[];
+      if (!hasEntities) {
+        await sql`CREATE TABLE entities (id bigserial PRIMARY KEY, canonical_name text NOT NULL)`;
+        madeEntities = true;
+      }
+      await sql`DELETE FROM entities`;
+      await sql`INSERT INTO entities (canonical_name) VALUES ('Ada'), ('Bob'), ('Graphs')`;
+      // Every table the runs below write: the core's four and the companion made above; the other companions absent.
+      const PRESENT = BACKUP_TABLES.filter((t) => !t.optional || t.name === "entities");
+      const absent = await sql`SELECT count(*)::int AS n FROM unnest(ARRAY['edges', 'ingestion_jobs', 'ingestion_items']) t WHERE to_regclass(t) IS NOT NULL`;
+      assert((absent[0] as { n: number }).n === 0, `the other companion tables are not on this database (${(absent[0] as { n: number }).n} are)`);
       // 1,001 thoughts, one past the CLI's page; one at a microsecond with a vector. Three entities; two thoughts'
       // mentions and edges, so a page of two splits rows that share a thought.
       await sql.unsafe(`INSERT INTO thoughts (content, metadata) SELECT '[50] row ' || i, jsonb_build_object('i', i) FROM generate_series(1, 1000) i`);
@@ -32271,21 +32286,26 @@ if (want("50")) {
       const cli = await backup(cliDir, { DATABASE_URL: URL_ });
       dates.add(today());
       const date = [...dates].find((d) => existsSync(join(cliDir, `thoughts-${d}.json`))) ?? today();
-      const cliFiles = await Promise.all(BACKUP_TABLES.map((t) => held(cliDir, t.name, date)));
-      assert(cli.code === 0 && /thoughts: 1001 row\(s\)/.test(cli.stdout) && /ob1_entity_edges: 12 row\(s\)/.test(cli.stdout) && /Done: 4 table\(s\) from one snapshot/.test(cli.stdout) && cliFiles.every(exact)
-             && readdirSync(cliDir).sort().join(" ") === BACKUP_TABLES.map((t) => `${t.name}-${date}.json`).sort().join(" "),
-        `bun db/backup.ts, DATABASE_URL alone: exit 0, the four files and nothing else, each the table's rows once and read back unchanged, 1,001 thoughts past the 1,000-row page (exit ${cli.code}: ${cliFiles.map(brief).join("; ")}; ${cli.stderr.split("\n")[0]})`);
+      const cliFiles = await Promise.all(PRESENT.map((t) => held(cliDir, t.name, date)));
+      const listed = existsSync(cliDir) ? readdirSync(cliDir).sort().join(" ") : "no directory";
+      assert(cli.code === 0 && /^Brain backup — \d{4}-\d\d-\d\d, database [^,]+, to /m.test(cli.stdout) && /thoughts: 1001 row\(s\)/.test(cli.stdout) && /ob1_entity_edges: 12 row\(s\)/.test(cli.stdout) && /entities: 3 row\(s\)/.test(cli.stdout)
+             && /Done: 5 table\(s\) from one snapshot, in .*\. Not on this brain: edges, ingestion_jobs, ingestion_items\./.test(cli.stdout) && cliFiles.every(exact)
+             && listed === PRESENT.map((t) => `${t.name}-${date}.json`).sort().join(" ") && modeOf(cliDir) === "700" && PRESENT.every((t) => modeOf(join(cliDir, `${t.name}-${date}.json`)) === "600"),
+        `bun db/backup.ts, DATABASE_URL alone: exit 0, the core's four files and the companion's, each the table's rows once and read back unchanged, 1,001 thoughts past the 1,000-row page, the absent companions named, the directory 0700 and the files 0600 (exit ${cli.code}: ${cliFiles.map(brief).join("; ")}; ${listed}; ${cli.stderr.split("\n")[0]})`);
       assert(/"created_at": "2026-01-0[12]T\d\d:\d4:05\.123456[+-]\d\d:\d\d"/.test(cliFiles[0]?.text ?? "") && cliFiles[0]?.text.includes('"n": 1.10') === true && /"embedding": "\[0\.12345679,/.test(cliFiles[0]?.text ?? ""),
         `…the rows are Postgres's JSON: the timestamp keeps its microseconds, the numeric its trailing zero, the vector its text (${/"created_at": "2026-01-02[^"]*"/.exec(cliFiles[0]?.text ?? "")?.[0] ?? "no precise row"})`);
 
-      // In process, two rows a page, a thought and its mention written by another session after the thoughts file: the
-      // snapshot leaves both out, so no mention names a thought the thoughts file lacks.
+      // In process, three rows a page — across each pair of edges that share a thought and two entities, so a keyset
+      // missing a key column loses a row — and a thought and its mention written by another session after the thoughts
+      // file: the snapshot leaves both out, so no mention names a thought the thoughts file lacks.
       const pageDir = join(scratch, "paged");
       let late = "";
       const lines: string[] = [];
+      const pagesOf: Record<string, number> = {};
       const paged = await runBackup({
-        sql, out: pageDir, date: "2026-01-02", pageSize: 2, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) },
+        sql, out: pageDir, date: "2026-01-02", pageSize: 3, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) },
         afterTable: async (t) => {
+          pagesOf[t.table] = t.pages;
           if (t.table !== "thoughts") return;
           const other = new SQL({ url: URL_, max: 1 });
           try {
@@ -32298,11 +32318,12 @@ if (want("50")) {
       });
       // A run that failed before the hook wrote nothing to take back.
       if (late !== "") await sql`DELETE FROM thoughts WHERE id = ${late}::uuid`;
-      const pagedFiles = await Promise.all(BACKUP_TABLES.map((t) => held(pageDir, t.name, "2026-01-02")));
+      const pagedFiles = await Promise.all(PRESENT.map((t) => held(pageDir, t.name, "2026-01-02")));
       const fileThoughts = new Set((JSON.parse(pagedFiles[0]?.text ?? "[]") as { id: string }[]).map((r) => r.id));
       const mentions = JSON.parse(pagedFiles[2]?.text ?? "[]") as { thought_id: string }[];
-      assert(paged === 0 && late !== "" && pagedFiles.every(exact) && mentions.length === 5 && mentions.every((m) => fileThoughts.has(m.thought_id)),
-        `…two rows a page, a thought and its mention written by another session between the tables: exit 0, each file every row once and unchanged, the late mention left out with its thought — one snapshot (exit ${paged}: ${pagedFiles.map(brief).join("; ")}; ${mentions.length} mention(s); ${lines.find((l) => /FAILED/.test(l)) ?? ""})`);
+      assert(paged === 0 && late !== "" && pagedFiles.every(exact) && mentions.length === 5 && mentions.every((m) => fileThoughts.has(m.thought_id))
+             && pagesOf.thought_entities === 2 && pagesOf.ob1_entity_edges === 5,
+        `…three rows a page, a thought and its mention written by another session between the tables: exit 0, each file every row once and unchanged, the mentions over 2 pages and the edges over 5, the late mention left out with its thought — one snapshot (exit ${paged}: ${pagedFiles.map(brief).join("; ")}; ${mentions.length} mention(s); pages ${JSON.stringify(pagesOf)}; ${lines.find((l) => /FAILED/.test(l)) ?? ""})`);
 
       // A table the role may not read: exit 1 naming it, nothing written, the date's earlier file untouched; with SELECT
       // on the four, the same role's run succeeds. [26]'s guards: a role needs CREATE ROLE and credentials to swap.
@@ -32311,7 +32332,8 @@ if (want("50")) {
       if (probeUrl === URL_ || !mayCreate) {
         const why = probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE";
         skip("…a role with SELECT on thoughts alone: exit 1, nothing written", why);
-        skip("…SELECT on the four tables is enough", why);
+        skip("…the same refusal into a directory the run made: removed again", why);
+        skip("…SELECT on the tables is enough", why);
       } else {
         await dropProbe();
         await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
@@ -32320,25 +32342,69 @@ if (want("50")) {
         const earlier = join(deniedDir, `thoughts-${date}.json`);
         writeFileSync(earlier, "[\"an earlier backup\"]\n");
         const denied = await backup(deniedDir, { DATABASE_URL: probeUrl });
-        assert(denied.code === 1 && /backup FAILED — ob1_entities: 42501 permission denied for table ob1_entities\. Nothing was written/.test(denied.stderr)
-               && readFileSync(earlier, "utf8") === "[\"an earlier backup\"]\n" && readdirSync(deniedDir).join(" ") === `thoughts-${date}.json`,
+        assert(denied.code === 1 && /backup FAILED — ob1_entities: 42501 permission denied for table ob1_entities\. Nothing was written: .* is as it was/.test(denied.stderr)
+               && existsSync(earlier) && readFileSync(earlier, "utf8") === "[\"an earlier backup\"]\n" && readdirSync(deniedDir).join(" ") === `thoughts-${date}.json`,
           `…a role with SELECT on thoughts alone: exit 1 naming 42501 on ob1_entities, no file and no .tmp left, the date's earlier thoughts file as it was (exit ${denied.code}: ${denied.stderr.split("\n")[0]}; ${readdirSync(deniedDir).join(" ")})`);
-        await sql.unsafe(`GRANT SELECT ON ob1_entities, thought_entities, ob1_entity_edges TO ${PROBE_ROLE}`);
+        // Into a directory the run makes: removed again, so a failed run leaves no trace.
+        const freshDir = join(scratch, "denied-fresh");
+        const deniedFresh = await backup(freshDir, { DATABASE_URL: probeUrl });
+        assert(deniedFresh.code === 1 && /Nothing was written: .*denied-fresh, which this run made, is removed\./.test(deniedFresh.stderr) && !existsSync(freshDir),
+          `…the same refusal into a directory the run made: the directory removed again (exit ${deniedFresh.code}: ${deniedFresh.stderr.split("\n")[0].slice(-80)}; ${existsSync(freshDir) ? "still there" : "gone"})`);
+        await sql.unsafe(`GRANT SELECT ON ob1_entities, thought_entities, ob1_entity_edges, entities TO ${PROBE_ROLE}`);
         const granted = await backup(deniedDir, { DATABASE_URL: probeUrl });
-        const grantedFiles = await Promise.all(BACKUP_TABLES.map((t) => held(deniedDir, t.name, date)));
+        const grantedFiles = await Promise.all(PRESENT.map((t) => held(deniedDir, t.name, date)));
         assert(granted.code === 0 && grantedFiles.every(exact),
-          `…SELECT on the four tables is enough: the same role's run exits 0, the earlier file replaced by the table's rows (exit ${granted.code}: ${grantedFiles.map(brief).join("; ")}; ${granted.stderr.split("\n")[0]})`);
+          `…SELECT on the tables is enough: the same role's run exits 0, the earlier file replaced by the table's rows (exit ${granted.code}: ${grantedFiles.map(brief).join("; ")}; ${granted.stderr.split("\n")[0]})`);
       }
 
-      // connect.ts's door: no URL is exit 2; a URL that is not Postgres's is exit 2 and prints none of itself.
+      // An empty table is the JSON `[]`: a brain that never ran extraction has three.
+      await sql`DELETE FROM ob1_entity_edges`;
+      const emptyDir = join(scratch, "empty");
+      const emptyRun = await runBackup({ sql, out: emptyDir, date: "2026-01-03", writer: { out: () => {}, err: () => {} } });
+      const emptyEdges = existsSync(join(emptyDir, "ob1_entity_edges-2026-01-03.json")) ? readFileSync(join(emptyDir, "ob1_entity_edges-2026-01-03.json"), "utf8") : "no file";
+      assert(emptyRun === 0 && emptyEdges === "[]\n" && exact(await held(emptyDir, "ob1_entity_edges", "2026-01-03")),
+        `…an empty table: its file is the JSON [] (exit ${emptyRun}: ${JSON.stringify(emptyEdges.slice(0, 20))})`);
+
+      // A path planted where this run's file goes — a symlink to a file elsewhere — is never written through: the run
+      // fails naming it, the target as it was, and the planted link left (not the run's to remove).
+      const plantDir = join(scratch, "planted");
+      mkdirSync(plantDir);
+      const victim = join(scratch, "victim.txt");
+      writeFileSync(victim, "not a backup\n");
+      symlinkSync(victim, join(plantDir, `thoughts-2026-01-04.json.${process.pid}.tmp`));
+      const plantLines: string[] = [];
+      const planted2 = await runBackup({ sql, out: plantDir, date: "2026-01-04", writer: { out: () => {}, err: (l) => plantLines.push(l) } });
+      assert(planted2 === 1 && readFileSync(victim, "utf8") === "not a backup\n" && /backup FAILED — thoughts: .*EEXIST/.test(plantLines.join(" ")) && readdirSync(plantDir).join(" ") === `thoughts-2026-01-04.json.${process.pid}.tmp`,
+        `…a symlink planted at the run's own file: exit 1 naming thoughts, the target unwritten, nothing else left (exit ${planted2}: ${plantLines[0]?.slice(0, 120)}; ${readdirSync(plantDir).join(" ")})`);
+
+      // A rename that fails — a directory where thought_entities' file goes — is said, naming the files it already
+      // replaced; the run's other files are removed.
+      const renameDir = join(scratch, "rename");
+      mkdirSync(join(renameDir, "thought_entities-2026-01-05.json"), { recursive: true });
+      const renameLines: string[] = [];
+      const renamed = await runBackup({ sql, out: renameDir, date: "2026-01-05", writer: { out: () => {}, err: (l) => renameLines.push(l) } });
+      const leftTmp = readdirSync(renameDir).filter((f) => f.endsWith(".tmp"));
+      assert(renamed === 1 && /backup FAILED renaming .*thought_entities-2026-01-05\.json into place: .*Already replaced: .*thoughts-2026-01-05\.json, .*ob1_entities-2026-01-05\.json; this run's other files are removed/.test(renameLines.join(" ")) && leftTmp.length === 0,
+        `…a rename that fails: exit 1 naming the file and the two already replaced, no .tmp left (exit ${renamed}: ${renameLines[0]?.slice(0, 160)}; ${leftTmp.join(" ")})`);
+
+      // Another database than the URL's — PGDATABASE beats it in Bun's client — is refused before any directory is made.
+      const otherDir = join(scratch, "other");
+      const other = await backup(otherDir, { DATABASE_URL: URL_, PGDATABASE: "template1" });
+      assert(other.code === 2 && /backup refused — the connection reached database "template1", not .* PGDATABASE is exported/.test(other.stderr) && !existsSync(otherDir),
+        `…PGDATABASE naming another database: exit 2 naming both, no directory made (exit ${other.code}: ${other.stderr.split("\n")[0]})`);
+
+      // connect.ts's door: no URL is exit 2; a URL that is not Postgres's is exit 2 and prints none of itself; a
+      // database that does not answer is exit 1, the directory not made.
       const noUrl = await backup(join(scratch, "none"), {});
       const mysql = await backup(join(scratch, "none"), {}, "--url", "mysql://u:pw-not-real@127.0.0.1:5432/x");
-      assert(noUrl.code === 2 && /No database URL/.test(noUrl.stderr) && mysql.code === 2 && !mysql.out.includes("pw-not-real") && !existsSync(join(scratch, "none")),
-        `…no URL, and a URL that is not Postgres's: exit 2 before any directory is made, the password never printed (${noUrl.code}: ${noUrl.stderr.split("\n")[0]}; ${mysql.code}: ${mysql.stderr.split("\n")[0]})`);
+      const closed = await backup(join(scratch, "none"), {}, "--url", "postgres://u:pw-not-real@127.0.0.1:1/x");
+      assert(noUrl.code === 2 && /No database URL/.test(noUrl.stderr) && mysql.code === 2 && !mysql.out.includes("pw-not-real") && closed.code === 1 && /backup FAILED/.test(closed.stderr) && !closed.out.includes("pw-not-real") && !existsSync(join(scratch, "none")),
+        `…no URL, a URL that is not Postgres's, a port that does not answer: exit 2, 2 and 1, no directory made, the password never printed (${noUrl.code}: ${noUrl.stderr.split("\n")[0]}; ${mysql.code}: ${mysql.stderr.split("\n")[0]}; ${closed.code}: ${closed.stderr.split("\n")[0]})`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
       await sql`DELETE FROM thoughts`;
       await sql`DELETE FROM ob1_entities`;
+      if (madeEntities) await sql`DROP TABLE IF EXISTS entities`;
       await dropProbe();
       await sql.close();
     }

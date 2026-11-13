@@ -61,3 +61,9 @@ evals/auth/.poc/
 # the shell-hazard check on the machine that pulled it.
 recipes/*/data/
 /data/atomic-memories/
+
+# db/backup.ts's default output (SMD-3318): ./backup under the working
+# directory, so the repo root's or db/'s when run from a checkout. Every
+# thought's text — never to be committed.
+/backup/
+/db/backup/
