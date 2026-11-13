@@ -1,69 +1,57 @@
 # Brain Backup and Export
 
-> **In Daemonic Brain (SMD-2144).** `backup-brain.mjs` reads the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2144 it reached the brain as a PostgREST client — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway Daemonic Brain's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. The export is the portable, readable form of the brain, not its restore path: **`pg_dump` of the stack's database is the whole-brain backup** — `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` (`deploy/README.md`, the `postgres` service row; its data-migration note is `pg_dump --data-only` plus a re-embed if the model changes) — and it has Daemonic Brain's own tables (`thought_audit`, `thought_sources`, `thought_facets`, `ob1_entities`, …), which this export does not.
+> **In Daemonic Brain (SMD-3318) — moved to `db/`.** The export now lives in
+> [`db/backup.ts`](../../db/backup.ts), a `db/` script on Bun's Postgres
+> client. The original `backup-brain.mjs` reached the brain as a PostgREST
+> client, then through `compat/supabase-sql` (SMD-2144), which retires
+> (SMD-3216). This page is kept as a pointer; the script is gone.
 
 <div align="center">
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
-**Created by [@alanshurafa](https://github.com/alanshurafa)**
+**Original recipe by [@alanshurafa](https://github.com/alanshurafa)** — the
+dated JSON export it introduced is kept in the `db/` script.
 
 </div>
 
-Export the brain's tables to local JSON files. The script pages each table through `compat/supabase-sql` (1 000 rows per query), writes each table to a dated JSON file, and prints a summary.
+## Where it went
 
-## Prerequisites
+Run the export from a checkout, with the brain's connection string:
 
-- A Daemonic Brain setup: the brain's Postgres, reachable from where the script runs (`deploy/README.md`: a checkout reaches the stack's database with `-f deploy/compose.host-ports.yaml`)
-- [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
-- A `.env.local` file in the directory you run from (or an exported environment variable) containing:
-  - `SUPABASE_URL` -- the brain's `postgres://` connection string (`SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored: the credentials live in the URL)
+```bash
+bun db/backup.ts --url "$DATABASE_URL"                # ./backup/<table>-YYYY-MM-DD.json
+bun db/backup.ts --url "$DATABASE_URL" --out ~/brain-backups
+```
 
-## Steps
+It writes one JSON array per table, named `<table>-<UTC date>.json`, as the
+recipe did. What changed:
 
-1. In your checkout, go to the recipe's directory and copy or create a `.env.local` file there with the connection string:
+- **The tables are the core's:** `thoughts`, `ob1_entities`, `thought_entities`
+  and `ob1_entity_edges`, which every brain has. The recipe's `entities` and
+  `edges` were a companion schema's, which no Daemonic Brain has, and its
+  `ingestion_jobs` and `ingestion_items` were the retired smart-ingest schema's.
+- **One snapshot:** the four tables are read in one read-only transaction, so
+  the files agree with each other.
+- **Postgres's own JSON:** each row is written as `to_jsonb(row)`. Timestamps
+  keep their microseconds and offset, numerics their digits, and the vector its
+  text. The recipe's rows went through JavaScript, which cut timestamps to
+  milliseconds.
+- **All or nothing:** a run that fails writes no file and leaves an earlier
+  backup of the same date as it was. It exits 1 with the database's reason.
+- **A read-only role is enough:** SELECT on the four tables
+  (`GRANT SELECT ON thoughts, ob1_entities, thought_entities, ob1_entity_edges TO <role>`).
 
-   ```bash
-   cd recipes/brain-backup
-   ```
+## The whole brain
 
-   ```
-   SUPABASE_URL=postgres://user:password@host:5432/openbrain
-   ```
+The export is the brain's portable, readable form, not its restore path.
+**`pg_dump` of the stack's database is the whole-brain backup**:
 
-2. Run the backup script from that directory:
+```bash
+compose exec -T postgres pg_dump -U postgres openbrain > dump.sql
+```
 
-   ```bash
-   bun backup-brain.mjs
-   ```
-
-   The `.env.local` it reads and the `backup/` folder it writes are the current directory's, so a scheduler runs it with that directory as its working directory.
-
-3. The script creates a `backup/` folder and writes one JSON file per table, named `<table>-YYYY-MM-DD.json`.
-
-4. Review the printed summary to confirm all tables exported successfully. A table that failed shows `ERROR` in the summary and the run exits 1, so a scheduler sees it; the other tables' files are still written.
-
-## Expected Result
-
-After running the script you will have a `backup/` directory containing dated JSON exports of every table the script knows that is present in your brain.
-
-- `thoughts` is always backed up (required).
-- Optional companion tables — `entities`, `edges`, `thought_entities`, `ingestion_jobs`, `ingestion_items` — are backed up only if they exist. They ship with the companion schemas: `schemas/entity-extraction` for the first three (on a migrated brain `thought_entities` is migration 016's, and is exported as it is) and the retired `schemas/smart-ingest` for the last two, which a brain that applied it keeps until its operator drops them (the [smart-ingest plugin](../../plugins/smart-ingest/)'s tables are its own schema's, `plugin_smart_ingest`, which this export does not read; `pg_dump` takes them). A brain without them will see `skipped (table not present)` for those, which is expected.
-
-The console output shows row counts and file sizes for each table, making it easy to verify the backup is complete.
-
-## Tips
-
-- Schedule the script with cron or Task Scheduler for automatic daily backups.
-- Commit the `backup/` directory to a private repo for versioned history.
-- The script streams rows to disk, so it handles large tables without running out of memory.
-- Timestamps come out as ISO strings — `Z` and milliseconds, where PostgREST spelled `+00:00` and microseconds; both parse to the same instant — and the `embedding` column as its vector text, as PostgREST's JSON had it. `bigint` and `numeric` columns — the entity tables' ids, `quality_score`, `confidence` — come out as JSON strings (`"1"`), where PostgREST gave numbers; tooling that read the old export as numbers should expect strings here.
-
-## Troubleshooting
-
-- **`expected a postgres:// connection URL`** -- `SUPABASE_URL` still holds a Supabase project URL. In Daemonic Brain it is the brain's `postgres://` connection string (`SETUP.md`); the script refuses before any query.
-- **`Postgres error 3D000 on thoughts: database "…" does not exist`** -- the URL names a database the server does not have; every table shows the same error, `0/6`, exit 1. Fix the path in the connection string.
-- **`Required table "thoughts" not found in the database`** -- the connection reached a database without the Daemonic Brain schema: a brain whose migrations have not run (`bun db/migrate.ts`), or the server's default `postgres` database named by mistake. Only Postgres's "relation does not exist" (`42P01`) is treated as "table not present"; everything else is surfaced so you can diagnose it.
-- **`Postgres error 42501 on thoughts: permission denied for table thoughts`** -- the connection's role has no SELECT on the table. Connect as the brain's owner, or grant the role with `bun db/migrate.ts --grant <role>` (`db/README.md`) — that is the capturing role's grant, SELECT and the writes on every table the export reads but the old smart-ingest pair; a read-only credential is a hand `GRANT SELECT ON thoughts, entities, edges, thought_entities, ingestion_jobs, ingestion_items TO <role>` instead.
-- **`skipped (table not present)` for optional tables** -- expected on a brain without the companion schemas (`schemas/entity-extraction`, and the retired `schemas/smart-ingest`).
-- **A table shows `ERROR … timed out after 60000 ms`** -- set `FETCH_TIMEOUT_MS` to a larger value (milliseconds) if the database is slow or a table very large. The page is abandoned, not cancelled: the other tables still export, the run exits 1, and it ends within a few seconds of its summary rather than waiting for the abandoned query.
+Here `compose` is the stack's compose command (`deploy/README.md`, the
+`postgres` service row). The dump has every table the export
+leaves out: `thought_audit`, the sources and facets, the claims, the plugins'
+schemas and the rest.

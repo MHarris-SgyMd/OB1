@@ -5608,6 +5608,33 @@ the pass before it began, and a stop is a stop however a pass then ends, unless 
 test-live [38] drives it against a stub model, and [38r] its re-embed first
 on a stub of its own (SMD-3392).
 
+## A JSON export of the brain (SMD-3318)
+
+### `backup.ts`
+
+```bash
+bun backup.ts --url postgres://…                      # ./backup/<table>-YYYY-MM-DD.json
+bun backup.ts --url … --out /srv/brain-backups         # another directory
+#   exits 0 written · 1 not written (the database's reason; nothing renamed into place) · 2 usage or the URL
+```
+
+The brain's `thoughts` and its entity graph (`ob1_entities`,
+`thought_entities`, `ob1_entity_edges`) as one JSON array per table, read in
+one REPEATABLE READ, READ ONLY transaction, so the four files agree. Each row is
+Postgres's own `to_jsonb(row)`: timestamps keep their microseconds and the
+vector its text, and `jsonb_populate_record` reads a row back into the same
+values. Pages of 1,000 follow each table's primary key, and each table's rows
+are compared with its `count(*)` in the same snapshot. Every file is written
+to a `.tmp` sibling and renamed only once all four are, so a failed run leaves
+the directory as it was. SELECT on the four tables is enough.
+
+It is the `db/` home of `recipes/brain-backup`'s export (SMD-2144), which
+leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
+`pg_dump` is (`deploy/README.md`, the `postgres` service row). test-live
+[50] holds the round trip, the one snapshot under a write between tables,
+the all-or-nothing rename under a role that may not read one table, and the
+refusals.
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.

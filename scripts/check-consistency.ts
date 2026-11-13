@@ -294,7 +294,8 @@
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
- *      moved onto the shim (SMD-2144, SMD-2139), weekly-digest retired
+ *      moved onto the shim (SMD-2144, SMD-2139; brain-backup's since to
+ *      db/backup.ts, SMD-3318), weekly-digest retired
  *      for the db/ verb db/weekly-digest.ts (SMD-2239), brain-smoke-test
  *      retired into deploy/smoke.sh (SMD-2103), and ob-graph's
  *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
@@ -6607,8 +6608,9 @@ const REST_CLIENT = "a script still to port; it becomes a REST-core client throu
  * recipe's README stays a pointer); and brain-smoke-test's smoke-all.js (SMD-2103), retired with its
  * recipe once deploy/smoke.sh took the wrong-key refusal, the one check of its that applied here and
  * that smoke.sh lacked; and ob-graph's smoke-graph-rpcs.mjs, with its recipe (SMD-2920; SMD-2146
- * canceled). Five more are on the shim: brain-backup's
- * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
+ * canceled). Five more went onto the shim: brain-backup's
+ * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land — the first of them
+ * since moved again, to db/backup.ts (SMD-3318) — and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
  * the first writers.
  */
@@ -6636,7 +6638,8 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
   // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
   // templates, is read to cover it. Its
-  // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
+  // two read-only siblings, brain-backup and lint-sweep, went onto the shim (SMD-2144, rescoped 2026-09-26);
+  // brain-backup's export is db/backup.ts now (SMD-3318).
   ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
 ]);
 function checkPostgrestClients() {
@@ -11771,7 +11774,6 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["recipes/atomizer/re-atomize-gmail-thought.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/authorship-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/authorship-edges/backfill-authorship.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
-  ["recipes/brain-backup/backup-brain.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/chatgpt-conversation-import/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/chatgpt-conversation-import/README.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/editorial-policy/README.md", { fork: { why: KEPT.UPSTREAM, lines: 1 }, name: { why: KEPT.UPSTREAM, lines: 2 } }],
