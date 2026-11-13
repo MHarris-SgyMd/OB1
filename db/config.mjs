@@ -2453,8 +2453,8 @@ export const ROLE_GRANTS = Object.freeze({
     // none of it (SMD-2267).
     Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "071" }),
     // 139's refusal on thoughts reads the ledger of forgotten texts on every
-    // capture and every edit of a text (SMD-1723): a role without it cannot
-    // write a thought once anything has been forgotten.
+    // capture and every edit of a text (SMD-1723): after 139 a role without
+    // it cannot write a thought at all, the ledger empty or not.
     Object.freeze({ table: "thought_forgotten", privileges: Object.freeze(["SELECT"]), since: "139" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its

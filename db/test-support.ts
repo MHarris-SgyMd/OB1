@@ -549,6 +549,8 @@ const FUNCTIONS = [
   "ob1_forgotten_guard()",
   "ob1_refuse_forgotten_text()",
   "ob1_forgetting_item(text)",
+  "ob1_forget_lock_key(uuid)",
+  "ob1_refuse_forgotten_origin()",
   "forget_thought(uuid, jsonb)",
 ];
 

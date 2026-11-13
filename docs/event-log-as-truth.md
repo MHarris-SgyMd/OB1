@@ -430,7 +430,11 @@ leaving the log to fight it:
   step 3 makes the log the input every rebuild folds from. SMD-1793 was
   canceled, its raw deletes gone with their servers, and SMD-1731 and
   SMD-1732 landed; SMD-1723's PR 1 built the redaction, migration 139.)
-- **Forgetting reaches the projections through the rebuild.** After the
+- **Forgetting reaches the projections through the rebuild.** (As built,
+  139: the rebuild runs before the row's delete and the amendment after it,
+  so the tombstone the delete writes is redacted with the rest; a thought
+  deleted before is forgotten without the rebuild, its snapshot rows taken
+  directly.) After the
   amendment and BEFORE the row delete (061's drop trigger leaves nothing to
   walk after it), `rebuild_derived(id, 'forget', input_gone => true,
   fingerprints)` (migration 063, SMD-1732) walks the lineage forward and

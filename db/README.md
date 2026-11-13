@@ -2510,7 +2510,9 @@ but the brain keeps what it said: every event in the log carries the text, and t
 entities, vectors, facets, page sections, priority statements, open items,
 deliverables and query log keep the text or the id. `forget_thought(id, actor)`
 removes the thought and all of these in one transaction, and returns what each
-store gave up. A thought another cites is refused `CITED`, as a delete is; the
+store gave up; a thought deleted first is forgotten from what remains. A capture
+of one of its texts, or an open item or priority statement naming it, waits for
+a running forget and is refused after (`OB005`, `OB007`). A thought another cites is refused `CITED`, as a delete is; the
 operator detaches first. Every event of it in `thought_audit` is redacted in place
 through the log's third named amendment, `redact`: each text becomes the marker
 `[forgotten]` and each metadata object `{"forgotten": true}`, while ids,
@@ -2518,9 +2520,10 @@ fingerprints, times and the actor stay. The amendment takes only a deleted
 thought's events under the forget's own setting, once. `thought_forgotten` records
 each forgetting, append-only; a capture or edit to a forgotten text is refused
 `OB005` unless `ob1.reinstate_forgotten` is on. A twin holding the same text keeps
-it and is named. Thoughts derived from the forgotten one, and pages re-rendered
-without a section built on it, are listed for a person to review: prose that
-absorbed the text can't be removed mechanically. Copies outside the brain (sleep
+it and is named. Thoughts derived from the forgotten one, and every page whose own log names it
+(its earlier renders, and a section once built on it whose revision keeps the
+earlier body), are listed for a person to review: prose that absorbed the text
+can't be removed mechanically. Copies outside the brain (sleep
 dumps, posted Linear comments, digest files, extraction dumps) are named, not
 reached. Each role that writes thoughts is granted SELECT on the ledger. The
 operation over REST and MCP is PR 2; the other brains, PR 3. Needs 016, 034, 055,
@@ -3030,7 +3033,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
-| | `thought_forgotten` (139) | `SELECT` — 139's refusal on `thoughts` reads the ledger of forgotten texts on every capture and every edit of a text (SMD-1723); 139 grants it to each role already writing thoughts |
+| | `thought_forgotten` (139) | `SELECT` — 139's refusal on `thoughts` reads the ledger of forgotten texts on every capture and every edit of a text (SMD-1723), so after 139 a role without it cannot write a thought at all; 139 grants it to each role already writing thoughts |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |

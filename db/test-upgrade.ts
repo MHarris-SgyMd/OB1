@@ -6565,7 +6565,7 @@ console.log("\n[20cc] Migration 138: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 137 forgotten, every event of it redacted with its actor kept, the text refused on its way back; a re-apply a no-op (SMD-1723)");
+console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text and an open item naming the thought wait, then are refused OB005 and OB007; a re-apply a no-op (SMD-1723)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6604,12 +6604,40 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   let back = "taken";
   try { await sql`INSERT INTO thoughts (content) VALUES (${SECRET})`; } catch (e) { back = String((e as { errno?: string }).errno ?? (e as { code?: string }).code); }
   assert(reads && ans.ok === true && ans.removed.audit_events === 3 && log.n === 3 && log.red === 3 && log.act === 3 && log.text === 0 && back === "OB005",
-    `applied: the writer reads the ledger; the thought from 137 forgotten, its capture, edit and tombstone redacted with their actor kept; the text refused OB005 (${reads} | ${JSON.stringify(log)} | ${back})`);
+    `applied: the writer reads the ledger; the thought from 138 forgotten, its capture, edit and tombstone redacted with their actor kept; the text refused OB005 (${reads} | ${JSON.stringify(log)} | ${back})`);
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_139_writer; DROP ROLE ob1_upgrade_139_writer`);
+
+  // Races, on two connections (review pass 1): while a forget of R runs, a capture of R's earlier text waits on the
+  // fingerprint lock the forget holds and an open item read from R waits on the forget's own lock; after the commit
+  // the capture is refused OB005 and the item OB007, nothing written.
+  const r = String((await sql`SELECT (upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    await tx`UPDATE thoughts SET content = ${"upgrade 139: the race's last text"}, content_fingerprint = content_fingerprint_of(${"upgrade 139: the race's last text"}) WHERE id = ${r}::uuid`;
+  });
+  const other = new SQL({ url: URL_, max: 2 });
+  const errOf = (e: unknown) => String((e as { errno?: string }).errno ?? (e as Error).message);
+  let capture: Promise<string> = Promise.resolve("not started"), opened: Promise<string> = Promise.resolve("not started");
+  const settled: string[] = [];
+  await sql.begin(async (tx) => {
+    await tx`SELECT forget_thought(${r}::uuid, (${ACT}::text)::jsonb)`;
+    capture = other`SELECT upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb) AS r`
+      .then(() => "taken", errOf).finally(() => settled.push("capture"));
+    opened = other`SELECT open_item('a race item', NULL, NULL, ${r}::uuid, NULL, false, (${ACT}::text)::jsonb) AS r`
+      .then((x) => JSON.stringify((x[0] as { r: unknown }).r), errOf).finally(() => settled.push("item"));
+    await new Promise((res) => setTimeout(res, 400));
+  });
+  const waitedThenRefused = settled.length === 0;
+  const [cap, item] = [await capture, await opened];
+  await other.close();
+  const leftR = (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE content LIKE 'upgrade 139: the race%') AS t,
+                                  (SELECT count(*)::int FROM open_item_events WHERE origin_thought_id = ${r}::uuid) AS i`)[0] as { t: number; i: number };
+  assert(waitedThenRefused && cap === "OB005" && item === "OB007" && leftR.t === 0 && leftR.i === 0,
+    `while the forget ran neither write settled; after it the capture of the earlier text was refused OB005 and the open item OB007, nothing written (${waitedThenRefused}; ${cap}; ${item}; ${JSON.stringify(leftR)})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
   const ledger = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten`)[0].c);
-  assert(ledger === 1 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
+  assert(ledger === 2 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
   await sql.close();
 }
 
