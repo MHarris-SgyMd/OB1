@@ -175,10 +175,11 @@
  *
  * Read-only against the live brain: the connection opens with
  * default_transaction_read_only on. No model is called. Run from a one-off
- * container on the brain's data network, DATABASE_URL in a 0600 env file
+ * container on the brain's data network, <project>_data
+ * (open-brain_data for the default project), DATABASE_URL in a 0600 env file
  * (never on argv):
  *
- *   podman run --rm --network open-brain_data --env-file <0600 file> \
+ *   podman run --rm --network <project>_data --env-file <0600 file> \
  *     -v <worktree>:/repo:ro -v <out dir>:/out -w /repo/evals \
  *     oven/bun:1.4.3-alpine bun eval-stated-status.ts [flags]
  *

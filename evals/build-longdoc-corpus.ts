@@ -16,8 +16,10 @@
  * OB1_LONGDOC_OUT (default /repo/evals/longdoc-corpus.json — *-corpus.json is
  * gitignored; the grades fixture that references it stays ids-only). Only the
  * corpus's ids + numbers ever enter the repo, via the later grades fixture.
+ * The container is on the brain's data network, <project>_data
+ * (open-brain_data for the default project):
  *
- *   podman run --rm --network open-brain_data --env-file deploy/.env \
+ *   podman run --rm --network <project>_data --env-file deploy/.env \
  *     -v <worktree>:/repo -w /repo oven/bun:1.4.3-alpine \
  *     sh -c 'export DATABASE_URL="postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain"; bun evals/build-longdoc-corpus.ts'
  */
