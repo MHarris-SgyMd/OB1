@@ -616,6 +616,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     clearTimeout(hung);
     provider?.stop(true);
     void relayStub.stop(true);
+    assert(relayed.frames.some((f) => f.slot === "bye"), "and says bye to it as it stops, so the coordinator keeps none of its calls (SMD-3379 PR 3b-2, review pass 2)");
     const said = (await childServed.stdout.rest()) + (await new Response(child.stderr).text()) + (await apiServed.stdout.rest()) + (await new Response(api.stderr).text());
     const menderLines = said.split("\n").filter((l) => /vector mender/.test(l));
     // Down for 11 s at a 1 s interval, about six ticks, and two menders: the outage said once by each at most, not per tick.

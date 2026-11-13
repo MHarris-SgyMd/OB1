@@ -766,7 +766,10 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   link.refuse(true);
   link.cut();
   const away = performance.now();
-  ok(await api.wait("run", "a4", 4000) && performance.now() - away >= 1500, "past the grace, the waiting call takes the api's own share", Math.round(performance.now() - away));
+  api.cmd({ cmd: "call", id: "a5" });
+  await sleep(1000);
+  ok(!api.saw("run", "a5") && !api.saw("run", "a4"), "within the grace, a new call waits for the next socket too");
+  ok(await api.wait("run", "a4", 4000) && performance.now() - away >= 1500 && await api.wait("run", "a5", 1000), "past the grace, the waiting calls take the api's own share", Math.round(performance.now() - away));
   ok(!pass1.saw("run", "p1") && pool(b).background === 1, "the api's calls still kept counted meanwhile", b.snapshot());
   ok(await pass1.wait("run", "p1", 6000) && performance.now() - away >= 4500 && await until(() => pool(b).live === 0 && relay.state().grants === 1 && relay.state().own === 0),
     "past the keeping, the coordinator gives back what the api held, and the pass's call takes the slot", { ms: Math.round(performance.now() - away), pool: pool(b), relay: relay.state() });
@@ -775,8 +778,8 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   ok(await api.wait("run", "a3", 800), "with no coordinator past the grace, an api call takes its own share at once", Math.round(performance.now() - at));
   link.refuse(false);
   ok(await until(() => listener.sockets() === 1, 5000), "the api dials again and the coordinator takes it");
-  ok(await until(() => pool(b).live === 1 && pool(b).background === 4 && relay.state().own === 4, 3000), "every api call still running counted again, beside the pass's: the live call, the granted one, the two on its own share", { pool: pool(b), relay: relay.state() });
-  for (const id of ["a2", "a3", "a4", "l2"]) api.cmd({ cmd: "end", id });
+  ok(await until(() => pool(b).live === 1 && pool(b).background === 5 && relay.state().own === 5, 3000), "every api call still running counted again, beside the pass's: the live call, the granted one, the three on its own share", { pool: pool(b), relay: relay.state() });
+  for (const id of ["a2", "a3", "a4", "a5", "l2"]) api.cmd({ cmd: "end", id });
   ok(await api.wait("ended", "a4") && await api.wait("ended", "a3") && await api.wait("ended", "l2") && await until(() => pool(b).live === 0 && pool(b).background === 1 && relay.state().own === 0), "and each done as it ends", { pool: pool(b), relay: relay.state() });
   pass1.cmd({ cmd: "end", id: "p1" });
   await pass1.wait("ended", "p1");
@@ -976,6 +979,44 @@ await withBroker(registry({ slots: 2 }), async (b) => {
   w5.send(JSON.stringify({ slot: "named", id: "" }));
   ok(await until(() => pool(b).background === 1 && relay.state().own === 1), "back within the keeping, the call it still names kept, the one it does not given back", b.snapshot());
   w5.close();
+  listener.stop({ detach: true });
+  await relay.stop();
+});
+await withBroker(registry({ slots: 2 }), async (b) => {
+  // A call that ends while the api is away is given back at its next socket's `named`; an ask the relay has granted,
+  // asked again, is answered `go` again (review pass 2 of 3b-2).
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  const link = linkTo(listener.port);
+  const api = await startApi(link.port);
+  await until(() => listener.sockets() === 1);
+  api.cmd({ cmd: "call", id: "n1" });
+  api.cmd({ cmd: "call", id: "n2", cls: "live" });
+  ok(await api.wait("run", "n1") && await api.wait("run", "n2", 1000) && await until(() => pool(b).background === 1 && pool(b).live === 1), "a grant and a live call, counted", b.snapshot());
+  link.refuse(true);
+  link.cut();
+  await sleep(200);
+  api.cmd({ cmd: "end", id: "n2" });
+  ok(await api.wait("ended", "n2"), "the live call ends while the api is away");
+  await sleep(300);
+  link.refuse(false);
+  ok(await until(() => listener.sockets() === 1 && pool(b).live === 0, 3000) && pool(b).background === 1 && relay.state().grants === 1,
+    "back within the keeping, the api's named gives back the call that ended meanwhile, and keeps the one still running", { pool: pool(b), relay: relay.state() });
+  api.cmd({ cmd: "end", id: "n1" });
+  await api.wait("ended", "n1");
+  ok(await until(() => pool(b).background === 0), "and that one given back as it ends", b.snapshot());
+  await kill(api);
+  // The relay's own: an id asked again after its grant.
+  const p = relay.port("api#9");
+  const got: { slot: string; id: string }[] = [];
+  p.attach((m) => got.push(m));
+  p.onMessage({ slot: "ask", id: "g1", base: BASE, model: "m", cls: "background" });
+  ok(await until(() => got.some((m) => m.slot === "go" && m.id === "g1")), "a grant", got);
+  p.onMessage({ slot: "ask", id: "g1", base: BASE, model: "m", cls: "background" });
+  ok(await until(() => got.filter((m) => m.slot === "go" && m.id === "g1").length === 2) && !got.some((m) => m.slot === "own"), "asked again, answered go again, not own", got);
+  p.detach();
+  link.stop();
   listener.stop({ detach: true });
   await relay.stop();
 });
