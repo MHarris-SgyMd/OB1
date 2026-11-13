@@ -78,6 +78,10 @@
       "scope": "read"
     },
     {
+      "name": "deliverable_history",
+      "scope": "read"
+    },
+    {
       "name": "agenda",
       "scope": "read"
     },
@@ -143,6 +147,14 @@
     },
     {
       "name": "set_priority_weights",
+      "scope": "write"
+    },
+    {
+      "name": "capture_deliverable",
+      "scope": "write"
+    },
+    {
+      "name": "verify_deliverable",
       "scope": "write"
     },
     {

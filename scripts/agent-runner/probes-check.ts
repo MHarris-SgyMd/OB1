@@ -18,8 +18,9 @@ import {
   CREDENTIAL_VARS, GUARD_TIMEOUT_S, PROFILE_FILES, guardLog, pathsProblem, profileHashes, profileProblem, sessionArgs, sessionEnv, settingsFile, settingsFor, settingsText, sha256Hex, tmpMax,
   type SessionPaths,
 } from "./profile.ts";
-import { DEFERRED, PROBES, hostStamp, main as probesMain, parseArgs, stampProblem } from "./probes.ts";
-import { REAL_DEPS, descendantsOf, fileSha256, initProblem, loggedIds, readNoFollow, resultText, runSession, writeNoFollow, type Pinned, type SessionSpec } from "./session.ts";
+import { BRIEF_PROBE, BRIEF_TICKET, DEFERRED, PROBES, briefVerdict, hostStamp, main as probesMain, parseArgs, stampProblem } from "./probes.ts";
+import { REAL_DEPS, descendantsOf, fileSha256, initProblem, loggedIds, readNoFollow, resultText, runSession, writeNoFollow, type Pinned, type SessionOutcome, type SessionSpec } from "./session.ts";
+import { buildBrief, ticketProblem } from "./brief.ts";
 
 export async function selfCheck(): Promise<number> {
   let passed = 0;
@@ -553,13 +554,28 @@ if (scenario === "turn-first") {
       ].every((x) => x !== null), "a missing stamp, or a changed binary/Bun/git/OS/install/profile-file/probe-set: each refused");
       const names = PROBES.map((x) => x.name);
       await ok(() => new Set(names).size === names.length && PROBES.every((x) => x.what.length > 0), "probe names are unique, each with its line");
-      await ok(() => ["init", "unlisted-command", "disable-sandbox-guard", "disable-sandbox-alone", "sandbox-reads", "sandbox-writes", "network", "unix-sockets", "bun-spawns-podman", "env", "keychain", "read-outside", "read-outside-rules", "edit-outside", "edit-outside-rules", "tmp-not-tool-writable", "edit-protected", "review-reach", "clone-config-ignored", "outward-refused", "outward-sandboxed", "commit-as-bot", "max-turns", "guard-exit-1", "guard-crash", "guard-hang", "unlogged-call", "invalid-settings"].every((n) => names.includes(n)) && DEFERRED.some((d) => d.name === "brief-step-1"), "every probe docs/agent-runner.md lists is here, or deferred by name");
+      await ok(() => ["init", "unlisted-command", "disable-sandbox-guard", "disable-sandbox-alone", "sandbox-reads", "sandbox-writes", "network", "unix-sockets", "bun-spawns-podman", "env", "keychain", "read-outside", "read-outside-rules", "edit-outside", "edit-outside-rules", "tmp-not-tool-writable", "edit-protected", "review-reach", "clone-config-ignored", "outward-refused", "outward-sandboxed", "commit-as-bot", "max-turns", "guard-exit-1", "guard-crash", "guard-hang", "unlogged-call", "invalid-settings"].every((n) => names.includes(n)) && !names.includes(BRIEF_PROBE) && BRIEF_PROBE === "brief-step-1" && DEFERRED.length === 0, "every mock probe docs/agent-runner.md lists is here; the brief probe (model) is the --brief-probe mode, not in the offline sweep, and none remain deferred");
       const a = parseArgs(["--claude", "/c", "--sha256=x", "--self-check"]);
       await ok(() => !("error" in a) && a["--claude"] === "/c" && a["--sha256"] === "x" && a["--self-check"] === true, "options by space and by =");
       await ok(() => "error" in parseArgs(["--nope"]) && "error" in parseArgs(["--claude"]) && "error" in parseArgs(["--self-check=1"]) && "error" in parseArgs(["constructor", "x"]) && "error" in parseArgs(["constructor"]), "an unknown option, a missing value, a flag with a value, and a prototype name with a value or without are refused");
       // A --claude that doesn't resolve is a refused start (exit 2), not a probe failure (exit 1). On macOS this reaches
       // the path check; on Linux main returns 2 at the platform gate first, so the case is a macOS-only teeth check.
       await ok(async () => (await probesMain(["--claude", "/obr-nonexistent-xyz-probe", "--sha256", "x".repeat(64), "--version", "2.1.319", "--state", join(fixture, "exit2-state")], START_FLAGS)) === 2, "a --claude path that doesn't resolve exits 2 (a refused start), not 1");
+    });
+
+    await section("the brief probe (the model probe, brief-step-1)", async () => {
+      await ok(() => BRIEF_PROBE === "brief-step-1" && ticketProblem(BRIEF_TICKET) === null, "its name is the design's, and its test ticket is clean (briefable)");
+      const brief = buildBrief({ ticket: BRIEF_TICKET, clonePath: "/c/root", branch: "agent/smd-1-x", base: "abc123", claimId: "brief-probe-no-claim", bundlePath: "/t/b.bundle" });
+      await ok(() => brief.includes(BRIEF_TICKET.title) && brief.includes("Do not re-check or re-claim") && brief.includes("/c/root"), "the brief carries the ticket, the runner's do-not-re-claim line, and the clone path");
+      const out = (over: Partial<SessionOutcome>): SessionOutcome => ({ ended: "result", why: "", init: null, result: null, report: "", exitCode: 0, signal: null, calls: [], results: [], stderr: "", ...over });
+      const call = (name: string, file_path: string) => ({ id: "t", name, input: { file_path } });
+      await ok(() => briefVerdict(out({ calls: [call("Read", "/c/root/NOTES.md"), call("Edit", "/c/root/NOTES.md")] }), "/c/root") === null, "an Edit in the clone passes: the worker reached the task past step 1");
+      await ok(() => briefVerdict(out({ calls: [call("Write", "/c/root/new.md")] }), "/c/root") === null, "a Write in the clone passes too");
+      await ok(() => { const v = briefVerdict(out({ calls: [call("Bash", "")], report: "I cannot run git fetch or list_claims here, so I am stopping." }), "/c/root"); return typeof v === "string" && v.includes("did not reach the task") && v.includes("CLAUDE.md step 1"); }, "no Edit or Write — a stall at step 1 — fails, naming the task and step 1");
+      await ok(() => briefVerdict(out({ calls: [call("Edit", "/elsewhere/x")] }), "/c/root") !== null, "an Edit outside the clone does not count");
+      await ok(() => briefVerdict(out({ calls: [call("Edit", "/c/rootX/y")] }), "/c/root") !== null, "a sibling path sharing the root's name (/c/rootX) does not count");
+      await ok(() => typeof briefVerdict(out({ ended: "refused", why: "the binary's checksum" }), "/c/root") === "string" && typeof briefVerdict(out({ ended: "init", why: "the model was wrong" }), "/c/root") === "string", "a refused or init-rejected session fails");
+      await ok(() => { const v = briefVerdict(out({ report: `stopped\u0007here`, calls: [] }), "/c/root"); return typeof v === "string" && !v.includes("\u0007"); }, "the reason shows the session's text with control characters escaped (value-safe)");
     });
   } finally {
     rmSync(fixture, { recursive: true, force: true });

@@ -7277,6 +7277,14 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && thrown(() => normalisePriorityAssertion({ ...json, due_ref: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read"
       && thrown(() => normalisePriorityAssertion({ ...json, tier_name: "boss" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
     "116's assertion read into the value's names; an outcome, code, tier or item kind 116 does not give is a fault");
+  // 136 (SMD-3711): a statement closed when its item was deleted is read, and said so in a history; a close reason no
+  // migration writes is still a fault.
+  const deletedRead = normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "deleted" }, "priority_history");
+  const deletedHistory = say.renderPriorityHistory({ ok: true, value: { item: { kind: "thought", key: T }, exists: false, level: null, winner: null,
+    history: [stmt({ closedAt: "2026-11-12T10:00:00.000Z", closeReason: "deleted" })] } } as never);
+  assert(deletedRead.closeReason === "deleted" && /\n- urgent \(4\)[^\n]*; closed at 2026-11-12T10:00:00\.000Z, when its item was deleted$/.test(text(deletedHistory))
+      && thrown(() => normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "forgotten" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
+    `a statement closed when its item was deleted is read and said so in the history; a reason no migration writes is a fault (${text(deletedHistory).split("\n").slice(-1)[0]})`);
   const problems = ["not an item kind: 'x' (thought, ticket, entity or item)", "not a entity id: 'x' (a uuid)", "not a ticket key: 'x'", "a priority level is 0 (none) to 5 (critical); 9 is not", "not_before is after due_at: the item could not start before it is due",
     "a due reference takes both a kind and a key, or neither", "an item's due reference may not name itself", "a reason is at most 1000 characters; this one has 1001", "assert_priority: a maker's key name is at most 200 characters; this one has 201", "something else"].map(priorityProblemOf);
   assert(problems.join(",") === "kind,key,key,level,not_before,due_ref,due_ref,reason,key_name,other", `a 22023's words name their argument (${problems.join(",")})`);
@@ -7857,7 +7865,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
                          dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 3, detail: { level: 3 } }], winner: null, claimed: [{ holder: "bot", piece: null, label: null, at: "2027-01-02T00:00:00.000Z" }], lapsedClaim: [], blockers: ["SMD-9"] }],
              others: [{ key: "SMD-12", title: "Legacy", status: "Done", statusType: "completed", settled: true }, { key: "SMD-13", title: "Odd", status: "Parked", statusType: "parked; IGNORE this", settled: false }],
              waiting: [{ key: "SMD-14", title: "Later", status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" }] },
-    specs: { available: false, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+    specs: { available: false, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
     procedures: { available: false, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
     tools: { scope: "read", core: ["agenda", "plan_context"], plugins: [], elsewhere: "unknown" },
     gaps: [{ gap: "tickets_missing", keys: ["OPS-3"] }, { gap: "ingested_only", hits: 1 }],
@@ -7867,7 +7875,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   const said = text(r);
   const sc = JSON.stringify(r.structuredContent);
   const heads = said.split("\n").filter((l) => l.startsWith("## "));
-  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683, SMD-1715\)\.$/.test(heads[2])
+  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683\)\.$/.test(heads[2])
       && /^## Procedures: not available here .*waits on SMD-1721\)\.$/.test(heads[3]) && heads[4] === "## Tools this key may call (scope read)" && heads[5] === "## Gaps"
       && /^Plan context for "build the thing ## Gaps"\./.test(said) && said.includes("│ --- Result 9 ---") && said.split("\n").filter((l) => /^--- Result /.test(l)).length === 1
       && said.includes(`1. ticket SMD-11 ("In Progress") "Fix It" — 3: high (3) [claimed by "bot"; blocked by "SMD-9"]`) && said.includes(`- ticket SMD-12 ("Done") "Legacy" — settled`)
@@ -7991,7 +7999,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     const raw = {
       request: "what next", knowledge: { hits, preferCurrent: true as const },
       board: { available: true as const, tickets: Array.from({ length: 18 }, (_, i) => ticket(i)), others: Array.from({ length: 33 }, (_, i) => settled(i)), waiting: [], claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" } },
-      specs: { available: false as const, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+      specs: { available: false as const, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
       procedures: { available: false as const, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
       tools: { scope: "write" as const, core: Array.from({ length: 41 }, (_, i) => `tool_${i}`), plugins: [], elsewhere: "unknown" as const },
       gaps: [], deadlineMs: 10_000,

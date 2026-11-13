@@ -195,6 +195,8 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 `--state` defaults to `~/.local/share/open-brain/agent-runner`. Each run's records stay in `probes/<time>/` there: the settings, the guard's logs, the streams and each probe's outcome. Clones and temp directories are removed. When every probe passes, the run writes `probe-stamp.json` there, recording Claude Code's path, checksum and version, Bun's and git's checksums, the macOS build, each profile and probe file's hash, and the set of probes that passed; a failed run deletes any earlier stamp and writes none. Cut 2b starts a session only under a stamp that matches. Run the probes again after any change to the profile or probe files, and before moving to a new Claude Code, Bun, git or macOS version (the stamp pins each, so an unprobed change makes cut 2b refuse to start).
 
+**The brief probe (the model probe).** One probe needs a model: that a worker given the brief gets past CLAUDE.md step 1 — it does the task instead of stopping because it can't run `git fetch`, `gh` or `list_claims`. Only a model reasons past step 1, so it can't use the scripted stand-in; it runs apart from the sweep, as `--brief-probe --anthropic-key <file>`. That is one real-model worker session at the runner's real model and effort (`claude-opus-5-5`, `xhigh`; decision 4), bounded at $2 and 20 turns for the trivial task, on a trivial, clean ticket, under the real profile with the real repo CLAUDE.md in its config directory — so the claim ceremony is actually there to get past. It passes when the worker edits the clone and fails when it stalls at step 1; the clone and temp directory are removed, a `brief-probe.json` verdict and the session's record stay. It is not part of the stamp, and its verdict logic has offline self-check coverage.
+
 **What they found on 2.1.319** (2026-11-07). All 35 pass; a first review pass then hardened the self-check and added probes. The design took these from them:
 
 * **The temp directory is short.** Claude Code keeps child commands in `<CLAUDE_CODE_TMPDIR>/claude-<uid>` only while that path is at most 44 bytes (the binary's own constant). Otherwise it falls back to the shared `/tmp/claude-<uid>`, which the profile denies, and every command exits 1. So a session's temp directory is `/private/tmp/obr-<8 hex>`, not a directory in the run's record.
@@ -216,6 +218,15 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 * **Claude Code sets two credentials for a command itself.** One is the token of its messaging socket, which the sandbox blocks. The other is its sandbox proxy's login, and the proxy refuses every host. Neither is the runner's.
 
 One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
+
+## The live run (`live-run.ts`)
+
+The executor runs one ticket end to end with the real clients — the capstone of cut 2c. Two modes, so the money path is never the default:
+
+* `--plan --ticket SMD-NNNN`: loads the config and keys, takes the ticket (its full fields fetched from Linear, Verify and the named ids parsed, checked for a character that doesn't show), provisions the runner's bare repository (a local clone of the main checkout, fetched each run), and prints what a run would do. No session, no claim, no Linear write, no spend.
+* `--execute --ticket SMD-NNNN --claude <path> --sha256 <hex> --version <x.y.z>`: the real run. It refuses a ticket not labelled `agent-ready`, checks the probe stamp (so the profile is as-probed — run the mock probes on this Claude Code first), then assembles the real `RunDeps` and `LiveDeps` and runs `liveRun`: claim on stable, move to In Progress, the worker and review sessions on the pinned Claude Code (the Anthropic key through `apiKeyHelper`), the gate, the release and the hand-back to Backlog. Up to about $13, with no PR (cut 3 publishes). The branch stays in the bare repository; the run's record stays under `runs/<run>/`.
+
+The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
 
 ## Cuts still to come
 

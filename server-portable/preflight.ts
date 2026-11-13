@@ -451,7 +451,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
@@ -3274,6 +3274,43 @@ if (configFailed) {
                 "Grant the items group (SMD-3665): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups items (db/README.md, Grants for a capturing role).");
           } else {
             add("open items", "ok", "open_item, update_item, set_item_status, propose_item_close, decide_item_close, open_item_history and their helpers present; the server's role holds the items group");
+          }
+        }
+
+        /**
+         * Migration 134's deliverables (SMD-1715 PR 2): the functions the deliverable tools call, under 134's
+         * signatures, and the server role's `deliverables` grant — soft, as the items group is (134's PRIVILEGES: a
+         * role without it is refused the deliverable calls alone, naming the table). Nothing to read before 134: a skip.
+         */
+        {
+          const DELIVERABLE_FNS = ["record_deliverable(text,text,text,jsonb)", "verify_deliverable(text,text,text,text,jsonb)", "deliverable_history(text)"];
+          // The group's grants from ROLE_GRANTS: its tables' and its sequence's (the event trigger draws each seq by nextval).
+          const DELIVERABLE_GRANTS = ROLE_GRANTS.deliverables.flatMap((g) => g.privileges.map((p) => [g.table ? "t" : "s", (g.table ?? g.sequence) as string, p] as const));
+          const dRows = await sql.unsafe(`
+            SELECT to_regclass('public.deliverable_events') IS NOT NULL AS has_table,
+                   ARRAY(SELECT f FROM unnest(ARRAY[${DELIVERABLE_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
+                   CASE WHEN to_regclass('public.deliverable_events') IS NULL THEN NULL
+                        ELSE ARRAY(SELECT g.o || ' ' || g.p FROM (VALUES ${DELIVERABLE_GRANTS.map(([k, o, p]) => `('${k}', '${o}', '${p}')`).join(", ")}) g(k, o, p)
+                                    -- CASE, not OR, as the items row's: the text form raises for an object not there.
+                                    WHERE CASE WHEN to_regclass('public.' || g.o) IS NULL THEN true
+                                               WHEN g.k = 's' THEN NOT has_sequence_privilege('public.' || g.o, g.p)
+                                               ELSE NOT has_table_privilege('public.' || g.o, g.p) END) END AS ungranted`)
+            .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const dl = Array.isArray(dRows) ? dRows[0] : null;
+          if (!dl) {
+            add("deliverables", "warn", `could not verify: ${(dRows as Error).message}`, "The check reads deliverable_events and 134's functions in public; the message says why it failed.");
+          } else if (!dl.has_table) {
+            add("deliverables", "skip", "not checked — deliverable_events does not exist (migration 134 not applied)");
+          } else if (dl.missing.length) {
+            add("deliverables", "fail", `migration 134's ${dl.missing.join(", ")} missing under 134's signature; the deliverable tools call them`,
+                ledgerRemedy("134", "Apply db/migrations/134_deliverables.sql."));
+          } else if (dl.ungranted?.length) {
+            // deliverable_history reads the events and the facet; the writers need every grant.
+            const reads = dl.ungranted.some((g) => g === "deliverable_events SELECT" || g === "thought_facets SELECT");
+            add("deliverables", "warn", `the server's role holds no ${dl.ungranted.join(", ")}: ${reads ? "every deliverable tool fails" : "capture_deliverable and verify_deliverable fail"} naming the table, and nothing else does`,
+                "Grant the deliverables group (SMD-1715): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups deliverables (db/README.md, Grants for a capturing role).");
+          } else {
+            add("deliverables", "ok", "record_deliverable, verify_deliverable, and deliverable_history present; the server's role holds the deliverables group");
           }
         }
 

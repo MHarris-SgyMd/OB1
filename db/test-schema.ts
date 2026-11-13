@@ -205,9 +205,11 @@ function definedIn(file: string): string[] {
  * entry. 120 is 102's record_thought_relation and 111's validator, each with
  * a thread's edge (SMD-3306), and carries both: 102 last states the comment
  * on supersession_proposals [74] reads, and 111 last defines
- * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]).
+ * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
+ * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
+ * whose door and thread functions it does not define.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -7096,7 +7098,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111 and 120, its last definer (053's body plus the relation kind, [74], with distinct, [92], and the subject kind, [98])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 134, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [121])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -8739,8 +8741,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
-    `seventeen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "priority_close_on_thought_delete,thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
+    `eighteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -15110,8 +15112,8 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   // both ([108]); the sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("120") && lastDefinerOf("record_thought_relation").startsWith("120"),
-    `120 is the last definer of the door and of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("134") && lastDefinerOf("record_thought_relation").startsWith("120"),
+    `120 is the last definer of the door and 134 of the validator, each carrying 102's (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
     "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
@@ -15176,7 +15178,7 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
   assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("102")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
     `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 102; 102 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
-  // 102 re-applied holds 102's validator and door; 120 is their last definer, so the sections after run on its bodies.
+  // 102 re-applied holds 102's validator and door; 134 and 120 are their last definers, so the sections after run on their bodies.
   await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -15799,7 +15801,7 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   // which 120 carries with a thread's edge ([108]); the sentinels; the trigger; the indexes (one standing per thought,
   // since 130 per thought and key); the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "120" : "111";
+    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "134" : "111";
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
@@ -15819,8 +15821,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
     assert(/111/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 111 and the ticket`);
   }
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
-  assert(/four kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
-    "thought_facets' comment registers the fourth kind, and the validator's names 111");
+  assert(/five kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
+    "thought_facets' comment registers the subject kind (five since 134), and the validator's names 111");
 
   // The key's shape: one rule, four namespaces.
   const valid = async (k: string | null) => (await one<{ v: boolean | null }>(`SELECT subject_key_valid($1) AS v`, [k])).v === true;
@@ -17461,9 +17463,11 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
   // constraint triggers, deferred to the writer's commit, the indexes, the sentinels, SECURITY INVOKER throughout, the
   // comments.
   // (The trigger function's last definer is 130, which takes its locks for a set: [116].)
-  for (const fn of ["thought_facets_validate", "record_thought_relation", "thread_relink"]) {
+  for (const fn of ["record_thought_relation", "thread_relink"]) {
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
   }
+  // The validator's last definer is 134, which carries 120's with the deliverable kind ([121]).
+  assert((await functionsNamed("thought_facets_validate")) === 1 && lastDefinerOf("thought_facets_validate").startsWith("134"), `one thought_facets_validate, 134 its last definer (${lastDefinerOf("thought_facets_validate")})`);
   assert((await functionsNamed("ob1_thread_relink_subject")) === 1 && lastDefinerOf("ob1_thread_relink_subject").startsWith("130"), `one ob1_thread_relink_subject, 130 its last definer (${lastDefinerOf("ob1_thread_relink_subject")})`);
   const [shape] = await q<{ written: string | null; closed: string | null; deleted: string | null; judged: string | null; thread: string | null; bykey: string | null }>(`SELECT
       (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_thread_written' AND tgrelid = 'thought_facets'::regclass) AS written,
@@ -17494,15 +17498,15 @@ console.log("\n[108] Migration 120: a work thread's edges — the thoughts holdi
     assert(/120/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 120 and the ticket`);
   }
   const validatorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? "";
-  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120\.$/.test(validatorComment),
-    `the validator's comment says what a thread's edge is and names its migrations, 120 the last (${validatorComment.slice(-60)})`);
+  assert(/For a relation since 120: one naming a subject key is a thread's edge/.test(validatorComment) && /Migrations 042, 053, 084, 102, 111, 120, 134\.$/.test(validatorComment),
+    `the validator's comment says what a thread's edge is and names its migrations, 120 and 134 the last (${validatorComment.slice(-60)})`);
   const closeComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["close_thought_subject(uuid, uuid, text)"])).c ?? "";
   const indexComments = await q<{ c: string | null }>(`SELECT obj_description(to_regclass(n), 'pg_class') AS c FROM unnest(ARRAY['thought_facets_relation_active_uniq', 'thought_facets_relation_thread_uniq', 'thought_facets_thread_key_idx']) n`);
   const payloadComment = (await one<{ c: string | null }>(`SELECT col_description('thought_facets'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_facets'::regclass AND attname = 'payload'`)).c ?? "";
   const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   assert(/113/.test(closeComment) && /since 120 a close re-links the subject''?s thread/.test(closeComment) && indexComments.every((r) => /120/.test(r.c ?? ""))
-         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130 /.test(tableComment),
-    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130: [116]) (${closeComment.slice(-200)})`);
+         && /Since 120 a relation may be a thread's edge/.test(payloadComment) && /Since 120 a relation is also a work thread's edge/.test(tableComment) && /Migrations 042, 053, 084, 102, 111, 120, 130, 134 /.test(tableComment),
+    `the catalog: close_thought_subject's comment says a close re-links, the indexes', the payload's and the table's name 120 (the table's restated by 130, [116], and 134, [121]) (${closeComment.slice(-200)})`);
 
   // A thread kept by the triggers, through the door: written, a thought come between, one re-keyed away, one closed.
   const a = await thought("a", "2026-11-01T00:00:00Z"), b = await thought("b", "2026-11-02T00:00:00Z"), c = await thought("c", "2026-11-03T00:00:00Z"), d = await thought("d", "2026-11-04T00:00:00Z");
@@ -19597,6 +19601,795 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
   const closedAfter = await closedCount();
   assert(closedAfter === closedBefore && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
     `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} → ${closedAfter})`);
+}
+
+console.log("\n[121] Migration 134: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
+{
+  const file = files.find((f) => /^\d{3}_deliverables\.sql$/.test(f)) ?? "no NNN_deliverables.sql";
+  // Sections before re-apply 120's validator and 130's table comment, which 134 replaces: this section holds 134's.
+  await restoreShipped("thought_facets_validate");
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const thought = async (content: string) => (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text AS id`, [content])).id;
+  const MAKER_ID = "1715a000-0000-4000-8000-000000000001";
+  const MAKER = { name: "[121] maker", scope: "write", agent_id: MAKER_ID };
+  const CHECKER = { name: "[121] checker", scope: "write" };
+  type R = { outcome: string; code?: string; message?: string; from?: string; to?: string; deliverable?: Record<string, unknown> | null; event?: Record<string, unknown> };
+  const rec = async (t: string, s: string, c: string, a: unknown) =>
+    (await one<{ r: R }>(`SELECT record_deliverable($1, $2, $3, $4::jsonb) AS r`, [t, s, c, JSON.stringify(a)])).r;
+  const ver = async (t: string, st: string, a: unknown, method = "review", outcome = "read the diff against the spec") =>
+    (await one<{ r: R }>(`SELECT verify_deliverable($1, $2, $3, $4, $5::jsonb) AS r`, [t, st, method, outcome, JSON.stringify(a)])).r;
+  const facet = async (t: string) => (await one<{ p: Record<string, unknown> | null }>(`SELECT (SELECT payload FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'deliverable') AS p`, [t])).p;
+  const rawEvent = (t: string, event: string, status: string, spec: string, checkpoint: string) => failure(
+    `INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5, CASE WHEN $2 = 'verification' THEN 'm' END, CASE WHEN $2 = 'verification' THEN 'o' END, 'raw', false, now())`,
+    [t, event, status, spec, checkpoint]);
+
+  // The shape: the table, its indexes and triggers; the facet's index and delete trigger; twenty-two functions,
+  // each commented by 134, the reads STABLE, none SECURITY DEFINER; 134 the last definer of each and of the validator.
+  const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'deliverable_events'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
+  const idx = (await one<{ i: string }>(`SELECT string_agg(indexname, ' ' ORDER BY indexname) AS i FROM pg_indexes WHERE tablename = 'deliverable_events'`)).i;
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'deliverable_events'::regclass AND NOT tgisinternal`)).t;
+  const facetTrig = (await one<{ t: string | null }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ') AS t FROM pg_trigger WHERE tgrelid = 'thought_facets'::regclass AND tgname = 'thought_facets_deliverable_kept'`)).t;
+  const facetIdx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thought_facets_deliverable_uniq')) AS d`)).d ?? "";
+  const FNS = ["ob1_deliverable_events_guard()", "ob1_deliverable_transition_ok(text, text)", "ob1_deliverable_lock(uuid)", "ob1_deliverable_time(timestamp with time zone)",
+    "ob1_deliverable_payload(uuid)", "ob1_deliverable_event_check()", "ob1_deliverable_facet_kept()", "ob1_deliverable_id(text, text)", "ob1_deliverable_actor(jsonb, text)",
+    "ob1_deliverable_refused(text, text)", "ob1_deliverable_event_json(deliverable_events)", "ob1_deliverable_json(uuid)",
+    "ob1_deliverable_event(uuid, text, text, uuid, text, text, text, record)", "ob1_deliverable_project(uuid)", "ob1_deliverable_is_maker(deliverable_events, text, uuid)",
+    "ob1_deliverable_is_author(uuid, text, uuid)", "ob1_deliverable_event_projected()",
+    "record_deliverable(text, text, text, jsonb)", "verify_deliverable(text, text, text, text, jsonb)", "deliverable_history(text)",
+    "ob1_deliverable_projection_drift()", "ob1_rebuild_deliverable_projection()"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
+  const checkSrc = await src("ob1_deliverable_event_check()");
+  const shape: Record<string, boolean> = {
+    columns: cols === "id uuid not null, seq bigint not null, thought_id uuid not null, event text not null, status text not null, spec_ref uuid not null, checkpoint text not null, method text, outcome text, actor_name text not null, actor_agent_id uuid, actor_proved boolean not null, actor_kind text, actor_trust text, actor_scope text, at timestamp with time zone not null",
+    indexes: idx === "deliverable_events_one_capture deliverable_events_pkey deliverable_events_seq_key deliverable_events_spec deliverable_events_thought",
+    triggers: trig === "deliverable_events_append_only:27 deliverable_events_no_truncate:34 deliverable_events_projected:5 deliverable_events_transitions:7",
+    facetTrigger: facetTrig === "thought_facets_deliverable_kept:11",
+    facetIndex: /UNIQUE INDEX thought_facets_deliverable_uniq ON public\.thought_facets USING btree \(thought_id\) WHERE \(kind = 'deliverable'::text\)/.test(facetIdx),
+    commented: fns.length === FNS.length && fns.every((f) => !f.d && /Migration 134 \/ SMD-1715\./.test(f.c ?? "")),
+    stable: ["ob1_deliverable_payload(uuid)", "deliverable_history(text)", "ob1_deliverable_projection_drift()", "ob1_deliverable_json(uuid)", "ob1_deliverable_is_author(uuid,text,uuid)"].every((f) => vol[f] === "s"),
+    definers: ["record_deliverable", "verify_deliverable", "deliverable_history", "ob1_deliverable_projection_drift", "ob1_rebuild_deliverable_projection", "thought_facets_validate"].every((f) => lastDefinerOf(f) === file),
+    sentinels: [/ob1:deliverable-facet-is-the-projection/, /ob1:subject-facet/, /ob1:link-facet/, /ob1:thread-edge/].every((r) => r.test(validator)) && /ob1:deliverable-transitions-on-the-event/.test(checkSrc)
+      && /ob1:deliverable-maker-from-the-envelope/.test(await src("ob1_deliverable_actor(jsonb, text)")),
+  };
+  const bad = Object.keys(shape).filter((k) => !shape[k]);
+  assert(bad.length === 0,
+    `the shape: the table's columns, its indexes and triggers; the facet's delete trigger and one-per-thought index; ${FNS.length} functions commented by 134, none SECURITY DEFINER, the reads STABLE; 134 the last definer of the writers, the read, the drift check, the rebuild and the validator, which carries 120's sentinels (failed: ${bad.join(", ") || "none"}; ${bad.includes("columns") ? cols : ""}${bad.includes("indexes") ? idx : ""}${bad.includes("triggers") ? trig : ""}${bad.includes("facetIndex") ? facetIdx : ""}${bad.includes("commented") ? fns.filter((f) => f.d || !/Migration 134 \/ SMD-1715\./.test(f.c ?? "")).map((f) => f.f).join() + ` ${fns.length}` : ""}${bad.includes("stable") ? JSON.stringify(vol) : ""}${bad.includes("definers") ? lastDefinerOf("record_deliverable") : ""})`);
+
+  // The rule: exactly the four moves.
+  const S = ["unverified", "verified", "corrected"];
+  const moves = (await q<{ m: string }>(`SELECT f || '>' || t AS m FROM unnest($1::text[]) f, unnest($1::text[]) t WHERE ob1_deliverable_transition_ok(f, t) ORDER BY 1`, [S])).map((r) => r.m).join(" ");
+  const nulls = (await one<{ a: boolean; b: boolean }>(`SELECT ob1_deliverable_transition_ok(NULL, 'verified') AS a, ob1_deliverable_transition_ok('unverified', NULL) AS b`));
+  assert(moves === "corrected>verified unverified>corrected unverified>verified verified>corrected" && nulls.a === false && nulls.b === false,
+    `the allowed moves are unverified -> verified, unverified -> corrected, verified -> corrected and corrected -> verified, and a NULL is false (${moves})`);
+
+  // record_deliverable: refusals as values, then the capture and its facet.
+  const spec = await thought("[121] the spec"), out = await thought("[121] the output"), other = await thought("[121] another thought");
+  const recRefusals = [
+    await rec(out, spec, "c0ffee", { name: "[121] reader", scope: "read" }),
+    await rec(out, spec, "c0ffee", { name: "[121] capturer", scope: "capture" }),
+    await rec(out, "00000000-0000-4000-8000-000000000120", "c0ffee", MAKER),
+    await rec(out, out, "c0ffee", MAKER),
+    await rec("00000000-0000-4000-8000-000000000121", spec, "c0ffee", MAKER),
+  ].map((r) => r.code);
+  const recRaised = [
+    await failure(`SELECT record_deliverable('not-a-uuid', $1, 'c', $2::jsonb)`, [spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, '   ', $3::jsonb)`, [out, spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, $3, $4::jsonb)`, [out, spec, "x".repeat(201), JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, E'a\\tb', $3::jsonb)`, [out, spec, JSON.stringify(MAKER)]),
+    await failure(`SELECT record_deliverable($1, $2, 'c', '{"scope": "write"}'::jsonb)`, [out, spec]),
+  ];
+  const none = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events`)).n);
+  assert(recRefusals.join(" ") === "WRITE_SCOPE_REQUIRED WRITE_SCOPE_REQUIRED SPEC_NOT_FOUND SPEC_IS_SELF THOUGHT_NOT_FOUND"
+         && recRaised.slice(0, 4).every((r) => r.startsWith("22023 ")) && /^42501 record_deliverable needs a maker/.test(recRaised[4]) && none === 0,
+    `record_deliverable refuses a read key's and a capture key's call (WRITE_SCOPE_REQUIRED), a missing spec, the thought as its own spec and a missing thought as values; raises 22023 on a bad id, an empty, long or tabbed checkpoint, 42501 on an envelope naming nobody; writes nothing (${recRefusals.join(" ")} | ${recRaised.map((r) => r.slice(0, 40)).join(" | ")})`);
+
+  const captured = await rec(` ${out.toUpperCase()} `, spec, " c0ffee ", MAKER);
+  const unchanged = await rec(out, spec, "c0ffee", MAKER);
+  // Another key recording the same is refused, naming the maker: told `unchanged`, it read the deliverable as its own
+  // and could verify output it had submitted (review pass 3).
+  const otherKey = await rec(out, spec, "c0ffee", CHECKER);
+  const again = await rec(out, spec, "deadbeef", MAKER);
+  const p1 = await facet(out);
+  assert(captured.outcome === "captured" && captured.deliverable?.status === "unverified" && captured.deliverable?.checkpoint === "c0ffee" && captured.deliverable?.spec_ref === spec
+         && captured.deliverable?.captured_by === "[121] maker" && captured.deliverable?.verification === null && (captured.event?.by as { agent_id: string }).agent_id === MAKER_ID
+         && unchanged.outcome === "unchanged" && unchanged.event?.id === captured.event?.id && again.code === "ALREADY_A_DELIVERABLE"
+         && otherKey.code === "ALREADY_A_DELIVERABLE" && /recorded by \[121\] maker/.test(otherKey.message ?? "")
+         && p1?.status === "unverified" && JSON.stringify(p1) === JSON.stringify((await one<{ p: unknown }>(`SELECT ob1_deliverable_payload($1::uuid) AS p`, [out])).p),
+    `a capture: unverified, the id and checkpoint trimmed, the maker and its agent id stamped from the envelope, the facet the payload's projection; the same spec and checkpoint again unchanged for its maker and refused ALREADY_A_DELIVERABLE for another key, naming the maker; another checkpoint refused (${JSON.stringify([captured.outcome, unchanged.outcome, otherKey.code, again.code])})`);
+
+  // verify_deliverable: the moves, the maker's rule, the refusals.
+  const notOne = await ver(other, "verified", CHECKER);
+  const byMaker = await ver(out, "verified", MAKER);
+  const byMakerRenamed = await ver(out, "verified", { name: "[121] maker renamed", scope: "write", agent_id: MAKER_ID });
+  const byMakerNoId = await ver(out, "verified", { name: "[121] maker", scope: "write" });
+  const toSame = await ver(out, "unverified", CHECKER);
+  const readKey = await ver(out, "verified", { name: "[121] reader", scope: "read" });
+  const verRaised = [
+    await failure(`SELECT verify_deliverable($1, 'done', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', '', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', 'm', '  ', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await failure(`SELECT verify_deliverable($1, 'verified', 'm', $2, $3::jsonb)`, [out, "o".repeat(4001), JSON.stringify(CHECKER)]),
+  ];
+  const ok = await ver(out, " Verified ", CHECKER);
+  const twice = await ver(out, "verified", CHECKER);
+  const back = await ver(out, "unverified", CHECKER);
+  const corrected = await ver(out, "corrected", MAKER, "rerun", "the check missed a failing case");
+  const reverified = await ver(out, "verified", CHECKER, "rerun", "the fix passes");
+  assert(notOne.code === "NOT_A_DELIVERABLE" && byMaker.code === "VERIFY_NOT_YOURS" && byMakerRenamed.code === "VERIFY_NOT_YOURS" && byMakerNoId.code === "VERIFY_NOT_YOURS"
+         && toSame.code === "ILLEGAL_TRANSITION" && toSame.from === "unverified" && toSame.to === "unverified" && readKey.code === "WRITE_SCOPE_REQUIRED"
+         && verRaised.every((r) => r.startsWith("22023 "))
+         && ok.outcome === "changed" && ok.from === "unverified" && ok.to === "verified" && (ok.deliverable?.verification as { by: string }).by === "[121] checker"
+         && twice.code === "ILLEGAL_TRANSITION" && twice.from === "verified" && twice.to === "verified"
+         && back.code === "ILLEGAL_TRANSITION" && back.from === "verified" && back.to === "unverified" && /does not move verified -> unverified/.test(back.message ?? "")
+         && corrected.outcome === "changed" && corrected.deliverable?.status === "corrected" && reverified.outcome === "changed" && reverified.deliverable?.status === "verified"
+         && (await facet(out))?.seq === reverified.event?.seq,
+    `verify_deliverable: a thought with no capture NOT_A_DELIVERABLE; the maker's move to verified refused VERIFY_NOT_YOURS by name and by agent id; unverified -> unverified, verified -> verified and verified -> unverified refused ILLEGAL_TRANSITION naming from and to; a read key WRITE_SCOPE_REQUIRED; a bad status, method or outcome raised 22023; another key verifies, the maker corrects, another verifies again (${JSON.stringify([byMaker.code, byMakerRenamed.code, toSame.code, ok.outcome, back.code, corrected.outcome, reverified.outcome])})`);
+
+  // The author: record_deliverable takes any thought, so the key that wrote it is refused its verification beside the
+  // key that recorded it (review pass 2, the maintainer's choice), and may still correct it.
+  // A key that rewrote the text after it was captured is one of its authors too (review pass 3: the first capture alone
+  // was read).
+  const AUTHOR = { name: "[121] author", scope: "write" }, EDITOR = { name: "[121] editor", scope: "write" }, THIRD = { name: "[121] third", scope: "write" };
+  const authored = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, NULL::vector) AS r`,
+    ["[121] an author's own output, recorded by another key", JSON.stringify({ actor: AUTHOR })])).r.id;
+  const byRecorder = await rec(authored, spec, "a17", CHECKER);
+  const byAuthor = await ver(authored, "verified", AUTHOR);
+  const authorCorrects = await ver(authored, "corrected", AUTHOR);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(EDITOR)]);
+    await tx.query(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [authored, "[121] an author's own output, rewritten by an editor"]);
+  });
+  const editorRow = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid AND action = 'update' AND actor_name = $2 AND diff ? 'content'`, [authored, EDITOR.name])).n;
+  const byEditor = await ver(authored, "verified", EDITOR);
+  const byThird = await ver(authored, "verified", THIRD);
+  assert(byRecorder.outcome === "captured" && byAuthor.code === "VERIFY_NOT_YOURS" && /\[121\] author wrote the thought deliverable \S+ is/.test(byAuthor.message ?? "")
+         && authorCorrects.outcome === "changed" && editorRow === 1 && byEditor.code === "VERIFY_NOT_YOURS" && /\[121\] editor wrote the thought/.test(byEditor.message ?? "")
+         && byThird.outcome === "changed" && byThird.deliverable?.status === "verified",
+    `a key that wrote a deliverable's thought, not the one that recorded it, is refused VERIFY_NOT_YOURS, its first capture's key and a key that rewrote its text alike; the author may correct it, and a third key verifies (${JSON.stringify([byRecorder.outcome, byAuthor.code, authorCorrects.outcome, editorRow, byEditor.code, byThird.outcome])})`);
+
+  // A seq the insert brings is not the one it keeps: the trigger draws each event's under the lock (review pass 2: a raw
+  // insert's OVERRIDING SYSTEM VALUE named a seq above every later event's, and pass 1's stale-seq refusal then refused
+  // every verification after it, for good).
+  const offeredFor = await thought("[121] an output a raw seq is offered for");
+  await rec(offeredFor, spec, "5eq", MAKER);
+  const offered = await failure(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at, seq)
+    OVERRIDING SYSTEM VALUE VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, '5eq', 'm', 'o', 'raw', false, '1999-01-01T00:00:00Z', 9000000000000000000)`, [offeredFor, spec]);
+  const offeredSeqs = (await q<{ s: string }>(`SELECT seq::text AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s);
+  // Its time is the trigger's too, and the facet is projected as it lands, with no rebuild (review pass 3).
+  const offeredAt = (await one<{ y: number }>(`SELECT extract(year FROM at)::int AS y FROM deliverable_events WHERE thought_id = $1::uuid AND event = 'verification'`, [offeredFor])).y;
+  const offeredFacet = await facet(offeredFor);
+  const offeredDrift = (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length;
+  const afterOffer = await ver(offeredFor, "verified", CHECKER).catch((e: Error) => ({ outcome: `raised ${e.message.split("\n")[0]}` }) as R);
+  const offeredStatuses = (await q<{ s: string }>(`SELECT status AS s FROM deliverable_events WHERE thought_id = $1::uuid ORDER BY seq`, [offeredFor])).map((r) => r.s).join(" ");
+  assert(offered === "taken" && offeredSeqs.length === 2 && offeredSeqs.every((s) => s !== "9000000000000000000" && BigInt(s) < 9000000000000000000n)
+         && offeredAt > 2000 && offeredFacet?.status === "corrected" && (offeredFacet?.verification as { by: string }).by === "raw" && offeredDrift === 0
+         && afterOffer.outcome === "changed" && offeredStatuses === "unverified corrected verified",
+    `a raw insert's own seq and time are replaced by the trigger's, its event is projected as it lands with no drift, the verification after it is taken and the events read in the order written (${offered.slice(0, 60)}; ${offeredSeqs.join(",")}; ${offeredAt}; ${offeredFacet?.status}, drift ${offeredDrift}; ${afterOffer.outcome}; ${offeredStatuses})`);
+
+  // Below the tools: a raw write is held to the same rules.
+  const before = JSON.stringify(await facet(out));
+  const raw = {
+    forbidden: await failure(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    allowed: await failure(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"corrected"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    closed: await failure(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    moved: await failure(`UPDATE thought_facets SET thought_id = $2::uuid WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out, other]),
+    noEvents: await failure(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'deliverable', $2::jsonb)`, [other, before]),
+    deleted: await failure(`DELETE FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+    illegal: await rawEvent(out, "verification", "unverified", spec, "c0ffee"),
+    same: await rawEvent(out, "verification", "verified", spec, "c0ffee"),
+    checkpoint: await rawEvent(out, "verification", "corrected", spec, "deadbeef"),
+    recapture: await rawEvent(out, "captured", "unverified", spec, "c0ffee"),
+    orphan: await rawEvent(other, "verification", "verified", spec, "c0ffee"),
+    noSpec: await rawEvent(other, "captured", "unverified", "00000000-0000-4000-8000-000000000122", "c0ffee"),
+    eventUpdate: await failure(`UPDATE deliverable_events SET outcome = 'rewritten' WHERE thought_id = $1::uuid`, [out]),
+    eventDelete: await failure(`DELETE FROM deliverable_events WHERE thought_id = $1::uuid`, [out]),
+    eventTruncate: await failure(`TRUNCATE deliverable_events`),
+  };
+  assert(/^23514 a deliverable facet is the projection of its events: thought \S+ stands verified as of event \d+, and this row says unverified/.test(raw.forbidden)
+         && /^23514 a deliverable facet is the projection of its events: .* this row says corrected/.test(raw.allowed)
+         && /^23514 a deliverable facet stands while its thought does/.test(raw.closed) && /^23514 a deliverable facet stays on its thought/.test(raw.moved)
+         && /^23514 thought \S+ has no deliverable events/.test(raw.noEvents) && /^23001 the deliverable facet on thought \S+ is the projection of its events and goes only with its thought/.test(raw.deleted)
+         && /^23514 a deliverable's status does not move verified -> unverified/.test(raw.illegal) && /^23514 a deliverable's status does not move verified -> verified/.test(raw.same)
+         && /^23514 a deliverable keeps the spec_ref and checkpoint it was captured with/.test(raw.checkpoint) && /^23514 thought \S+ is a deliverable already/.test(raw.recapture)
+         && /^23514 thought \S+ is not a deliverable: a verification follows a capture/.test(raw.orphan) && /^23514 a deliverable's spec_ref \S+ is not a thought/.test(raw.noSpec)
+         && [raw.eventUpdate, raw.eventDelete, raw.eventTruncate].every((r) => /^23001 deliverable_events is append-only/.test(r))
+         && JSON.stringify(await facet(out)) === before,
+    `below the tools: a raw UPDATE of the facet's status refused whether the move is forbidden or allowed, a close and a move refused, a facet with no events refused, a DELETE of it alone refused; a raw event's forbidden move, a move to the same status, a changed checkpoint, a second capture, a verification with no capture and a capture of no spec refused; an event's UPDATE, DELETE and TRUNCATE refused; the facet as it was (${Object.values(raw).map((r) => r.slice(0, 30)).join(" | ")})`);
+
+  // READ COMMITTED alone: above it a read of the newest event is an older snapshot's, so the writers, a raw event and a
+  // raw facet write are each refused 0A000 (review pass 1: the trigger and the validator checked no isolation, and a raw
+  // insert under REPEATABLE READ wrote a move from a status since replaced). Two sessions are test-live [49]'s.
+  const above = async (sql: string, params: unknown[] = []) => {
+    try {
+      await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(sql, params); });
+      return "taken";
+    } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const isolated = [
+    await above(`SELECT verify_deliverable($1, 'corrected', 'm', 'o', $2::jsonb)`, [out, JSON.stringify(CHECKER)]),
+    await above(`SELECT record_deliverable($1, $2, 'c', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]),
+    await above(`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+                 VALUES ($1::uuid, 'verification', 'corrected', $2::uuid, 'c0ffee', 'm', 'o', 'raw', false, now())`, [out, spec]),
+    await above(`UPDATE thought_facets SET payload = payload WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]),
+  ];
+  assert(/^0A000 verify_deliverable must run under READ COMMITTED/.test(isolated[0]) && /^0A000 record_deliverable must run under READ COMMITTED/.test(isolated[1])
+         && /^0A000 a deliverable event must run under READ COMMITTED/.test(isolated[2]) && /^0A000 a deliverable facet must run under READ COMMITTED/.test(isolated[3])
+         && JSON.stringify(await facet(out)) === before,
+    `above READ COMMITTED the writers, a raw event and a raw facet write are refused 0A000, and the facet stands as it was (${isolated.map((r) => r.slice(0, 60)).join(" | ")})`);
+
+  // The time zone: the payload's times are UTC text, so a session elsewhere computes the same projection.
+  await db.exec(`SET TimeZone = 'Asia/Kolkata'`);
+  const elsewhere = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);
+  const viaElsewhere = await failure(`UPDATE thought_facets SET payload = ob1_deliverable_payload(thought_id) WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]);
+  await db.exec(`RESET TimeZone`);
+  assert(elsewhere.length === 0 && viaElsewhere === "taken" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(String((await facet(out))?.captured_at)),
+    `the payload's times are UTC to the microsecond: no drift read from another time zone, and the projection written there admitted (${elsewhere.length}, ${viaElsewhere})`);
+
+  // Drift and the rebuild: a raw write with the validator off is found, and mended from the events.
+  await db.exec(`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`);
+  await db.query(`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"unverified"') WHERE thought_id = $1::uuid AND kind = 'deliverable'`, [out]);
+  await db.exec(`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`);
+  const drifted = await q<{ thought_id: string; problem: string }>(`SELECT thought_id::text AS thought_id, problem FROM ob1_deliverable_projection_drift()`);
+  const rebuilt = Number((await one<{ n: number }>(`SELECT ob1_rebuild_deliverable_projection() AS n`)).n);
+  const after = await q(`SELECT * FROM ob1_deliverable_projection_drift()`);
+  assert(drifted.length === 1 && drifted[0].thought_id === out && drifted[0].problem === "differs" && rebuilt === 1 && after.length === 0 && JSON.stringify(await facet(out)) === before,
+    `a facet written with the validator off reads as drift (differs); the rebuild makes it the events' projection again (${JSON.stringify(drifted)}, ${rebuilt})`);
+
+  // The deliverables grant group: with capture alone beside it, it records, verifies and reads; it cannot change an event;
+  // without it, refused naming the table.
+  const ROLE = "ob1_test_deliverables";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "deliverables"] })]) await db.exec(st);
+  const asRole = async (body: (tx: { query: typeof db.query }) => Promise<unknown>) => {
+    try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
+    catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const roleOut = await thought("[121] a role's output");
+  const roleUse = await asRole(async (tx) => {
+    const r1 = (await tx.query<{ r: R }>(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb) AS r`, [roleOut, spec, JSON.stringify(MAKER)])).rows[0].r;
+    const r2 = (await tx.query<{ r: R }>(`SELECT verify_deliverable($1, 'verified', 'm', 'o', $2::jsonb) AS r`, [roleOut, JSON.stringify(CHECKER)])).rows[0].r;
+    await tx.query(`SELECT deliverable_history($1)`, [roleOut]);
+    return `${r1.outcome},${r2.outcome}`;
+  });
+  const roleUpdate = await asRole((tx) => tx.query(`UPDATE deliverable_events SET outcome = 'x' WHERE false`));
+  await db.exec(`REVOKE ALL ON deliverable_events FROM ${ROLE}`);
+  const roleWithout = await asRole((tx) => tx.query(`SELECT record_deliverable($1, $2, 'r0le', $3::jsonb)`, [other, spec, JSON.stringify(MAKER)]));
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+  assert(roleUse.code === "" && roleUse.r === "captured,changed" && roleUpdate.code === "42501"
+         && roleWithout.code === "42501" && /permission denied for table deliverable_events/.test(roleWithout.message ?? ""),
+    `a role granted capture and deliverables alone records, verifies and reads a deliverable (the author read by the capture group's grant, the seq drawn by this group's); it cannot UPDATE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleUpdate.code}, ${roleWithout.message?.slice(0, 60)})`);
+
+  // The thought deleted: the facet goes with it, the events stay as history; no more verifications; not drift.
+  const events = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);
+  await db.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [out]);
+  const gone = await facet(out);
+  const kept = Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM deliverable_events WHERE thought_id = $1::uuid`, [out])).n);
+  const late = await ver(out, "corrected", CHECKER);
+  const lateRaw = await rawEvent(out, "verification", "corrected", spec, "c0ffee");
+  const history = (await one<{ h: { deliverable: unknown; events: { event: string; status: string }[] } }>(`SELECT deliverable_history($1) AS h`, [out])).h;
+  assert(gone === null && kept === events && events === 4 && late.code === "NOT_A_DELIVERABLE" && /thought was deleted/.test(late.message ?? "") && /thought was deleted: it takes no more verifications/.test(lateRaw)
+         && history.deliverable === null && history.events.map((e) => `${e.event}:${e.status}`).join(" ") === "captured:unverified verification:verified verification:corrected verification:verified"
+         && (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length === 0,
+    `the thought deleted: its facet goes by the cascade, its ${kept} events stay; a verification refused NOT_A_DELIVERABLE as a value and as a raw event; the history the events in order with no deliverable; not drift (${JSON.stringify(history.events.map((e) => e.status))})`);
+
+  // A re-apply is a no-op: the events kept, the projection current, the rules the same.
+  const out2 = await thought("[121] a second output");
+  await rec(out2, spec, "f00d", MAKER);
+  const keptRows = JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`));
+  const keptFacet = JSON.stringify(await facet(out2));
+  await reapply(file.slice(0, 4));
+  assert(JSON.stringify(await q(`SELECT seq, thought_id, event, status FROM deliverable_events ORDER BY seq`)) === keptRows && JSON.stringify(await facet(out2)) === keptFacet
+         && (await q(`SELECT * FROM ob1_deliverable_projection_drift()`)).length === 0 && (await ver(out2, "unverified", CHECKER)).code === "ILLEGAL_TRANSITION",
+    "a re-apply is a no-op: the events and the facet kept, no drift, the rules the same");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[122] Migration 135: a thought serves every ticket of its subject set — ob1_item_serves returns each standing ticket subject, distinct, in key order, a filed ticket still serving alone and a subject of another kind none; effective_priority inherits from the best of them; 122's other arms as they were; a re-apply a no-op (SMD-3306)");
+{
+  const file = files.find((f) => /^\d{3}_item_serves_subject_set\.sql$/.test(f)) ?? "no NNN_item_serves_subject_set.sql";  // by name: renumbered when main takes its number
+  // [109] re-applied 122's ob1_item_serves, which 135 replaces: this section holds 135's.
+  await reapply(file.slice(0, 4));
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[122]%'`);
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('serves-op', 'operator') ON CONFLICT DO NOTHING`);
+  const OP = { name: "serves-op", scope: "write" };
+
+  // The shape: 135 the last definer, the sentinel, the comment naming both migrations.
+  const src = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'ob1_item_serves(text, text)'::regprocedure`)).s);
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["ob1_item_serves(text, text)"])).c ?? "";
+  assert((await functionsNamed("ob1_item_serves")) === 1 && lastDefinerOf("ob1_item_serves") === file && /ob1:serves-subject-set/.test(src) && !/LIMIT 1/.test(src)
+         && /Migrations 122, 135 \/ SMD-3667, SMD-3306/.test(comment),
+    `one ob1_item_serves, ${file} its last definer, its sentinel and no LIMIT 1, its comment naming 122 and 135 (${comment.slice(-60)})`);
+
+  const thought = async (content: string, metadata: object | null = null) =>
+    (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`, [`[122] ${content}`, metadata === null ? null : JSON.stringify(metadata)])).id;
+  const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
+  const sets = async (id: string, keys: string[]) =>
+    (await one<{ r: { action: string } }>(`SELECT record_thought_subjects($1::uuid, $2::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL, $3, NULL) AS r`, [id, keys, await fp(id)])).r;
+  /** What an item serves, `kind:key` each, a thought's by default. */
+  const serves = async (key: string, kind = "thought") =>
+    (await q<{ kind: string; key: string | null }>(`SELECT kind, key FROM ob1_item_serves($1, $2)`, [kind, key])).map((r) => `${r.kind}:${r.key}`).join(",");
+
+  // A session on two tickets, and a phrase beside them: both tickets served, in key order, the phrase none. The lesser
+  // key's facet is written first, so a read of one subject in scan order would serve it alone.
+  const session = await thought("a session on two tickets");
+  await sets(session, ["ticket:SMD-91701", "ticket:SMD-91702", "phrase:a release cut"]);
+  const two = await serves(session);
+  // A ticket filed under: it alone, whatever subjects stand (the metadata rule writes it alone; a raw set beside it
+  // here, to show the filed ticket wins).
+  const filed = await thought("filed under its ticket", { ticket: "SMD-91709" });
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'subject', $2::jsonb)`, [filed, JSON.stringify({ key: "ticket:SMD-91708", by: "model", judge_key: "subject:qwen3.8:27b@p3r" })]);
+  const alone = await serves(filed);
+  // No ticket subject: nothing.
+  const phrased = await thought("a phrase alone");
+  await sets(phrased, ["phrase:a phrase alone"]);
+  const none = await serves(phrased);
+  assert(two === "ticket:SMD-91701,ticket:SMD-91702" && alone === "ticket:SMD-91709" && none === "",
+    `a thought serves each ticket of its set, in key order, a phrase none; a filed ticket alone; no ticket subject, nothing (${two} | ${alone} | ${none || "none"})`);
+  // A set grown out of key order — the greater key first, the lesser written beside it later — then narrowed: the
+  // closed ticket serves nothing. And keys that are no ticket 122 serves: a phrase shaped like an id, a ticket key
+  // 122's pattern refuses (number 0). STABLE as 122's (review pass 1's mutants: each filter and arm otherwise unheld).
+  const grown = await thought("a set grown and narrowed");
+  await sets(grown, ["ticket:SMD-91702"]);
+  await sets(grown, ["ticket:SMD-91701", "ticket:SMD-91702"]);
+  const grownServes = await serves(grown);
+  await sets(grown, ["ticket:SMD-91702"]);
+  const narrowedServes = await serves(grown);
+  const odd = await thought("keys that are no ticket's");
+  await sets(odd, ["phrase:ab-12", "ticket:SMD-0"]);
+  const oddServes = await serves(odd);
+  const volatility = (await one<{ v: string }>(`SELECT provolatile AS v FROM pg_proc WHERE oid = 'ob1_item_serves(text, text)'::regprocedure`)).v;
+  assert(grownServes === "ticket:SMD-91701,ticket:SMD-91702" && narrowedServes === "ticket:SMD-91702" && oddServes === "" && volatility === "s",
+    `a set written out of key order serves in key order; a ticket closed from it serves nothing; a phrase shaped like an id and a ticket key 122 refuses serve nothing; STABLE as 122's (${grownServes} | ${narrowedServes} | ${oddServes || "none"} | ${volatility})`);
+
+  // The ORDER BY, not the plan: a set of three written greatest key first, read with sorts priced out (a hashed
+  // DISTINCT), still serves in key order (review pass 2, mutant: without ORDER BY 2 the sorted DISTINCT hid it).
+  const hashed = await thought("a set of three, the greatest key first");
+  await sets(hashed, ["ticket:SMD-91713"]);
+  await sets(hashed, ["ticket:SMD-91712", "ticket:SMD-91713"]);
+  await sets(hashed, ["ticket:SMD-91711", "ticket:SMD-91712", "ticket:SMD-91713"]);
+  let hashedServes = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SET LOCAL enable_sort = off`);
+    // Planned now, for these settings: plpgsql keeps a generic plan once a statement has run five times, built under
+    // the settings of the call that built it, so with one more read above this one the plan would be a sorted one, the
+    // ORDER BY unheld (review pass 3, mutant).
+    await tx.query(`SET LOCAL plan_cache_mode = force_custom_plan`);
+    hashedServes = (await tx.query<{ kind: string; key: string }>(`SELECT kind, key FROM ob1_item_serves('thought', $1)`, [hashed])).rows.map((r) => `${r.kind}:${r.key}`).join(",");
+  });
+  assert(hashedServes === "ticket:SMD-91711,ticket:SMD-91712,ticket:SMD-91713", `a set of three served in key order under a hashed DISTINCT too (${hashedServes})`);
+
+  // 122's filed-ticket arm as 135 copies it ([109] re-applies 122's own, so only this section reads 135's): a ticket
+  // filed in lower case serves upper case, a malformed metadata.ticket passes to a valid issue, an issue alone serves
+  // (review pass 3, mutants: each unheld).
+  const lowFiled = await serves(await thought("filed under its ticket in lower case", { ticket: "smd-91714" }));
+  const badTicket = await serves(await thought("a malformed ticket beside its issue", { ticket: "SMD 91715", issue: "SMD-91715" }));
+  const issueOnly = await serves(await thought("an issue alone", { issue: "smd-91716" }));
+  // …and a malformed metadata.issue passes to the subjects (review pass 4, mutant: the issue's pattern unheld).
+  const badIssue = await thought("a malformed issue beside a ticket subject", { issue: "SMD 91717" });
+  await sets(badIssue, ["ticket:SMD-91717"]);
+  const badIssueServes = await serves(badIssue);
+  assert(lowFiled === "ticket:SMD-91714" && badTicket === "ticket:SMD-91715" && issueOnly === "ticket:SMD-91716" && badIssueServes === "ticket:SMD-91717",
+    `135's filed-ticket arm as 122's: upper case, a malformed ticket passing to its issue, an issue alone, a malformed issue passing to the subjects (${lowFiled || "none"} | ${badTicket || "none"} | ${issueOnly || "none"} | ${badIssueServes || "none"})`);
+
+  // effective_priority inherits from the best of the set's tickets: High on the first, Urgent on the second — the
+  // thought takes the Urgent one less a hop (3), where the first alone would give nothing above unknown's 2.
+  const put = async (key: string, level: number) => {
+    const r = (await one<{ r: { outcome: string } }>(`SELECT assert_priority('ticket', $1, $2, NULL, NULL, NULL, NULL, NULL, false, $3::jsonb) AS r`, [key, level, JSON.stringify(OP)])).r;
+    if (r.outcome !== "asserted") throw new Error(`[122] fixture: assert_priority on ${key} answered ${JSON.stringify(r)}`);
+  };
+  /** A ticket's row as board-sync writes it ([109]'s way): its thought, open, and its Linear source row. */
+  const ticketRow = async (issue: string) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text`,
+        [`[122] ${issue}`, JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, `[122] ${issue}`]);
+    return id;
+  };
+  // The two tickets, open.
+  for (const issue of ["SMD-91701", "SMD-91702"]) await ticketRow(issue);
+  await put("SMD-91701", 3);
+  await put("SMD-91702", 4);
+  type Eff = { level: number | null; inherited_from: { kind: string; key: string; level: number; hops: number } | null; effective: string };
+  const effOf = async (id: string) => (await one<Eff>(`SELECT level, inherited_from, effective FROM effective_priority($1::jsonb, NULL, $2::timestamptz)`, [JSON.stringify([{ kind: "thought", key: id }]), NOW]));
+  const inherited = await effOf(session);
+  assert(inherited.inherited_from?.key === "SMD-91702" && inherited.inherited_from.level === 4 && inherited.inherited_from.hops === 1,
+    `effective_priority inherits from the best ticket of the set, the Urgent one a hop away (${JSON.stringify(inherited.inherited_from)}; effective ${inherited.effective})`);
+
+  // 122's other arms: a ticket's parent, an item's origin thought — answered as before.
+  const parentArm = (await q<{ key: string }>(`SELECT key FROM ob1_item_serves('ticket', 'SMD-91799')`)).length;
+  const itemArm = (await q<{ key: string }>(`SELECT key FROM ob1_item_serves('item', '00000000-0000-4000-8000-000000009170')`)).length;
+  assert(parentArm === 0 && itemArm === 0, `a ticket with no parent link and an item that does not exist serve nothing, as under 122 (${parentArm}, ${itemArm})`);
+  // …and each arm's rows: a child with a link to its parent and one to itself serves its parent alone, upper case; an
+  // item with no origin thought serves nothing, one with an origin its thought.
+  const child = await ticketRow("SMD-91703");
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [child, JSON.stringify([{ relation: "child_of", target: "smd-91701" }, { relation: "child_of", target: "smd-91703" }, { relation: "child_of", target: "SMD-91701" }, { relation: "child_of", target: "smd-0" }])]);
+  const parentRows = await serves("SMD-91703", "ticket");
+  const [noOrigin, withOrigin] = ["00000000-0000-4000-8000-000000009171", "00000000-0000-4000-8000-000000009172"];
+  await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq, origin_thought_id) VALUES ($1::uuid, 'open', '[122] no origin', now(), now(), 'raw-writer', now(), 0, NULL), ($2::uuid, 'open', '[122] an origin', now(), now(), 'raw-writer', now(), 0, $3::uuid)`, [noOrigin, withOrigin, session]);
+  const itemRows = [await serves(noOrigin, "item"), await serves(withOrigin, "item")];
+  await db.query(`DELETE FROM open_items WHERE item_id IN ($1::uuid, $2::uuid)`, [noOrigin, withOrigin]);
+  assert(parentRows === "ticket:SMD-91701" && itemRows[0] === "" && itemRows[1] === `thought:${session}`,
+    `a child serves its parent alone, upper case, not itself; an item with no origin nothing, one with an origin its thought, as under 122 (${parentRows} | ${itemRows.map((r) => r || "none").join(" | ")})`);
+
+  // The ticket arm as 135 copies it: a closed child_of link serves nothing, nor an active link of another relation
+  // (review pass 3, mutants: each unheld once [109] re-applies 122's own).
+  const orphan = await ticketRow("SMD-91704");
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }, { relation: "blocks", target: "SMD-91702" }])]);
+  await db.query(`UPDATE thought_facets SET valid_until = now() WHERE thought_id = $1::uuid AND kind = 'link' AND payload->>'relation' = 'child_of'`, [orphan]);
+  // Another system's child_of link on the ticket's thought (review pass 4, mutant: the link's system filter unheld).
+  await db.query(`SELECT record_source_links($1::uuid, 'github', $2::text::jsonb)`, [orphan, JSON.stringify([{ relation: "child_of", target: "SMD-91705" }])]);
+  const orphanRows = await serves("SMD-91704", "ticket");
+  // A key another system's source row holds, its thought linked by Linear: no Linear ticket, so no parent (review pass
+  // 4, mutant: the source row's system filter unheld).
+  let elsewhere = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "serves-op" })]);
+    elsewhere = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}'::jsonb) RETURNING id::text`, ["[122] SMD-91706 held elsewhere"])).rows[0].id;
+  });
+  await db.query(`SELECT record_thought_source($1::uuid, 'github', 'SMD-91706', '[122] SMD-91706 held elsewhere', 'text/markdown')`, [elsewhere]);
+  await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [elsewhere, JSON.stringify([{ relation: "child_of", target: "SMD-91701" }])]);
+  const elsewhereRows = await serves("SMD-91706", "ticket");
+  assert(orphanRows === "" && elsewhereRows === "",
+    `a closed parent link serves nothing, nor a link of another relation or another system, nor a key no Linear source row holds (${orphanRows || "none"} | ${elsewhereRows || "none"})`);
+
+  // Re-applied, 135 changes nothing.
+  await reapply(file.slice(0, 4));
+  assert((await serves(session)) === two && (await functionsNamed("ob1_item_serves")) === 1, "135 applied again changes nothing");
+
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[122]%'`);
+}
+
+console.log("\n[123] Migration 136: a deleted item's priority statements close — close reason `deleted`, by AFTER DELETE row triggers on thoughts and ob1_entities, on delete_thought, a raw DELETE and a prune alike, each item re-projected; a statement whose due reference names the deleted item kept open; merge_entities restating the loser's statements on the survivor, the maker's later one there standing; a role without the priority grants deletes as before and the sweep closes what it left; on upgrade the statements on items already gone closed; the CHECK holding closed_by to `replaced`; a re-apply a no-op (SMD-3711)");
+{
+  type Assertion = { id: string; item: { kind: string; key: string }; level: number; reason: string | null; due_ref: { kind: string; key: string } | null; asserted_at: string;
+    maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
+  const file = files.find((f) => /^\d{3}_priority_deleted_items\.sql$/.test(f)) ?? "no NNN_priority_deleted_items.sql";
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[123] op', 'operator'), ('[123] bot', 'agent')`);
+  const OP = { name: "[123] op", scope: "write" }, BOT = { name: "[123] bot", scope: "write" };
+  const thoughtAs = async (content: string) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[123] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [content])).rows[0].id;
+    });
+    return id;
+  };
+  const entity = async (name: string, type = "tool") =>
+    (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ($1, $2, lower($2)) RETURNING id::text`, [type, name])).rows[0].id;
+  const put = async (kind: string, key: string, level: number, actor: object, o: { ref?: [string, string]; reason?: string } = {}) => {
+    const r = (await db.query<{ r: { outcome: string; assertion: Assertion } }>(`SELECT assert_priority($1, $2, $3, NULL, NULL, $4, $5, $6, false, $7::jsonb) AS r`,
+      [kind, key, level, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.reason ?? null, JSON.stringify(actor)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[123] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+    return r.assertion;
+  };
+  const history = async (kind: string, key: string) => (await db.query<{ r: Assertion[] }>(`SELECT priority_history($1, $2) AS r`, [kind, key])).rows[0].r;
+  const of = async (kind: string, key: string) =>
+    (await db.query<{ level: number | null; assertions: Assertion[] }>(`SELECT * FROM priority_of($1::jsonb)`, [JSON.stringify([{ kind, key }])])).rows[0];
+  const current = async (kind: string, key: string) =>
+    (await db.query<{ level: number }>(`SELECT level FROM priority_current WHERE item_kind = $1 AND item_key = $2`, [kind, key])).rows[0]?.level ?? null;
+  const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
+  const row = async (id: string) =>
+    (await db.query<{ close_reason: string | null; closed_by: string | null }>(`SELECT close_reason, closed_by::text FROM priority_assertions WHERE id = $1::uuid`, [id])).rows[0];
+  const failure = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+
+  // The shape: four functions and merge_entities say 136; two row-level AFTER DELETE triggers (review pass 2: a statement
+  // trigger's transition table copied every deleted row whole).
+  const fns = (await db.query<{ n: string; c: string | null }>(
+    `SELECT p.proname AS n, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND p.proname IN ('ob1_priority_can_close', 'ob1_priority_close_items', 'ob1_priority_close_deleted', 'ob1_close_orphan_priorities', 'merge_entities') ORDER BY 1`)).rows;
+  const triggers = (await db.query<{ t: string; r: string }>(
+    `SELECT t.tgname AS t, c.relname AS r FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+      WHERE t.tgname IN ('priority_close_on_thought_delete', 'priority_close_on_entity_delete') AND (t.tgtype & 1) = 1 AND (t.tgtype & 8) = 8 ORDER BY 1`)).rows;
+  assert(fns.length === 5 && fns.every((f) => /[Mm]igration 136 \/ SMD-3711/.test(f.c ?? "")) && JSON.stringify(triggers.map((t) => `${t.t}:${t.r}`))
+           === JSON.stringify(["priority_close_on_entity_delete:ob1_entities", "priority_close_on_thought_delete:thoughts"]),
+    `five functions name 136; a row-level AFTER DELETE trigger on thoughts and on ob1_entities (${fns.map((f) => f.n).join(", ")}; ${triggers.map((t) => t.t).join(", ")})`);
+
+  // The ticket's Verify: a thought with an open statement deleted through delete_thought — priority_of answers unknown, the
+  // history shows it closed `deleted`, no projection row and no drift; another thought's statement taking its due time
+  // from the deleted one stays open, its own level kept.
+  const gone = await thoughtAs("[123] a note to delete");
+  const other = await thoughtAs("[123] a note that takes its due time from it");
+  const onGone = await put("thought", gone, 4, OP, { reason: "renewal" });
+  const botOnGone = await put("thought", gone, 2, BOT);
+  const refOn = await put("thought", other, 3, OP, { ref: ["thought", gone] });
+  const del = (await db.query<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, NULL::jsonb) AS r`, [gone])).rows[0].r;
+  const ofGone = await of("thought", gone), hGone = await history("thought", gone);
+  assert(del.ok === true && ofGone.level === null && ofGone.assertions.length === 0
+         && hGone.length === 2 && hGone.every((h) => h.close_reason === "deleted" && h.closed_at !== null && h.closed_by === null)
+         && await current("thought", gone) === null && (await row(refOn.id)).close_reason === null && (await of("thought", other)).level === 3 && await drift() === 0,
+    `deleted through delete_thought, the thought's statements (two keys') close as deleted, priority_of answers unknown and no projection row stands; one taking its due time from it stays open at its own level; no drift (${hGone.map((h) => h.close_reason).join(", ")}; ${onGone.id !== botOnGone.id})`);
+
+  // A raw DELETE fires it too, and many thoughts in one statement close together.
+  const rawA = await thoughtAs("[123] raw a"), rawB = await thoughtAs("[123] raw b");
+  await put("thought", rawA, 1, OP); await put("thought", rawB, 5, OP);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[123] op" })]);
+    await tx.query(`DELETE FROM thoughts WHERE id = ANY($1::uuid[])`, [[rawA, rawB]]);
+  });
+  assert((await history("thought", rawA))[0]?.close_reason === "deleted" && (await history("thought", rawB))[0]?.close_reason === "deleted" && await drift() === 0,
+    `a raw DELETE of two thoughts in one statement closes both their statements as deleted; no drift`);
+
+  // An entity deleted outright (extraction's prune, here by hand) closes its statements.
+  const pruned = await entity("[123] pruned");
+  await put("entity", pruned, 3, OP);
+  await db.query(`DELETE FROM ob1_entities WHERE id = $1::uuid`, [pruned]);
+  assert((await history("entity", pruned))[0]?.close_reason === "deleted" && await current("entity", pruned) === null && await drift() === 0,
+    `an entity deleted outright closes its statements as deleted, its projection row gone`);
+
+  // merge_entities restates the loser's statements on the survivor: the operator's earlier word on the survivor is replaced
+  // by its later one on the loser, restated; the agent's later word on the survivor stands over its earlier one on the loser;
+  // a due reference from the loser to the survivor is dropped from the copy.
+  const survivor = await entity("[123] Survivor"), loser = await entity("[123] Loser");
+  // Apart by a few milliseconds: a merge compares when each word was said, and PGlite's clock can give two calls one.
+  const opOnS = await put("entity", survivor, 1, OP);
+  await Bun.sleep(5);
+  const botOnL = await put("entity", loser, 2, BOT);
+  await Bun.sleep(5);
+  const opOnL = await put("entity", loser, 4, OP, { ref: ["entity", survivor], reason: "the merged one" });
+  await Bun.sleep(5);
+  const botOnS = await put("entity", survivor, 3, BOT);
+  const merged = (await db.query<{ r: { ok: boolean; priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [survivor, loser])).rows[0].r;
+  const onS = (await history("entity", survivor)).filter((h) => h.closed_at === null);
+  const restated = onS.find((h) => h.maker.name === "[123] op");
+  assert(merged.ok === true && merged.priorities_moved === 1 && onS.length === 2
+         && restated?.level === 4 && restated?.reason === "the merged one" && restated?.due_ref === null && restated?.asserted_at === opOnL.asserted_at
+         && (await row(opOnL.id)).close_reason === "replaced" && (await row(opOnL.id)).closed_by === restated?.id
+         && (await row(opOnS.id)).close_reason === "replaced" && (await row(opOnS.id)).closed_by === restated?.id
+         && (await row(botOnL.id)).close_reason === "replaced" && (await row(botOnL.id)).closed_by === botOnS.id && (await row(botOnS.id)).close_reason === null
+         && (await history("entity", loser)).every((h) => h.close_reason === "replaced") && await current("entity", survivor) === 4 && await drift() === 0,
+    `a merge restates the operator's later statement on the loser on the survivor (level, reason, asserted_at kept, its due reference to the survivor dropped), closing the loser's and its earlier one on the survivor as replaced by it; the agent's later statement on the survivor stands, its earlier one on the loser replaced by it; priorities_moved 1, no drift (${JSON.stringify(merged)})`);
+
+  // The maker's latest word on the survivor is a clear made after its statement on the loser: the loser's is cleared, and
+  // nothing is restated (review pass 1: the merge brought back a level the maker had withdrawn).
+  const sClear = await entity("[123] Survivor cleared"), lClear = await entity("[123] Loser cleared");
+  const opOnLClear = await put("entity", lClear, 4, OP);
+  await Bun.sleep(5);
+  await put("entity", sClear, 3, OP);
+  await Bun.sleep(5);
+  await db.query(`SELECT clear_priority('entity', $1, $2::jsonb)`, [sClear, JSON.stringify(OP)]);
+  const mergedClear = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sClear, lClear])).rows[0].r;
+  assert(mergedClear.priorities_moved === 0 && (await row(opOnLClear.id)).close_reason === "cleared" && (await row(opOnLClear.id)).closed_by === null
+         && (await of("entity", sClear)).level === null && await drift() === 0,
+    `where the maker cleared its statement on the survivor after stating one on the loser, the merge clears the loser's and restates nothing (${JSON.stringify(mergedClear)})`);
+
+  // A maker's statement on the survivor made by name before its key had an id is that maker's: the restatement replaces it
+  // too, one open statement left (review pass 1: matched by maker_key the merge left two).
+  const sName = await entity("[123] Survivor by name"), lName = await entity("[123] Loser by id");
+  const byName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 1, '[123] op', NULL, 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [sName])).rows[0].id;
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await Bun.sleep(5);
+  const onLName = await put("entity", lName, 5, OP);
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sName, lName]);
+  const openOnSName = (await history("entity", sName)).filter((h) => h.closed_at === null);
+  assert(openOnSName.length === 1 && openOnSName[0]?.level === 5 && (await row(byName)).close_reason === "replaced" && (await row(byName)).closed_by === openOnSName[0]?.id
+         && (await row(onLName.id)).closed_by === openOnSName[0]?.id && await drift() === 0,
+    `the maker's by-name statement on the survivor is its own: the restatement replaces it and the loser's, one open statement left (${openOnSName.map((h) => h.level).join(", ")})`);
+
+  // The other way round: the loser's statement made by name before the key had an id, the survivor's by id — the registry
+  // gives the name its id, so the survivor's later one stands and the loser's closes as replaced by it.
+  const sId = await entity("[123] Survivor by id"), lByName = await entity("[123] Loser by name");
+  const loserByName = (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 5, '[123] op', NULL, 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [lByName])).rows[0].id;
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await Bun.sleep(5);  // the times are what a merge compares, and PGlite's clock can give two calls one millisecond
+  const onSId = await put("entity", sId, 2, OP);
+  const mergedByName = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sId, lByName])).rows[0].r;
+  assert(mergedByName.priorities_moved === 0 && (await row(loserByName)).close_reason === "replaced" && (await row(loserByName)).closed_by === onSId.id
+         && (await history("entity", sId)).filter((h) => h.closed_at === null).length === 1 && await drift() === 0,
+    `a loser's by-name statement is the maker whose id the registry gives that name: its later statement on the survivor stands, the loser's replaced by it (${JSON.stringify(mergedByName)})`);
+
+  // Two merges in turn: the maker's level on the second loser, said later than its level on the first, replaces the first's
+  // restatement (review pass 2: by seq, the restatement read as the later word).
+  const sTwo = await entity("[123] Survivor of two"), l0 = await entity("[123] First loser"), l1 = await entity("[123] Second loser");
+  await put("entity", l0, 2, OP); await Bun.sleep(5); await put("entity", l1, 5, OP);
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sTwo, l0]);
+  await db.query(`SELECT merge_entities($1::uuid, $2::uuid)`, [sTwo, l1]);
+  const openOnTwo = (await history("entity", sTwo)).filter((h) => h.closed_at === null);
+  assert(openOnTwo.length === 1 && openOnTwo[0]?.level === 5 && await drift() === 0,
+    `two merges in turn leave the maker's later word, 5 from the second loser, on the survivor, not the first loser's restated 2 (${openOnTwo.map((h) => h.level).join(", ")})`);
+
+  // A clear counts from when it was made: the maker stated on the survivor, then on the loser, then cleared the survivor —
+  // the clear is its latest word, so the loser's is cleared too.
+  const sLate = await entity("[123] Survivor cleared late"), lLate = await entity("[123] Loser before the clear");
+  // Apart by a few milliseconds: the times are what is compared, and PGlite's clock can give two calls one millisecond.
+  await put("entity", sLate, 3, OP);
+  await Bun.sleep(5);
+  const onLLate = await put("entity", lLate, 4, OP);
+  await Bun.sleep(5);
+  await db.query(`SELECT clear_priority('entity', $1, $2::jsonb)`, [sLate, JSON.stringify(OP)]);
+  const mergedLate = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sLate, lLate])).rows[0].r;
+  assert(mergedLate.priorities_moved === 0 && (await row(onLLate.id)).close_reason === "cleared" && (await of("entity", sLate)).level === null,
+    `a clear on the survivor made after the maker's statement on the loser clears it, though the statement it cleared was older (${JSON.stringify(mergedLate)})`);
+
+  // A maker's by-name and by-id statements on the loser are restated in turn, the later replacing the earlier:
+  // priorities_moved counts the one left standing (review pass 5).
+  const sPair = await entity("[123] Survivor of a pair"), lPair = await entity("[123] Loser with a pair");
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 2, '[123] op', NULL, 'operator', 'operator', 'write', false, 1, now())`, [lPair]);
+  // Both raw: assert_priority would close the by-name one as the key's own.
+  await Bun.sleep(5);
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 4, '[123] op', (SELECT canonical_agent_id FROM ob1_agents WHERE label = '[123] op'), 'operator', 'operator', 'write', false, 1, now())`, [lPair]);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  const pairOpen = (await history("entity", lPair)).filter((h) => h.closed_at === null).length;
+  const mergedPair = (await db.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sPair, lPair])).rows[0].r;
+  const openOnPair = (await history("entity", sPair)).filter((h) => h.closed_at === null);
+  assert(pairOpen === 2 && mergedPair.priorities_moved === 1 && openOnPair.length === 1 && openOnPair[0]?.level === 4 && await drift() === 0,
+    `a maker's by-name and by-id statements on the loser leave one restatement on the survivor, the later, and priorities_moved says one (${JSON.stringify(mergedPair)})`);
+
+  // A role that may close but not restate (no INSERT on the assertions) merges as before; the delete's trigger closes the
+  // loser's as deleted.
+  const NOINSERT = "ob1_test_no_insert";
+  await db.exec(`CREATE ROLE ${NOINSERT} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOINSERT}`, ...grantStatements(NOINSERT, { groups: ["capture", "extraction"] })]) await db.exec(st);
+  const sNo = await entity("[123] Survivor no insert"), lNo = await entity("[123] Loser no insert");
+  const onLNo = await put("entity", lNo, 3, OP);
+  let noInsertMerge = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOINSERT}`);
+      noInsertMerge = JSON.stringify((await tx.query<{ r: { ok: boolean; priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sNo, lNo])).rows[0].r);
+    });
+  } catch (e) { noInsertMerge = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(/"ok":true/.test(noInsertMerge) && /"priorities_moved":0/.test(noInsertMerge) && (await row(onLNo.id)).close_reason === "deleted" && await drift() === 0,
+    `a role holding the extraction group's grants, which close but do not write, merges as before; the loser's statement closes as deleted (${noInsertMerge})`);
+
+  // A role holding the priority and extraction groups but no SELECT on the registry merges as before (review pass 2: the
+  // maker's id is read from ob1_agents, which the gate did not ask).
+  const NOREG = "ob1_test_no_registry";
+  await db.exec(`CREATE ROLE ${NOREG} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOREG}`, ...grantStatements(NOREG, { groups: ["extraction", "priority"] })]) await db.exec(st);
+  const sReg = await entity("[123] Survivor no registry"), lReg = await entity("[123] Loser no registry");
+  const onLReg = await put("entity", lReg, 3, OP);
+  let noRegMerge = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOREG}`);
+      noRegMerge = JSON.stringify((await tx.query<{ r: { ok: boolean; priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sReg, lReg])).rows[0].r);
+    });
+  } catch (e) { noRegMerge = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(/"ok":true/.test(noRegMerge) && /"priorities_moved":0/.test(noRegMerge) && (await row(onLReg.id)).close_reason === "deleted",
+    `a role without SELECT on the registry merges as before, its loser's statement closed as deleted (${noRegMerge})`);
+  await db.exec(`DROP OWNED BY ${NOREG}; DROP ROLE ${NOREG}`);
+
+  // A delete under REPEATABLE READ skips, as every priority writer refuses one there, and leaves its statement for the sweep.
+  const rr = await thoughtAs("[123] deleted under repeatable read");
+  const onRR = await put("thought", rr, 2, OP);
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[123] op" })]);
+    await tx.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [rr]);
+  });
+  const rrLeft = (await row(onRR.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(rrLeft === null && (await row(onRR.id)).close_reason === "deleted",
+    `a delete under REPEATABLE READ goes through, its statement left open, and the sweep closes it (${rrLeft})`);
+
+  // A merge under REPEATABLE READ restates nothing, as the writers refuse a transaction there (review pass 3); its delete's
+  // trigger skips too, and the sweep closes the loser's statement as deleted.
+  const sRR = await entity("[123] Survivor repeatable read"), lRR = await entity("[123] Loser repeatable read");
+  const onLRR = await put("entity", lRR, 4, OP);
+  let rrMerge = "";
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+    rrMerge = JSON.stringify((await tx.query<{ r: { priorities_moved: number } }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sRR, lRR])).rows[0].r);
+  });
+  const rrLeftOpen = (await row(onLRR.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(/"priorities_moved":0/.test(rrMerge) && rrLeftOpen === null && (await row(onLRR.id)).close_reason === "deleted" && (await of("entity", sRR)).level === null,
+    `a merge under REPEATABLE READ goes through restating nothing; the loser's statement is left open, and the sweep closes it as deleted (${rrMerge})`);
+
+  // The extraction group's own prune closes an entity's statements: its grants are what closing takes.
+  const prunedByWorker = await entity("[123] pruned by the worker");
+  const onWorker = await put("entity", prunedByWorker, 2, OP);
+  let workerDelete = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOINSERT}`);
+      await tx.query(`DELETE FROM ob1_entities WHERE id = $1::uuid`, [prunedByWorker]);
+      workerDelete = "deleted";
+    });
+  } catch (e) { workerDelete = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(workerDelete === "deleted" && (await row(onWorker.id)).close_reason === "deleted" && await current("entity", prunedByWorker) === null && await drift() === 0,
+    `an extraction-group role's prune of an entity closes its statement in the trigger (${workerDelete})`);
+  await db.exec(`DROP OWNED BY ${NOINSERT}; DROP ROLE ${NOINSERT}`);
+
+  // The carry: a role holding DELETE on ob1_entities before 136 is granted what closing takes by it.
+  const OLDX = "ob1_test_extraction_old";
+  await db.exec(`CREATE ROLE ${OLDX} NOLOGIN; GRANT DELETE ON ob1_entities TO ${OLDX}`);
+  const heldX = async () => (await db.query<{ g: boolean }>(`SELECT has_table_privilege('${OLDX}', 'priority_assertions', 'UPDATE') AND has_table_privilege('${OLDX}', 'priority_current', 'DELETE') AS g`)).rows[0].g;
+  const xBefore = await heldX();
+  await reapply(file.slice(0, 4));
+  const xAfter = await heldX();
+  assert(!xBefore && xAfter, `a role holding DELETE on ob1_entities before 136 is granted UPDATE on the assertions and the projection's writes by it (${xBefore} → ${xAfter})`);
+  await db.exec(`DROP OWNED BY ${OLDX}; DROP ROLE ${OLDX}`);
+
+  // A role without the priority grants deletes as before; its delete leaves the statement open, and the sweep closes it.
+  const ROLE = "ob1_test_no_priority";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server"] })]) await db.exec(st);
+  const leftOpen = await thoughtAs("[123] deleted by a role without the priority grants");
+  const leftStatement = await put("thought", leftOpen, 2, OP);
+  let roleDelete = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${ROLE}`);
+      roleDelete = JSON.stringify((await tx.query<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, $2::jsonb) AS r`, [leftOpen, JSON.stringify({ name: "[123] op" })])).rows[0].r.ok);
+    });
+  } catch (e) { roleDelete = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const stillOpen = (await row(leftStatement.id)).close_reason;
+  const swept = (await db.query<{ thoughts_closed: number; entities_closed: number }>(`SELECT * FROM ob1_close_orphan_priorities()`)).rows[0];
+  const sweptAgain = (await db.query<{ thoughts_closed: number; entities_closed: number }>(`SELECT * FROM ob1_close_orphan_priorities()`)).rows[0];
+  assert(roleDelete === "true" && stillOpen === null && swept.thoughts_closed === 1 && swept.entities_closed === 0 && (await row(leftStatement.id)).close_reason === "deleted"
+         && sweptAgain.thoughts_closed === 0 && sweptAgain.entities_closed === 0 && await drift() === 0,
+    `a role granted capture and server alone deletes a thought as before, its statement left open; the sweep closes it as deleted, and a second finds nothing (${roleDelete}, ${JSON.stringify(swept)})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // A role that may read the statements but not close them (SELECT alone on the assertions) deletes as before too: the
+  // full check, past the cheap one, skips it (review pass 3).
+  const READER = "ob1_test_priority_reader";
+  await db.exec(`CREATE ROLE ${READER} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${READER}`, ...grantStatements(READER, { groups: ["capture", "server"] }), `GRANT SELECT ON priority_assertions TO ${READER}`]) await db.exec(st);
+  const readerGone = await thoughtAs("[123] deleted by a role that reads priorities");
+  const onReaderGone = await put("thought", readerGone, 2, OP);
+  let readerDelete = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${READER}`);
+      readerDelete = JSON.stringify((await tx.query<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, $2::jsonb) AS r`, [readerGone, JSON.stringify({ name: "[123] op" })])).rows[0].r.ok);
+    });
+  } catch (e) { readerDelete = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const readerLeft = (await row(onReaderGone.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(readerDelete === "true" && readerLeft === null && (await row(onReaderGone.id)).close_reason === "deleted",
+    `a role reading the statements but unable to close them deletes as before, its statement left for the sweep (${readerDelete})`);
+  await db.exec(`DROP OWNED BY ${READER}; DROP ROLE ${READER}`);
+
+  // The CHECK: `deleted` closes with no closed_by; any other reason refused.
+  const still = await thoughtAs("[123] a note that stays");
+  const kept = await put("thought", still, 2, OP);
+  const checks = [
+    await failure(`UPDATE priority_assertions SET closed_at = now(), close_reason = 'deleted', closed_by = gen_random_uuid() WHERE id = $1::uuid`, [kept.id]),
+    await failure(`UPDATE priority_assertions SET closed_at = now(), close_reason = 'forgotten' WHERE id = $1::uuid`, [kept.id]),
+  ];
+  assert(checks.every((c) => c === "23514") && (await row(kept.id)).close_reason === null,
+    `the CHECK holds closed_by to replaced alone, and refuses any reason but replaced, cleared and deleted (${checks.join(", ")})`);
+
+  // On upgrade: statements on items gone before 136 (written raw, as 116's writers left them) close; a re-apply then
+  // closes nothing more.
+  const raw = async (kind: string, key: string) =>
+    (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_source, tier, asserted_at)
+       VALUES ($1, $2, 2, '[123] raw', false, 4, now()) RETURNING id::text`, [kind, key])).rows[0].id;
+  const orphans = [await raw("thought", "11111111-2222-4333-8444-555555555121"), await raw("entity", "11111111-2222-4333-8444-555555555122"), await raw("thought", "not-a-uuid-121")];
+  const living = await raw("thought", still);
+  const upper = await raw("thought", still.toUpperCase());
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await reapply(file.slice(0, 4));
+  const reasons = await Promise.all(orphans.map(async (id) => (await row(id)).close_reason));
+  const closedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)).rows[0].n;
+  const before = await closedCount();
+  await reapply(file.slice(0, 4));
+  assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(upper)).close_reason === null && (await row(kept.id)).close_reason === null
+         && await closedCount() === before && await drift() === 0,
+    `on upgrade the statements on a thought and an entity gone before 136, and on a thought key that is no uuid, close as deleted; a living thought's stay open, keyed in upper case too; a re-apply closes nothing more (${reasons.join(", ")})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

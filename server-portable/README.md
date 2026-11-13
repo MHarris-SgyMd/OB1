@@ -1321,7 +1321,8 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   each with its maker, tier, reason and how its window closed. A ticket's history and
   each of its rows' are one list, each statement naming its own item, and the text says
   where one stands when it is not on the item asked. `exists: false` is an
-  item since removed, whose statements are kept.
+  item since removed, whose statements are kept, closed since migration 136
+  (SMD-3711) with the reason `deleted`.
 - **`set_priority_weights`** (`POST /v1/priority-weights`, write scope; SMD-4193 PR 2,
   migration 132): the operator's weights, which every read takes as its defaults (the
   agenda, plan_context's board, search's `priority_weight` and `min_priority`), by
@@ -1435,6 +1436,71 @@ it, each over REST and MCP alike:
 Each writer is one statement in its own READ COMMITTED transaction holding the item's
 lock (117's rule). A role without the `items` grant group has the item calls fail, naming
 the table, and nothing else. Preflight's `open items` row checks the functions and the
+grant.
+
+### Deliverables (SMD-1715)
+
+A deliverable is a piece of agent output tied to the spec it was meant to meet (a
+thought's id), with a checkpoint (a commit hash or a content fingerprint) and a status:
+`unverified`, `verified` or `corrected` (migration 134, SMD-1715 PR 1). Three tools reach
+it, each over REST and MCP alike:
+
+| Tool | REST | Group | Answers |
+| --- | --- | --- | --- |
+| `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}`; `capture` null when nothing was captured |
+| `verify_deliverable` | `POST /v1/deliverables/{id}/verifications` | write | `{outcome: changed, deliverable, event, from, to}` |
+| `deliverable_history` | `GET /v1/deliverables/{id}` | read | `{deliverable, events}`; `deliverable` null when its thought was deleted |
+
+- **The capture is a capture_thought.** The output is captured as any thought is (its
+  egress, embedding, chunks and tags), its `derived_from` the spec, its text closing
+  with a `Checkpoint: …` line. So a new checkpoint is a new thought, and reworked output
+  is a new deliverable (the maintainer's definition, 2026-11-12). `capture` says what the
+  capture did by capture_thought's safe fields alone (`id`, `existed`, `chunks`,
+  `contextFailures`, and `noVector`: `refused` or `provider_down`), or is null when
+  nothing was captured.
+- **Everything is asked before the capture.** The capture and the record are two
+  statements, not one transaction (one transaction is SMD-4248). So the key's scope and
+  the spec (an id, or a thought's `client_key`, resolved once for both) are asked first.
+  Text that is a thought already, found before the capture or landed on by it, is
+  answered by what that thought is:
+  - a deliverable: 134's answer, writing nothing (`unchanged` for its own key, spec and
+    checkpoint, else `ALREADY_A_DELIVERABLE`);
+  - a thought this key captured from this spec that no deliverable names (a record that
+    did not land after an earlier call): recorded now;
+  - any other thought: `OUTPUT_EXISTS` (the maintainer, 2026-11-12).
+
+  Nothing is deleted. A record refused after a fresh capture leaves the thought; a
+  `SPEC_NOT_FOUND` names it (`left`), and a failed record leaves it for the same call to
+  record again. A text is matched by the thought's fingerprint, which ignores letter case
+  and runs of white space: two checkpoints that differ only there name one deliverable.
+- **What remains for SMD-4248:**
+  - another key capturing the same text while this call's model calls run has its row
+    merged into by this call's capture, before this call is refused;
+  - a thought left as above keeps its capture's side effects (proposed open items, an
+    inferred priority).
+- **A verification vouches for the output at its checkpoint,** not for the thought's
+  text, which stays editable. `verified`: it meets the spec. `corrected`: the check found
+  it wanting; corrected → verified is a later check overturning that finding.
+- **The finding is `finding`.** 134 stores a verification's finding as `outcome`; the
+  server names it `finding`, so no answer holds two `outcome`s.
+
+Their refusals:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured, unless the spec was deleted between the capture and the record: `left` then names the thought, which stays. |
+| `SPEC_IS_SELF` | 409 | The output's text is the spec's own, and a thought cannot be its own spec. |
+| `ALREADY_A_DELIVERABLE` | 409 | The thought is a deliverable recorded by another key, or at another spec or checkpoint; it names the one that stands (`recordedBy`, `spec`, `checkpoint`). |
+| `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable, and not this key's own leftover from this spec. Nothing is recorded. |
+| `NOT_A_DELIVERABLE` | 404 | No deliverable was recorded on the thought; `deleted` when its thought was deleted, its events kept. |
+| `ILLEGAL_TRANSITION` | 409 | The status does not move `from` → `to`. |
+| `VERIFY_NOT_YOURS` | 403 | A move to verified by the key that recorded the deliverable (`as: recorder`), or by a key the brain records as writing its thought (`as: author`). Either may mark it corrected. |
+| `WRITE_SCOPE_REQUIRED` | 403 | A principal without write scope reaching a writer through a caller of the core's own. |
+| `NOT_FOUND` | 404 | The thought was deleted between the capture and the record. |
+
+capture_thought's own refusals (a refused egress, a provider down) stand for a capture.
+A role without the `deliverables` grant group has the deliverable calls fail, naming the
+table, and nothing else. Preflight's `deliverables` row checks the functions and the
 grant.
 
 ## Where a tool's logic lives (SMD-2283)

@@ -12,7 +12,7 @@ import { heardFrom } from "../provider-health.ts";
 import { ItemRefused } from "../open-items.ts";
 import { writerScope } from "./caller.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
-import { inferPriority, inferredStatement, type Inferred } from "../priority-infer.ts";
+import { forWriter, inferPriority, inferredStatement, type Inferred } from "../priority-infer.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
@@ -1143,12 +1143,32 @@ async function proposeActionItems(ctx: Ctx, principal: Principal, thoughtId: str
  * capture alone (its caller's `existed === false`; both the maintainer's, 2026-11-09). Nothing ranks on it until the
  * measurement clears its bar (effective_priority's `count_inferred`). Never fails the capture: a refusal or a fault
  * is logged and the rest are not stated.
+ *
+ * A level cited for another item ("SMD-2627 (Medium)") and a due day that is a floor ("can't happen before 11-03") are
+ * dropped only when the row's stamp says its writer is agent-kind (SMD-4226, the maintainer's choices). The stamp is
+ * read only when either is marked; a writer of no kind, an importer, or a stamp that can't be read keeps both.
  */
-async function stateInferred(ctx: Ctx, principal: Principal, thoughtId: string, items: string[], inferred: Inferred | null): Promise<void> {
-  const statement = inferredStatement(inferred);
+async function stateInferred(ctx: Ctx, principal: Principal, thoughtId: string, items: string[], read: Inferred | null): Promise<void> {
   const scope = writerScope(principal);
-  if (!statement || !scope) return;
-  const store = await ctx.store();
+  if (!scope || !inferredStatement(read)) return;
+  let store: ThoughtStore;
+  try {
+    store = await ctx.store();
+  } catch (e) {
+    console.error(`capture: the inferred priority of thought ${thoughtId} was not stated: ${(e as Error)?.message ?? e}`);
+    return;
+  }
+  let kind: string | null = null;
+  if (read?.level?.cited || read?.due?.floored) {
+    try {
+      const row = await store.getThought(thoughtId);
+      kind = typeof row?.metadata?.actor_kind === "string" ? (row.metadata.actor_kind as string) : null;
+    } catch (e) {
+      console.error(`capture: the writer of thought ${thoughtId} was not read, so its marked halves stand: ${(e as Error)?.message ?? e}`);
+    }
+  }
+  const statement = inferredStatement(forWriter(read, kind));
+  if (!statement) return;
   const targets = items.length ? items.map((key) => ({ kind: "item", key })) : [{ kind: "thought", key: thoughtId }];
   for (const { kind, key } of targets) {
     try {

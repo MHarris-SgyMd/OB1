@@ -95,6 +95,15 @@ export type Refusal =
   | { code: "PROPOSAL_YOURS"; retryable: false; proposal: string } // a proposal is accepted by a key other than its proposer
   | { code: "CONFIRM_NOT_YOURS"; retryable: false; item: string } // a capture-only key may dismiss a proposed item, never confirm it
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
+  // Deliverables (134, SMD-1715 PR 2): the writers' refusals. NOT_FOUND above answers a thought deleted under a capture.
+  | { code: "WRITE_SCOPE_REQUIRED"; retryable: false; key: string } // a key without write scope reaching a deliverable writer — met by the core's own callers alone (the manifest gives no other key the writers)
+  | { code: "SPEC_NOT_FOUND"; retryable: false; spec: string; left?: string } // capture_deliverable: the spec names no thought; left: the thought a fresh capture wrote before the record found the spec gone, which stays, named by no deliverable
+  | { code: "SPEC_IS_SELF"; retryable: false; id: string } // capture_deliverable: the content is the spec's own text, and a thought cannot be its own spec
+  | { code: "ALREADY_A_DELIVERABLE"; retryable: false; id: string; recordedBy: string; spec: string; checkpoint: string } // the thought is a deliverable recorded by another key, or at another spec or checkpoint
+  | { code: "OUTPUT_EXISTS"; retryable: false; id: string } // capture_deliverable: the output's text (with its checkpoint line) is a thought already, not a deliverable nor this key's own leftover from this spec: a deliverable is always a thought its key wrote from its spec
+  | { code: "NOT_A_DELIVERABLE"; retryable: false; id: string; deleted: boolean } // no deliverable was recorded on the thought, or its thought was deleted (deleted: its events stay as history)
+  | { code: "ILLEGAL_TRANSITION"; retryable: false; id: string; from: string; to: string } // the status does not move from → to (unverified → verified or corrected, verified → corrected, corrected → verified)
+  | { code: "VERIFY_NOT_YOURS"; retryable: false; id: string; as: "recorder" | "author" } // a move to verified by the key that recorded the deliverable, or a key the brain records as writing its thought
   // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
   | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
   | { code: "ORDER_UNAVAILABLE"; retryable: false } // order due on a brain before migration 129 (SMD-4192), whose agenda has the priority order alone
@@ -230,6 +239,14 @@ const FACTS: Facts = {
   PROPOSAL_DECIDED: (r) => ({ proposal: r.proposal, decision: r.decision }),
   PROPOSAL_YOURS: (r) => ({ proposal: r.proposal }),
   CONFIRM_NOT_YOURS: (r) => ({ item: r.item }),
+  WRITE_SCOPE_REQUIRED: none,
+  SPEC_NOT_FOUND: (r) => ({ spec: r.spec, ...(r.left ? { left: r.left } : {}) }),
+  SPEC_IS_SELF: (r) => ({ id: r.id }),
+  ALREADY_A_DELIVERABLE: (r) => ({ id: r.id, recordedBy: r.recordedBy, spec: r.spec, checkpoint: r.checkpoint }),
+  OUTPUT_EXISTS: (r) => ({ id: r.id }),
+  NOT_A_DELIVERABLE: (r) => ({ id: r.id, deleted: r.deleted }),
+  ILLEGAL_TRANSITION: (r) => ({ id: r.id, from: r.from, to: r.to }),
+  VERIFY_NOT_YOURS: (r) => ({ id: r.id, as: r.as }),
   CLAIMS_UNREADABLE: none,
   ORDER_UNAVAILABLE: none,
   // The weights it names, from the known names alone: the database's words ride the text.
