@@ -11292,6 +11292,7 @@ const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
     "db/ci-parity.sh": reads("the local mirror of CI runs the checker; no CI job runs it"),
     "integrations/test-writes.ts": reads("asserts over the checker's text (thoughtWritesAroundIn), in data-layer"),
     "scripts/agent-runner/probes-check.ts": names("a refusedPart test case lists it among the paths the guard allows; it opens no file"),
+    "scripts/agent-runner/publish-check.ts": names("the facts self-check lists it as a sample CI-check file in a buildPrBody fixture; it opens no file"),
     "scripts/gen-tools.ts": names("a sentence in the note it writes into tools.json"),
     "scripts/gen-version.ts": names("a sentence in the comment it writes into db/version.mjs"),
     "scripts/mechanism-yield.ts": names("a sample commit body in its own cases"),
