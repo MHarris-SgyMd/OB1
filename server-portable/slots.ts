@@ -355,6 +355,13 @@ export const RELAY_URL = "ws://coordinator:8096/v1/relay";
 /** The api's reconnect to the coordinator: from the first, doubling to the most — quick, as its calls running are uncounted
  *  until a socket is back (review pass 1 of 3b-2: at 5 s a recreated coordinator's broker handed their slots on). */
 export const RELAY_RECONNECT_MS = { first: 250, max: 1000 } as const;
+/** Dials failing this long (no coordinator listening: no broker named), they ease to every RELAY_EASED_MS. */
+export const RELAY_EASE_MS = 10_000;
+export const RELAY_EASED_MS = 5000;
+/** How long the api's asks wait for its next socket after one is lost, rather than taking its own share. */
+export const RELAY_GRACE_MS = 2000;
+/** A refused dial is asked why (a plain request) at most this often. */
+export const RELAY_WHY_MS = 30_000;
 /** A socket to the coordinator silent this long is dropped: the api pings every third of it, the listener answers. */
 export const RELAY_SILENCE_MS = 10_000;
 
@@ -366,8 +373,9 @@ type Reach = "up" | "away" | "gone";
  * this process's own share — by id, each with the frame that counts it again at a socket after a lost one, and the
  * relay's `back`s. `send` drops a frame while nothing is up.
  */
-function relayCore(t: { send(m: object): void; reach(): Reach; hold(d: 1 | -1): void; close(): void }) {
-  const waiting = new Map<string, (word: "go" | "queued" | "own", why?: string) => void>();
+function relayCore(t: { send(m: object): void; reach(): Reach; grace(): boolean; hold(d: 1 | -1): void; close(): void }) {
+  /** Each ask waiting on the relay's word: its answer; `park`, waiting here with no socket; `resend`, asked again on one. */
+  const waiting = new Map<string, { answer(word: "go" | "queued" | "own", why?: string): void; park(): void; resend(): void }>();
   const running = new Map<string, object>();
   let next = 0;
   let back = new AbortController();
@@ -380,10 +388,10 @@ function relayCore(t: { send(m: object): void; reach(): Reach; hold(d: 1 | -1): 
     // `held` for it; review pass 1 of 3b-2).
     if (f?.slot === "lapsed" && typeof f.id === "string") { running.delete(f.id); return; }
     if (typeof f?.id !== "string" || (f.slot !== "go" && f.slot !== "queued" && f.slot !== "own")) return;
-    waiting.get(f.id)?.(f.slot, f.why);
+    waiting.get(f.id)?.answer(f.slot, f.why);
   };
   /** Every ask waiting answered `own`: asked again at the next `back` where `away`. */
-  const answerAll = (away: boolean) => { for (const answer of [...waiting.values()]) answer("own", away ? "away" : undefined); };
+  const answerAll = (away: boolean) => { for (const w of [...waiting.values()]) w.answer("own", away ? "away" : undefined); };
   const runningFrame = (id: string, call: ResolvedModelCall) => ({ slot: "running", id, base: call.base, model: call.model ?? null, cls: call.cls });
   const client: RelayClient = {
     gone: () => t.reach() === "gone",
@@ -409,30 +417,50 @@ function relayCore(t: { send(m: object): void; reach(): Reach; hold(d: 1 | -1): 
       // The backs said as it is sent: one said before its `own` comes means the broker is back already (review pass 5:
       // a back read in the same batch as the own was missed, the call waiting on its own share).
       const sentAt = backs;
+      const askedAt = performance.now();
       return new Promise((resolve, reject) => {
         if (signal.aborted) return reject(signal.reason);
-        const end = () => { waiting.delete(id); clearTimeout(timer); signal.removeEventListener("abort", onAbort); t.hold(-1); };
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let toldOnce = false;
+        const tell = () => { if (!toldOnce) { toldOnce = true; told(); } };
+        const end = () => { waiting.delete(id); if (timer) clearTimeout(timer); signal.removeEventListener("abort", onAbort); t.hold(-1); };
         // `retry`: the broker was away (the relay's grace, or no word in time), so the call asks again at the next back;
         // a base it does not broker, or a bad frame, is its own share for good (review pass 5).
         const own = (retry: boolean) => { end(); resolve({ own: true, retry, backs: sentAt }); };
-        const timer = setTimeout(() => { t.send({ slot: "done", id }); own(true); }, RELAY_ANSWER_MS);
+        // No word within RELAY_ANSWER_MS of a send: its own share, the ask withdrawn.
+        const arm = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => { t.send({ slot: "done", id }); own(true); }, RELAY_ANSWER_MS); };
         const onAbort = () => { t.send({ slot: "done", id }); end(); reject(signal.reason); };
         signal.addEventListener("abort", onAbort, { once: true });
-        waiting.set(id, (word, why) => {
-          if (word === "queued") { clearTimeout(timer); told(); return; }
-          if (word === "own") return own(why === "away");
-          end();
-          running.set(id, runningFrame(id, call));
-          resolve({ go: id });
+        // Its time waited carried each time it is asked (the relay orders asks by it).
+        const frame = () => {
+          const waited = (waitedS ?? 0) + (performance.now() - askedAt) / 1000;
+          return { slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls, ...(first ? { first: true } : {}), max_wait_s: maxWaitS, ...(waited >= 0.001 ? { waited_s: Math.min(waited, 86_400) } : {}) };
+        };
+        waiting.set(id, {
+          answer(word, why) {
+            if (word === "queued") { if (timer) clearTimeout(timer); timer = null; tell(); return; }
+            if (word === "own") return own(why === "away");
+            end();
+            running.set(id, runningFrame(id, call));
+            resolve({ go: id });
+          },
+          park() { if (timer) clearTimeout(timer); timer = null; tell(); },
+          resend() { arm(); t.send(frame()); },
         });
         t.hold(1);
         const reach = t.reach();
-        if (reach !== "up") return own(reach === "away");
-        t.send({ slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls, ...(first ? { first: true } : {}), max_wait_s: maxWaitS, ...(waitedS ? { waited_s: Math.min(waitedS, 86_400) } : {}) });
+        if (reach === "up") { arm(); t.send(frame()); return; }
+        // A socket lost a moment ago: waits for the next within the grace, asked again there (review pass 2 of 3b-2).
+        if (reach === "away" && t.grace()) { waiting.get(id)!.park(); return; }
+        own(reach === "away");
       });
     },
   };
-  return { client, heard, answerAll, sayBack, running };
+  /** Every ask waiting parked: the socket lost, the grace begun. */
+  const park = () => { for (const w of waiting.values()) w.park(); };
+  /** Every ask waiting asked again: a socket back. */
+  const resendAsks = () => { for (const w of [...waiting.values()]) w.resend(); };
+  return { client, heard, answerAll, sayBack, running, park, resendAsks };
 }
 
 /**
@@ -458,6 +486,7 @@ function ipcRelayClient(env: Record<string, string | undefined>, log: (line: str
   const core = relayCore({
     send: (m) => { if (closed) return; try { proc.send!(m); } catch { /* disconnect follows */ } },
     reach: () => (closed ? "gone" : "up"),
+    grace: () => false,
     hold: (d) => {
       held += d;
       try { if (held === 1 && d === 1) proc.channel?.ref(); else if (held === 0) proc.channel?.unref(); } catch { /* the channel is going */ }
@@ -501,18 +530,31 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   let ping: ReturnType<typeof setInterval> | null = null;
   let lostSaidAt = -Infinity;
   let lostSaid = false;
+  /** Until when (performance.now) asks wait for the next socket rather than taking the own share: RELAY_GRACE_MS from a loss. */
+  let graceUntil = 0;
+  let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** This process's id to the listener, so a socket after a lost one takes back the calls it kept counted. */
+  const clientId = crypto.randomUUID();
+  /** When dials began failing (performance.now), or null while a socket is open: past RELAY_EASE_MS, the dials ease. */
+  let failingSince: number | null = null;
+  /** When the last refused dial was asked why: at most every RELAY_WHY_MS, never in the way of the next dial. */
+  let whyAt = -Infinity;
   const said = new Set<string>();
   const once = (what: string, line: string) => { if (!said.has(what)) { said.add(what); log(line); } };
   const core = relayCore({
     send: (m) => { if (up && ws) { try { ws.send(JSON.stringify(m)); } catch { /* close follows */ } } },
     reach: () => (closed ? "gone" : up ? "up" : "away"),
+    grace: () => performance.now() < graceUntil,
     hold: () => {},
     close: () => {
       closed = true;
       if (retry) clearTimeout(retry);
       if (ping) clearInterval(ping);
+      if (graceTimer) clearTimeout(graceTimer);
       const sock = ws;
       ws = null;
+      // Its calls end with it: said, so the coordinator keeps none for a socket that will not come.
+      if (up && sock) { try { sock.send(JSON.stringify({ slot: "bye", id: "" })); } catch { /* gone */ } }
       up = false;
       try { sock?.close(1000, "the api is stopping"); } catch { /* gone */ }
     },
@@ -531,14 +573,16 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   };
   const again = () => {
     if (closed) return;
+    if (failingSince === null) failingSince = performance.now();
     retry = setTimeout(() => { retry = null; connect(); }, wait);
-    wait = Math.min(wait * 2, RELAY_RECONNECT_MS.max);
+    // Quick through a recreate; past RELAY_EASE_MS of failing (no coordinator listening), every RELAY_EASED_MS.
+    wait = performance.now() - failingSince < RELAY_EASE_MS ? Math.min(wait * 2, RELAY_RECONNECT_MS.max) : RELAY_EASED_MS;
   };
   const connect = () => {
     if (closed) return;
     let sock: WebSocket;
     try {
-      sock = new WebSocket(url, { headers: { "x-brain-key": key } } as unknown as string[]);
+      sock = new WebSocket(url, { headers: { "x-brain-key": key, "x-relay-client": clientId } } as unknown as string[]);
     } catch (e) {
       once("url", `background slots: OB1_SLOT_RELAY_URL could not be opened (${(e as Error).message}) — ${own.replace(" meanwhile", "")}`);
       closed = true;
@@ -551,11 +595,17 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       opened = true;
       up = true;
       wait = RELAY_RECONNECT_MS.first;
+      failingSince = null;
+      graceUntil = 0;
+      if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
       heard = performance.now();
       // Every call still running counted again, then each call waiting on its own share told to ask again.
       for (const f of core.running.values()) sock.send(JSON.stringify(f));
       const counted = core.running.size;
       core.sayBack();
+      // The asks parked through the loss asked again, then every call named: the listener gives back any other it kept.
+      core.resendAsks();
+      sock.send(JSON.stringify({ slot: "named", id: "" }));
       if (!said.has("up") || lostSaid) {
         said.add("up");
         log(`background slots: this process asks the host's slot broker through the coordinator (${url})${counted ? `; ${counted} call${counted === 1 ? "" : "s"} still running counted again` : ""}`);
@@ -580,11 +630,14 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       if (ws !== sock) return;
       if (opened) return lost(sock, `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`);
       ws = null;
-      core.answerAll(true);
-      void whyRefused().then(([kind, why]) => {
-        once(`refused:${kind}`, `background slots: ${why}; ${own}, and it is dialled again every ${RELAY_RECONNECT_MS.max / 1000} s`);
-        again();
-      });
+      if (!graceTimer) core.answerAll(true);
+      // The next dial at once on its clock; why this one was refused asked beside it, now and then (review pass 2 of 3b-2:
+      // the 2 s ask held each redial, a recreate's api back late).
+      again();
+      if (performance.now() - whyAt >= RELAY_WHY_MS) {
+        whyAt = performance.now();
+        void whyRefused().then(([kind, why]) => once(`refused:${kind}`, `background slots: ${why}; ${own}, and it is dialled again every second, every ${RELAY_EASED_MS / 1000} s after ${RELAY_EASE_MS / 1000} s`));
+      }
     };
     sock.onerror = () => { /* onclose follows */ };
   };
@@ -594,8 +647,14 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     ws = null;
     up = false;
     if (ping) { clearInterval(ping); ping = null; }
-    core.answerAll(true);
-    if (closed) return;
+    if (closed) return core.answerAll(true);
+    // Its asks wait RELAY_GRACE_MS for the next socket — a coordinator recreated, a link cut — asked again there; past
+    // it, their own share (as the relay's GRACE_MS for the passes; review pass 2 of 3b-2: at once, each loss ran them
+    // past the broker's room).
+    graceUntil = performance.now() + RELAY_GRACE_MS;
+    core.park();
+    if (graceTimer) clearTimeout(graceTimer);
+    graceTimer = setTimeout(() => { graceTimer = null; if (!up) core.answerAll(true); }, RELAY_GRACE_MS);
     if (performance.now() - lostSaidAt >= 60_000) {
       lostSaidAt = performance.now();
       lostSaid = true;

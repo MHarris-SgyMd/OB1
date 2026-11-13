@@ -83,9 +83,6 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
 import { MIN_RELAY_KEY, RELAY_PATH, RELAY_PORT, serveRelay, startRelay, type Relay, type RelayListener } from "./slot-relay.ts";
-
-/** The longest the coordinator's first `synced` waits for the api's socket: within the broker's KEEP_MS (5 s), above the api's 1 s redial. */
-export const SYNC_WAIT_MS = 2500;
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
 import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S, rowWriter } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
@@ -192,6 +189,14 @@ export const OWNED: ReadonlySet<string> = new Set(Object.values(CHILDREN).flatMa
  * and key are the brain's own to the host's broker (SMD-3379 PR 3b-1): only the coordinator holds them, and its
  * children ask through it (docs/brain-coordinator.md, row 2).
  */
+/**
+ * The longest the coordinator's first `synced` waits for the api's socket, above the api's 1 s redial. What it holds is
+ * the broker's to keep: a closed coordinator's grants, KEEP_MS (5 s) from that close — so a recreate whose new relay
+ * reaches the broker more than about 4 s after the old one's close hands the api's calls' slots on until the api names
+ * them (review pass 2 of 3b-2).
+ */
+export const SYNC_WAIT_MS = 2500;
+
 export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT", "OB1_SLOT_BROKER_URL", "OB1_SLOT_BROKER_KEY", "OB1_SLOT_RELAY_KEY"];
 
 /**
@@ -512,6 +517,8 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   relay = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err, onChange: () => row.changed(), ...(listening ? { syncWaitMs: SYNC_WAIT_MS } : {}) }) : null;
   if (relay && plan.children.length) writer.err(`coordinator: the passes ask the host's slot broker through this process (OB1_SLOT_BROKER_URL), their own shares while it is away`);
   listener = listenKey ? listenForApi(relay, listenKey, opts.relayPort ?? RELAY_PORT, writer.err, () => row.changed()) : null;
+  // Not listening after all (the port taken): no api is coming, so the held `synced` goes now.
+  if (listening && !listener) relay?.apiBack?.();
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
@@ -541,7 +548,9 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const ended = children.length
     ? Promise.all(children.map((c) => c.done))
     : new Promise<void>((settle) => stopped.signal.addEventListener("abort", () => settle(), { once: true }));
-  const done = ended.then(() => listener?.stop()).then(() => relay?.stop()).then(() => row.end()).then(() => 0);
+  // The relay last: its close starts the broker's keeping of the api's calls, which the next coordinator's hello must
+  // reach within (review pass 2 of 3b-2: the row's write after it lengthened that gap).
+  const done = ended.then(() => listener?.stop()).then(() => row.end()).then(() => relay?.stop()).then(() => 0);
   return {
     done,
     stop(signal) {

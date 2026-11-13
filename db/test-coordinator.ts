@@ -324,6 +324,19 @@ if (!existsSync(composePath)) {
     ws.close();
     c.stop("SIGTERM");
     await Promise.race([c.done, Bun.sleep(5000)]);
+    // Its port taken, it does not listen after all: no api is coming, so the first synced goes at once (review pass 2 of 3b-2).
+    ops.length = 0;
+    const taken = Bun.serve({ port: 0, fetch: () => new Response("") });
+    const lines2: string[] = [];
+    const c2 = coordinate({
+      env: { PATH: process.env.PATH ?? "", OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${fakeBroker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: key }, sql: null, asOwnUsers: false,
+      children: [], writer: { out: () => {}, err: (l) => lines2.push(l) }, relayPort: taken.port as number,
+    });
+    for (let i = 0; i < 20 && !ops.some((o) => o.op === "synced"); i++) await Bun.sleep(50);
+    ok(lines2.some((l) => /could not listen on/.test(l)) && ops.some((o) => o.op === "synced"), `its port taken, it says so and its synced goes within a second, not held for an api (${lines2.filter((l) => /listen/.test(l)).join(" | ")}; ${ops.map((o) => o.op).join(", ")})`);
+    c2.stop("SIGTERM");
+    await Promise.race([c2.done, Bun.sleep(5000)]);
+    void taken.stop(true);
     void fakeBroker.stop(true);
   }
   // Its row: the relay's mark, its age counted back from the stamp, the api's sockets where it listens.

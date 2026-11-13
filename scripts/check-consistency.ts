@@ -7715,6 +7715,7 @@ function listenLoopbackFiles(): string[] | null {
     .filter((n) => existsSync(join(ROOT, n)) && statSync(join(ROOT, n)).isFile()).sort();
 }
 const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
+  ["db/test-coordinator.ts", 'Bun.serve({ port: 0, fetch: () => new Response("") })', "the port-taken row: it holds a port on every address, as the coordinator's relay listener binds in its container, so that listener finds it taken (SMD-3379 PR 3b-2)"],
   ["db/test-support.ts", "new Response(token)", "secondLoopback's probe: it stands for a server on every address, so a row can find an address that reaches one"],
   ["db/test-support.ts", 'OB1_LISTEN_HOST: "127.0.0.1", ...env', "serveChild's own default, which a case's env may override; each override is an object naming OB1_LISTEN_HOST, read here as a site of its own"],
   ["server-portable/test-rest.ts", "OB1_LISTEN_HOST: value", "[11b]'s refusing children: told a value that is no address, or none the host has, they exit before they serve"],
