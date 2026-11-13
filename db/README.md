@@ -2511,9 +2511,11 @@ entities, vectors, facets, page sections, priority statements, open items,
 deliverables and query log keep the text or the id. `forget_thought(id, actor)`
 removes the thought and all of these in one transaction, and returns what each
 store gave up; a thought deleted first is forgotten from what remains. A capture
-of one of its texts, or an open item or priority statement naming it, waits for
-a running forget and is refused after (`OB005`, `OB007`). A thought another cites is refused `CITED`, as a delete is; the
-operator detaches first. Every event of it in `thought_audit` is redacted in place
+of one of its texts waits for a running forget and is refused after (`OB005`);
+another store's write that lands beside a forget is swept by a second
+`forget_thought` of the same id. A thought another cites is refused `CITED`, as
+a delete is; the operator detaches first, deleting it with
+`delete_thought(id, actor, true)`, then forgets it. Every event of it in `thought_audit` is redacted in place
 through the log's third named amendment, `redact`: each text becomes the marker
 `[forgotten]` and each metadata object `{"forgotten": true}`, while ids,
 fingerprints, times and the actor stay. The amendment takes only a deleted

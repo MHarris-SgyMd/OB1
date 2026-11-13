@@ -16585,10 +16585,9 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const triggers = (await db.query<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE tgrelid = 'priority_assertions'::regclass AND NOT tgisinternal ORDER BY 1`)).rows.map((r) => r.t);
   assert(/^CREATE UNIQUE INDEX priority_assertions_one_open ON public\.priority_assertions USING btree \(item_kind, item_key, maker_key\) WHERE \(closed_at IS NULL\)$/.test(idx)
          && comments.length === 3 && comments.every((c) => /Migration 116 \/ SMD-3663/.test(c))
-         // 139 (SMD-1723) adds a third: a statement waits on a running forget of the thought it names.
-         && JSON.stringify(triggers) === JSON.stringify(["priority_assertions_append_only", "priority_assertions_no_truncate", "priority_assertions_refuse_forgotten"])
+         && JSON.stringify(triggers) === JSON.stringify(["priority_assertions_append_only", "priority_assertions_no_truncate"])
          && ["ob1:priority-maker-from-the-envelope", "ob1:priority-tier", "ob1:priority-one-open-per-maker"].every((s) => src.includes(s)) && headed === 1,
-    `three tables commented, one open assertion per item and maker (${idx.slice(0, 60)}), the append-only and no-truncate triggers (and 139's wait on a forget), the three sentinels; the ticket row's head standing (${headed})`);
+    `three tables commented, one open assertion per item and maker (${idx.slice(0, 60)}), the append-only and no-truncate triggers, the three sentinels; the ticket row's head standing (${headed})`);
 
   // The ticket's first Verify: an operator's High and an agent's Urgent on one item — the operator's wins, both listed.
   // The agent's envelope claims an operator's kind and trust; the registry's word is stamped (a maker from the call is the mutant).
@@ -16905,12 +16904,11 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const origin = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('open_items_one_per_origin')) AS d`)).rows[0].d ?? "";
   const pluginIdx = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('open_items_one_per_plugin_row')) AS d`)).rows[0].d ?? "";
   assert(comments.length === 3 && comments.every((c) => /Migration 117 \/ SMD-3665/.test(c))
-         // 139 (SMD-1723) adds a fifth: an item's first event waits on a running forget of its origin.
-         && JSON.stringify(triggers) === JSON.stringify(["open_item_close_proposals_decided_once", "open_item_close_proposals_no_truncate", "open_item_events_append_only", "open_item_events_no_truncate", "open_item_events_refuse_forgotten"])
+         && JSON.stringify(triggers) === JSON.stringify(["open_item_close_proposals_decided_once", "open_item_close_proposals_no_truncate", "open_item_events_append_only", "open_item_events_no_truncate"])
          && /^CREATE UNIQUE INDEX open_items_one_per_origin ON public\.open_items USING btree \(origin_key\) WHERE \(origin_key IS NOT NULL\)$/.test(origin)
          && /^CREATE UNIQUE INDEX open_items_one_per_plugin_row ON public\.open_items USING btree \(plugin, plugin_row\) WHERE \(plugin IS NOT NULL\)$/.test(pluginIdx)
          && ["ob1:item-maker-from-the-envelope", "ob1:item-proposal-never-alone", "ob1:item-one-per-origin"].every((s) => src.includes(s)),
-    `three tables commented, four refusing triggers (and 139's wait on a forget), one item per thought and text and per plugin row, the three sentinels (${triggers.join(",")})`);
+    `three tables commented, four refusing triggers, one item per thought and text and per plugin row, the three sentinels (${triggers.join(",")})`);
 
   // The ticket's first Verify, at the store: an item from a thought, open; a later thought proposes its close; the proposer cannot accept it; another key does, and it is done.
   const dentist = await thoughtBy("item-op", "[105] remind me to call the dentist");
@@ -20840,6 +20838,51 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
       && gAgain.error === "FORGOTTEN" && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`deleted first: ${SECRET}-G`]) === "OB005",
     `a thought deleted first is forgotten all the same: gone, its capture and tombstone redacted, then FORGOTTEN, its text refused (${JSON.stringify(gLog)}, ${gAgain.error})`);
 
+  // Detach first, then forget (review pass 2): a thought deleted with its citations detached is forgotten, the
+  // detached citations deleted; and an entity only it named, left with no mention by the delete, pruned.
+  const D = await thought(`cited, then detached: ${SECRET}-D`);
+  const citer = await thought("a thought that cites D");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', $3::text, 'stance', 'stated', 'source_id', $2::text))`, [citer, D, `per D: ${SECRET}-D`]);
+  const entity = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Vault D Entity 126', 'vault d entity 126') RETURNING id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p0')`, [D, entity]);
+  const dCited = await forget(D);
+  const detached = (await one<{ r: J }>(`SELECT delete_thought($1::uuid, $2::jsonb, true) AS r`, [D, ACT])).r;
+  const dGone = await forget(D);
+  const dLeft = await one<{ cites: number; ent: number }>(`SELECT (SELECT count(*)::int FROM thought_facets WHERE payload::text LIKE '%' || $1 || '%') AS cites,
+    (SELECT count(*)::int FROM ob1_entities WHERE id = $2::uuid) AS ent`, [`${SECRET}-D`, entity]);
+  assert(dCited.error === "CITED" && detached.detached === 1 && dGone.ok === true && dGone.gone === true
+      && (dGone.removed as Record<string, number>).detached_citations === 1 && ((dGone.rebuild as J).orphan_entities as number) >= 1
+      && dLeft.cites === 0 && dLeft.ent === 0,
+    `cited, then detached by the delete, then forgotten: the detached citation deleted, the entity only it named pruned (${dCited.error}; ${JSON.stringify(detached)}; ${JSON.stringify(dGone.removed)}; ${JSON.stringify(dLeft)})`);
+
+  // A write that raced the forget (the maintainer, review pass 2: a second forget sweeps it): planted after T's
+  // forget — a statement on T, an orphan event on the item it took, a close proposal citing it, a page section built
+  // on it, a thought derived from it — the second call takes each and writes a ledger row; a third is FORGOTTEN.
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, reason, maker_name, maker_source, tier, asserted_at)
+    VALUES ('thought', $1, 3, $2, 'fg125-op', false, 2, now())`, [T, `raced reason ${SECRET}`]);
+  await db.query(`INSERT INTO open_item_events (item_id, event, status, text, actor_name, actor_proved, at)
+    VALUES ($1::uuid, 'updated', 'open', $2, 'fg125-op', true, now())`, [item, `raced edit ${SECRET}`]);
+  const itemO2 = (await one<{ r: { item: { id: string } } }>(`SELECT open_item('another item of O', NULL, NULL, $1::uuid, NULL, false, $2::jsonb) AS r`, [O, ACT])).r.item.id;
+  // Planted raw: after the forget the writers refuse to name T, as they should; these stand for writes that landed
+  // during it.
+  await db.query(`INSERT INTO open_item_close_proposals (item_id, status, evidence_thought_id, reason, proposer_name, proposed_at)
+    VALUES ($1::uuid, 'done', $2::uuid, $3, 'fg125-op', now())`, [itemO2, T, `raced: ${SECRET}`]);
+  await db.query(`SELECT write_page_section($1::uuid, 'raced', 'RACED-126 body', 'generated', NULL, '{}'::jsonb, $2::uuid[], NULL, 'fg125-op')`, [page, [O]]);
+  await db.query(`UPDATE page_sections SET evidence_thought_ids = $2::uuid[] WHERE page_id = $1::uuid AND section_key = 'raced'`, [page, [T]]);
+  const raceChild = await thought("a summary that raced the forget");
+  await db.query(`UPDATE thoughts SET derived_from = $2::jsonb WHERE id = $1::uuid`, [raceChild, JSON.stringify([T])]);
+  const sweep = await forget(T);
+  const sweepLeft = await one<{ n: number }>(`SELECT
+      (SELECT count(*)::int FROM priority_assertions WHERE item_key = $1) + (SELECT count(*)::int FROM open_item_events WHERE item_id = $2::uuid)
+    + (SELECT count(*)::int FROM open_item_close_proposals WHERE evidence_thought_id = $1::uuid) + (SELECT count(*)::int FROM page_sections WHERE body_md LIKE '%RACED-126%')
+    + (SELECT count(*)::int FROM thoughts WHERE derived_from @> jsonb_build_array($1::text)) AS n`, [T, item]);
+  const sr = sweep.removed as Record<string, number>;
+  const third = await forget(T);
+  assert(sweep.ok === true && sweep.gone === true && sr.priority_statements === 1 && sr.item_events === 1 && sr.item_proposals === 1
+      && sr.page_sections === 1 && sr.derived_refs === 1 && sweepLeft.n === 0 && third.error === "FORGOTTEN"
+      && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten WHERE thought_id = $1::uuid`, [T])).n === 2,
+    `a second forget sweeps what a racing write left — the statement, the orphan event on the item it took, the proposal, the section, the child — and writes a second ledger row; a third is FORGOTTEN (${JSON.stringify(sr)}; ${sweepLeft.n}; ${third.error})`);
+
   // delete_thought is unchanged: a deleted thought's events keep their text, and nothing enters the ledger.
   const plain = await thought("deleted, not forgotten, 125");
   const del = (await one<{ r: J }>(`SELECT delete_thought($1::uuid, $2::jsonb) AS r`, [plain, ACT])).r;
@@ -20851,7 +20894,7 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   // A re-apply is a no-op: the ledger kept, the refusal still standing.
   await reapply(file.slice(0, 4));
   const ledAfter = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten`)).n;
-  assert(ledAfter === 3 && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]) === "OB005",
+  assert(ledAfter === 5 && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]) === "OB005",
     `a re-apply keeps the ledger and the refusal (${ledAfter})`);
 }
 

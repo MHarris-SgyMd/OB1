@@ -21,13 +21,16 @@
 --   * forget_thought(p_id, p_actor) removes a thought and everything in the
 --     database that holds its text, in one transaction, and returns the
 --     evidence. In order:
---     - its own lock (a write naming the thought waits on it), the
---       supersession lock, the capture's fingerprint lock for every text it
---       has had, then the row; an id the log never held is NOT_FOUND. A
---       thought deleted before is forgotten from what remains (review pass 1);
---       forgotten already with nothing left, FORGOTTEN;
+--     - the supersession lock, the capture's fingerprint lock for every text
+--       it has had (so a capture of one waits, then meets the ledger), then
+--       the row; an id the log never held is NOT_FOUND. A thought deleted
+--       before is forgotten from what remains, the brain's orphaned entities
+--       pruned (review passes 1 and 2); forgotten already with nothing left,
+--       FORGOTTEN;
 --     - a thought another cites (an active citation) is refused CITED, as
---       delete_thought refuses it: the operator detaches first;
+--       delete_thought refuses it: the operator detaches first, deleting it
+--       with delete_thought(id, actor, true), then forgets it; the citations
+--       so detached are deleted;
 --     - every fingerprint its text has had, read from the log before the
 --       redaction, less any a standing thought holds (a twin keeps its text);
 --     - rebuild_derived(p_id, 'forget', p_input_gone => true) with those
@@ -75,9 +78,15 @@
 --     ob1.forgetting of a row that holds that thought's text, once the
 --     thought is deleted (ob1_forgetting names no living thought), and
 --     nothing else.
---   * An open item's first event naming a thought, and a priority statement
---     naming a thought or an open item, wait for a running forget of that
---     thought, and are refused OB007 if what they name is gone after.
+--   * A write racing the forget (the maintainer, review pass 2: simplify):
+--     only a capture or edit of one of its texts waits for it (the
+--     fingerprint lock) and is refused after. Another store's write that
+--     lands beside a running forget — a statement restated, an item updated,
+--     a close proposal, a page section, a thought derived from it — may stay;
+--     a second forget_thought sweeps it, the items an earlier forget took
+--     included (its ledger rows' item_ids), and answers FORGOTTEN when there
+--     is nothing left. PR 2's preflight check names a forgotten id still held;
+--     serialising those writers against a forget is SMD-4299.
 --
 -- NOT CHANGED
 --   * delete_thought: forgetting is the exception; a delete keeps its events.
@@ -105,15 +114,18 @@
 --     fingerprint nor NULL) is not read as a twin.
 --   * A raw INSERT takes no fingerprint lock: one racing the forget with the
 --     text is not held by it.
+--   * The redact amendment and the relaxed guards trust ob1.forgetting for
+--     any deleted thought: a role holding UPDATE on thought_audit and DELETE
+--     on those tables can forget by hand, as forget_thought does.
+--   * SMD-2117's fold, replaying another thought's history that held a
+--     forgotten text, meets the OB005 refusal: it reinstates, or skips.
 --
 -- SAFETY
 --   thought_audit gains one column, nullable. Five functions replaced (the
 --   gate and four guards), each keeping every arm it had. One table added,
---   with two triggers of its own; three triggers on other tables: the
---   refusal of a forgotten text on thoughts, which fires only for a
---   fingerprint the ledger holds, and on open_item_events and
---   priority_assertions a wait on a running forget, which judges only a
---   write that had to wait. Each role able to write thoughts is granted
+--   with two triggers of its own, and one trigger on thoughts: the refusal
+--   of a forgotten text, which fires only for a fingerprint the ledger
+--   holds. Each role able to write thoughts is granted
 --   SELECT on the ledger: after 139 a capture reads it, so a role without it
 --   cannot write a thought at all. MINOR under the version rules.
 --   test-schema [126], test-upgrade [20cd].
@@ -357,9 +369,9 @@ BEGIN
     -- and redacted_at stamped with now(), once — every other column
     -- byte-equal. Each condition named when it fails.
     IF ob1_forgetting() IS DISTINCT FROM OLD.thought_id THEN
-      v_why := 'only an event of the thought this transaction is forgetting (ob1.forgetting) is redacted';
-    ELSIF EXISTS (SELECT 1 FROM thoughts t WHERE t.id = OLD.thought_id) THEN
-      v_why := 'a thought still standing is never redacted: forget_thought deletes it first';
+      -- ob1_forgetting() names no thought still standing: forget_thought
+      -- deletes it first.
+      v_why := 'only an event of a deleted thought this transaction is forgetting (ob1.forgetting) is redacted';
     ELSIF OLD.redacted_at IS NOT NULL THEN
       v_why := 'an event is redacted once';
     ELSIF (to_jsonb(OLD) - 'diff' - 'redacted_at') <> (to_jsonb(NEW) - 'diff' - 'redacted_at') THEN
@@ -479,10 +491,13 @@ AS $$
   -- projection names that thought as its origin, or any of its events does.
   SELECT ob1_forgetting() IS NOT NULL AND p_item IS NOT NULL
      AND (EXISTS (SELECT 1 FROM open_items i WHERE i.item_id::text = p_item AND i.origin_thought_id = ob1_forgetting())
-          OR EXISTS (SELECT 1 FROM open_item_events e WHERE e.item_id::text = p_item AND e.origin_thought_id = ob1_forgetting()))
+          OR EXISTS (SELECT 1 FROM open_item_events e WHERE e.item_id::text = p_item AND e.origin_thought_id = ob1_forgetting())
+          -- An item an earlier forget of the thought took: a write that raced it may have left an event behind, with
+          -- no origin and no item (review pass 2), which the second forget sweeps.
+          OR EXISTS (SELECT 1 FROM thought_forgotten f WHERE f.thought_id = ob1_forgetting() AND f.evidence->'item_ids' ? p_item))
 $$;
 COMMENT ON FUNCTION ob1_forgetting_item(text) IS
-  'Whether an open item (by its id as text) was read from the thought this transaction is forgetting (ob1_forgetting): the guards of 116 and 117 admit the forget''s delete of its rows. Migration 139 / SMD-1723.';
+  'Whether an open item (by its id as text) was read from the thought this transaction is forgetting (ob1_forgetting), or was taken by an earlier forget of it (its ledger rows'' item_ids): the guards of 116 and 117 admit the forget''s delete of its rows. Migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_priority_assertions_guard()
 RETURNS trigger
@@ -592,103 +607,6 @@ COMMENT ON FUNCTION ob1_deliverable_events_guard() IS
   'Refuses every UPDATE of deliverable_events, every TRUNCATE, and every DELETE but forget_thought''s of the events of the deliverable that is the thought it is forgetting (139) — for the owner too. Migration 134 / SMD-1715. The forget''s delete admitted by migration 139 / SMD-1723.';
 
 -- ---------------------------------------------------------------------------
--- 5b. A row naming a thought being forgotten waits for the forget, and is
---     refused once the thought is gone
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION ob1_forget_lock_key(p_id uuid)
-RETURNS bigint
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT hashtextextended('ob1:forget:' || p_id::text, 0)
-$$;
-COMMENT ON FUNCTION ob1_forget_lock_key(uuid) IS
-  'The advisory lock a forget of this thought holds exclusively and a write naming it takes shared (ob1_refuse_forgotten_origin), so the write waits for a running forget. Migration 139 / SMD-1723.';
-
-CREATE OR REPLACE FUNCTION ob1_refuse_forgotten_origin()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  v_ids    uuid[] := '{}';
-  v_direct uuid[] := '{}';
-  v_item   text[] := '{}';
-  v_id     uuid;
-  v_gone   boolean;
-  v_waited boolean := false;
-BEGIN
-  -- The thoughts this row is read from or names, and the items it names: an
-  -- item's first event its origin; a statement its thought, its due
-  -- reference, or an item's origin. The writers check each exists before
-  -- they write (117, 138), with a plain read a running forget does not stop
-  -- (review pass 1: an item and a statement written during the forget
-  -- survived it). So each waits here on the forget's lock, taken before it
-  -- reads any store, and is refused if the thought is gone after. An advisory
-  -- lock asks for no table privilege.
-  IF TG_TABLE_NAME = 'open_item_events' THEN
-    IF NEW.event = 'opened' AND NEW.origin_thought_id IS NOT NULL THEN
-      v_ids := ARRAY[NEW.origin_thought_id];
-    END IF;
-  ELSE
-    IF NEW.item_kind = 'thought' AND pg_input_is_valid(NEW.item_key, 'uuid') THEN
-      v_direct := v_direct || NEW.item_key::uuid;
-    END IF;
-    IF NEW.due_ref_kind = 'thought' AND pg_input_is_valid(NEW.due_ref_key, 'uuid') THEN
-      v_direct := v_direct || NEW.due_ref_key::uuid;
-    END IF;
-    v_ids := v_direct;
-    IF NEW.item_kind = 'item' THEN
-      v_item := v_item || NEW.item_key;
-    END IF;
-    IF NEW.due_ref_kind = 'item' THEN
-      v_item := v_item || NEW.due_ref_key;
-    END IF;
-    IF cardinality(v_item) > 0 THEN
-      v_ids := v_ids || ARRAY(SELECT i.origin_thought_id FROM open_items i
-                               WHERE i.item_id::text = ANY(v_item) AND i.origin_thought_id IS NOT NULL);
-    END IF;
-  END IF;
-  -- Only a write that had to wait on a forget is judged: with none running
-  -- the lock is free at once, and this trigger changes nothing for any
-  -- writer, a raw one included.
-  FOR v_id IN SELECT DISTINCT x FROM unnest(v_ids) x ORDER BY x LOOP
-    IF NOT pg_try_advisory_xact_lock_shared(ob1_forget_lock_key(v_id)) THEN
-      PERFORM pg_advisory_xact_lock_shared(ob1_forget_lock_key(v_id));
-      v_waited := true;
-    END IF;
-  END LOOP;
-  IF NOT v_waited THEN
-    RETURN NEW;
-  END IF;
-  -- After the wait: a thought or item named that is gone now was taken by
-  -- the forget the write waited on. An item's origin alone gone is no
-  -- refusal: a plain delete keeps the items read from its thought.
-  IF TG_TABLE_NAME = 'open_item_events' THEN
-    v_gone := EXISTS (SELECT 1 FROM unnest(v_ids) x WHERE NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = x));
-  ELSE
-    v_gone := EXISTS (SELECT 1 FROM unnest(v_direct) x WHERE NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = x))
-           OR EXISTS (SELECT 1 FROM unnest(v_item) k WHERE NOT EXISTS (SELECT 1 FROM open_items i WHERE i.item_id::text = k));
-  END IF;
-  IF v_gone THEN
-    RAISE EXCEPTION USING ERRCODE = 'OB007',
-      MESSAGE = format('%s names a thought or an open item that is gone: it was forgotten or deleted while this write waited', TG_TABLE_NAME);
-  END IF;
-  RETURN NEW;
-END;
-$$;
-COMMENT ON FUNCTION ob1_refuse_forgotten_origin() IS
-  'On an INSERT into open_item_events (an opened event with an origin thought) or priority_assertions (a thought or an open item as the item or its due reference): takes the forget lock (ob1_forget_lock_key) shared on each thought named or read from; a write that had to wait for a running forget is refused (OB007) if a thought or an item it names is gone by then, and every other write passes untouched. Migration 139 / SMD-1723.';
-
-DROP TRIGGER IF EXISTS open_item_events_refuse_forgotten ON open_item_events;
-CREATE TRIGGER open_item_events_refuse_forgotten
-  BEFORE INSERT ON open_item_events
-  FOR EACH ROW EXECUTE FUNCTION ob1_refuse_forgotten_origin();
-DROP TRIGGER IF EXISTS priority_assertions_refuse_forgotten ON priority_assertions;
-CREATE TRIGGER priority_assertions_refuse_forgotten
-  BEFORE INSERT ON priority_assertions
-  FOR EACH ROW EXECUTE FUNCTION ob1_refuse_forgotten_origin();
-
--- ---------------------------------------------------------------------------
 -- 6. forget_thought
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION forget_thought(
@@ -737,10 +655,6 @@ BEGIN
   -- lock, then the row), in order, so a capture or an edit to one of those
   -- texts waits for this forget and then meets the ledger (review pass 1: a
   -- capture of an earlier text raced it); then the row.
-  -- The forget's own lock first (ob1_forget_lock_key): a write naming this
-  -- thought waits on it, and one that came before holds it shared until it
-  -- commits, so the stores read below hold every row written beside it.
-  PERFORM pg_advisory_xact_lock(ob1_forget_lock_key(p_id));
   PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
   SELECT array_agg(DISTINCT fp ORDER BY fp) INTO v_fps
     FROM (SELECT t.content_fingerprint AS fp FROM thoughts t WHERE t.id = p_id
@@ -770,23 +684,23 @@ BEGIN
   END IF;
 
   -- A thought another cites is refused, as delete_thought refuses it (the
-  -- maintainer, 2026-11-13): the operator detaches first. A deleted one's
-  -- detached citations name it as source_deleted_id and count the same while
-  -- active. The same answer, up to ten citing rows, newest first (042).
+  -- maintainer, 2026-11-13): the operator detaches first, by deleting it with
+  -- delete_thought(id, actor, true), then forgets it. A citation so detached
+  -- names it as source_deleted_id and refuses nothing (review pass 2: it
+  -- refused for good); the sweep below deletes it. The same answer, up to ten
+  -- citing rows, newest first (042).
   SELECT count(*)::int INTO v_cited
     FROM thought_facets f
-   WHERE f.kind = 'citation' AND f.thought_id <> p_id AND thought_facet_active(f)
-     AND (f.payload->>'source_id' = p_id::text OR f.payload->>'source_deleted_id' = p_id::text);
+   WHERE f.kind = 'citation' AND f.payload->>'source_id' = p_id::text AND f.thought_id <> p_id AND thought_facet_active(f);
   IF v_cited > 0 THEN
     SELECT COALESCE(jsonb_agg(jsonb_build_object('id', s.id, 'thought_id', s.thought_id, 'source_id', s.source_id,
                                                  'stance', s.stance, 'text', s.text, 'created_at', s.created_at)
                               ORDER BY s.created_at DESC, s.id), '[]'::jsonb)
       INTO v_sample
-      FROM (SELECT f.id, f.thought_id, COALESCE(f.payload->>'source_id', f.payload->>'source_deleted_id')::uuid AS source_id,
+      FROM (SELECT f.id, f.thought_id, (f.payload->>'source_id')::uuid AS source_id,
                    f.payload->>'stance' AS stance, f.payload->>'text' AS text, f.created_at
               FROM thought_facets f
-             WHERE f.kind = 'citation' AND f.thought_id <> p_id AND thought_facet_active(f)
-               AND (f.payload->>'source_id' = p_id::text OR f.payload->>'source_deleted_id' = p_id::text)
+             WHERE f.kind = 'citation' AND f.payload->>'source_id' = p_id::text AND f.thought_id <> p_id AND thought_facet_active(f)
              ORDER BY f.created_at DESC, f.id
              LIMIT 10) s;
     RETURN jsonb_build_object('ok', false, 'error', 'CITED', 'id', p_id, 'cited_by', v_cited, 'citations', v_sample);
@@ -823,6 +737,14 @@ BEGIN
       DELETE FROM ob1_embedding_snapshot s WHERE s.content_fingerprint = ANY(v_fps);
       GET DIAGNOSTICS v_c = ROW_COUNT;
       v_rebuild := jsonb_build_object('input_gone', true, 'row', 'deleted before the forget', 'snapshot_rows', v_c);
+      -- Its entity links went with the row, leaving any entity only it named
+      -- with no mention: 016's residue, which prune_orphan_entities takes —
+      -- every such entity in the brain, the forgotten thought's among them
+      -- (review pass 2: a name from the text stood). Once, on the first
+      -- forget: a later one sweeps this thought's leftovers, not the brain's.
+      IF NOT v_ledgered THEN
+        v_rebuild := v_rebuild || jsonb_build_object('orphan_entities', prune_orphan_entities());
+      END IF;
     END IF;
 
     -- The relation facets on other thoughts that target it (084, 120), and
@@ -833,10 +755,15 @@ BEGIN
     v_n := v_n || jsonb_build_object('relations', v_c);
     DELETE FROM thought_facets f
      WHERE f.id IN (SELECT x.id FROM thought_facets x
-                     WHERE x.kind = 'citation' AND x.thought_id <> p_id AND NOT thought_facet_active(x)
-                       AND (x.payload->>'source_id' = p_id::text OR x.payload->>'source_deleted_id' = p_id::text));
+                     WHERE x.kind = 'citation' AND x.payload->>'source_id' = p_id::text AND x.thought_id <> p_id AND NOT thought_facet_active(x));
     GET DIAGNOSTICS v_c = ROW_COUNT;
     v_n := v_n || jsonb_build_object('inactive_citations', v_c);
+    -- The citations detached from it when it was deleted (042: each keeps its
+    -- text and names it as source_deleted_id), active or not.
+    DELETE FROM thought_facets f
+     WHERE f.kind = 'citation' AND f.payload->>'source_deleted_id' = p_id::text AND f.thought_id <> p_id;
+    GET DIAGNOSTICS v_c = ROW_COUNT;
+    v_n := v_n || jsonb_build_object('detached_citations', v_c);
 
     -- Its id out of other thoughts' derived_from (a raw update, which the
     -- audit trigger records). Prose those thoughts absorbed can't be removed
@@ -928,7 +855,9 @@ BEGIN
     -- either (116), each item re-projected.
     SELECT COALESCE(array_agg(DISTINCT k), '{}') INTO v_items
       FROM (SELECT i.item_id::text AS k FROM open_items i WHERE i.origin_thought_id = p_id
-            UNION SELECT e.item_id::text FROM open_item_events e WHERE e.origin_thought_id = p_id) s;
+            UNION SELECT e.item_id::text FROM open_item_events e WHERE e.origin_thought_id = p_id
+            UNION SELECT jsonb_array_elements_text(f.evidence->'item_ids') FROM thought_forgotten f
+                   WHERE f.thought_id = p_id AND jsonb_typeof(f.evidence->'item_ids') = 'array') s;
     v_c := 0;
     FOR v_pair IN
       WITH gone AS (
@@ -994,6 +923,7 @@ BEGIN
       'irreproducible', to_jsonb(COALESCE(v_children, '{}'::uuid[])),
       'pages', to_jsonb(COALESCE(v_pages, '{}'::uuid[])),
       'twins', to_jsonb(COALESCE(v_twins, '{}'::uuid[])),
+      'item_ids', to_jsonb(COALESCE(v_items, '{}'::text[])),
       'outside', jsonb_build_array('the sleep dumps (OB1_SLEEP_DUMP_DIR)', 'Linear comments already posted with a proposal''s reason (board_findings_posted)',
                                    'the weekly digest''s files', 'extraction dumps (extract-entities.ts --dump)'));
     INSERT INTO thought_forgotten (thought_id, actor_name, actor_agent_id, fingerprints, evidence)
@@ -1016,7 +946,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION forget_thought(uuid, jsonb) IS
-  'Forget a thought: remove it and everything in the database holding its text, in one transaction, and return the evidence (migration 139 / SMD-1723). Takes the supersession lock, then the capture''s fingerprint lock for every text it has had (in order), then the row. An id the log never held: {ok:false, error:NOT_FOUND}. Cited by an active citation (source_id, or source_deleted_id for one deleted already): {ok:false, error:CITED, id, cited_by, citations}, as delete_thought (the operator detaches first). A thought deleted before is forgotten from what remains (gone true): its snapshot vectors and every store below. Else: rebuild_derived(id, ''forget'', true, its fingerprints) (windows, entity links, orphaned entities, snapshot vectors); relation facets targeting it and expired or superseded citations of it deleted; its id stripped from other thoughts'' derived_from (those listed irreproducible); page sections whose evidence names it deleted through delete_page_section, each page re-rendered, and every page whose own log names it listed in pages (its log and its revisions may keep an earlier render); the query log''s result_ids (with their scores) and result_items cleared of it, its action rows deleted; the row deleted through delete_thought; then the priority statements on it, on open items read from it, or taking a due time from either, deleted and re-projected; those items, their events and close proposals (and proposals whose evidence it is) deleted; its deliverable''s events deleted; every event of it in thought_audit redacted (the redact amendment); a thought_forgotten row written. Forgotten already with nothing left: FORGOTTEN with forgotten_at. Returns {ok:true, id, forgotten_at, gone, removed{relations, inactive_citations, derived_refs, page_sections, query_log_rows, priority_statements, item_proposals, item_events, items, deliverable_events, audit_events}, rebuild, irreproducible[] (thoughts derived from it, for a person to review), pages[] (pages to review), twins[] (standing thoughts holding the same text), outside[] (copies beyond the brain)}.';
+  'Forget a thought: remove it and everything in the database holding its text, in one transaction, and return the evidence (migration 139 / SMD-1723). Takes the supersession lock, then the capture''s fingerprint lock for every text it has had (in order), then the row; a write racing the forget on another store may land beside it, and a second call sweeps what it left (FORGOTTEN when nothing). An id the log never held: {ok:false, error:NOT_FOUND}. Cited by an active citation: {ok:false, error:CITED, id, cited_by, citations}, as delete_thought; the operator detaches first (delete_thought(id, actor, true)), then forgets it, its detached citations deleted. A thought deleted before is forgotten from what remains (gone true): its snapshot vectors, the brain''s orphaned entities (prune_orphan_entities) and every store below. Else: rebuild_derived(id, ''forget'', true, its fingerprints) (windows, entity links, orphaned entities, snapshot vectors); relation facets targeting it, expired or superseded citations of it and citations detached from it deleted; its id stripped from other thoughts'' derived_from (those listed irreproducible); page sections whose evidence names it deleted through delete_page_section, each page re-rendered, and every page whose own log names it listed in pages (its log and its revisions may keep an earlier render); the query log''s result_ids (with their scores) and result_items cleared of it, its action rows deleted; the row deleted through delete_thought; then the priority statements on it, on open items read from it, or taking a due time from either, deleted and re-projected; those items, their events and close proposals (and proposals whose evidence it is) deleted; its deliverable''s events deleted; every event of it in thought_audit redacted (the redact amendment); a thought_forgotten row written. Forgotten already with nothing left: FORGOTTEN with forgotten_at. Returns {ok:true, id, forgotten_at, gone, removed{relations, inactive_citations, detached_citations, derived_refs, page_sections, query_log_rows, priority_statements, item_proposals, item_events, items, deliverable_events, audit_events}, rebuild, irreproducible[] (thoughts derived from it, for a person to review), pages[] (pages to review), twins[] (standing thoughts holding the same text), item_ids[] (the items it took, which a later call sweeps again), outside[] (copies beyond the brain)}.';
 
 -- ---------------------------------------------------------------------------
 -- 7. Every role that writes thoughts reads the ledger, which the refusal on
