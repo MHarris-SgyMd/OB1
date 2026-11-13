@@ -4296,7 +4296,8 @@ if (want("9f")) {
         if (crashCycles > 0) crashCycles--;
         crashedBy.push(input);
         crashLeft = crashProbes;
-        // Its own answer a beat late, so the other worker's call is made by then.
+        // Its own answer `crashAnswerMs` late, so the other worker's call is made by then; whose error is read first,
+        // the docblock.
         await Bun.sleep(crashAnswerMs);
         return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
       }
@@ -4721,9 +4722,10 @@ if (want("9f")) {
 
     // SMD-2641 PR 2: two workers, a poison thought crashing the provider beside an innocent one in flight: both suspects,
     // retried one at a time, each handed back at the pool's front — the poison failed at its third outage alone, its probe
-    // unanswered each time, the innocent re-embedded, each claim's attempt refunded at every hand-back. Then a crash at the
-    // next call after each recovery, whatever is in flight, three times, twice on a suspect retried alone: nothing failed,
-    // and the drain after the isolated one takes the four behind with both workers at once.
+    // unanswered each time, the innocent re-embedded, each claim's attempt refunded at every hand-back — and in the other
+    // order, the innocent's error read first (PR 3). Then a crash at the next call after each recovery, whatever is in
+    // flight, three times, twice on a suspect retried alone: nothing failed, and the drain after the isolated one takes
+    // the four behind with both workers at once.
     // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
     await (async () => {
       const isolatedSaid = (lines: string[]) => lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the drain goes back to 2; one that errs again alone is blamed only on a probe made at once$/.test(l));
