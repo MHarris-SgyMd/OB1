@@ -303,6 +303,7 @@ free_rows() {
   nodb .                 scripts/agent-runner/live-check.ts --self-check
   nodb .                 scripts/agent-runner/setup.ts --self-check
   nodb .                 scripts/agent-runner/live-run.ts --self-check
+  nodb .                 scripts/agent-runner/publish-check.ts --self-check
   nodb .                 .github/ci/test-counts-page.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts
