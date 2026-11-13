@@ -323,22 +323,131 @@ const QUEUE_OIDS = [2 ** 32 - 1 - MAX_SLOTS, 2 ** 32 - 2] as const;
 /** How long a subscription to the channel that failed to open is not tried again, in ms: a database refusing connections is not asked each round. */
 const LISTEN_RETRY_MS = 2000;
 
+/** The reason a call waiting on its own share is withdrawn when the relay says the broker is back: it asks again. */
+const BACK = new Error("background slots: the broker is back");
+
+/** How long a relayed ask waits for the relay's first word (go, queued or own) before it takes its own share. */
+export const RELAY_ANSWER_MS = 1000;
+
+/** The child's side of the coordinator's slot relay (db/slot-relay.ts, SMD-3379 PR 3b-1): its asks over this process's IPC channel. */
+type RelayClient = {
+  /** Gone once the channel closed: every call then takes its own share. */
+  gone(): boolean;
+  /** A background call's turn: `go` (a broker slot, its id to end it with) or `own` (this process's share decides). */
+  ask(call: ResolvedModelCall, signal: AbortSignal, waiting: () => void, first: boolean, maxWaitS: number, waitedS?: number): Promise<{ go: string } | { own: true; retry: boolean; backs: number }>;
+  /** How many `back`s the relay has said: a call answered `own` before the latest asks again at once. */
+  backs(): number;
+  /** Aborted at the relay's next `back` (the broker answering again): a call waiting on its own share asks again. */
+  backSignal(): AbortSignal;
+  /** A live call, counted and not waited for: its id to end it with. */
+  live(call: ResolvedModelCall): string;
+  /** A call running on this process's own share, after `own`, so the broker counts it too: its id to end it with. */
+  running(call: ResolvedModelCall): string;
+  done(id: string): void;
+  /** Its listeners off the process: the hook uninstalled. */
+  close(): void;
+};
+
+/**
+ * The relay client, where the coordinator started this process with a channel and said so (OB1_SLOT_RELAY=ipc); null
+ * elsewhere — a pass run by hand from a checkout, the api — which keeps the semaphore alone. The channel is held
+ * (ref) only while an ask waits on it, so a pass with nothing outstanding exits on its own (measured: an open channel
+ * holds a child open). A word not come within RELAY_ANSWER_MS takes the process's own share, withdrawing the ask.
+ */
+function relayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
+  const proc = process as unknown as { send?: (m: unknown) => boolean; channel?: { ref(): void; unref(): void }; on(ev: string, f: (m: unknown) => void): void; off(ev: string, f: (m: unknown) => void): void };
+  if (env.OB1_SLOT_RELAY !== "ipc" || typeof proc.send !== "function") return null;
+  const waiting = new Map<string, (word: "go" | "queued" | "own", why?: string) => void>();
+  let closed = false;
+  let next = 0;
+  let back = new AbortController();
+  let backs = 0;
+  let held = 0;
+  const hold = (d: 1 | -1) => {
+    held += d;
+    try { if (held === 1 && d === 1) proc.channel?.ref(); else if (held === 0) proc.channel?.unref(); } catch { /* the channel is going */ }
+  };
+  const send = (m: object) => { if (closed) return; try { proc.send!(m); } catch { /* disconnect follows */ } };
+  const onMessage = (m: unknown) => {
+    const f = m as { slot?: string; id?: string };
+    if (f?.slot === "back") { backs++; const was = back; back = new AbortController(); was.abort(BACK); return; }
+    if (typeof f?.id !== "string" || (f.slot !== "go" && f.slot !== "queued" && f.slot !== "own")) return;
+    waiting.get(f.id)?.(f.slot, (f as { why?: string }).why);
+  };
+  const onDisconnect = () => {
+    closed = true;
+    log("background slots: the coordinator's relay is gone — every call takes this process's own share");
+    for (const answer of [...waiting.values()]) answer("own");
+  };
+  proc.on("message", onMessage);
+  proc.on("disconnect", onDisconnect);
+  try { proc.channel?.unref(); } catch { /* no channel to unref */ }
+  const frame = (id: string, call: ResolvedModelCall, extra: object = {}) => ({ slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls, ...extra });
+  return {
+    gone: () => closed,
+    backSignal: () => back.signal,
+    backs: () => backs,
+    close() { proc.off("message", onMessage); proc.off("disconnect", onDisconnect); },
+    live(call) {
+      const id = `l${++next}`;
+      send(frame(id, call));
+      return id;
+    },
+    running(call) {
+      const id = `o${++next}`;
+      send({ slot: "running", id, base: call.base, model: call.model ?? null, cls: call.cls });
+      return id;
+    },
+    done(id) { send({ slot: "done", id }); },
+    ask(call, signal, told, first, maxWaitS, waitedS) {
+      const id = `b${++next}`;
+      // The backs said as it is sent: one said before its `own` comes means the broker is back already (review pass 5:
+      // a back read in the same batch as the own was missed, the call waiting on its own share).
+      const sentAt = backs;
+      return new Promise((resolve, reject) => {
+        if (signal.aborted) return reject(signal.reason);
+        const end = () => { waiting.delete(id); clearTimeout(timer); signal.removeEventListener("abort", onAbort); hold(-1); };
+        // `retry`: the broker was away (the relay's grace, or no word in time), so the call asks again at the next back;
+        // a base it does not broker, or a bad frame, is its own share for good (review pass 5).
+        const own = (retry: boolean) => { end(); resolve({ own: true, retry, backs: sentAt }); };
+        const timer = setTimeout(() => { send({ slot: "done", id }); own(true); }, RELAY_ANSWER_MS);
+        const onAbort = () => { send({ slot: "done", id }); end(); reject(signal.reason); };
+        signal.addEventListener("abort", onAbort, { once: true });
+        waiting.set(id, (word, why) => {
+          if (word === "queued") { clearTimeout(timer); told(); return; }
+          if (word === "own") return own(why === "away");
+          end();
+          resolve({ go: id });
+        });
+        hold(1);
+        if (closed) return own(false);
+        send(frame(id, call, { ...(first ? { first: true } : {}), max_wait_s: maxWaitS, ...(waitedS ? { waited_s: Math.min(waitedS, 86_400) } : {}) }));
+      });
+    },
+  };
+}
+
 /**
  * Sets the background-slots hook for this process, once, at its entry point:
  * `raw` its OB1_BACKGROUND_SLOTS, `modelSlots` its OB1_MODEL_SLOTS, `url` its
  * database. Returns `uninstall`, which puts back the hook it replaced and ends
  * every wait, a call already running keeping its slot until it ends; and the
  * settings' problems, said through `log`, the defaults then standing in.
- * Under `off` no hook is set. `maxWaitS` is --max-wait's, DEFAULT_MAX_WAIT_S
- * unless given, or not a finite number. `connectS` bounds a connection's
- * opening and each statement, CONNECT_S unless a test asks for less.
+ * Under `off` no hook is set, unless the coordinator's relay is in (`env`,
+ * process.env unless given, says OB1_SLOT_RELAY=ipc). `maxWaitS` is
+ * --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a finite number.
+ * `connectS` bounds a connection's opening and each statement, CONNECT_S
+ * unless a test asks for less.
  */
-export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
+export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number; env?: Record<string, string | undefined> }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));
   const setting = slotsSettingFrom(opts.raw, opts.modelSlots);
   for (const p of setting.problems) log(p);
   const problem = setting.problems.length ? setting.problems.join("; ") : undefined;
-  if (!setting.set && !setting.defaults) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
+  // The coordinator's relay, where it started this process with one (SMD-3379 PR 3b-1): read before `off`, which holds
+  // nothing to this process's own shares but leaves the host's broker in (review pass 1: `off` dropped it unsaid).
+  const relay = relayClient(opts.env ?? process.env, log);
+  if (!setting.set && !setting.defaults && !relay) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
   const ended = new AbortController();
   const stop = opts.stop ? AbortSignal.any([opts.stop, ended.signal]) : ended.signal;
   const boundS = opts.connectS ?? CONNECT_S;
@@ -363,7 +472,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
    * The share's turn to wait for a slot in this process: at once when no call of it has it, else queued, `first` where
    * its pass goes first (passTurn's order); a stop takes a call out of the queue.
    */
-  const takeTurn = (l: Local, signal: AbortSignal, waiting: () => void, first: boolean): Promise<void> => {
+  const takeTurn = (l: Local, signal: AbortSignal, waiting: () => void, first: boolean, since?: number): Promise<void> => {
     if (!l.waiter) {
       l.waiter = true;
       return Promise.resolve();
@@ -374,7 +483,9 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (l.busy) waiting();
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(signal.reason);
-      const entry: Turn = { waiting, first, at: performance.now(), go: () => { signal.removeEventListener("abort", onAbort); resolve(); } };
+      // Its age from the call's first ask (`since`), so a call asked again after the relay's `back` reaches --max-wait
+      // as if it had waited here all along, though it queues behind those already here (SMD-3379 PR 3b-1, review pass 5).
+      const entry: Turn = { waiting, first, at: Math.min(since ?? Infinity, performance.now()), go: () => { signal.removeEventListener("abort", onAbort); resolve(); } };
       const onAbort = () => { l.queue.splice(l.queue.indexOf(entry), 1); reject(signal.reason); };
       signal.addEventListener("abort", onAbort, { once: true });
       l.queue.push(entry);
@@ -400,8 +511,10 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   };
   /**
    * The turn handed to the next call queued, or given up: the longest queued of those whose pass goes first or that
-   * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked, so the first
-   * such is the longest queued. The waiter is never passed over: a call queued after it waits for its slot. A call
+   * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked here, so the
+   * first such is the longest queued here; a call asked again after the relay's `back` carries its age from its first
+   * ask (`since`, SMD-3379 PR 3b-1), which counts toward --max-wait, not its place. The waiter is never passed over:
+   * a call queued after it waits for its slot. A call
    * passed over that has queued RECHECK_MS or more is told it waits — not only once a waiter finds no slot free, which a
    * share with slots to spare never does (review pass 2: an extraction call behind seven consolidation workers waited
    * 10 s on the hook untold, N12's clock, the stall clock and a stop's sweep reading it as running) — and one passed
@@ -588,11 +701,11 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     );
   });
   /** A slot of the share, held on a connection of its own; null where the semaphore fails open. A stop rejects with its reason. */
-  const acquire = async (l: Local, signal: AbortSignal, waiting: () => void, first: boolean): Promise<Held | null> => {
+  const acquire = async (l: Local, signal: AbortSignal, waiting: () => void, first: boolean, since?: number): Promise<Held | null> => {
     // Stopped already — a pass's first stop aborts a call's wait as it comes: no turn, no kept session spent.
     if (signal.aborted) throw signal.reason;
     if (Date.now() < downUntil) return null;
-    await takeTurn(l, signal, waiting, first);
+    await takeTurn(l, signal, waiting, first, since);
     let client: SQL | undefined;
     try {
       // Queued behind a waiter that found the database down: run without a slot as well.
@@ -739,10 +852,12 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       else void close(held);
     }
   };
-  const hook: ModelCallHook = async (call, run, waiting) => {
-    const share = shareOf(setting, call);
-    if (!share) return run();
-    // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a).
+  // The coordinator's relay first (SMD-3379 PR 3b-1): the host's broker hands out the slot, the brain's other
+  // processes' and other brains' calls counted with it; its `own` falls through here, the call then reported running
+  // so the broker counts it as well (review pass 1: own calls ran uncounted after a hand-back).
+  const hook: ModelCallHook = async (call, plain, waiting) => {
+    // The wait timed however it ends, a slot taken at once included: a point and its pass's tally (SMD-3379 PR 2b-2a) —
+    // from the first ask, the relay's wait carried into its own share's (review pass 1).
     const asked = performance.now();
     // Whether it waited at all, by the hook's own word, apart from a slot taken at once (review pass 1).
     let waited = false;
@@ -750,18 +865,52 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
       waited = true;
       waiting();
     };
-    let held: Held | null;
-    try {
-      held = await acquire(localOf(share.key, share.limit), call.signal ? AbortSignal.any([call.signal, stop]) : stop, told, call.pass !== undefined && FIRST_PASSES.has(call.pass));
-    } catch (e) {
-      noteSlotWait(call, performance.now() - asked, "stopped", waited);
-      throw e;
-    }
-    noteSlotWait(call, performance.now() - asked, held ? "held" : "open", waited);
-    try {
-      return await run();
-    } finally {
-      if (held) await release(held);
+    const stopOf = call.signal ? AbortSignal.any([call.signal, stop]) : stop;
+    const first = call.pass !== undefined && FIRST_PASSES.has(call.pass);
+    // Asked of the relay, then on its own share; asked again if the relay says the broker is back while it still waits
+    // there (review pass 4), its time waited carried.
+    for (;;) {
+      let run = plain;
+      let backOf: AbortSignal | null = null;
+      if (relay && !relay.gone()) {
+        if (call.cls === "live") {
+          // Counted, never waited for: the broker grants live at once, always (the maintainer, 2026-11-11).
+          const id = relay.live(call);
+          try { return await plain(); } finally { relay.done(id); }
+        }
+        const got = await relay.ask(call, stopOf, told, first, maxWaitMs / 1000, (performance.now() - asked) / 1000).catch((e) => {
+          noteSlotWait(call, performance.now() - asked, "stopped", waited);
+          throw e;
+        });
+        if ("go" in got) {
+          noteSlotWait(call, performance.now() - asked, "held", waited);
+          try { return await plain(); } finally { relay.done(got.go); }
+        }
+        // A back said since it was sent: the broker is back, so ask again now; one not worth asking again never waits on back.
+        if (got.retry && relay.backs() !== got.backs) continue;
+        backOf = got.retry ? relay.backSignal() : null;
+        run = async () => {
+          if (relay.gone()) return plain();
+          const id = relay.running(call);
+          try { return await plain(); } finally { relay.done(id); }
+        };
+      }
+      const share = shareOf(setting, call);
+      if (!share) return run();
+      let held: Held | null;
+      try {
+        held = await acquire(localOf(share.key, share.limit), backOf ? AbortSignal.any([stopOf, backOf]) : stopOf, told, first, asked);
+      } catch (e) {
+        if (backOf?.aborted && !stopOf.aborted) continue;
+        noteSlotWait(call, performance.now() - asked, "stopped", waited);
+        throw e;
+      }
+      noteSlotWait(call, performance.now() - asked, held ? "held" : "open", waited);
+      try {
+        return await run();
+      } finally {
+        if (held) await release(held);
+      }
     }
   };
   const before = setModelCallHook(hook);
@@ -769,6 +918,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     installed: true,
     uninstall: async () => {
       setModelCallHook(before);
+      relay?.close();
       ended.abort(new Error("background slots: the process is stopping"));
       const it = listener;
       listener = undefined;
