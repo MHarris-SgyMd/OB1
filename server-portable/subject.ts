@@ -201,13 +201,17 @@ const clipped = (line: string): boolean => line.endsWith("…") && line.length -
  * The metadata key the capture hook (recipes/session-capture-hook, from 1.8.0) sends with a session summary: where its
  * header's tickets came from, `asks` (those the episode's asks named) or `place` (its branch's or directory's), which
  * the text cannot say (SMD-3306 PR 7a-3b-2, after three review passes each found the rule's guesses at it wrong).
+ * It is read when the text's subjects are found, and kept on the set's recipe: a word changed alone, with the text
+ * as it was, finds nothing again (the fingerprint is the text's, and 113's trigger pools a thought for its text and its
+ * filed ticket alone), and a text edited keeps the word it had (review pass 4, cold read and run-it: the hook never
+ * changes a word it sent, nor edits a summary).
  */
 export const TICKETS_FROM = "tickets_from";
 
 /**
  * A session summary's header tickets. With the hook's word on where they came from (`from`, TICKETS_FROM): `asks`,
- * every listed ticket, each named by an ask, shown or not; `place`, those a listed prompt names, as version 2 read a
- * header. Without it — a summary from a hook before 1.8.0, or a brain that refused the key — the rest of this reading:
+ * every listed ticket, each named by an ask, shown or not; `place`, those a listed prompt names, as a header shown
+ * whole is read. Without it — a summary from a hook before 1.8.0, or a brain that refused the key — the rest of this reading:
  * those the header lists that one of the session's listed prompts names, in any
  * case, in the header's order, each once; and every one it lists when the summary shows its prompts in part — a
  * `- … and N more` line past the 12 it lists, or a prompt clipped at its 200 characters — and a listed prompt names one
@@ -251,8 +255,6 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
   const home = [...rest.toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).find(isTicket);
   const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
   if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
-  // Where the list came from, when the hook says (TICKETS_FROM): the asks' tickets every one, each named by an ask.
-  if (from === "asks") return tickets;
   const anchored = tickets.every((t) => nameOf(t).test(rest));
   const named = new Set<string>();
   let asked = false, inPart = false;
@@ -264,7 +266,11 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
       for (const t of tickets) if (nameOf(t).test(line)) named.add(t);
     } else break;
   }
-  // The place's, those a listed prompt names, as version 2 read a header; with no word, the guesses above.
+  // Where the list came from, when the hook says (TICKETS_FROM): the asks' tickets every one, each named by an ask —
+  // in the hook's layout, an Asked list read (review pass 4, cold read: a model's summary echoing a header, or a note
+  // claiming the word with no Asked list, was keyed).
+  if (from === "asks") return asked ? tickets : [];
+  // The place's, those a listed prompt names, as a header shown whole is read; with no word, the guesses above.
   return named.size === 0 ? [] : inPart && !anchored && from !== "place" ? tickets : tickets.filter((t) => named.has(t));
 }
 
@@ -275,11 +281,14 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
  * context, its own subject a digest, a process or a release, and the model, asked instead, agreed with the raters
  * 0.950 against the rule's 0.750.
  */
-export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; by: Exclude<SubjectBy, "model"> } | null {
+export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; by: Exclude<SubjectBy, "model">; from?: "asks" | "place" } | null {
   const filed = metadataTicket(row.metadata);
   if (filed) return { keys: [`ticket:${filed}`], by: "metadata" };
-  const header = sessionHeaderTickets(row.content, row.metadata?.[TICKETS_FROM]);
-  return header.length ? { keys: header.map((t) => `ticket:${t}`), by: "first_line" } : null;
+  const from = row.metadata?.[TICKETS_FROM];
+  const header = sessionHeaderTickets(row.content, from);
+  if (!header.length) return null;
+  // The hook's word, which reading keyed the set, for its recipe (review pass 4, run-it).
+  return { keys: header.map((t) => `ticket:${t}`), by: "first_line", ...(from === "asks" || from === "place" ? { from } : {}) };
 }
 
 // ── The judge model's question ────────────────────────────────────────────────

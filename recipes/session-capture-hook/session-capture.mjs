@@ -1691,11 +1691,13 @@ export async function postCapture(cfg, payload) {
   // blanked from it (SMD-2168) — the count alone, never the reasons or offsets,
   // which the text's markers already name; and where its header's tickets came
   // from, the asks or the place (SMD-3306 PR 7a-3b-2), for the brain's subject
-  // rule, which the text alone leaves to guess.
+  // rule, which the text alone leaves to guess — not with a model's summary,
+  // whose prose has no header for the word to describe (review pass 4: a model
+  // echoing the header it was shown would have its tickets keyed).
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
-  if (payload.tickets_from) meta.tickets_from = payload.tickets_from;
+  if (payload.tickets_from && !payload.summary_model) meta.tickets_from = payload.tickets_from;
   if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
@@ -1874,18 +1876,19 @@ export function prepare(hook, opts = {}) {
     // redaction, so no single-line secret the scan can see is sent (SMD-2127).
     const where = gateFindings(cleaned, text);
     if (where.length) { refused.push({ ep, where: `${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}` }); continue; }
+    const ticketsFrom = headerTickets(cleaned.ep).from;
     const payload = {
       session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
       ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
-      ...(headerTickets(cleaned.ep).from ? { tickets_from: headerTickets(cleaned.ep).from } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
+      ...(ticketsFrom ? { tickets_from: ticketsFrom } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running
     // checkpoint, which keeps its derived text (the same event-table test
-    // modelSummary applies): so a derived-mode payload is byte-identical to
-    // before (SMD-2014), and a checkpoint payload never carries the assistant
+    // modelSummary applies): so a derived-mode payload carries nothing of the
+    // model (SMD-2014), and a checkpoint payload never carries the assistant
     // excerpt at rest unread (review pass 2). The fingerprint stays the DERIVED
     // text's, so an episode is asked of the model once — a re-end with the same
     // derived summary is skipped, not re-modelled.
@@ -3661,7 +3664,8 @@ export async function main(argv) {
       const ids = provenanceOf(ep);
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
-      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
+      const from = headerTickets(cleaned.ep).from;
+      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}${from ? `, metadata.tickets_from=${from}` : ""}`);
       if (where.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
       else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
       else console.log("--- secret scan: clean");

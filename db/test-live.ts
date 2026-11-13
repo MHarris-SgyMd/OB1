@@ -9350,9 +9350,16 @@ if (want("10h")) {
       const shownOnly = await seed(oneShown.replace("Both done.", "Both done, the other way."));
       const askedRun = await extractRun();
       assert(askedRun.code === 0 && (await standingKeys(askedSet)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87"
-          && (await standingKeys(shownOnly)).map((x) => x.key).join() === "ticket:SMD-86",
+          && (await standingKeys(shownOnly)).map((x) => x.key).join() === "ticket:SMD-86"
+          && (await standingKeys(askedSet)).every((x) => x.recipe?.tickets_from === "asks") && (await standingKeys(shownOnly)).every((x) => x.recipe?.tickets_from === undefined),
         `the hook's word that the asks named the header's tickets keys them all; without it, those a listed prompt names (exit ${askedRun.code})`);
       await sql`DELETE FROM thoughts WHERE id IN (${askedSet}::uuid, ${shownOnly}::uuid)`;
+      // Review pass 4 (mutant: the sweep reading no word lived): the sweep reads the hook's word off the metadata too.
+      const sweptAsked = await seed(oneShown.replace("Both done.", "Both done, swept."), { tickets_from: "asks" });
+      const sweptRun = await sweep({ limit: 5 });
+      assert(sweptRun.code === 0 && (await standingKeys(sweptAsked)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87",
+        `the sweep reads the hook's word off the thought's metadata too (exit ${sweptRun.code}: ${tally(sweptRun)})`);
+      await sql`DELETE FROM thoughts WHERE id = ${sweptAsked}::uuid`;
       // The sweep: a header's two tickets by the rule; a header's ticket version 2 keyed, found again under version 3, the
       // same key, a replacement with no new key; and a note the model names four tickets for, one of them twice: the
       // first three keys in its order, each once, the answers read kept on each subject's recipe. One question asked.

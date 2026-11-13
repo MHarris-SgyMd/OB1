@@ -1018,6 +1018,15 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(askedPrep.code === 0 && /^Session summary — SMD-2013 — /.test(askedPrep.payload?.text ?? "") && askedPrep.payload.tickets_from === "asks",
     `…an ask naming its ticket: the header lists it, and the payload says the asks named it (${askedPrep.payload?.tickets_from}; ${askedPrep.payload?.text?.split("\n")[0]})`);
   if (askedPrep.payloadPath) unlinkSync(askedPrep.payloadPath);
+  // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says `place`.
+  const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });
+  assert(JSON.stringify(placedFour) === '{"tickets":["SMD-11","SMD-12","SMD-13"],"from":"place"}', `…the place's tickets three at most (${JSON.stringify(placedFour)})`);
+  const placedT = join(TMP, "tickets-from-place.jsonl");
+  writeFileSync(placedT, [user("bump the node-22 image", { origin: { kind: "human" }, gitBranch: "michaelharris/smd-90-x" }), line({ type: "assistant", sessionId: SID, timestamp: "2026-09-22T13:20:00.000Z", cwd: "/repo/proj", gitBranch: "michaelharris/smd-90-x", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } })].join("\n"));
+  const placedPrep = prepare({ ...base, session_id: "s-tickets-from-place", transcript_path: placedT });
+  assert(placedPrep.code === 0 && /^Session summary — SMD-90 — /.test(placedPrep.payload?.text ?? "") && placedPrep.payload.tickets_from === "place",
+    `…a branch's ticket, no ask naming one: the payload says the place gave it (${placedPrep.payload?.tickets_from}; ${placedPrep.payload?.text?.split("\n")[0]})`);
+  if (placedPrep.payloadPath) unlinkSync(placedPrep.payloadPath);
   // First review pass: the gate reads each prompt on its own, as the redaction blanks them — a flag ending one prompt and a word opening the next was a refusal under either mode that no redaction could clear.
   writeFileSync(join(TMP, "join.jsonl"), [user("run psql --password", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }]), user("hunter2 then check the row count", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
   const jn = prepare({ ...base, session_id: "s-join", transcript_path: join(TMP, "join.jsonl") });
@@ -1492,8 +1501,14 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   await postCapture(cfg, { text: "the model's redacted summary", harness: "claude-code", derived_from: [], summary_model: "test-model", redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] });
   assert(received[0].args.metadata?.summary_model === "test-model" && received[0].args.metadata?.redactions === 1, "a model summary that was also redacted carries both keys");
   received.length = 0;
+  await postCapture(cfg, { text: "the model's prose, no header", harness: "claude-code", derived_from: [], summary_model: "test-model", tickets_from: "asks" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"summary_model":"test-model"}', `…and a model's summary no tickets_from: its prose has no header for the word to describe (SMD-3306 review pass 4: ${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
   await postCapture(cfg, { text: "a session's summary", harness: "claude-code", derived_from: [], tickets_from: "asks" });
   assert(JSON.stringify(received[0].args.metadata) === '{"tickets_from":"asks"}', `where its header's tickets came from rides metadata.tickets_from (SMD-3306 PR 7a-3b-2: ${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
+  await postCapture(cfg, { text: "a session's summary", harness: "claude-code", derived_from: [], tickets_from: "place" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"tickets_from":"place"}', `…\`place\` as the payload says it (review pass 4, mutant: ${JSON.stringify(received[0]?.args?.metadata)})`);
   // A server that refuses the metadata key drops it and posts the summary anyway (SMD-2168): the summary is the point, the count a nicety.
   received.length = 0;
   let rm; try { rm = await postCapture(cfg, { text: "[[refuse-metadata]] a redacted summary", harness: "claude-code", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] }); } catch (e) { rm = { error: e.message }; } // a mutant that drops the mend throws; the guard turns that into a failed arm, not a crashed suite

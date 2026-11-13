@@ -2225,7 +2225,7 @@ async function sweep(
     if (found) {
       ({ keys, by } = found);
       judge = subjectRuleKey(found.by);
-      recipe = subjectRecipe({ by: found.by });
+      recipe = subjectRecipe(found);
     } else if (!MODEL || DRY_RUN) {
       n.left++;
       // One holding a subject found at another text or under an older rule or question: it stands until a model's

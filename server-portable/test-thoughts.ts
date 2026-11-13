@@ -2807,11 +2807,17 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
       && HF(hook("SMD-55, SMD-56", clippedAsk), "place") === "SMD-55" && H(hook("SMD-55, SMD-56", clippedAsk)) === "SMD-55,SMD-56" && HF(hook("SMD-55, SMD-56", ["look around"]), "place") === ""
       && HF(hook("NODE-22, NODE-24", ["bump node-22 to node-24"]), "asks") === "" && HF(hook("SMD-2125, SMD-7", ["start smd-2125"]), "bogus") === "SMD-2125",
     "…with the hook's word: the asks' every ticket; the place's those a prompt names, never widened; another team's still the model's; a word it does not send read as none");
+  assert(HF("Session summary — SMD-2125, SMD-2126 — claude-code — OB1 (main) — 2026-11-13\n\nWe decided to ship SMD-2125.", "asks") === "" && HF("Session summary — SMD-2125, SMD-2126 — claude-code — x — 2026-11-13", "asks") === "",
+    "…`asks` only in the hook's layout, an Asked list read: a model's prose echoing a header, or a header line alone claiming the word, keys none (review pass 4, cold read)");
   assert(HF(late, headerTickets(lateSession).from) === "SMD-1,SMD-2" && headerTickets(lateSession).from === "asks"
       && HF(anchoredLate, headerTickets(anchoredSession).from) === "SMD-610" && headerTickets(anchoredSession).from === "place",
     `…as the hook's own headerTickets says of its sessions (${headerTickets(lateSession).from}, ${headerTickets(anchoredSession).from})`);
-  assert(JSON.stringify(ruleSubject({ content: hook("SMD-2125, SMD-7", ["start smd-2125"]), metadata: { tickets_from: "asks" } })) === JSON.stringify({ keys: ["ticket:SMD-2125", "ticket:SMD-7"], by: "first_line" }),
-    "…ruleSubject reads the word off the thought's metadata");
+  assert(JSON.stringify(ruleSubject({ content: hook("SMD-2125, SMD-7", ["start smd-2125"]), metadata: { tickets_from: "asks" } })) === JSON.stringify({ keys: ["ticket:SMD-2125", "ticket:SMD-7"], by: "first_line", from: "asks" })
+      && JSON.stringify(subjectRecipe({ by: "first_line", from: "asks" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 3, tickets_from: "asks" }),
+    "…ruleSubject reads the word off the thought's metadata, and the rule's recipe keeps it (review pass 4)");
+  assert(HF(hook("SMD-2614, FY-2026", ["start smd-2614"]), "asks") === "SMD-2614" && HF(hook("SMD-1, SMD-2, SMD-3, SMD-4", ["smd-1"]), "asks") === ""
+      && HF(hook("SMD-55, SMD-56", clippedAsk), "bogus") === "SMD-55,SMD-56" && HF(hook("SMD-55, SMD-56", clippedAsk), 1) === "SMD-55,SMD-56",
+    "…under `asks` a denied prefix still no ticket and a header over three none; a word the hook does not send, its prompts shown in part, widened as with none (review pass 4, mutants)");
   // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
   const two = hook("SMD-7, SMD-8", ["start smd-8", "and smd-7"]);
   assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" })
