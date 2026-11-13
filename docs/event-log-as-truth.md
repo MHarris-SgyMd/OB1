@@ -384,7 +384,16 @@ leaving the log to fight it:
   `thought_id`, and writes a row saying it did. With content in the capture
   row from step 1, a thought's text lives in its capture, in every content
   update's before/after and in its tombstone; the redaction is by thought, not
-  by row.
+  by row. **Landed in migration 138 (SMD-1723 PR 1)** as the gate's third
+  named amendment, `redact` (055's `payload` took the second slot): under
+  `ob1.audit_amend = 'redact'` and the forget's own setting, and only once
+  the thought is deleted, each event's `diff` becomes
+  `ob1_audit_redacted_diff` — every text the marker `[forgotten]`, every
+  metadata object `{"forgotten": true}`, ids, fingerprints and times kept —
+  with `redacted_at` stamped once. The saying-so row is the ledger,
+  `thought_forgotten`, beside the log as the next bullet asks. `forget_thought`
+  redacts after the row's delete, not before it, so the tombstone the delete
+  writes, which carries the text in full, is redacted with the rest.
 - **A redacted thought projects to nothing.** The projector refuses a capture
   event with no content (SQLSTATE `OB003`), so a redaction that blanked the
   text would otherwise stop every fold at that thought. The rule: the
@@ -412,10 +421,15 @@ leaving the log to fight it:
   deletes the snapshot rows at a leaving thought's fingerprints — its current
   one, the ones its own lineage rows recorded, and the earlier texts' the
   caller reads from the log — where no standing thought holds them. The order moves one step: the redaction lands no
-  later than step 3, SMD-2117's fold, which is where a copied log first
-  carries text to a server that cannot remove it, and SMD-2117 is blocked by
-  SMD-1723 as SMD-2116 was. SMD-1723 itself stands behind SMD-1793 (the raw
-  deletes), SMD-1731 and SMD-1732.
+  later than step 3, SMD-2117's fold, and SMD-2117 is blocked by SMD-1723 as
+  SMD-2116 was. (Amended 2026-11-13: the fold is not where a copied log
+  first carries text to another server — a tier refresh already copies the
+  whole database, the log included (`db/tier.ts`), between the operator's own
+  brains. The maintainer kept the block for another reason, at the
+  2026-10-25 board review: a captured secret had no removal path at all, and
+  step 3 makes the log the input every rebuild folds from. SMD-1793 was
+  canceled, its raw deletes gone with their servers, and SMD-1731 and
+  SMD-1732 landed; SMD-1723's PR 1 built the redaction, migration 138.)
 - **Forgetting reaches the projections through the rebuild.** After the
   amendment and BEFORE the row delete (061's drop trigger leaves nothing to
   walk after it), `rebuild_derived(id, 'forget', input_gone => true,
@@ -546,8 +560,9 @@ bounded fold into a tier that writes on (SMD-2118, Low, blocked by step 3).
   did not apply it; SMD-1697's bench decides when. (SMD-1947 benches 055's
   census and backfill at a million rows — a question of its own.)
 - **The redaction amendment's exact shape** (which keys of `diff` blank, what
-  the saying-so row carries) — SMD-1723, on the gate 046 built; what the
-  projector does with a redacted thought is decided above.
+  the saying-so row carries) — decided by SMD-1723 in migration 138 (above);
+  what the projector does with a redacted thought is decided above, and is
+  SMD-2117's to build.
 - **The graph's fingerprint and every recipe** — decided and landed after this
   record by SMD-1731 (migration 061): `derivations`, the table the projections
   table above depends on; the rebuild that walks it landed as migration 063

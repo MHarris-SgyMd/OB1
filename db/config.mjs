@@ -2452,6 +2452,10 @@ export const ROLE_GRANTS = Object.freeze({
     // moves no status and a re-record that changes only the canonical need
     // none of it (SMD-2267).
     Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "071" }),
+    // 138's refusal on thoughts reads the ledger of forgotten texts on every
+    // capture and every edit of a text (SMD-1723): a role without it cannot
+    // write a thought once anything has been forgotten.
+    Object.freeze({ table: "thought_forgotten", privileges: Object.freeze(["SELECT"]), since: "138" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)

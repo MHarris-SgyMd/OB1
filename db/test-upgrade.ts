@@ -764,12 +764,16 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // replaces 016's merge_entities, refusing by name without 016, 116 or 133
   // ([20ca]); 137 replaces 129's ten-argument agenda, ordering a tie by the
   // count of open items each unblocks, refusing by name without 034, 068,
-  // 115, 122, 123 or 129 ([20cb]) — all recorded by the
+  // 115, 122, 123 or 129 ([20cb]); 138 adds forgetting — the ledger, the
+  // log's redact amendment in 055's gate, the refusal of a forgotten text on
+  // thoughts, 116's, 117's and 134's guards admitting the forget's deletes,
+  // and forget_thought — refusing by name without 016, 034, 055, 060, 064,
+  // 067, 116, 117, 123 or 134 ([20cc]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 108, `030 is among the last one hundred and eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 109, `030 is among the last one hundred and nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6420,6 +6424,54 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
     `applied: the tie at 2.2 goes to the one blocking 5, which key order put second; a nine-argument call the same (${keys(before)} → ${keys(after)} | ${keys(afterNine)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });
   assert(keys(await read(10)) === keys(after), "a re-apply is a no-op: the same read");
+  await sql.close();
+}
+
+console.log("\n[20cc] Migration 138: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 137 forgotten, every event of it redacted with its actor kept, the text refused on its way back; a re-apply a no-op (SMD-1723)");
+{
+  const the138 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the138 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const SECRET = "upgrade 138: the door code is 2468";
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ACT = JSON.stringify({ name: "upgrade-op", scope: "write" });
+  let id = "";
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    id = String((await tx`INSERT INTO thoughts (content, content_fingerprint) VALUES (${SECRET}, content_fingerprint_of(${SECRET})) RETURNING id`)[0].id);
+  });
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    await tx`UPDATE thoughts SET content = ${`${SECRET}, edited`}, content_fingerprint = content_fingerprint_of(${`${SECRET}, edited`}) WHERE id = ${id}::uuid`;
+  });
+  // A role granted thoughts' writes before 138, which the file grants the ledger the refusal reads.
+  await sql.unsafe(`CREATE ROLE ob1_upgrade_138_writer NOLOGIN; GRANT INSERT, UPDATE ON thoughts TO ob1_upgrade_138_writer`);
+  const made = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'forget_thought'`)[0].c);
+
+  // Without 067's rebuild_derived: refused by name, nothing made.
+  await sql`ALTER FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) RENAME TO rebuild_derived_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the138 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION rebuild_derived_away(uuid, text, boolean, text[], boolean, boolean) RENAME TO rebuild_derived`;
+  assert(/^migration 138 needs 016, 034, 055, 060, 064, 067, 116, 117, 123 and 134 /.test(without) && await made() === 0,
+    `without 067's rebuild_derived the file is refused by name, nothing made (${without.slice(0, 90)} | ${await made()})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the138 });
+  const reads = Boolean((await sql`SELECT has_table_privilege('ob1_upgrade_138_writer', 'thought_forgotten', 'SELECT') AS r`)[0].r);
+  const ans = (await sql`SELECT forget_thought(${id}::uuid, (${ACT}::text)::jsonb) AS r`)[0].r as { ok: boolean; removed: { audit_events: number } };
+  const log = (await sql`SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NOT NULL)::int AS red,
+                                count(*) FILTER (WHERE actor_name = 'upgrade-op')::int AS act,
+                                count(*) FILTER (WHERE diff::text LIKE '%door code%')::int AS text
+                           FROM thought_audit WHERE thought_id = ${id}::uuid`)[0] as { n: number; red: number; act: number; text: number };
+  let back = "taken";
+  try { await sql`INSERT INTO thoughts (content) VALUES (${SECRET})`; } catch (e) { back = String((e as { errno?: string }).errno ?? (e as { code?: string }).code); }
+  assert(reads && ans.ok === true && ans.removed.audit_events === 3 && log.n === 3 && log.red === 3 && log.act === 3 && log.text === 0 && back === "OB005",
+    `applied: the writer reads the ledger; the thought from 137 forgotten, its capture, edit and tombstone redacted with their actor kept; the text refused OB005 (${reads} | ${JSON.stringify(log)} | ${back})`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_138_writer; DROP ROLE ob1_upgrade_138_writer`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the138 });
+  const ledger = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten`)[0].c);
+  assert(ledger === 1 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
   await sql.close();
 }
 
