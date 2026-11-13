@@ -207,9 +207,12 @@ function definedIn(file: string): string[] {
  * on supersession_proposals [74] reads, and 111 last defines
  * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
  * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
- * whose door and thread functions it does not define.
+ * whose door and thread functions it does not define. 137 is 129's
+ * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
+ * carries 129, whose nine-argument wrapper it does not define and whose
+ * agenda it needs ([110] drops both).
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -18294,7 +18297,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
-  // The shipped agenda back: the last definer's (129's), which drops 123's eight-argument one.
+  // The shipped agenda back: the last definer's (137's, carrying 129's, which drops 123's eight-argument one).
   await restoreShipped("agenda");
 }
 
@@ -20390,6 +20393,87 @@ console.log("\n[123] Migration 136: a deleted item's priority statements close �
   assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(upper)).close_reason === null && (await row(kept.id)).close_reason === null
          && await closedCount() === before && await drift() === 0,
     `on upgrade the statements on a thought and an entity gone before 136, and on a thought key that is no uuid, close as deleted; a living thought's stay open, keyed in upper case too; a re-apply closes nothing more (${reasons.join(", ")})`);
+}
+
+console.log("\n[124] Migration 137: within one level the agenda puts the item that unblocks more first — after the sooner due time and before kind and key, under both orders, so a Medium blocking 50 open items leads Mediums blocking 6 and 3 whose keys sort first, and of two at 2.1 the one blocking 2 leads the one blocking 1; no score moves, so a Low blocking 50 stays below a Medium blocking none; the due order breaks a tie on the moment by the count too; 129's body re-applied puts key order back; the shape; a re-apply a no-op (SMD-4264)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_unblocks_order\.sql$/.test(f)) ?? "no NNN_agenda_unblocks_order.sql";
+  const the129 = files.find((f) => /^\d{3}_agenda_order\.sql$/.test(f)) ?? "no NNN_agenda_order.sql";
+  // [117] re-applied 129's ten-argument agenda: put this file's back first.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [124]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag124-op', 'operator')`);
+  const OP = { name: "ag124-op", scope: "write" };
+  type Ag = { items: { key: string; effective: number; unblocks: number }[]; total: number; left_out: { blocked: number } };
+  const ticket = async (issue: string, blockedBy: string[] = []) => {
+    const content = `${issue} — [124] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag124-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (blockedBy.length) {
+      await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(blockedBy.map((target) => ({ relation: "blocked_by", target })))]);
+    }
+  };
+  const put = (issue: string, level: number, due: string | null = null) =>
+    db.query(`SELECT assert_priority('ticket', $1, $2::int, $3::timestamptz, NULL, NULL, NULL, NULL, false, $4::jsonb)`, [issue, level, due, JSON.stringify(OP)]);
+  // Each blocker, then the open tickets it blocks (blocked_by on theirs). UB-6 blocks the same 50 as UB-2.
+  const blocks: [string, number][] = [["UB-1", 3], ["UB-2", 50], ["UB-3", 6], ["UB-4", 1], ["UB-5", 2], ["UB-7", 0], ["UB-8", 3], ["UB-9", 5]];
+  for (const [b, n] of blocks) {
+    await ticket(b);
+    for (let i = 1; i <= n; i++) await ticket(`${b}0${String(i).padStart(2, "0")}`, b === "UB-2" ? ["UB-2", "UB-6"] : [b]);
+  }
+  await ticket("UB-6");
+  // Mediums with no date, but UB-8 and UB-9, due at one moment; UB-6 a Low. The blocked tickets state nothing.
+  for (const b of ["UB-1", "UB-2", "UB-3", "UB-4", "UB-5", "UB-7"]) await put(b, 2);
+  await put("UB-8", 2, "2027-03-20T00:00:00Z"); await put("UB-9", 2, "2027-03-20T00:00:00Z");
+  await put("UB-6", 1);
+  const scope = JSON.stringify({ project: P });
+  const ten = async (order: string) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz, false, $3) AS a`, [scope, NOW, order])).rows[0].a;
+  const nine = async () => (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz, false) AS a`, [scope, NOW])).rows[0].a;
+  const keys = (a: Ag) => a.items.map((i) => `${i.key.slice(3)}:${i.effective}:${i.unblocks}`).join(" ");
+
+  // The shape: the ten-argument agenda's body orders by the count before kind and key, and its comment says so,
+  // naming 137; still plpgsql, STABLE, no argument defaulted.
+  const fn = (await db.query<{ src: string; c: string | null; l: string; v: string; d: string }>(
+    `SELECT p.prosrc AS src, obj_description(p.oid, 'pg_proc') AS c, l.lanname AS l, p.provolatile::text AS v, pg_get_function_arguments(p.oid) AS d
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname = 'agenda' AND p.pronargs = 10`)).rows[0];
+  assert(/\(k\.s->>'due_at'\)::timestamptz ASC NULLS LAST,\s+COALESCE\(\(k\.s->>'unblocks'\)::int, 0\) DESC,\s+k\.c->>'kind', k\.c->>'key'\) AS rank/.test(fn.src)
+      && /then the sooner due time, then the more open items it unblocks \(122's count, to its cap\), then kind and key/.test(fn.c ?? "")
+      && /each tie by effective, then the more it unblocks, then kind and key/.test(fn.c ?? "") && /129 \(SMD-4192\) and 137 \(SMD-4264\)/.test(fn.c ?? "")
+      && fn.l === "plpgsql" && fn.v === "s" && !/DEFAULT/.test(fn.d),
+    `the ten-argument agenda orders by the unblocks count after the due time and before kind and key, its comment saying so for 137; plpgsql, STABLE, nothing defaulted (${fn.l}:${fn.v}; ${(fn.c ?? "").slice(-90)})`);
+
+  // priority: the two dated Mediums first (the sooner due time comes before the count: both 2.2, one moment, UB-9
+  // blocking 5 before UB-8 blocking 3); then the undated at 2.2 by the count, 50, 6, 3, where key order put UB-1
+  // first; then the two at 2.1, the one blocking 2 first; then the Medium blocking none (2); the Low blocking 50 last
+  // (1.2), as no score moved. The blocked tickets are left out.
+  const expected = "9:2.2:5 8:2.2:3 2:2.2:50 3:2.2:6 1:2.2:3 5:2.1:2 4:2.1:1 7:2:0 6:1.2:50";
+  const byPriority = await ten("priority"), byNine = await nine();
+  assert(keys(byPriority) === expected && keys(byNine) === expected && byPriority.total === 9 && byPriority.left_out.blocked === 70,
+    `within one level the more an item unblocks, the sooner it comes, after the due time and before the key; a Low blocking 50 stays below a Medium blocking none; a nine-argument call the same (${keys(byPriority)} | ${keys(byNine)} | ${byPriority.total}, ${byPriority.left_out.blocked} blocked)`);
+
+  // due: the dated two first, a tie on the moment and on effective broken by the count; the undated after, as priority.
+  const byDue = await ten("due");
+  assert(keys(byDue) === expected,
+    `under due a tie on the moment and on effective goes to the one unblocking more, the undated after in priority's order (${keys(byDue)})`);
+
+  // 129's body re-applied: key order again among the ties (the mechanism's own mutant, held here). Then 137's back.
+  await reapply(the129.slice(0, 4));
+  const keyOrder = keys(await ten("priority"));
+  await reapply(file.slice(0, 4));
+  assert(keyOrder === "8:2.2:3 9:2.2:5 1:2.2:3 2:2.2:50 3:2.2:6 4:2.1:1 5:2.1:2 7:2:0 6:1.2:50" && keys(await ten("priority")) === expected,
+    `129's order put the ties in key order, the item blocking 50 behind those blocking 3 and 6; 137 re-applied puts the count first again (${keyOrder})`);
+
+  // A re-apply is a no-op: the same reads.
+  await reapply(file.slice(0, 4));
+  assert(keys(await ten("priority")) === expected && keys(await ten("due")) === expected, "a re-apply is a no-op: the same reads under both orders");
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
