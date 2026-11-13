@@ -211,14 +211,14 @@ function definedIn(file: string): string[] {
  * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
  * carries 129, whose nine-argument wrapper it does not define and whose
  * agenda it needs ([110] drops both). 139 is 061's record_thought_entities
- * and 067's rebuild_derived with the prunes sparing an entity someone stated
- * a priority on (SMD-4241), and carries both: a restore of either re-applied
- * its file, whose other functions it restored and whose DROP took 053's
- * six-argument writer ([52] re-applies 053). 056 and 136, whose
- * apply_entity_type_gate and merge_entities it also carries, are not
- * carried: 056 runs the gate over the rows at each apply.
+ * with its prune sparing an entity someone stated a priority on (SMD-4241),
+ * and carries 061: a restore of the writer re-applied 061, whose other
+ * functions it restored and whose DROP took 053's six-argument writer ([52]
+ * re-applies 053). 056 and 136, whose apply_entity_type_gate and
+ * merge_entities it also carries, are not carried: 056 runs the gate over the
+ * rows at each apply.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["061", "067"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["061"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -9582,9 +9582,8 @@ console.log("\n[58] Migration 063: rebuild_derived â€” the walk over the lineage
     `one consolidation_candidates, 079 its last definer â€” 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("111") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
     `one ob1_record_derivation, 111 its last definer â€” 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]), the relation kind ([74]) and the subject kind ([99]) (${lastDefinerOf("ob1_record_derivation")})`);
-  // rebuild_derived's last definer is 139, on 067's body (SMD-2297: the proposal arm reopens a pass-settled row; SMD-4241:
-  // its prunes spare an entity with a priority, [126]); [61] asserts it.
-  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("139"), `one rebuild_derived, 139 its last definer, on 067's body (${lastDefinerOf("rebuild_derived")})`);
+  // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
+  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("067"), `one rebuild_derived, 067 its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
   assert(/ob1:rebuild-acts-on-a-held-frontier/.test(await src(REBUILD_SIG)) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src(REBUILD_SIG)) && /FOR NO KEY UPDATE/.test(await src(REBUILD_SIG)),
     "the primitive carries its sentinel, takes the supersession lock and the row lock in delete_thought's order");
@@ -10347,11 +10346,11 @@ console.log("\n[61] Migration 067: the consolidation pass settles a stale propos
   const KEY = "extract:stub@p1", JUDGE = "consolidate:stub@p1", JUDGE2 = "consolidate:stub@p2";
   const SETTLE_SIG = "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)", REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)";
 
-  // The shape: one settle function, 067 its last definer and 139 rebuild_derived's
-  // (067's body carried), the two sentinels, the marker literal held to the
-  // TypeScript constant, the comments naming 067.
-  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").startsWith("139"),
-    `one settle function; 067 is the last definer of it, and 139 of rebuild_derived, on 067's body ([126]) (${lastDefinerOf("rebuild_derived")})`);
+  // The shape: one settle function, 067 the last definer of both, the two
+  // sentinels, the marker literal held to the TypeScript constant, the
+  // comments naming 067.
+  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").startsWith("067"),
+    `one settle function; 067 is the last definer of it and of rebuild_derived (${lastDefinerOf("rebuild_derived")})`);
   const rebuildSrc = await src(REBUILD_SIG), settleSrc = await src(SETTLE_SIG);
   assert(/ob1:pass-settled-is-the-pass-to-reopen/.test(rebuildSrc) && /ob1:rebuild-acts-on-a-held-frontier/.test(rebuildSrc) && /ob1:settle-records-the-texts-it-judged/.test(settleSrc),
     "the reopen and the settle carry their sentinels; 063's frontier sentinel stands");
@@ -20611,7 +20610,7 @@ console.log("\n[125] Migration 138: a priority write names every statement it cl
     `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
-console.log("\n[126] Migration 139: an entity's priority statements follow it â€” the prunes (record_thought_entities, rebuild_derived's two, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references; the shape; a re-apply a no-op (SMD-4241)");
+console.log("\n[126] Migration 139: an entity's priority statements follow it â€” the prunes (record_thought_entities, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting (rebuild_derived, unchanged) still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references, counting what stands; the shape; a re-apply a no-op (SMD-4241)");
 {
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; reason: string | null; due_ref: { kind: string; key: string } | null; asserted_at: string;
     maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
@@ -20655,8 +20654,8 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
     `SELECT p.proname AS n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
       WHERE s.nspname = 'public' AND obj_description(p.oid, 'pg_proc') ILIKE '%migration 139 / SMD-4241%' ORDER BY 1`)).rows.map((r) => r.n);
   assert(JSON.stringify(named) === JSON.stringify(["apply_entity_type_gate", "merge_entities", "ob1_entity_has_open_priority", "ob1_priority_merge_entity",
-                                                   "prune_orphan_entities", "rebuild_derived", "record_thought_entities"]),
-    `seven functions name 139: two new, five carried (${named.join(", ")})`);
+                                                   "prune_orphan_entities", "record_thought_entities"]),
+    `six functions name 139: two new, four carried, rebuild_derived not among them (${named.join(", ")})`);
   const dueIdx = (await db.query<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'priority_assertions_open_due_ref_idx'`)).rows[0]?.d ?? "";
   assert(/\(due_ref_kind, due_ref_key\) WHERE \(\(closed_at IS NULL\) AND \(due_ref_key IS NOT NULL\)\)/.test(dueIdx),
     `a partial index on the open statements' due references serves the spare test and the merge (${dueIdx})`);
@@ -20689,22 +20688,24 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   assert(after.pruned_entities === 1 && !(await exists(atlas)) && (await row(onAtlas.id)).close_reason === "cleared",
     `once its statement is cleared, the next prune takes the entity (${JSON.stringify(after)})`);
 
-  // rebuild_derived, its input leaving: the walk's prune (a thought whose entities came through the writer, lineage and all)
-  // and the fallback's (mentions written raw, no lineage row) both spare an entity with a statement.
+  // rebuild_derived, its input leaving, is a forgetting (SMD-1723's forget_thought, rebuild.ts --gone, whose reason is
+  // 'operator: forget'), and spares nothing (the maintainer, review pass 1; review pass 2: whatever the reason says): the
+  // walk's prune (a thought whose entities came through the writer, lineage and all) and the fallback's (mentions written
+  // raw, no lineage row) both take an entity with a statement, which 136's trigger closes as deleted.
   const walked = await thought("[126] the walk's thought");
   await rte(walked, [E("[126] Walked kept"), E("[126] Walked gone")]);
   const wKept = (await idOf("tool", "[126] Walked kept"))!, wGone = (await idOf("tool", "[126] Walked gone"))!;
   const onWKept = await put("entity", wKept, 3, OP);
   const lineage = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = $1::uuid`, [walked])).rows[0].n;
-  await db.query(`SELECT rebuild_derived($1::uuid, '[126] input gone', true, NULL, false, false)`, [walked]);
+  await db.query(`SELECT rebuild_derived($1::uuid, 'operator: forget', true, NULL, false, false)`, [walked]);
   const raw = await thought("[126] the fallback's thought");
   const fKept = await entity("[126] Fallback kept"), fGone = await entity("[126] Fallback gone");
   await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:raw'), ($1::uuid, $3::uuid, 0.9, 'extract:raw')`, [raw, fKept, fGone]);
   const onFKept = await put("entity", fKept, 2, OP);
   await db.query(`SELECT rebuild_derived($1::uuid, '[126] input gone', true, NULL, false, false)`, [raw]);
-  assert(lineage === 1 && await exists(wKept) && !(await exists(wGone)) && (await row(onWKept.id)).close_reason === null
-         && await exists(fKept) && !(await exists(fGone)) && (await row(onFKept.id)).close_reason === null && await drift() === 0,
-    `rebuild_derived with its input leaving spares an entity with a statement in the walk's prune and in the fallback's, and prunes the one without (${lineage})`);
+  assert(lineage === 1 && !(await exists(wKept)) && !(await exists(wGone)) && (await row(onWKept.id)).close_reason === "deleted"
+         && !(await exists(fKept)) && !(await exists(fGone)) && (await row(onFKept.id)).close_reason === "deleted" && await drift() === 0,
+    `rebuild_derived with its input leaving, whatever its reason, prunes an entity with a statement in the walk's prune and in the fallback's, closed as deleted (${lineage})`);
 
   // prune_orphan_entities spares it too; a deliberate DELETE still closes it as deleted (136).
   const lone = await entity("[126] Lone with a word"), bare = await entity("[126] Lone bare");
@@ -20714,10 +20715,6 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   await db.query(`DELETE FROM ob1_entities WHERE id = $1::uuid`, [lone]);
   assert(swept >= 1 && spared && bareGone && (await row(onLone.id)).close_reason === "deleted" && await drift() === 0,
     `prune_orphan_entities spares the entity with a statement and takes the bare one; an operator's DELETE then closes its statement as deleted (${swept})`);
-  // The rest of the spared fixtures, cleared, go with the next sweep.
-  await clear("entity", wKept, OP); await clear("entity", fKept, OP);
-  await db.query(`SELECT prune_orphan_entities()`);
-  assert(!(await exists(wKept)) && !(await exists(fKept)), `cleared, the spared entities go with the next prune_orphan_entities`);
 
   // An entity with no statement of its own that another item's open statement takes its due time from is spared too
   // (review pass 1: pruned, the reference named a deleted id and read no due time); once that statement is cleared, the
@@ -20733,16 +20730,6 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   await db.query(`SELECT prune_orphan_entities()`);
   assert(keelPrune.pruned_entities === 0 && keelSpared && !(await exists(keel)),
     `an entity an open statement takes its due time from is spared, and pruned once that statement is cleared (${JSON.stringify(keelPrune)})`);
-
-  // A forgetting spares nothing (the maintainer, review pass 1: erasing the thought's text wins): rebuild_derived with the
-  // reason 'forget' prunes the entity only that thought named, statement and all, and 136's trigger closes it as deleted.
-  const forgotten = await thought("[126] Rudder, a name to forget");
-  await rte(forgotten, [E("[126] Rudder")]);
-  const rudder = (await idOf("tool", "[126] Rudder"))!;
-  const onRudder = await put("entity", rudder, 4, OP);
-  await db.query(`SELECT rebuild_derived($1::uuid, 'forget', true, NULL, false, false)`, [forgotten]);
-  assert(!(await exists(rudder)) && (await row(onRudder.id)).close_reason === "deleted" && await drift() === 0,
-    `rebuild_derived forgetting a thought prunes the entity only it named though it has a statement, closed as deleted`);
 
   // A role without SELECT on the assertions prunes as before (no 42501 from the spare test): the entity goes, its statement
   // left open, and 136's sweep closes it.
@@ -20846,6 +20833,19 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
          && onTarget.length === 1 && onTarget[0].level === 4 && onTarget[0].reason === "the widget" && (await row(onRetyped.id)).closed_by === onTarget[0].id
          && onTGate.length === 1 && onTGate[0].due_ref?.key === target && (await row(refGate.id)).closed_by === onTGate[0].id && await drift() === 0,
     `the gate's retype merge moves the entity's statement onto the one it merges into and restates the reference naming it, where the delete closed them (${toType}; ${JSON.stringify(gate)})`);
+
+  // Two retyped rows bound for one target (a person and a place named like a ticket, both project by the gate under 056's rule and 065's): the first
+  // merges, then the second, whose maker's later statement replaces the first's restatement. priorities_moved counts the
+  // one standing (review pass 2: summed per merge, it said two).
+  const target2 = await entity("WGT-1262", toType ?? "project"), asPerson = await entity("WGT-1262", "person");
+  await put("entity", asPerson, 2, OP);
+  await Bun.sleep(5);  // the times are what the merge compares, and PGlite's clock can give two calls one millisecond
+  const asPlace = await entity("WGT-1262", "place");
+  await put("entity", asPlace, 5, OP);
+  const gate2 = (await db.query<{ r: J }>(`SELECT apply_entity_type_gate() AS r`)).rows[0].r;
+  const onTarget2 = await open("entity", target2);
+  assert(!(await exists(asPerson)) && !(await exists(asPlace)) && gate2.priorities_moved === 1 && onTarget2.length === 1 && onTarget2[0].level === 5 && await drift() === 0,
+    `two retyped rows merging into one target, the second's later statement replacing the first's restatement, count one moved (${JSON.stringify(gate2)})`);
 
   // A re-apply moves nothing and replaces the functions as they were.
   const closedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)).rows[0].n;

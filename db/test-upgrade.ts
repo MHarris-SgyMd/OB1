@@ -768,11 +768,11 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // the item and every statement closed, and adds
   // ob1_priority_closed_json, refusing by name without 115, 116, 117,
   // 122 or 133 ([20cc]); 139 has the prunes spare an entity with an open
-  // priority statement (061's record_thought_entities, 067's rebuild_derived
-  // and 016's prune_orphan_entities carried) and moves a merge's statements
-  // and due references through ob1_priority_merge_entity (136's
-  // merge_entities and 056's apply_entity_type_gate carried), refusing by
-  // name without 016, 056, 061, 063, 067, 116, 133 or 136 ([20cd]) — all recorded by the
+  // priority statement (061's record_thought_entities and 016's
+  // prune_orphan_entities carried) and moves a merge's statements and due
+  // references through ob1_priority_merge_entity (136's merge_entities and
+  // 056's apply_entity_type_gate carried), refusing by name without 016,
+  // 056, 061, 116, 133 or 136 ([20cd]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
