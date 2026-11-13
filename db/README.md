@@ -2514,7 +2514,10 @@ gain `closed`, every statement the call closed, newest first ([] when none), and
 closed the key's statement on the ticket's row no longer reads as a clear on the
 row. `replaced` and `assertion` stay, the newest of `closed`. A statement a delete
 closed between the call's read and its write (136's trigger takes no priority lock)
-is not listed, nor named as `replaced`. Needs 115, 116, 117, 122 and 133, refusing
+is not listed, nor named as `replaced`: `assert_priority` now locks every one of the
+key's open statements in the pool before it counts them, where 133 locked the newest
+alone, so a restatement of the one a racing delete left open is `unchanged`. Needs
+115, 116, 117, 122 and 133, refusing
 by name without any function the writers call; a re-apply is a no-op. test-schema
 [124], test-upgrade [20cb].
 

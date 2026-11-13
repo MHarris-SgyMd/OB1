@@ -7139,20 +7139,28 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     const none = await priorityCore.clearPriority(storeOf({ ...old, outcome: "nothing_to_clear", assertion: null }), P, { kind: "ticket", key: "smd-4238" } as never);
     const keyedBefore137 = keyed;
     const at137 = await priorityCore.clearPriority(storeOf({ ...old, outcome: "cleared", assertion: onRow5, item: TICKET, closed: [onRow5, onTicket1] }), P, { kind: "ticket", key: "smd-4238" } as never);
-    const v = (o: unknown) => (o as { ok: true; value: { item: { key: string }; closed: { id: string }[] } }).value;
+    const v = (o: unknown) => (o as { ok: true; value: { item: { kind: string; key: string }; closed: { id: string }[] } }).value;
     assert(v(set).item.key === "SMD-4127" && v(set).closed.map((c) => c.id).join() === A
            && v(cleared).item.key === "SMD-4238" && v(cleared).closed.map((c) => c.id).join() === A && v(none).item.key === "SMD-4238" && v(none).closed.length === 0
            && keyedBefore137 === 2 && keyed === 2 && v(at137).item.key === "SMD-4127" && v(at137).closed.map((c) => c.id).join() === `${A},${B}`,
       `a brain before 137: a set names its statement's item and the one it replaced; a clear keys the item by 116's function, once, and names the one it closed; at 137 the answer's own (${keyedBefore137}, ${keyed})`);
-    // The item read follows a clear that landed (review pass 1): its failure is no fault of the clear's. The item is
-    // then the closed statement's, or with none closed the caller's words as given.
+    // The item read follows a clear that landed (review passes 1 and 3): its failure, the read's or the store's, is
+    // no fault of the clear's. The item is then the caller's words, the item asked — never the closed statement's,
+    // which stood on the ticket's row here.
     const failing = (answer: Record<string, unknown>) => ({ store: async () => ({
       clearPriority: async () => answer, priorityItem: async () => { throw new Error("connection reset"); },
     }), door: "rest" }) as never;
+    let stores = 0;
+    const storeAway = (answer: Record<string, unknown>) => ({ store: async () => {
+      if (stores++ > 0) throw new Error("the pool was reset");
+      return { clearPriority: async () => answer };
+    }, door: "rest" }) as never;
     const landed = await priorityCore.clearPriority(failing({ ...old, outcome: "cleared", assertion: onRow5 }), P, { kind: "ticket", key: "SMD-4238" } as never);
     const landedNone = await priorityCore.clearPriority(failing({ ...old, outcome: "nothing_to_clear", assertion: null }), P, { kind: "ticket", key: "SMD-4238" } as never);
-    assert(landed.ok && v(landed).item.key === T && v(landed).closed.map((c) => c.id).join() === A && landedNone.ok && v(landedNone).item.key === "SMD-4238",
-      `a brain before 137 whose item read fails after the clear landed: still the clear's answer, the item the closed statement's, or the caller's words with none (${JSON.stringify(landed.ok && v(landed).item)})`);
+    const landedAway = await priorityCore.clearPriority(storeAway({ ...old, outcome: "cleared", assertion: onRow5 }), P, { kind: "ticket", key: "SMD-4238" } as never);
+    assert(landed.ok && v(landed).item.kind === "ticket" && v(landed).item.key === "SMD-4238" && v(landed).closed.map((c) => c.id).join() === A
+           && landedNone.ok && v(landedNone).item.key === "SMD-4238" && landedAway.ok && v(landedAway).item.key === "SMD-4238" && stores === 2,
+      `a brain before 137 whose item read fails after the clear landed, the store's own included: still the clear's answer, the item the caller's words, not the row the statement stood on (${JSON.stringify(landed.ok && v(landed).item)})`);
   }
   // Each refusal by its rule; the item, a uuid or a ticket key, kept in the value; the database's words in the text alone.
   const refusals: [string, ReturnType<typeof say.renderSetPriority>, RegExp][] = [

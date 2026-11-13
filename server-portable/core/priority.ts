@@ -139,10 +139,11 @@ export async function clearPriority(ctx: Ctx, principal: Principal, input: Input
   if (away) return away;
   if (a.outcome === "cleared" || a.outcome === "nothing_to_clear") {
     // A brain before 137 names neither: the item is keyed by 116's own function, read for it alone, and the newest
-    // statement closed was the only one named. That read follows a clear that has landed, so its failure is no fault
-    // of the clear's (review pass 1): the item is then the closed statement's, or the caller's words as given.
-    const item = a.item ?? await (await ctx.store()).priorityItem(input.kind, input.key).then((r) => r.item,
-      () => a.assertion?.item ?? { kind: input.kind, key: input.key });
+    // statement closed was the only one named. That read follows a clear that has landed, so its failure, the
+    // store's included, is no fault of the clear's (review passes 1 and 3): the item is then the caller's words as
+    // given, the item asked, never the closed statement's, which may stand on the ticket's row.
+    const item = a.item ?? await ctx.store().then((s) => s.priorityItem(input.kind, input.key)).then((r) => r.item,
+      () => ({ kind: input.kind, key: input.key }));
     return ok({ outcome: a.outcome, item, assertion: a.assertion, closed: a.closed ?? (a.assertion ? [a.assertion] : []), winner: a.winner, winnerShown: scope === "write" });
   }
   if (a.outcome === "refused" && a.code === "READ_ONLY_KEY") return readOnly(principal);

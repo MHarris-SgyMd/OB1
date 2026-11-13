@@ -17,7 +17,7 @@
 --   thought …", and the winner was placed relative to the row.
 --
 -- WHAT
---   * assert_priority and clear_priority (133's, carried whole) gain two
+--   * assert_priority and clear_priority (133's, carried) gain two
 --     keys in every answer: `item`, the item named as ob1_priority_item keys
 --     it, and `closed`, every statement the call closed, newest first ([]
 --     when it closed none). `replaced` and `assertion` stay, the newest of
@@ -26,10 +26,16 @@
 --     ob1_priority_json renders each, newest first.
 --   * `closed` holds what the call's own UPDATE closed. A statement that a
 --     delete closed between the call's read and its write (136's trigger
---     takes no priority lock) is not among them, and assert_priority's
---     `replaced` is the newest statement still open when locked (review
---     pass 1: 133 locked the newest read, which such a delete may have
---     closed, so `replaced` could name one the call never closed).
+--     takes no priority lock) is not among them.
+--   * TWO CHANGES OF BEHAVIOUR in assert_priority (review passes 1-3):
+--     it locks every one of the key's statements in the pool still open,
+--     where 133 locked the newest it had read alone, so a delete can no
+--     longer close one between the lock and the UPDATE, and `replaced` is
+--     always one it closed; and the `unchanged` test counts the statements
+--     locked, not those read before the lock, so a restatement of the one a
+--     racing delete left open is `unchanged` rather than a copy of itself.
+--     Both writers re-project only the items whose statements they closed
+--     (a delete's own trigger projects the ones it closed).
 --
 --   NOT CHANGED. A set that checked its item exists before a delete
 --   committed still writes its statement on the deleted item, which
@@ -129,7 +135,7 @@ DECLARE
   v_closed   uuid[] := '{}';
   v_ref_kind text;
   v_ref_key  text;
-  v_open     int;
+  v_said     jsonb;
   v_reason   text   := ob1_work_claim_text(p_reason, 1000, 'a reason');
   v_who      record;
   v_now      timestamptz;
@@ -235,22 +241,22 @@ BEGIN
   -- The newest is v_old.
   v_own := ARRAY(SELECT o.id FROM ob1_priority_open(v_item.kind, v_item.key) o
                   WHERE ob1_priority_is_maker(o, v_who.name, v_who.agent_id));
-  -- Still open when locked (review pass 1): 136's delete trigger takes no
-  -- priority lock, so it may have closed one of v_own since it was read; a
-  -- row lock waited on returns the closed row, which the closing UPDATE
-  -- below then skips, and `replaced` would name a statement this call never
-  -- closed. How many of v_own are still open is counted after the lock, for
-  -- the `unchanged` test (review pass 2: the count read before it made a
-  -- restatement of the one left open a write).
-  SELECT * INTO v_old FROM priority_assertions a
-   WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
-   ORDER BY a.seq DESC LIMIT 1
-   FOR UPDATE;
-  SELECT count(*)::int INTO v_open FROM priority_assertions a WHERE a.id = ANY(v_own) AND a.closed_at IS NULL;
+  -- Every one still open, locked, newest first (review passes 1-3): 136's
+  -- delete trigger takes no priority lock, so it may have closed one of
+  -- v_own since it was read, or close one before this call's UPDATE. A row
+  -- lock waited on rechecks closed_at and drops what the delete closed; once
+  -- held, nothing else closes them. So the `unchanged` test reads what is
+  -- open, `closed` is exactly these, and `replaced` (the newest) is among
+  -- them. 133 locked the newest it had read alone.
+  SELECT COALESCE(array_agg(l.id ORDER BY l.seq DESC), '{}') INTO v_closed
+    FROM (SELECT a.id, a.seq FROM priority_assertions a
+           WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
+             FOR UPDATE) l;
+  SELECT * INTO v_old FROM priority_assertions a WHERE a.id = v_closed[1];
 
   -- The same statement again, on the item named, is no change (116's review
   -- passes 1 and 4); the same words on another item of the pool move it.
-  IF v_open = 1 AND v_old.item_kind = v_item.kind AND v_old.item_key = v_item.key
+  IF cardinality(v_closed) = 1 AND v_old.item_kind = v_item.kind AND v_old.item_key = v_item.key
      AND (v_old.level, v_old.due_at, v_old.not_before, v_old.due_ref_kind, v_old.due_ref_key, v_old.reason, v_old.inferred, v_old.tier,
           v_old.maker_name, v_old.maker_agent_id, v_old.maker_kind, v_old.maker_trust, v_old.maker_scope, v_old.maker_source)
          IS NOT DISTINCT FROM (p_level::smallint, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false), v_tier,
@@ -262,34 +268,30 @@ BEGIN
       'item', v_named, 'closed', '[]'::jsonb);
   END IF;
 
-  -- Every one this call closes, kept for the answer. v_old is held FOR UPDATE
-  -- and was open when locked, so it is among them; another of v_own that a
-  -- delete closed meanwhile is not.
-  IF v_old.id IS NOT NULL THEN
-    WITH c AS (
-      UPDATE priority_assertions a SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
-       WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
-      RETURNING a.id)
-    SELECT COALESCE(array_agg(c.id), '{}') INTO v_closed FROM c;
-    SELECT * INTO v_old FROM priority_assertions WHERE id = v_old.id;
-  END IF;
+  -- The ones locked above close, all of them: none can have closed since.
+  UPDATE priority_assertions a SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
+   WHERE a.id = ANY(v_closed);
   INSERT INTO priority_assertions (id, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
                                    maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
   VALUES (v_id, v_item.kind, v_item.key, p_level, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false),
           v_who.name, v_who.agent_id, v_who.kind, v_who.trust, v_who.scope, v_who.source, v_tier, v_now)
   RETURNING * INTO v_row;
 
-  -- Every item whose statement closed, and the item named, made current.
+  -- Every item whose statement this call closed, and the item named, made
+  -- current (one a delete closed meanwhile is its trigger's to project).
   PERFORM ob1_priority_project(t.item_kind, t.item_key)
-     FROM (SELECT DISTINCT a.item_kind, a.item_key FROM priority_assertions a WHERE a.id = ANY(v_own)
+     FROM (SELECT DISTINCT a.item_kind, a.item_key FROM priority_assertions a WHERE a.id = ANY(v_closed)
            UNION SELECT v_item.kind, v_item.key) t
     ORDER BY t.item_kind, t.item_key;
   v_win := ob1_priority_winner(v_item.kind, v_item.key);
+  -- Rendered once: `replaced` is its first (review pass 3: read again, it was
+  -- a second source for one fact).
+  v_said := ob1_priority_closed_json(v_closed);
   RETURN jsonb_build_object('outcome', 'asserted', 'code', NULL, 'message', NULL,
     'assertion', ob1_priority_json(v_row),
-    'replaced', CASE WHEN v_old.id IS NOT NULL THEN ob1_priority_json(v_old) END,
+    'replaced', v_said->0,
     'winner', CASE WHEN v_win.id IS NOT NULL AND v_who.scope = 'write' THEN ob1_priority_json(v_win) END,
-    'item', v_named, 'closed', ob1_priority_closed_json(v_closed));
+    'item', v_named, 'closed', v_said);
 END;
 $$;
 COMMENT ON FUNCTION assert_priority(text, text, int, timestamptz, timestamptz, text, text, text, boolean, jsonb) IS
@@ -314,7 +316,7 @@ DECLARE
   v_who  record;
   v_now  timestamptz;
   v_own  uuid[];
-  v_row  priority_assertions;
+  v_said jsonb;
   v_win  priority_assertions;
 BEGIN
   v_named := jsonb_build_object('kind', v_item.kind, 'key', v_item.key);
@@ -333,27 +335,28 @@ BEGIN
   v_own := ARRAY(SELECT o.id FROM ob1_priority_open(v_item.kind, v_item.key) o
                   WHERE ob1_priority_is_maker(o, v_who.name, v_who.agent_id));
   -- Every one this call closes, kept for the answer (one that a delete closed
-  -- meanwhile is not among them); v_row is the newest.
+  -- meanwhile is not among them, nor projected here: its trigger's to).
   WITH c AS (
     UPDATE priority_assertions a SET closed_at = v_now, close_reason = 'cleared'
      WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
     RETURNING a.id)
   SELECT COALESCE(array_agg(c.id), '{}') INTO v_closed FROM c;
-  SELECT * INTO v_row FROM priority_assertions a WHERE a.id = ANY(v_closed) ORDER BY a.seq DESC LIMIT 1;
-  IF v_row.id IS NOT NULL THEN
+  IF cardinality(v_closed) > 0 THEN
     PERFORM ob1_priority_project(t.item_kind, t.item_key)
-       FROM (SELECT DISTINCT a.item_kind, a.item_key FROM priority_assertions a WHERE a.id = ANY(v_own)) t
+       FROM (SELECT DISTINCT a.item_kind, a.item_key FROM priority_assertions a WHERE a.id = ANY(v_closed)) t
       ORDER BY t.item_kind, t.item_key;
   END IF;
+  -- Rendered once: `assertion` is its first (review pass 3).
+  v_said := ob1_priority_closed_json(v_closed);
   v_win := ob1_priority_winner(v_item.kind, v_item.key);
   -- A capture key is shown no winner: its reply would otherwise read another
   -- key's statement — its reason, its maker — on any item, and say the item
   -- exists, which assert_priority's refusal keeps from it (116's review pass 2).
-  RETURN jsonb_build_object('outcome', CASE WHEN v_row.id IS NULL THEN 'nothing_to_clear' ELSE 'cleared' END,
+  RETURN jsonb_build_object('outcome', CASE WHEN cardinality(v_closed) = 0 THEN 'nothing_to_clear' ELSE 'cleared' END,
     'code', NULL, 'message', NULL,
-    'assertion', CASE WHEN v_row.id IS NOT NULL THEN ob1_priority_json(v_row) END,
+    'assertion', v_said->0,
     'winner', CASE WHEN v_win.id IS NOT NULL AND v_who.scope = 'write' THEN ob1_priority_json(v_win) END,
-    'item', v_named, 'closed', ob1_priority_closed_json(v_closed));
+    'item', v_named, 'closed', v_said);
 END;
 $$;
 COMMENT ON FUNCTION clear_priority(text, text, jsonb) IS
