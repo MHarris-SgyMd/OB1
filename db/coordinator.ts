@@ -547,7 +547,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
 }
 
 /** The relay's mark for the coordinator's row: the broker's state and its start, and the api's sockets where it listens. */
-function relayMark(relay: Relay | null, listener: RelayListener | null) {
+export function relayMark(relay: Relay | null, listener: RelayListener | null) {
   if (!relay) return null;
   const st = relay.state();
   return { broker: st.broker, since: st.since, ...(listener ? { sockets: listener.sockets() } : {}) };

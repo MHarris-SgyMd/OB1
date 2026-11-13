@@ -20,7 +20,7 @@
 import { chmodSync, existsSync, lchownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, coordinatorValue, planPasses, relaySettings, runOnce, type Child } from "./coordinator.ts";
+import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, coordinatorValue, planPasses, relayMark, relaySettings, runOnce, type Child } from "./coordinator.ts";
 import type { Relay, RelayPort } from "./slot-relay.ts";
 import { hashKey, parseRegistry, startBroker } from "../deploy/federated/broker.ts";
 import { supervise } from "./supervise.ts";
@@ -298,6 +298,10 @@ if (!existsSync(composePath)) {
     JSON.stringify(coordinatorValue({ id: "i", host: "h", passes: [], children: [], keys: new Map(), states: new Map(), now: 10_000, everyS: 60, relay }).relay ?? null);
   ok(mark({ broker: "up", since: 4_000, sockets: 2 }) === '{"broker":"up","for_s":6,"sockets":2}' && mark({ broker: "down", since: 9_400 }) === '{"broker":"down","for_s":1}' && mark(null) === "null" && mark() === "null",
     `the row carries the relay's mark where there is one: its state's seconds, the api's sockets where it listens (${mark({ broker: "up", since: 4_000, sockets: 2 })}, ${mark({ broker: "down", since: 9_400 })})`);
+  const st = { broker: "down" as const, boot: null, since: 7, asks: 0, parked: 0, grants: 0, own: 0 };
+  const relayOf = { port: () => ({}) as RelayPort, state: () => st, stop: async () => {} } as Relay;
+  ok(JSON.stringify(relayMark(relayOf, { port: 1, sockets: () => 3, stop() {} })) === '{"broker":"down","since":7,"sockets":3}' && JSON.stringify(relayMark(relayOf, null)) === '{"broker":"down","since":7}' && relayMark(null, null) === null,
+    "the mark is read from the relay's state, with the listener's sockets where it listens, and none without a relay");
   // The key, but no broker named, or too short: said, and not listened for.
   for (const [what, env, said] of [
     ["no broker", { OB1_SLOT_RELAY_KEY: "relay-key-of-this-brain-0123" }, /OB1_SLOT_RELAY_KEY is set, but no broker is named here/],
