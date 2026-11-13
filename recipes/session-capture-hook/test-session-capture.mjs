@@ -1018,7 +1018,8 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(askedPrep.code === 0 && /^Session summary — SMD-2013 — /.test(askedPrep.payload?.text ?? "") && askedPrep.payload.tickets_from === "asks",
     `…an ask naming its ticket: the header lists it, and the payload says the asks named it (${askedPrep.payload?.tickets_from}; ${askedPrep.payload?.text?.split("\n")[0]})`);
   if (askedPrep.payloadPath) unlinkSync(askedPrep.payloadPath);
-  // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says `place`.
+  // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says
+  // `place`.
   const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });
   assert(JSON.stringify(placedFour) === '{"tickets":["SMD-11","SMD-12","SMD-13"],"from":"place"}', `…the place's tickets three at most (${JSON.stringify(placedFour)})`);
   const placedT = join(TMP, "tickets-from-place.jsonl");

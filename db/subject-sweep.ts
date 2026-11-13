@@ -2,10 +2,9 @@
  * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought in the subject pool (migration
  * 113) is given its own subjects, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
  * migration 130's record_thought_subjects: a set of at most three, one rule's or the model's, which the header rule and
- * the question find since their versions 3 (SMD-3306 PR 7a-3b-2). A subject is current when it
- * stands at the thought's text and was found under the current rules and question, a model's with its reasoning on when
- * the question is asked with it on (subjectCurrent), and the ticket the thought is filed under agrees with it
- * (filedTicketSql).
+ * the question find since their versions 3 (SMD-3306 PR 7a-3b-2). A subject is current when it stands at the thought's
+ * text and was found under the current rules and question, a model's with its reasoning on when the question is asked
+ * with it on (subjectCurrent), and the ticket the thought is filed under agrees with it (filedTicketSql).
  *
  *   bun db/extract-entities.ts --url … --subjects                # the rules, then the judge model for the rest
  *   bun db/extract-entities.ts --url … --subjects rules          # the rules alone: no model call
@@ -87,7 +86,7 @@
  * oldest pooled first, need not.
  *
  * The extraction pass records the rules' subjects with each thought's entities (extract-entities.ts's processRow), so
- * a thought filed under a ticket, or a session summary whose prompts name its header's tickets, has its subjects once
+ * a thought filed under a ticket, or a session summary whose asks name its header's tickets, has its subjects once
  * it is extracted, and the sweep finishes it unasked. 111's door replaces a subject found under another pass key, so a
  * changed rule finds again the subjects it found, and those alone; version 1's one key for both rules is taken whole,
  * once, its filed tickets found again unchanged under the metadata rule's own key (review pass 5). Two sweeps, or a
@@ -396,7 +395,8 @@ class TimedOutDown extends ProviderDown {
 
 /**
  * What record_thought_subjects answers (130): `added` when it wrote and closed nothing, `closed` when it closed and
- * wrote nothing (a set narrowed), `replaced` when it did both, `kept` when it did neither.
+ * wrote nothing (a set narrowed), `replaced` when it did both, `kept` when it did neither; and with each write how many
+ * keys it kept, added and closed (`kept`, `added`, `closed`), as the door found the set under its lock.
  */
 export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; ids?: string[]; kept?: number; added?: number; closed?: number; stale?: boolean; gone?: boolean };
 
@@ -1544,13 +1544,14 @@ async function sweep(
    * out of setBack, as the probe after the abort finds it so, its place under --limit taken again. `pollsLost`, no
    * thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed back taken twice, as an edited
    * one is. `subjects`, no thoughts' count either: the subjects written on the recorded ones, each of a set, one kept
-   * standing not counted (SMD-3306 PR 7a-3b-2). `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
-   * named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
-   * when it released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and
-   * those whose failure's release a lost poll handed back, which the failure count leaves out.
+   * standing not counted (SMD-3306 PR 7a-3b-2). `replaced` and `newKey` count within the recorded ones, `closed` the
+   * subjects closed on those the model named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`,
+   * the claims no longer this worker's when it released them, across them all: no bucket of their own; `lostFailed` the
+   * failed ones among the lost, and those whose failure's release a lost poll handed back, which the failure count
+   * leaves out.
    */
   const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, subjects: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, deadlocked: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
-  /** Whether each thought recorded wrote one subject, as every one-key set does: the summary's words of a thought each. */
+  /** Whether each thought recorded wrote one subject, as a one-key set does: the summary's words of a thought each. */
   let wroteOneEach = true;
   let taken = 0;
   /**
@@ -2551,7 +2552,7 @@ async function sweep(
       // widened set read as new, and a set's kept keys as recorded). What stood is the door's to say, under its lock: a
       // set closed or written by another writer since the read (review pass 2, cold read).
       n[by]++;
-      // 130's door answers every write with `added`.
+      // The keys written: `added`, a count 130's door answers with every write.
       n.subjects += w.added ?? 0;
       if (w.added !== 1) wroteOneEach = false;
       if ((w.kept ?? 0) + (w.closed ?? 0) > 0) {

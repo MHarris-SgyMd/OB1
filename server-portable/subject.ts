@@ -10,10 +10,10 @@
  *   2. `first_line`: a session summary's header tickets: every one when the capture hook says its asks named
  *      them (metadata.tickets_from), else those its listed prompts name — without the hook's word, every one when
  *      the summary shows its prompts in part and its own branch and project do not name them all — none when it
- *      lists another team's ticket than the first its own project and branch name, or the hook's model wrote it
- *      (sessionHeaderTickets, ruleSubject). The capture hook's header lists the tickets a session's prompts named,
- *      and the branch's or directory's only when they named none: that one is the session's work only when it says
- *      so;
+ *      lists another team's ticket than the first its own branch, else its project, names, or the hook's model
+ *      wrote it (sessionHeaderTickets, ruleSubject). The capture hook's header lists the tickets a session's prompts
+ *      named, and the branch's or directory's only when they named none: that one is the session's work only when it
+ *      says so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), each of its
  *      answers read into a key (subjectKey).
  * Version 1 of the rules and the question (SMD-3306 PR 2) read the first ticket on any thought's first line and asked
@@ -113,13 +113,13 @@ export type NamedIn = (kind: "ticket" | "pr" | "version", value: string) => bool
 
 /**
  * One subject a model answered, as a key, or null when it names nothing: the first ticket in it (isTicket), else the
- * pull request it is (PR_ANSWER), else a release's version, else the answer as a phrase. A ticket comes first because a thread is
- * the ticket's: a PR named beside its ticket is one step of that ticket's work. With `named` (askOwnSubject's), a
- * ticket or a release the thought itself does not name is dropped from the answer first, and an answer that is a PR
- * the thought does not name names nothing: the model's invention, or its copy of one of the question's examples
- * (review passes 3 and 4). A phrase is the answer lower-cased, every run of space, control or format characters one
- * space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a word; an answer of
- * marks alone names nothing. Read whole: the answer kept on a recipe is cut, not this.
+ * pull request it is (PR_ANSWER), else a release's version, else the answer as a phrase. A ticket comes first because a
+ * thread is the ticket's: a PR named beside its ticket is one step of that ticket's work. With `named`
+ * (askOwnSubject's), a ticket or a release the thought itself does not name is dropped from the answer first, and an
+ * answer that is a PR the thought does not name names nothing: the model's invention, or its copy of one of the
+ * question's examples (review passes 3 and 4). A phrase is the answer lower-cased, every run of space, control or
+ * format characters one space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a
+ * word; an answer of marks alone names nothing. Read whole: the answer kept on a recipe is cut, not this.
  */
 export function subjectKey(answer: string, named?: NamedIn): string | null {
   let text = oneLine(answer);
@@ -181,7 +181,7 @@ const HEADER_TICKETS = /^\s*Session summary — ([A-Z][A-Z0-9]*-[0-9]+(?:, [A-Z]
 const HEADER_TICKETS_MAX = 3;
 /** A ticket-shaped word as the capture hook reads one in a branch or a directory (its TICKET_RE). */
 const HOOK_TICKETS = /\b([A-Za-z]{2,5})-([0-9]{2,6})\b/g;
-/** The prefixes the capture hook takes for no ticket (its NOT_TICKETS), beside this module's own (NOT_TICKET_PREFIXES). */
+/** The prefixes the capture hook takes for no ticket (its NOT_TICKETS), beside this module's NOT_TICKET_PREFIXES. */
 const HOOK_NOT_TICKETS: ReadonlySet<string> = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
 /** The header's branch part, `(branch)` before the day: renderSummary writes `… project (branch) — day`. */
 const HEADER_BRANCH = /\(([^()]*)\)\s+—\s+[^—]*$/;
@@ -218,58 +218,60 @@ export const TICKETS_FROM = "tickets_from";
 
 /**
  * A session summary's header tickets. With the hook's word on where they came from (`from`, TICKETS_FROM): `asks`,
- * every listed ticket, each named by an ask, shown or not, where the hook's Asked list is read (none else); `place`, those a listed prompt names, as a header shown
- * whole is read. Without it — a summary from a hook before 1.8.0, or a brain that refused the key — the rest of this reading:
- * those the header lists that one of the session's listed prompts names, in any
- * case, in the header's order, each once; and every one it lists when the summary shows its prompts in part — a
- * `- … and N more` line past the 12 it lists, or a prompt clipped at its 200 characters — and a listed prompt names one
- * of them; else none. The hook's header lists the tickets the session's prompts named, from every prompt, so a ticket a
- * prompt the summary does not show whole named is on the header and on no listed line (review pass 1, run-it and cold
- * read: the rule keyed a part of the set). It lists the branch's or directory's only when the prompts named none,
- * where an ask in lower case before the hook knew the team counts for none, and the branch's other ticket-shaped words
- * are listed too (`SMD-55, NODE-22` from `smd-55-node-22-image`): so with every prompt shown, only the tickets a prompt
- * names are keyed (review pass 2, cold read and run-it: pass 1 keyed every listed ticket once one was named, NODE-22
- * among them); nor is a header widened whose every ticket the header's own later parts, its project and branch, name
- * too, which may be the branch's (`smd-610-bump-node-22`) though its prompts are shown in part. Both guesses at where
- * the header came from are the summary's alone, which does not say (review pass 3, cold read): a header the place gave,
- * its prompts shown in part, a parent directory's ticket among its tickets, is still widened; and a set the prompts
- * named, a hidden prompt naming one, on a branch naming them all, is keyed in part. And the hook learns a team from
- * each ticket-shaped word of a branch or a directory (`node-22` of `smd-610-bump-node-22`), so a header listing a
- * ticket of another team than the first ticket the header's own project and branch name is left to the model (review
- * pass 3, run-it: `NODE-22, NODE-24` from a prompt's `bump node-22 to node-24`, keyed, the session's SMD-610 lost);
- * a session over two teams' tickets is the model's too.
- * On Verify item 1 (post hoc) the header's ticket was the
- * session's own subject for 0.857 of the sessions whose prompts named it and 0.667 of those whose prompts did not,
- * where a session on a branch did other work: a triage, a release, a review. Version 3 (SMD-3306 PR 7a-3b-2) keys
- * every listed ticket, a full list of three included: a thought's subjects are a set since 130, and the maintainer
- * chose one rule's set (2026-11-09). Version 2 keyed a header naming one ticket alone and left several, or a full list
- * that may have left one out, to the model to choose one among (its review pass 1: the rule's first agreed with the
- * raters 0.375 of the time on the four drawn). A denied prefix the hook listed is no ticket (isTicket), and a header
- * listing more than the hook's three is not the hook's. The hook's layout is read as it is written: the header; a
- * blank line between its parts; `Title: …`, passed over; `Asked (N prompts):` and its `- …` items, read. The first line
- * of any other shape ends the read, so the outcome's lines, and a `- ` line no `Asked` heads, never count.
+ * every listed ticket, each named by an ask, shown or not, where the hook's Asked list is read (none else); `place`,
+ * those a listed prompt names, as a header shown whole is read. Without it — a summary from a hook before 1.8.0, or a
+ * brain that refused the key — the rest of this reading: those the header lists that one of the session's listed
+ * prompts names, in any case, in the header's order, each once; and every one it lists when the summary shows its
+ * prompts in part — a `- … and N more` line past the 12 it lists, or a prompt clipped at its 200 characters — and a
+ * listed prompt names one of them; else none. The hook's header lists the tickets the session's prompts named, from
+ * every prompt, so a ticket a prompt the summary does not show whole named is on the header and on no listed line
+ * (review pass 1, run-it and cold read: the rule keyed a part of the set). It lists the branch's or directory's only
+ * when the prompts named none, where an ask in lower case before the hook knew the team counts for none, and the
+ * branch's other ticket-shaped words are listed too (`SMD-55, NODE-22` from `smd-55-node-22-image`): so with every
+ * prompt shown, only the tickets a prompt names are keyed (review pass 2, cold read and run-it: pass 1 keyed every
+ * listed ticket once one was named, NODE-22 among them); nor is a header widened whose every ticket the header's own
+ * later parts, its project and branch, name too, which may be the branch's (`smd-610-bump-node-22`) though its prompts
+ * are shown in part. Both guesses at where the header came from are the summary's alone, which does not say (review
+ * pass 3, cold read): a header the place gave, its prompts shown in part, a parent directory's ticket among its
+ * tickets, is still widened; and a set the prompts named, a hidden prompt naming one, on a branch naming them all, is
+ * keyed in part. And the hook learns a team from each ticket-shaped word of a branch or a directory (`node-22` of
+ * `smd-610-bump-node-22`), so a header listing a ticket of another team than the first ticket the header's own branch,
+ * else its project, names is left to the model (review pass 3, run-it: `NODE-22, NODE-24` from a prompt's
+ * `bump node-22 to node-24`, keyed, the session's SMD-610 lost); a session over two teams' tickets is the model's too.
+ * On Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose prompts
+ * named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a release, a
+ * review. Version 3 (SMD-3306 PR 7a-3b-2) keys several listed tickets, a full list of three included: a thought's
+ * subjects are a set since 130, and the maintainer chose one rule's set (2026-11-09). Version 2 keyed a header naming
+ * one ticket alone and left several, or a full list that may have left one out, to the model to choose one among (its
+ * review pass 1: the rule's first agreed with the raters 0.375 of the time on the four drawn). A denied prefix the hook
+ * listed is no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The hook's layout
+ * is read as it is written: the header; a blank line between its parts; `Title: …`, passed over; `Asked (N prompts):`
+ * and its `- …` items, read. The first line of any other shape ends the read, so the outcome's lines, and a `- ` line
+ * no `Asked` heads, never count.
  */
 export function sessionHeaderTickets(content: string, from?: unknown): string[] {
   const lines = content.split(HOOK_LINE);
   const at = lines.findIndex((l) => l.trim() !== "");
-  const listed = at < 0 ? undefined : HEADER_TICKETS.exec(lines[at])?.[1].split(", ");
-  if (listed === undefined || listed.length > HEADER_TICKETS_MAX) return [];
+  const head = at < 0 ? null : HEADER_TICKETS.exec(lines[at]);
+  if (head === null) return [];
+  const listed = head[1].split(", ");
+  if (listed.length > HEADER_TICKETS_MAX) return [];
   const tickets = [...new Set(listed.filter(isTicket))];
   const nameOf = (t: string) => new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i");
-  const rest = lines[at].slice(HEADER_TICKETS.exec(lines[at])![0].length);
+  const rest = lines[at].slice(head[0].length);
   // The hook learns a team from every ticket-shaped word of the branch and the directory, so on `smd-610-bump-node-22`
   // a prompt's `node-22` is a ticket to it, listed as one (review pass 3, run-it: `NODE-22, NODE-24` keyed, SMD-610
-  // lost): a header listing a ticket of a team other than the first ticket its own later parts name is the model's.
-  // Read with the hook's own shape, two to five letters and two to six digits: the server's wider one took
+  // lost): a header listing a ticket of another team than the session's is the model's. The session's team is the
+  // first ticket of the branch, else of the project, as the hook's anchorOf reads a place: read with the hook's own
+  // shape, two to five letters and two to six digits, and no prefix either list denies. The server's wider shape took
   // `hotfix-2026` or `release-2` for a team the hook never learned, sending its own sessions to the model (review pass
-  // 5, run-it).
-  // The branch's first, then the project's, as the hook's anchorOf reads a place, and no prefix either list denies
-  // (review pass 6, cold read: a project `site-2025` or a worktree named for another team's ticket was taken for the
-  // session's team ahead of its branch's ticket; `ed-25519-keys`, which the hook learns no team from, refused it).
-  const homeOf = (text: string) => [...text.matchAll(HOOK_TICKETS)].map((m) => `${m[1].toUpperCase()}-${m[2]}`)
-    .find((t) => isTicket(t) && !HOOK_NOT_TICKETS.has(t.slice(0, t.indexOf("-"))));
-  const home = homeOf(HEADER_BRANCH.exec(rest)?.[1] ?? "") ?? homeOf(rest);
+  // 5, run-it); and the project read first took a `site-2025`, or a worktree named for another team's ticket, ahead of
+  // the branch's ticket, while `ed-25519-keys`, which the hook learns no team from, refused the session (review pass 6,
+  // cold read).
   const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
+  const homeOf = (text: string) => [...text.matchAll(HOOK_TICKETS)].map((m) => `${m[1].toUpperCase()}-${m[2]}`)
+    .find((t) => isTicket(t) && !HOOK_NOT_TICKETS.has(teamOf(t)));
+  const home = homeOf(HEADER_BRANCH.exec(rest)?.[1] ?? "") ?? homeOf(rest);
   if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
   const anchored = tickets.every((t) => nameOf(t).test(rest));
   const named = new Set<string>();
@@ -293,10 +295,9 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
 /**
  * The subjects the two rules find, in their order, or null for the model to find: the ticket the thought is filed
  * under, alone; else a session summary's header tickets (sessionHeaderTickets), one to three, unless the capture hook's
- * model wrote it (metadata.summary_model). Any
- * other note's first line is left to the model (version 2): on Verify item 1 a note's first-line ticket was often only
- * context, its own subject a digest, a process or a release, and the model, asked instead, agreed with the raters
- * 0.950 against the rule's 0.750.
+ * model wrote it (metadata.summary_model). Any other note's first line is left to the model (version 2): on Verify item
+ * 1 a note's first-line ticket was often only context, its own subject a digest, a process or a release, and the model,
+ * asked instead, agreed with the raters 0.950 against the rule's 0.750.
  */
 export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; by: Exclude<SubjectBy, "model">; from?: "asks" | "place" } | null {
   const filed = metadataTicket(row.metadata);
@@ -475,14 +476,15 @@ export function subjectCurrent(by: string | null, judge: string | null, reasonin
  * thought's own text names it, a PR when its number appears there, none when it named nothing a key holds. Of the
  * first SUBJECT_ANSWERS_READ subjects (ownSubjectsOf's, empty ones left out), `keys` are those keys, each once, until
  * SUBJECT_SET_MAX of them; a phrase whose tickets, named in any case, the answer all gives as keys of their own is read
- * as its first ticket, where it stands (`smd-12` or `smd-12 tests` beside `SMD-12`: review pass 1, run-it and cold
- * read, a ticket standing twice, once as a phrase thread; review pass 2, cold read and mutant, left out instead, its
- * ticket given past the cut, the model's first subject was lost); `smd-5 and smd-6 merge` beside `SMD-5` alone stays a
- * phrase, as is one naming only a denied prefix beside its ticket (`sha-256 checks for smd-5`). `answers` are the
- * subjects read, every one of the first SUBJECT_ANSWERS_READ, so the recipe holds whatever a key was read from or read
- * as (review pass 3, cold read: one past the last key, which made a phrase its ticket, was left off), each at most 200
- * code points, those empty or null left out (ownSubjectsOf); null when the answer gave no subjects. No key is none named: [] when every answer named nothing a key holds, or there were none. A PR answered
- * beside a ticket is its own subject: the question asks for a PR only where the work is no ticket's.
+ * as its first ticket, where it stands (`smd-12` or `smd-12 tests` beside `SMD-12`, and `sha-256 checks for smd-5`
+ * beside `SMD-5`, a denied prefix no ticket: review pass 1, run-it and cold read, a ticket standing twice, once as a
+ * phrase thread; review pass 2, cold read and mutant, left out instead, its ticket given past the cut, the model's
+ * first subject was lost); `smd-5 and smd-6 merge` beside `SMD-5` alone stays a phrase. `answers` are the subjects
+ * read, every one of the first SUBJECT_ANSWERS_READ, so the recipe holds whatever a key was read from or read as
+ * (review pass 3, cold read: one past the last key, which made a phrase its ticket, was left off), each at most 200
+ * code points, those empty or null left out (ownSubjectsOf); null when the answer gave no subjects. `keys` is [] when
+ * every answer named nothing a key holds, or there were none. A PR answered beside a ticket is its own subject: the
+ * question asks for a PR only where the work is no ticket's.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answers: string[] | null; keys: string[] }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {
@@ -501,10 +503,10 @@ export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: E
   const read = whole.slice(0, SUBJECT_ANSWERS_READ).map((one) => ({ one, key: subjectKey(one, named) }));
   const given = new Set(read.flatMap((r) => (r.key?.startsWith("ticket:") ? [r.key.slice("ticket:".length)] : [])));
   const keys: string[] = [];
-  for (const { key: read1 } of read) {
+  for (const { key: answered } of read) {
     if (keys.length >= SUBJECT_SET_MAX) break;
-    const its = read1?.startsWith("phrase:") ? [...read1.slice("phrase:".length).toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).filter(isTicket) : [];
-    const key = its.length > 0 && its.every((t) => given.has(t)) ? `ticket:${its[0]}` : read1;
+    const its = answered?.startsWith("phrase:") ? [...answered.slice("phrase:".length).toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).filter(isTicket) : [];
+    const key = its.length > 0 && its.every((t) => given.has(t)) ? `ticket:${its[0]}` : answered;
     if (key !== null && !keys.includes(key)) keys.push(key);
   }
   return { raw, answers: read.map((r) => cutByCodePoint(r.one, 200)), keys };

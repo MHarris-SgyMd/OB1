@@ -138,17 +138,17 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
 /**
  * A thought's own subject's recipe (111, SMD-3306): a rule's, deterministic,
  * naming the rule and its version, and for the header rule the capture hook's
- * word it read (`tickets_from`, SMD-3306 PR 7a-3b-2); or the judge model's, naming the
- * model, the question's version and hash, the temperature, the reasoning it
- * was asked with (subject.ts's subjectReasoning: on, off or an effort) and the
- * subjects it answered, which the keys were read from (subject.ts's
- * askOwnSubject and subjectKey, its guard reading the thought's text at the
- * fingerprint the lineage names), so a changed reading can be checked against
- * what the model said. Since question version 3 (SMD-3306 PR 7a-3b-2) they
- * are `answers`, a list in the model's order, its null and empty ones left out;
- * version 2's one was `answer`. Each subject of a set has its own lineage row,
- * each with the whole recipe; 130 keeps a set by key, so the model's order,
- * most-worked first, is the recipe's alone.
+ * word it read (`tickets_from`, SMD-3306 PR 7a-3b-2); or the judge model's,
+ * naming the model, the question's version and hash, the temperature, the
+ * reasoning it was asked with (subject.ts's subjectReasoning: on, off or an
+ * effort) and the subjects it answered, which the keys were read from
+ * (subject.ts's askOwnSubject and subjectKey, its guard reading the thought's
+ * text at the fingerprint the lineage names), so a changed reading can be
+ * checked against what the model said. Since question version 3 (SMD-3306 PR
+ * 7a-3b-2) they are `answers`, a list in the model's order, its null and empty
+ * ones left out; version 2's one was `answer`. Each subject of a set has its
+ * own lineage row, each with the whole recipe; 130 keeps a set by key, so the
+ * model's order, most-worked first, is the recipe's alone.
  */
 export function subjectRecipe(found: { by: "metadata" | "first_line"; from?: string } | { by: "model"; model: string; temperature: number; reasoning: string; answers: string[] }): Recipe {
   if (found.by !== "model") return { deterministic: true, rule: found.by, rule_version: SUBJECT_RULE_VERSIONS[found.by], ...(found.from ? { tickets_from: found.from } : {}) };

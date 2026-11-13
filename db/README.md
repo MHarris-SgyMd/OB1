@@ -3847,24 +3847,23 @@ clipped) every listed ticket is keyed once a listed prompt names one, unless the
 header's own branch or project names them all, a header the branch's words may
 have given; that guess is for a summary without the hook's word, which says
 `place` for the branch's. A header listing a ticket of another team than the
-first ticket its own project and branch name is left to the model: the hook
-learns a team from each ticket-shaped word of a branch, so on
-`smd-610-bump-node-22` a prompt's `node-22` is a ticket to it; the team is the
-branch's first ticket, else the project's, read as the hook reads a place
-(`hotfix-2026` names none). The hook also learns teams from the session's other
-places and a directory's whole path, which the header does not show; that is
-SMD-4291's to fix in the hook. A summary the hook's model wrote
+session's, its branch's first ticket, else its project's, read as the hook reads
+a place (`hotfix-2026` names none), is left to the model: the hook learns a team
+from each ticket-shaped word of a branch, so on `smd-610-bump-node-22` a
+prompt's `node-22` is a ticket to it. The hook also learns teams from the
+session's other places and a directory's whole path, which the header does not
+show; that is SMD-4291's to fix in the hook. A summary the hook's model wrote
 (`metadata.summary_model`) keys no header: its prose is never the hook's layout.
 A prompt the user ended with `…` is no clip. Since the header rule's version 3
 (SMD-3306 PR 7a-3b-2) a header listing several, its full three included, keys a
 set of one rule's (migration 130); version 2 keyed a header listing one alone,
 and left several to the model. A ticket-shaped word counts unless its prefix is
-on a fixed list of encodings, hashes, protocols, standards,
-licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
-no ticket, and a key is the same on every brain and every run. It goes through
-migration 130's `record_thought_subjects` at the text the claim read, under its
-rule's key (`subject:metadata@r1`, `subject:first_line@r3`), and the pass asks
-no model for them. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
+on a fixed list of encodings, hashes, protocols, standards, licences, model
+names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names no ticket, and a
+key is the same on every brain and every run. It goes through migration 130's
+`record_thought_subjects` at the text the claim read, under its rule's key
+(`subject:metadata@r1`, `subject:first_line@r3`), and the pass asks no model for
+them. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought in its pool (migration 113, below), into which a pool's first run puts
 every thought with no current subject — none at its text (extracted before 111,
 keyed by no rule, or edited since), or one found under an older rule or question,
@@ -3873,8 +3872,8 @@ edited one, gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`),
 the door replacing the old one. The
 model is asked the subject's own question about the thought alone
 (`server-portable/subject.ts`'s `OWN_RULES`, version 3), with its reasoning on
-unless `OB1_SUBJECT_REASONING` says off, and each
-subject it answers is read into a key: the first ticket id in it, else the PR it is (an
+unless `OB1_SUBJECT_REASONING` says off, and each subject it answers is read
+into a key: the first ticket id in it, else the PR it is (an
 answer that is one PR: a PR among other numbers is none), else a release's
 version, else the answer as a lower-case phrase. A ticket or a release counts
 only when the thought itself names it, and a PR only when its number appears in
@@ -3883,9 +3882,9 @@ example, and is dropped. Version 3's question (SMD-3306 PR 7a-3b-2) asks for
 each thing the thought's own work is mainly about, at most three, the
 most-worked first and usually one, never a thing it only mentions; a ticket by
 its id alone. Of its first eight answers, the keys are a set, each once and at
-most three, a phrase whose tickets the answer also gives read as its first, written
-through 130's door; version 2 asked for one. 130 keeps a set by key, so the
-model's order is its recipe's alone. Version 1 read
+most three, a phrase whose tickets the answer also gives read as its first,
+written through 130's door; version 2 asked for one. 130 keeps a set by key, so
+the model's order is its recipe's alone. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken

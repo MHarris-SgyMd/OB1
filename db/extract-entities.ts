@@ -190,7 +190,7 @@
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
  * With its entities, each thought's own subjects are recorded when a rule
  * finds them: the ticket it is filed under, else a session summary's header
- * tickets its prompts name (server-portable/subject.ts), through migration
+ * tickets its asks name (server-portable/subject.ts), through migration
  * 130's record_thought_subjects at the text the claim read. No model is asked
  * for them here. `--subjects` is the sweep for the rest (db/subject-sweep.ts),
  * from migration 113's pool, into which its first run puts every thought with
@@ -1349,7 +1349,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /**
    * The thought's own subjects by the rules (SMD-3306), recorded once its
    * entities are: the ticket it is filed under, else a session summary's
-   * header tickets its prompts name (subject.ts's ruleSubject), each under
+   * header tickets its asks name (subject.ts's ruleSubject), each under
    * its rule's key, at the text the claim read; record_thought_subjects (130)
    * refuses a text that moved since, and a ticket that did. No model is asked
    * here: a thought no rule keys is --subjects' (db/subject-sweep.ts). A
