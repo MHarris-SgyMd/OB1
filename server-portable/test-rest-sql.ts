@@ -30,7 +30,7 @@ import { listCursor, parseRelationsCursor, relationsCursor, threadCursor } from 
 import * as say from "./render.ts";
 import { REFUSAL_STATUS } from "./rest/app.ts";
 import { TOOL_NAMES } from "./tools.ts";
-import { INFER_PROMPT } from "./priority-infer.ts";
+import { INFER_PROMPT, INFER_PROMPT_VERSION } from "./priority-infer.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { checkerOver, subjectHash, tokenSettings } from "./oauth-token.ts";
 
@@ -68,7 +68,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (body.messages?.[0]?.content === INFER_PROMPT) {
       inferCalls++;
       const said = String(body.messages[1]?.content ?? "");
-      const answer = said.includes("[20]") && said.includes("Urgent") ? { level: "urgent", level_phrase: "Urgent", due_phrase: "by Friday", due_date: null } : { level: null };
+      // "[20c]" (SMD-4226): a ticket's label quoted, "Medium" read off "SMD-2627 (Medium)", a level cited for another item.
+      // "[20f]": a floor ("can't happen before Friday"), read as a due day the rules resolve.
+      const answer = said.includes("[20f]") ? { level: "urgent", level_phrase: "Urgent", due_phrase: "before Friday", due_date: null }
+        : said.includes("[20c]") ? { level: "medium", level_phrase: "Medium", due_phrase: null }
+        : said.includes("[20]") && said.includes("Urgent") ? { level: "urgent", level_phrase: "Urgent", due_phrase: "by Friday", due_date: null } : { level: null };
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(answer) } }] }), { headers: { "Content-Type": "application/json" } });
     }
     // A capture marked "rho: remind me" reads action items (SMD-3665 PR 3a's [15]): a repeat in another case, a blank and a number among them;
@@ -3134,7 +3138,7 @@ console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_IN
   const startDay = new Date().toISOString().slice(0, 10);
   const stated = (a: A | undefined, kind: string, key: string, maker: string, scope: string) => [startDay, new Date().toISOString().slice(0, 10)].map(fridayAfter).some((friday) =>
     a !== undefined && a.item.kind === kind && a.item.key === key && a.level === 3
-    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v1): urgent from "Urgent"; due ${friday} from "by Friday"`
+    && a.dueAt === new Date(Date.parse(`${friday}T00:00:00Z`) + 86_400_000).toISOString() && a.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): urgent from "Urgent"; due ${friday} from "by Friday"`
     && a.inferred === true && a.tierName === "inferred" && a.maker.name === maker && a.maker.scope === scope && a.closedAt === null);
   const friday = fridayAfter(startDay);
   await sql`SELECT set_agent_kind('rival', 'operator')`;
@@ -3181,6 +3185,35 @@ console.log("\n[20] The priority a capture's text states (SMD-3670): with OB1_IN
     const before = inferCalls;
     const plainCap = await rest("POST", "/v1/thoughts", { content: "[20] a note that says nothing about when" });
     assert(inferCalls === before + 1 && (await hist("thought", String(plainCap.body.id))).history.length === 0, "a text the model reads nothing in states nothing");
+    // SMD-4226: a level cited for another ticket is dropped for an agent-kind writer alone (the maintainer's choice).
+    const [{ kind: writerKind }] = await sql`SELECT kind FROM ob1_agents WHERE label = 'writer'`;
+    const capturedAs = async (kind: string | null, content: string) => {
+      if (kind === null) await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+      else await sql`SELECT set_agent_kind('writer', ${kind})`;
+      const cap = await rest("POST", "/v1/thoughts", { content });
+      return { status: cap.status, h: await hist("thought", String(cap.body.id)) };
+    };
+    try {
+      const byAgent = await capturedAs("agent", "[20c] Next: SMD-2627 (Medium): the gate, from a session");
+      const byPerson = await capturedAs("operator", "[20c] Next: SMD-2627 (Medium): the gate, from a person");
+      assert(byAgent.status === 201 && byAgent.h.history.length === 0 && byPerson.status === 201 && byPerson.h.history.length === 1 && byPerson.h.history[0].level === 2
+          && byPerson.h.history[0].reason === `inferred from the text (v${INFER_PROMPT_VERSION}): medium from "Medium"` && byPerson.h.history[0].inferred === true,
+        `a ticket's quoted label states nothing for an agent-kind writer and stands for an operator (${byAgent.h.history.length} | ${JSON.stringify(byPerson.h.history.map((a) => [a.level, a.reason]))})`);
+      // Review pass 3: only a stamp that says agent drops it; a writer of no kind, or an importer, keeps it.
+      const byNoKind = await capturedAs(null, "[20c] Next: SMD-2627 (Medium): the gate, from a key never classified");
+      const byImporter = await capturedAs("ingested", "[20c] Next: SMD-2627 (Medium): the gate, from an importer");
+      assert(byNoKind.h.history.length === 1 && byNoKind.h.history[0].level === 2 && byImporter.h.history.length === 1 && byImporter.h.history[0].level === 2,
+        `a ticket's quoted label stands for a writer of no kind and for an importer (${byNoKind.h.history.length} | ${byImporter.h.history.length})`);
+      // Review pass 3: a floor's due day is dropped for an agent-kind writer alone; the level beside it stays.
+      const floorAgent = await capturedAs("agent", "[20f] Urgent: the cut can't happen before Friday, from a session");
+      const floorPerson = await capturedAs("operator", "[20f] Urgent: the cut can't happen before Friday, from a person");
+      assert(floorAgent.h.history.length === 1 && floorAgent.h.history[0].level === 3 && floorAgent.h.history[0].dueAt === null
+          && floorPerson.h.history.length === 1 && floorPerson.h.history[0].level === 3 && floorPerson.h.history[0].dueAt !== null,
+        `a floor's due day is dropped for an agent-kind writer, its level kept, and stands for an operator (${JSON.stringify([floorAgent.h.history[0]?.dueAt, floorPerson.h.history[0]?.dueAt])})`);
+    } finally {
+      if (writerKind === null) await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+      else await sql`SELECT set_agent_kind('writer', ${writerKind})`;
+    }
   } finally {
     await sql`SELECT set_agent_kind('rival', 'agent')`;
   }
