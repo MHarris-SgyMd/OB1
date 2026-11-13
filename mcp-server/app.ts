@@ -21,7 +21,7 @@ import type { Refusal } from "../server-portable/core/refusal.ts";
 import type { LoadedOp, LoadedPlugin } from "../server-portable/core/plugins.ts";
 import * as say from "../server-portable/render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "../server-portable/sse.ts";
-import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "../server-portable/telemetry.ts";
+import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, toolOutcome, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "../server-portable/telemetry.ts";
 import type { CallCount } from "../server-portable/shutdown.ts";
 import { atOriginHost, authReachability, edgeSettings, edgeView, forPublicDocument, forPublicResource, JWT_SHAPE, PRM_PATH, presentedKind, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
 import { codeWord, ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
@@ -386,8 +386,11 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
   // One call's end on the request's record, for its line, and on its span: how it ended, and the code an error reply carries (index.ts's ended).
   const ended = (reply: say.Reply, outcome: "ok" | "refused" | "error", span: ToolSpan): say.Reply => {
     const code = reply.isError && typeof reply.structuredContent.code === "string" ? reply.structuredContent.code : undefined;
-    recordCall(record, outcome, code);
-    span.end(outcome, code);
+    // A refusal whose code is a fault's — the brain's own embedding provider failing (SMD-2892) — ends as an error,
+    // as the REST core's outcomeOf counts it, so a refused key stays on the fault panels (review pass 1).
+    const said = outcome === "refused" ? toolOutcome(false, code) : outcome;
+    recordCall(record, said, code);
+    span.end(said, code);
     return reply;
   };
   /**

@@ -189,7 +189,7 @@
       "type": "timeseries",
       "id": 7,
       "title": "Server failures, by error type",
-      "description": "Each failed request's fault code (STORE_UNAVAILABLE or FAILED) or, with neither, its outcome.",
+      "description": "Each failed request's fault code (STORE_UNAVAILABLE, FAILED or EMBEDDING_PROVIDER_ERROR) or, with none, its outcome.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"x": 12, "y": 17, "w": 12, "h": 7},
       "targets": [
