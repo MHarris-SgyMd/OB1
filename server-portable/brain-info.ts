@@ -2554,7 +2554,7 @@ export type ProviderFact = (
 export function providerWords(p: NonNullable<ServerFacts["provider"]>): string {
   if (p.status === "unknown") return "not called yet";
   if (p.status === "answering") {
-    if (p.fault) return `answering, but refusing its embedding calls (${p.fault}, ${p.at}) — a capture fails outright until that is fixed: check the model is pulled and the key`;
+    if (p.fault) return `answering, but refusing its embedding calls (${p.fault}, ${p.at}) — a capture, a search or an edit of a thought's text is refused (EMBEDDING_PROVIDER_ERROR) until that is fixed: check the model is pulled and the key`;
     return p.by === "call" ? `answering (an embedding call answered ${p.at})` : `reachable (GET /models answered ${p.at}); no embedding call made since`;
   }
   const silent = p.reason === "provider_unreachable" || p.reason === "provider_timeout";
