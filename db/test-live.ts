@@ -4243,14 +4243,18 @@ if (want("9f")) {
    * The provider crashing, as [10]'s stub (SMD-2641 PR 2): a row whose text holds `crashMarker`, or, while `crashCycles` is
    * above zero, the next row's call whatever its text, crashes it — it and every call after answer 500 until
    * `crashProbes` probes have found it down — and while `inFlightMs` is set every other row's call it is up for takes that
-   * long, so the other worker's is in flight when one crashes. `crashedBy` names whose call crashed it; `peakAfterCrashes`
-   * is the most row calls in flight at once once the crashes are spent.
+   * long, so the other worker's is in flight when one crashes. The crashing call's own answer comes `crashAnswerMs`
+   * late. A call made after the crash is answered at once, so read first; one made before, at `inFlightMs`. Past
+   * `inFlightMs`, the crashing call's error is read after the other's either way (SMD-2641 PR 3).
+   * `crashedBy` names whose call crashed it; `peakAfterCrashes` is the most row calls in flight at once once the crashes
+   * are spent.
    */
   let crashMarker: string | null = null;
   let crashCycles = 0;
   let crashProbes = 1;
   let crashLeft: number | null = null;
   let inFlightMs = 0;
+  let crashAnswerMs = 400;
   const crashedBy: string[] = [];
   let upCallsNow = 0;
   let peakAfterCrashes = 0;
@@ -4293,7 +4297,7 @@ if (want("9f")) {
         crashedBy.push(input);
         crashLeft = crashProbes;
         // Its own answer a beat late, so the other worker's call is made by then.
-        await Bun.sleep(400);
+        await Bun.sleep(crashAnswerMs);
         return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
       }
       if (!probe && inFlightMs > 0) {
@@ -4750,6 +4754,31 @@ if (want("9f")) {
           `two re-embed workers, a poison thought crashing the provider beside an innocent one: both suspects, retried one at a time — the poison failed at its third outage alone, the innocent re-embedded, each attempt refunded (SMD-2641 PR 2; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentDone}; alone ${aloneOf(pair.lines)}; ${crashedBy.length} crash(es); isolated said ${isolatedSaid(pair.lines)}; waits after the failure ${waitsAfterFailure(pair.lines)}; attempts ${attempts.join(",")}; ${pairExit})`);
         await sql`DELETE FROM thoughts WHERE id = ${poisonId}::uuid OR id = ${innocentId}::uuid OR id = ${movedId}::uuid`;
 
+        // The other order (SMD-2641 PR 3; its Verify's mutant, every worker in the isolated drain, passed the row above
+        // whenever the poison's error was read first): the innocent pooled first and the poison's crash answered past
+        // `inFlightMs`, so at a crash with both in flight the innocent's error is read first, whichever call was made first
+        // (at 400 ms, only when the innocent's call came after the crash). Retried one at a time, the poison is alone at
+        // each crash: failed at its third, the innocent re-embedded. With both workers the innocent's error, read first,
+        // was blamed alone, and the innocent failed at its third.
+        crashedBy.length = 0;
+        crashAnswerMs = 1600;
+        const late = liveFollower({ workers: 2 });
+        await late.idle();
+        const [{ id: lateInnocent }, { id: latePoison }] = (await sql`INSERT INTO thoughts (content) VALUES ('an innocent thought pooled first'), ('a crash-poison thought pooled second, its crash answered late') RETURNING id::text AS id`) as { id: string }[];
+        const lateBack = await late.saw(new RegExp(`${latePoison} goes back to the pool unrecorded`));
+        // The first thought back is the innocent: its error read before the poison's.
+        const firstBack = late.lines.map((l) => / — ([0-9a-f-]{36}) goes back to the pool unrecorded/.exec(l)?.[1]).find((id) => id !== undefined);
+        const latePoisonFailed = await pollUntil(async () => (await claimOf(latePoison))?.status === "failed", 60_000);
+        const lateInnocentDone = await pollUntil(() => atModel(lateInnocent), 30_000);
+        const latePoisonClaim = await claimOf(latePoison);
+        const lateInnocentClaim = await claimOf(lateInnocent);
+        const lateExit = await late.stop();
+        crashAnswerMs = 400;
+        assert(lateBack && firstBack === lateInnocent && latePoisonFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* 500/.test(latePoisonClaim?.last_error ?? "")
+            && lateInnocentDone && lateInnocentClaim?.status !== "failed" && aloneOf(late.lines) === "1,2" && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid(late.lines) && lateExit === "exit 0",
+          `…and in the other order, the innocent pooled first and its error read first at the crash: retried one at a time, the poison failed at its third outage alone, the innocent re-embedded (SMD-2641 PR 3; first back ${firstBack === lateInnocent ? "the innocent" : firstBack === latePoison ? "the poison" : firstBack}; poison ${latePoisonClaim?.status}: ${latePoisonClaim?.last_error?.slice(0, 90)}; innocent ${lateInnocentDone}, ${lateInnocentClaim?.status}; alone ${aloneOf(late.lines)}; ${crashedBy.length} crash(es); isolated said ${isolatedSaid(late.lines)}; ${lateExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ${latePoison}::uuid OR id = ${lateInnocent}::uuid`;
+
         crashMarker = null;
         crashedBy.length = 0;
         crashCycles = 3;
@@ -4814,6 +4843,7 @@ if (want("9f")) {
         crashCycles = 0;
         crashLeft = null;
         inFlightMs = 0;
+        crashAnswerMs = 400;
         crashProbes = 1;
         hangProbeAtHemlock = 0;
         hemlock503At = 0;
