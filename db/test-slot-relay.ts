@@ -13,7 +13,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { hashKey, parseRegistry, startBroker, type Broker, type Registry } from "../deploy/federated/broker.ts";
-import { startRelay, type Relay, type RelayPort } from "./slot-relay.ts";
+import { RELAY_PATH, serveRelay, startRelay, type Relay, type RelayPort } from "./slot-relay.ts";
+import { RELAY_URL } from "../server-portable/slots.ts";
 
 let pass = 0;
 let fail = 0;
@@ -85,10 +86,10 @@ type Ev = { ev: string; id?: string; line?: string; ms?: number };
 type Pass = { evs: Ev[]; proc: ReturnType<typeof Bun.spawn>; cmd(m: object): void; saw(ev: string, id?: string): boolean; wait(ev: string, id?: string, ms?: number): Promise<boolean> };
 
 /** A pass started as supervise.ts starts one under a relay: a channel, OB1_SLOT_RELAY=ipc, the relay's frames to its port. */
-async function startPass(port: RelayPort | null, opts: { relayEnv?: boolean; mode?: string; raw?: string } = {}): Promise<Pass> {
+async function startPass(port: RelayPort | null, opts: { relayEnv?: boolean; mode?: string; raw?: string; env?: Record<string, string> } = {}): Promise<Pass> {
   const evs: Ev[] = [];
   const proc = Bun.spawn([process.execPath, "--no-env-file", CHILD, opts.mode ?? "keep", ...(opts.raw ? [opts.raw] : [])], {
-    env: { PATH: process.env.PATH ?? "", HOME: DIR, ...(opts.relayEnv === false ? {} : { OB1_SLOT_RELAY: "ipc" }) },
+    env: { PATH: process.env.PATH ?? "", HOME: DIR, ...(opts.relayEnv === false ? {} : { OB1_SLOT_RELAY: "ipc" }), ...opts.env },
     stdio: ["ignore", "inherit", "inherit"],
     ipc: (m: Ev & { slot?: string }) => { if (m && typeof m === "object" && "slot" in m) port?.onMessage(m); else evs.push(m); },
     serialization: "json",
@@ -680,6 +681,102 @@ section("[11] the broker's list of bases; a refused key met after an outage");
   try {
     ok(await until(() => logs.some((l) => /refused this brain's key \(401\)/.test(l)), 5000), "a key refused only after an outage was said is named all the same", logs);
   } finally { await relay.stop(); await b.stop(); }
+}
+
+section("[12] the api's calls through the coordinator's socket (SMD-3379 PR 3b-2)");
+ok(RELAY_URL === `ws://coordinator:8096${RELAY_PATH}`, "the api's default URL is the listener's port and path on the brain's network", RELAY_URL);
+const RKEY = "relay-key-of-this-brain-0123";
+/** An api, as far as its model calls go: the pass's child, with no relay channel, and the coordinator's socket's key and URL. */
+const startApi = (port: number, over: Record<string, string> = {}) => startPass(null, { relayEnv: false, env: { OB1_SLOT_RELAY_KEY: RKEY, OB1_SLOT_RELAY_URL: `ws://127.0.0.1:${port}${RELAY_PATH}`, ...over } });
+const logsOf = (p: Pass) => p.evs.filter((e) => e.ev === "log").map((e) => e.line ?? "");
+await withBroker(registry({ slots: 1 }), async (b) => {
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const llogs: string[] = [];
+  let changes = 0;
+  let listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: (l) => llogs.push(l), onChange: () => changes++ });
+  const lport = listener.port;
+  const url = (path = RELAY_PATH) => `http://127.0.0.1:${lport}${path}`;
+  const statuses = [
+    (await fetch(url())).status,
+    (await fetch(url(), { headers: { "x-brain-key": "relay-key-of-another-brain" } })).status,
+    (await fetch(url(), { headers: { "x-brain-key": RKEY } })).status,
+    (await fetch(url("/v1/slots"), { headers: { "x-brain-key": RKEY } })).status,
+  ];
+  ok(statuses.join() === "401,401,426,404", "the listener refuses a socket with no key or another (401), a plain request with the key (426), another path (404)", statuses);
+  ok(llogs.filter((l) => /refused for its key/.test(l)).length === 1, "and says a refused key once", llogs);
+  const api = await startApi(lport);
+  ok(await until(() => listener.sockets() === 1) && changes >= 1, "the api dials the coordinator with the key, and the coordinator's row is told", { sockets: listener.sockets(), changes });
+  ok(await until(() => logsOf(api).some((l) => /asks the host's slot broker through the coordinator/.test(l))), "and says it asks through the coordinator", logsOf(api));
+  api.cmd({ cmd: "call", id: "a1" });
+  ok(await api.wait("run", "a1") && await until(() => pool(b).background === 1), "an api background call runs on a broker grant", b.snapshot());
+  api.cmd({ cmd: "call", id: "a2" });
+  ok(await api.wait("waiting", "a2") && !api.saw("run", "a2") && pool(b).waiting.stable === 1, "a second waits at the broker", b.snapshot());
+  api.cmd({ cmd: "call", id: "l1", cls: "live" });
+  ok(await api.wait("run", "l1", 1000) && await until(() => pool(b).live === 1), "a live call runs at once, counted at the broker", b.snapshot());
+  api.cmd({ cmd: "end", id: "l1" });
+  ok(await api.wait("ended", "l1") && await until(() => pool(b).live === 0), "and done as it ends", b.snapshot());
+  api.cmd({ cmd: "end", id: "a1" });
+  ok(await api.wait("run", "a2"), "the api's first done, its second runs");
+  api.cmd({ cmd: "call", id: "l2", cls: "live" });
+  ok(await api.wait("run", "l2", 1000), "another live call runs at once");
+  // A pass beside it: the brain's calls are one at the broker, whichever way they come.
+  const pass1 = await startPass(relay.port("sleep"));
+  pass1.cmd({ cmd: "call", id: "p1" });
+  ok(await pass1.wait("waiting", "p1") && pool(b).waiting.stable === 1, "a pass's call waits behind the api's at the broker: one brain, both ways in", b.snapshot());
+  // The coordinator recreated: the listener gone, then back on the same port.
+  listener.stop();
+  ok(await until(() => logsOf(api).some((l) => /coordinator's socket was lost/.test(l))), "the api says the socket was lost", logsOf(api));
+  ok(await pass1.wait("run", "p1") && await until(() => pool(b).background === 1 && pool(b).live === 0 && relay.state().grants === 1 && relay.state().own === 0),
+    "at its close the relay gives back what the api held, and the pass's call takes the slot", { pool: pool(b), relay: relay.state() });
+  const at = performance.now();
+  api.cmd({ cmd: "call", id: "a3" });
+  ok(await api.wait("run", "a3", 800), "with no coordinator, an api call takes its own share at once", Math.round(performance.now() - at));
+  listener = serveRelay(relay, { key: RKEY, port: lport, hostname: "127.0.0.1", log: (l) => llogs.push(l) });
+  ok(await until(() => listener.sockets() === 1, 5000), "the api dials again and the coordinator takes it");
+  ok(await until(() => pool(b).live === 1 && pool(b).background === 3 && relay.state().own === 3, 3000), "every api call still running counted again, beside the pass's: the live call, the granted one, the one on its own share", { pool: pool(b), relay: relay.state() });
+  for (const id of ["a2", "a3", "l2"]) api.cmd({ cmd: "end", id });
+  ok(await api.wait("ended", "a3") && await api.wait("ended", "l2") && await until(() => pool(b).live === 0 && pool(b).background === 1 && relay.state().own === 0), "and each done as it ends", { pool: pool(b), relay: relay.state() });
+  pass1.cmd({ cmd: "end", id: "p1" });
+  await pass1.wait("ended", "p1");
+  ok(await until(() => pool(b).background === 0 && relay.state().grants === 0), "and nothing is held after", { pool: pool(b), relay: relay.state() });
+  // Past the most sockets: refused, said by the api, its calls on its own share.
+  listener.stop();
+  listener = serveRelay(relay, { key: RKEY, port: lport, hostname: "127.0.0.1", log: () => {}, maxSockets: 1 });
+  ok(await until(() => listener.sockets() === 1, 5000), "the first api's socket back");
+  const second = await startApi(lport);
+  ok(await until(() => logsOf(second).some((l) => /HTTP 503/.test(l)), 5000) && listener.sockets() === 1, "a socket past the listener's most is refused (503), and the api says so", logsOf(second));
+  second.cmd({ cmd: "call", id: "s1" });
+  ok(await second.wait("run", "s1", 800), "and its calls take its own share");
+  await kill(second); await kill(api); await kill(pass1);
+  ok(await until(() => listener.sockets() === 0), "a killed api's socket closes at the coordinator");
+  listener.stop();
+  await relay.stop();
+});
+{
+  // The api's own refusals: another key (named), no coordinator listening (said), a key too short (never dialled).
+  const relayless = startRelay({ url: "ws://127.0.0.1:1/v1/slots", key: KEYS.stable, log: () => {}, graceMs: 0 });
+  const listener = serveRelay(relayless, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  const wrong = await startApi(listener.port, { OB1_SLOT_RELAY_KEY: "relay-key-of-another-brain" });
+  ok(await until(() => logsOf(wrong).some((l) => /refused OB1_SLOT_RELAY_KEY \(401\)/.test(l)), 5000), "an api with another key names it (401)", logsOf(wrong));
+  wrong.cmd({ cmd: "call", id: "w1" });
+  ok(await wrong.wait("run", "w1", 800), "and its calls take its own share");
+  listener.stop();
+  const nobody = await startApi(listener.port);
+  ok(await until(() => logsOf(nobody).some((l) => /does not answer at/.test(l)), 5000), "an api with no coordinator listening says so", logsOf(nobody));
+  const short = await startApi(listener.port, { OB1_SLOT_RELAY_KEY: "short-key" });
+  ok(await until(() => logsOf(short).some((l) => /shorter than 16 characters/.test(l))) && !logsOf(short).some((l) => /does not answer/.test(l)), "an api with a key too short says so, and dials nothing", logsOf(short));
+  for (const p of [wrong, nobody, short]) await kill(p);
+  await relayless.stop();
+}
+{
+  // A coordinator that takes the socket and then says nothing: the api drops it, and dials again.
+  const fake = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })), websocket: { message() {}, sendPings: false } });
+  const api = await startApi(fake.port as number);
+  ok(await until(() => logsOf(api).some((l) => /asks the host's slot broker through the coordinator/.test(l)), 3000), "the api's socket opens", logsOf(api));
+  ok(await until(() => logsOf(api).some((l) => /lost \(silent for 10 s\)/.test(l)), 14_000), "a socket silent 10 s is dropped, said", logsOf(api));
+  await kill(api);
+  void fake.stop(true);
 }
 
 rmSync(DIR, { recursive: true, force: true });

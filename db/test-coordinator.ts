@@ -20,7 +20,7 @@
 import { chmodSync, existsSync, lchownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, relaySettings, runOnce, type Child } from "./coordinator.ts";
+import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, coordinatorValue, planPasses, relaySettings, runOnce, type Child } from "./coordinator.ts";
 import type { Relay, RelayPort } from "./slot-relay.ts";
 import { hashKey, parseRegistry, startBroker } from "../deploy/federated/broker.ts";
 import { supervise } from "./supervise.ts";
@@ -67,7 +67,7 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
     MCP_ACCESS_KEYS: "keys", OB1_WORKER_KEY: "wk", LINEAR_API_KEY: "lin", LINEAR_COMMENT_API_KEY: "linc", OB1_BOARD_SYNC_INTERVAL: "300",
     OB1_SLEEP_CAPTURE: "60", OB1_SLEEP_DUMP_DIR: "/d", OB1_EXTRACT_FOLLOW: "30", OB1_CONSOLIDATE_WORKERS: "2",
     OB1_PASSES: "sleep", PORT: "", UNSET: undefined,
-    OB1_SLOT_BROKER_URL: "ws://host.containers.internal:8095/v1/slots", OB1_SLOT_BROKER_KEY: "slot_brain",
+    OB1_SLOT_BROKER_URL: "ws://host.containers.internal:8095/v1/slots", OB1_SLOT_BROKER_KEY: "slot_brain", OB1_SLOT_RELAY_KEY: "relay-key-of-this-brain",
   };
   const of = (name: keyof typeof CHILDREN) => childEnv(CHILDREN[name], env);
   const board = of("board-sync");
@@ -85,8 +85,8 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
     const e = of(name);
     ok(e.PATH === "/usr/bin" && e.DATABASE_URL === "postgres://x" && e.OB1_LLM_BASE_URL === "http://m" && e.OB1_EXTRACT_CHUNK_TOKENS === "900",
       `${name}: the shared settings, OB1_EXTRACT_CHUNK_TOKENS among them (the server's, though it starts like extract's own)`);
-    ok(!("OB1_PASSES" in e) && !("PORT" in e) && !("UNSET" in e) && !("OB1_SLOT_BROKER_URL" in e) && !("OB1_SLOT_BROKER_KEY" in e) && !("OB1_SLOT_RELAY" in e),
-      `${name}: never the coordinator's own settings — the slot broker's URL and key among them (SMD-3379 PR 3b-1) — nor an unset one`);
+    ok(!("OB1_PASSES" in e) && !("PORT" in e) && !("UNSET" in e) && !("OB1_SLOT_BROKER_URL" in e) && !("OB1_SLOT_BROKER_KEY" in e) && !("OB1_SLOT_RELAY" in e) && !("OB1_SLOT_RELAY_KEY" in e),
+      `${name}: never the coordinator's own settings — the slot broker's URL and key (SMD-3379 PR 3b-1) and the api's key to its relay (PR 3b-2) among them — nor an unset one`);
   }
   ok(childEnv(CHILDREN.sleep, env, { HOME: "/tmp/ob1-sleep-x" }).HOME === "/tmp/ob1-sleep-x" && childHome(CHILDREN.sleep) === "/tmp/ob1-sleep-", "a HOME of its own, given, beneath its prefix");
   const uids = Object.values(CHILDREN).map((c) => c.uid);
@@ -268,7 +268,47 @@ if (!existsSync(composePath)) {
     let gone = false;
     for (let i = 0; i < 40 && !gone; i++) { await Bun.sleep(50); gone = !("o/m" in broker.snapshot()); }
     ok(counted && gone, `the coordinator opens the relay from OB1_SLOT_BROKER_URL and _KEY: its pass's ask is granted at the broker, and given back when the pass ends (${counted}, ${gone})`);
+
+    // The api's listener (SMD-3379 PR 3b-2): OB1_SLOT_RELAY_KEY beside the broker's settings, and the coordinator takes
+    // the api's socket — with no pass to run, too.
+    const key = "relay-key-of-this-brain-0123";
+    const lines: string[] = [];
+    const api = coordinate({
+      env: { PATH: process.env.PATH ?? "", OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${broker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: ` ${key} ` }, sql: null, asOwnUsers: false,
+      children: [], writer: { out: () => {}, err: (l) => lines.push(l) }, relayPort: 0,
+    });
+    const port = Number(/on :(\d+)\/v1\/relay \(OB1_SLOT_RELAY_KEY\)/.exec(lines.join("\n"))?.[1] ?? 0);
+    ok(port > 0 && !lines.some((l) => /the passes ask/.test(l)), `with the key, it listens for the api and says where; with no pass, says nothing of passes (${lines.join(" | ")})`);
+    const heard: { slot?: string; id?: string }[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/relay`, { headers: { "x-brain-key": key } } as unknown as string[]);
+    ws.onmessage = (ev) => heard.push(JSON.parse(String(ev.data)));
+    let opened = false;
+    ws.onopen = () => { opened = true; ws.send(JSON.stringify({ slot: "ask", id: "a1", base: "http://h:1/v1", model: "m", cls: "background" })); };
+    let granted = false;
+    for (let i = 0; i < 100 && !granted; i++) { await Bun.sleep(50); granted = heard.some((m) => m.slot === "go" && m.id === "a1") && broker.snapshot()["o/m"]?.background === 1; }
+    ws.close();
+    let back = false;
+    for (let i = 0; i < 40 && !back; i++) { await Bun.sleep(50); back = !("o/m" in broker.snapshot()); }
+    ok(opened && granted && back, `an api socket's ask, with the key, is granted at the broker through it, and given back at the socket's close (${opened}, ${granted}, ${back})`);
+    api.stop("SIGTERM");
+    ok(await Promise.race([api.done.then(() => true), Bun.sleep(5000).then(() => false)]), "and it stops with no pass to wait for");
   } finally { await broker.stop(); }
+  // Its row: the relay's mark, its age counted back from the stamp, the api's sockets where it listens.
+  const mark = (relay?: { broker: "up" | "down"; since: number; sockets?: number } | null) =>
+    JSON.stringify(coordinatorValue({ id: "i", host: "h", passes: [], children: [], keys: new Map(), states: new Map(), now: 10_000, everyS: 60, relay }).relay ?? null);
+  ok(mark({ broker: "up", since: 4_000, sockets: 2 }) === '{"broker":"up","for_s":6,"sockets":2}' && mark({ broker: "down", since: 9_400 }) === '{"broker":"down","for_s":1}' && mark(null) === "null" && mark() === "null",
+    `the row carries the relay's mark where there is one: its state's seconds, the api's sockets where it listens (${mark({ broker: "up", since: 4_000, sockets: 2 })}, ${mark({ broker: "down", since: 9_400 })})`);
+  // The key, but no broker named, or too short: said, and not listened for.
+  for (const [what, env, said] of [
+    ["no broker", { OB1_SLOT_RELAY_KEY: "relay-key-of-this-brain-0123" }, /OB1_SLOT_RELAY_KEY is set, but no broker is named here/],
+    ["a short key", { OB1_SLOT_RELAY_KEY: "short", OB1_SLOT_BROKER_URL: "ws://127.0.0.1:1/v1/slots", OB1_SLOT_BROKER_KEY: "slot_k" }, /shorter than 16 characters — not listening/],
+  ] as const) {
+    const lines: string[] = [];
+    const c = coordinate({ env: { PATH: process.env.PATH ?? "", ...env }, sql: null, asOwnUsers: false, children: [], writer: { out: () => {}, err: (l) => lines.push(l) }, relayPort: 0 });
+    c.stop("SIGTERM");
+    await Promise.race([c.done, Bun.sleep(5000)]);
+    ok(lines.some((l) => said.test(l)) && !lines.some((l) => /\/v1\/relay \(OB1_SLOT_RELAY_KEY\)/.test(l)), `${what}: said, and nothing listens (${lines.join(" | ")})`);
+  }
   rmSync(dir, { recursive: true, force: true });
 }
 

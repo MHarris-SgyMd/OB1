@@ -391,9 +391,10 @@ free:
   never cut short, so a brain of minute-long calls has a little more (0.54
   of the time for 71 s calls beside 50 ms ones).
 
-**A brain asks it through its coordinator** (SMD-3379 PR 3b-1), with
+**A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
-coordinator holds the brain's one connection, and its passes ask through it.
+coordinator holds the brain's one connection, and its passes ask through it,
+as does the api where `OB1_SLOT_RELAY_KEY` is set (below).
 While the broker is away, a call waits a few seconds for it, then runs on the
 brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
 back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
@@ -406,9 +407,27 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
   answers, is lost, or refused the key (a 401, naming `OB1_SLOT_BROKER_KEY`);
   the broker's log says each brain's connections, a socket ended for not
   answering, and a server over its slots.
-- **What 3b-1 does not cover.** The api's calls, live and background, are not
-  yet the broker's (SMD-3379 PR 3b-2): until then only each server's
-  `reserve` keeps room for live calls.
+- **The api's calls** (SMD-3379 PR 3b-2) join with `OB1_SLOT_RELAY_KEY` set
+  in the same `deploy/.env` (any 16 characters or more: `openssl rand -hex
+  32`), then `up -d api coordinator`. The api reads the key, and so does the
+  coordinator, which hands it to no pass. The coordinator then listens on the
+  brain's own network (`coordinator:8096`, published nowhere) and refuses a
+  socket without the key. The api asks it for every model call:
+  - **A live call** (a capture's, a search's) is counted at the broker as it
+    runs and never waits.
+  - **A background call** (the vector mender's, a detached job's) waits its
+    turn, as a pass's does.
+
+  While the coordinator is away (recreated, or not yet up), each api call
+  takes the api's own share at once. The api dials again every few seconds
+  and counts its calls still running once a socket is back. Without the key,
+  only each server's `reserve` keeps room for live calls.
+- **Checking it.** Preflight's `slot relay` row reads the key beside the
+  coordinator's row: whether the coordinator listens for the api, and since
+  when the broker has answered. `brain_info`'s tasks say the same on the
+  coordinator's line. The api's `background slots:` lines say when it reaches
+  the coordinator, loses it, or is refused (a 401, naming
+  `OB1_SLOT_RELAY_KEY`).
 
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's

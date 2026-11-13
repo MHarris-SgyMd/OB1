@@ -37,7 +37,10 @@
  * checked before it is passed on (review pass 1: one child's 5 kB base made the broker close the brain's whole socket).
  */
 
-import { normalisedBase } from "../server-portable/slots.ts";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { MIN_RELAY_KEY, normalisedBase } from "../server-portable/slots.ts";
+
+export { MIN_RELAY_KEY };
 
 /** The reconnect's backoff: from the first, doubling to the most. */
 export const RECONNECT_MS = { first: 500, max: 2000 } as const;
@@ -71,7 +74,7 @@ export type RelayPort = {
   detach(): void;
 };
 
-/** What a test reads of the relay (and 3b-2's preflight row will: `since`, the broker's state's start). */
+/** What a test reads of the relay, and the coordinator's row (`broker` and `since`, the start of that state). */
 export type RelayState = { broker: "up" | "down"; boot: string | null; since: number; asks: number; parked: number; grants: number; own: number };
 
 export type Relay = { port(child: string): RelayPort; state(): RelayState; stop(): Promise<void> };
@@ -111,7 +114,7 @@ export function childFrame(m: unknown): ChildFrame | "bad" | null {
 }
 
 /** Opens the relay: one socket to the broker at `url` with `key`, kept open, and a port per child. */
-export function startRelay(opts: { url: string; key: string; log?: (line: string) => void; reconnectMs?: { first: number; max: number }; graceMs?: number; helloMs?: number }): Relay {
+export function startRelay(opts: { url: string; key: string; log?: (line: string) => void; reconnectMs?: { first: number; max: number }; graceMs?: number; helloMs?: number; onChange?: () => void }): Relay {
   const log = opts.log ?? ((line: string) => console.error(line));
   const backoff = opts.reconnectMs ?? RECONNECT_MS;
   const graceMs = opts.graceMs ?? GRACE_MS;
@@ -218,6 +221,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     for (const send of senders.values()) { try { send({ slot: "back", id: "" }); } catch { /* going */ } }
     const parked = [...entries.values()].filter((e) => e.kind === "parked").length;
     feed();
+    opts.onChange?.();
     if (epoch === 1 || restarted || performance.now() - lostSaidAt >= 60_000 || lostUnsaid === 0) log(`slot relay: the broker answers${restarted ? " (restarted)" : ""}${held ? `; ${held} call${held === 1 ? "" : "s"} still running re-registered` : ""}${parked ? `; ${parked} waiting asked again` : ""}`);
   };
   /** The socket gone (closed, or dropped here): asks parked, running calls kept for `held`, a reconnect scheduled. */
@@ -232,6 +236,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       e.kind = e.cls === "live" ? "own" : "parked";
       if (e.kind === "parked" && !e.told) { e.told = true; tell(e, "queued"); }
     }
+    if (was) opts.onChange?.();
     if (downAt === null) downAt = performance.now();
     if (!grace) grace = setTimeout(graceOver, Math.max(0, graceMs - (performance.now() - downAt)));
     if (stopped) return;
@@ -439,6 +444,93 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       ws = null;
       open = false;
       if (sock && sock.readyState <= 1) await new Promise<void>((r) => { sock.onclose = () => r(); sock.close(); setTimeout(r, 1000); });
+    },
+  };
+}
+
+/** The port the coordinator's listener takes on the brain's network (SMD-3379 PR 3b-2): the api dials coordinator:8096. */
+export const RELAY_PORT = 8096;
+/** Its one path. */
+export const RELAY_PATH = "/v1/relay";
+/** The most sockets it holds at once: the api's, one a process, and a spare for one replaced while its last closes. */
+export const MAX_RELAY_SOCKETS = 8;
+/** A frame's most bytes: an ask is a few hundred, its base at most 2048. */
+export const RELAY_FRAME_MAX = 4096;
+/** Seconds a socket may say nothing before the listener drops it: the api pings every third of it. */
+export const RELAY_IDLE_S = 30;
+
+export type RelayListener = { port: number; sockets(): number; stop(): void };
+
+/**
+ * The coordinator's listener for the brain's servers (SMD-3379 PR 3b-2; docs/brain-coordinator.md, row 2): the api's
+ * model calls asked of the host's broker through the coordinator, as its passes' are, over a WebSocket on the brain's
+ * network at RELAY_PATH. The api proves itself with OB1_SLOT_RELAY_KEY, which both hold (x-brain-key; 401 without it,
+ * checked before anything else is said). Each socket is one more of the relay's ports — the frames a pass sends over
+ * its channel, and `{slot: "ping"}`, answered `{slot: "pong"}` here — and its close every call it had done (a socket
+ * after it counts again those still running). At most MAX_RELAY_SOCKETS at once (503 past it), frames of at most
+ * RELAY_FRAME_MAX bytes, a socket silent RELAY_IDLE_S dropped.
+ */
+export function serveRelay(relay: Relay, opts: { key: string; port?: number; hostname?: string; log?: (line: string) => void; idleS?: number; maxSockets?: number; onChange?: () => void }): RelayListener {
+  const log = opts.log ?? ((line: string) => console.error(line));
+  const digest = (s: string) => createHash("sha256").update(s).digest();
+  const want = digest(opts.key);
+  const keyOk = (got: string | null) => got !== null && timingSafeEqual(digest(got), want);
+  const max = opts.maxSockets ?? MAX_RELAY_SOCKETS;
+  // Names reused, lowest free first: the relay keeps a port's ids under its name, so a name a closed socket held is
+  // taken again rather than a new one a socket (a flapping link would grow the relay's map without end).
+  const free = Array.from({ length: max }, (_, i) => `api#${i + 1}`);
+  type Data = { name: string; port: RelayPort | null };
+  const open = new Set<import("bun").ServerWebSocket<Data>>();
+  let refusedSaid = false;
+  const server = Bun.serve<Data, never>({
+    port: opts.port ?? RELAY_PORT,
+    ...(opts.hostname ? { hostname: opts.hostname } : {}),
+    fetch(req, srv) {
+      if (new URL(req.url).pathname !== RELAY_PATH) return new Response("not found\n", { status: 404 });
+      if (!keyOk(req.headers.get("x-brain-key"))) {
+        if (!refusedSaid) { refusedSaid = true; log("slot relay: a socket was refused for its key — OB1_SLOT_RELAY_KEY must be the same on the api and the coordinator; said once"); }
+        return new Response("refused: no OB1_SLOT_RELAY_KEY of this brain\n", { status: 401 });
+      }
+      // Full before a plain request's 426: the api asks again without the upgrade to say why it was refused.
+      if (open.size >= max || !free.length) return new Response("too many sockets\n", { status: 503 });
+      if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("a WebSocket, at this path\n", { status: 426 });
+      const name = free.sort((a, b) => Number(a.slice(4)) - Number(b.slice(4))).shift()!;
+      if (srv.upgrade(req, { data: { name, port: null } })) return undefined;
+      free.push(name);
+      return new Response("upgrade failed\n", { status: 400 });
+    },
+    websocket: {
+      maxPayloadLength: RELAY_FRAME_MAX,
+      idleTimeout: opts.idleS ?? RELAY_IDLE_S,
+      sendPings: true,
+      open(ws) {
+        open.add(ws);
+        const port = relay.port(ws.data.name);
+        ws.data.port = port;
+        port.attach((m) => { ws.send(JSON.stringify(m)); });
+        opts.onChange?.();
+      },
+      message(ws, msg) {
+        let m: unknown;
+        try { m = JSON.parse(typeof msg === "string" ? msg : new TextDecoder().decode(msg)); } catch { return; }
+        if ((m as { slot?: unknown } | null)?.slot === "ping") { ws.send(JSON.stringify({ slot: "pong", id: "" })); return; }
+        ws.data.port?.onMessage(m);
+      },
+      close(ws) {
+        if (!open.delete(ws)) return;
+        ws.data.port?.detach();
+        ws.data.port = null;
+        free.push(ws.data.name);
+        opts.onChange?.();
+      },
+    },
+  });
+  return {
+    port: server.port as number,
+    sockets: () => open.size,
+    stop() {
+      for (const ws of [...open]) { try { ws.close(1001, "the coordinator is stopping"); } catch { /* gone */ } }
+      void server.stop(true);
     },
   };
 }

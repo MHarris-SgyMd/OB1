@@ -79,6 +79,20 @@ export type Env = {
    */
   OB1_SLOT_RELAY?: string;
   /**
+   * The api's key to the coordinator's slot relay (SMD-3379 PR 3b-2): set, the
+   * api asks the host's slot broker for each model call through the
+   * coordinator, over a WebSocket on the brain's network, proved with this
+   * key; the coordinator, which reads the same, listens for it once its broker
+   * is named (OB1_SLOT_BROKER_URL and _KEY) and hands it to no pass. 16
+   * characters at least. Unset, the api's calls keep their own shares.
+   */
+  OB1_SLOT_RELAY_KEY?: string;
+  /**
+   * Where the api dials the coordinator's slot relay: ws://coordinator:8096/v1/relay
+   * unless set — a checkout's api, or a test's, sets it. Not forwarded by compose.
+   */
+  OB1_SLOT_RELAY_URL?: string;
+  /**
    * A local model server's parallel calls per model (SMD-3379 PR 2b-2b), 1 to
    * 16: compose hands the bundled Ollama the same as OLLAMA_NUM_PARALLEL, and
    * the background slots' defaults leave one of them for live calls (a server

@@ -1896,6 +1896,15 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
   ].map((v) => coord(v));
   assert(refused.every((r) => r === null) && parseCoordinator({ value: "not json", at, age_s: 1 }) === null && parseCoordinator({ value: JSON.stringify(value), at: "yesterday", age_s: 1 }) === null,
     `a coordinator row not of the shape is refused whole (${refused.map((r) => (r === null ? "·" : "KEPT")).join("")})`);
+  // Its relay's mark (SMD-3379 PR 3b): read where of the shape, the row refused whole where not; said in the coordinator's words.
+  const relayed = coord({ ...value, relay: { broker: "up", for_s: 300, sockets: 1 } });
+  const passesOnly = coord({ ...value, relay: { broker: "down", for_s: 40 } });
+  const badRelays = [{ broker: "away", for_s: 1 }, { broker: "up", for_s: -1 }, { broker: "up", for_s: 1, sockets: 2000 }, { broker: "up", for_s: 1, sockets: "1" }, "up", null].map((relay) => coord({ ...value, relay }));
+  const wordsOf = (b: ReturnType<typeof coord>) => taskStates({ heartbeats: [], ignored: 0, coordinator: b! }).tasks[0]!.words;
+  assert(relayed?.relay?.broker === "up" && relayed.relay.sockets === 1 && passesOnly?.relay?.sockets === undefined && read?.relay === undefined && badRelays.every((r) => r === null)
+      && /^runs board-sync, sleep; relays the passes' and the api's \(1 socket\) model-call slots to the host's broker, which has answered for 5 min \(OB1_PASSES/.test(wordsOf(relayed))
+      && /; relays the passes' model-call slots to the host's broker, which has not answered for 50 s \(/.test(wordsOf(passesOnly)) && !/relays/.test(wordsOf(read)),
+    `the coordinator's relay mark is read, said in its words, and one not of the shape refuses the row (${wordsOf(relayed)} | ${wordsOf(passesOnly)}; ${badRelays.map((r) => (r === null ? "·" : "KEPT")).join("")})`);
   // parseHeartbeats hands the row to its own parser: carried when of the shape, counted as ignored when not, never read as a worker's.
   const withRow = parseHeartbeats([{ key: "heartbeat:coordinator", value: JSON.stringify(value), at, age_s: 10 }]);
   const badRow = parseHeartbeats([{ key: "heartbeat:coordinator", value: JSON.stringify({ ...value, v: 2 }), at, age_s: 10 }]);
