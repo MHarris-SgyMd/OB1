@@ -9343,6 +9343,16 @@ if (want("10h")) {
           && passSetLeft.every((x) => x.by === "first_line" && x.judge === "subject:first_line@r3" && x.recipe?.rule_version === 3),
         `the pass records a session header's two tickets its prompts name as one rule's set (exit ${passSetRun.code}: ${JSON.stringify(passSetLeft.map((x) => [x.key, x.judge, x.recipe?.rule_version]))}; ${passSetRun.stdout.split("\n").find((l) => /wrote /.test(l))?.trim().slice(-160)})`);
       await sql`DELETE FROM thoughts WHERE id = ${passSet}::uuid`;
+      // The hook's word, read off the thought's metadata by the pass: a header whose listed prompt names one of its two
+      // tickets, the other named by an ask the summary does not list, keyed whole (metadata.tickets_from `asks`).
+      const oneShown = twoTickets("SMD-86", "SMD-87").replace("\n- and SMD-87 after it", "");
+      const askedSet = await seed(oneShown, { tickets_from: "asks" });
+      const shownOnly = await seed(oneShown.replace("Both done.", "Both done, the other way."));
+      const askedRun = await extractRun();
+      assert(askedRun.code === 0 && (await standingKeys(askedSet)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87"
+          && (await standingKeys(shownOnly)).map((x) => x.key).join() === "ticket:SMD-86",
+        `the hook's word that the asks named the header's tickets keys them all; without it, those a listed prompt names (exit ${askedRun.code})`);
+      await sql`DELETE FROM thoughts WHERE id IN (${askedSet}::uuid, ${shownOnly}::uuid)`;
       // The sweep: a header's two tickets by the rule; a header's ticket version 2 keyed, found again under version 3, the
       // same key, a replacement with no new key; and a note the model names four tickets for, one of them twice: the
       // first three keys in its order, each once, the answers read kept on each subject's recipe. One question asked.

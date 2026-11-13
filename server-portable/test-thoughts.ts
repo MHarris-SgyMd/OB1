@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -2760,7 +2760,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
   // The hook's own renderSummary (review passes 1 and 3), its session as the segmenter fills one: a header it writes for
   // prompts naming their ticket is keyed; one carrying the branch's ticket, the harness's title naming it, is not.
-  const { renderSummary } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string };
+  const { renderSummary, headerTickets } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string; headerTickets: (s: Record<string, unknown>) => { tickets: string[]; from: string | null } };
   const hookSession = (branch: string, prompts: string[], named: string[], title = "") => ({
     harness: "claude-code", sessionId: "s-1", title, cwd: "/work/ob1", branch, roots: new Set(), prompts, outcome: "Done.", assistant: [], files: new Set(), commits: 0, prs: [],
     retrieved: new Set(), captured: new Set(), first: "2026-10-01T10:00:00Z", last: "2026-10-01T11:00:00Z", pushed: false, checkpoint: undefined, n: 0, named: new Set(named),
@@ -2772,14 +2772,16 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     `…as the hook's own renderSummary writes a session: its prompts' ticket keyed; the branch's, named by its title alone, not (${JSON.stringify(fromHook.split("\n")[0])})`);
   // Review pass 1 (PR 7a-3b-2, run-it): a ticket named only by a prompt the summary does not list — the 13th, or past
   // the 200th character of a long one — is on the header, and keyed with the rest.
-  const late = renderSummary(hookSession("michaelharris/smd-1-x", ["start smd-1", ...Array.from({ length: 11 }, (_, i) => `step ${i + 2}`), "and SMD-2 too"], ["SMD-1", "SMD-2"]));
+  const lateSession = hookSession("michaelharris/smd-1-x", ["start smd-1", ...Array.from({ length: 11 }, (_, i) => `step ${i + 2}`), "and SMD-2 too"], ["SMD-1", "SMD-2"]);
+  const late = renderSummary(lateSession);
   const longPrompt = renderSummary(hookSession("michaelharris/smd-3-x", [`${"x".repeat(230)} SMD-4`, "SMD-3 too"], ["SMD-4", "SMD-3"]));
   const shownAll = renderSummary(hookSession("michaelharris/smd-1-x", ["start smd-1", ...Array.from({ length: 10 }, (_, i) => `step ${i + 2}`)], ["SMD-1", "SMD-2"]));
   assert(/^Session summary — SMD-1, SMD-2 — /.test(late) && !/and SMD-2 too/.test(late) && /^- … and 1 more$/m.test(late) && H(late) === "SMD-1,SMD-2"
       && /^Session summary — SMD-4, SMD-3 — /.test(longPrompt) && /…$/m.test(longPrompt) && H(longPrompt) === "SMD-4,SMD-3"
       && /^Session summary — SMD-1, SMD-2 — /.test(shownAll) && !/…/.test(shownAll) && H(shownAll) === "SMD-1",
     `…a ticket only an unlisted prompt names, or one past a long prompt's cut, keyed with the header's rest, the summary showing its prompts in part; with every prompt shown whole, those a prompt names alone (review pass 2) (${H(late)} | ${H(longPrompt)} | ${H(shownAll)})`);
-  const anchoredLate = renderSummary(hookSession("michaelharris/smd-610-and-smd-611", ["upgrade the runtime, see smd-610", ...Array.from({ length: 12 }, (_, i) => `step ${i + 2}`)], []));
+  const anchoredSession = hookSession("michaelharris/smd-610-and-smd-611", ["upgrade the runtime, see smd-610", ...Array.from({ length: 12 }, (_, i) => `step ${i + 2}`)], []);
+  const anchoredLate = renderSummary(anchoredSession);
   assert(/^Session summary — SMD-610, SMD-611 — /.test(anchoredLate) && /^- … and 1 more$/m.test(anchoredLate) && H(anchoredLate) === "SMD-610",
     `…nor widened, its prompts shown in part, when the header's own branch names its every ticket (review pass 2, run-it: ${H(anchoredLate)})`);
   assert(H(hook("SMD-2615, SMD-2614", ["… start smd-2615 … then review"])) === "SMD-2615",
@@ -2796,6 +2798,20 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   const nodeAndOwn = renderSummary(hookSession("michaelharris/smd-610-bump-node-22", ["the image still pins node-22, see smd-610"], ["NODE-22", "SMD-610"]));
   assert(/^Session summary — NODE-22, NODE-24 — /.test(nodes) && H(nodes) === "" && /^Session summary — NODE-22, SMD-610 — /.test(nodeAndOwn) && H(nodeAndOwn) === "",
     `…a header listing another team's tickets than its branch's first left to the model (${H(nodes)} | ${H(nodeAndOwn)})`);
+  // The hook's word on where the header's tickets came from (metadata.tickets_from, the hook from 1.8.0): `asks`, every
+  // listed ticket, named by an ask though no listed line shows it; `place`, those a listed prompt names, never widened;
+  // without it, or with a word it does not send, the reading above. The team guard holds either way (PR 7a-3b-2).
+  const HF = (content: string, from: unknown) => sessionHeaderTickets(content, from).join(",");
+  const clippedAsk = [`start smd-55 ${"x".repeat(200)}`].map((q) => `${q.slice(0, 199).trimEnd()}…`);
+  assert(TICKETS_FROM === "tickets_from" && HF(hook("SMD-2125, SMD-7", ["start smd-2125"]), "asks") === "SMD-2125,SMD-7" && H(hook("SMD-2125, SMD-7", ["start smd-2125"])) === "SMD-2125"
+      && HF(hook("SMD-55, SMD-56", clippedAsk), "place") === "SMD-55" && H(hook("SMD-55, SMD-56", clippedAsk)) === "SMD-55,SMD-56" && HF(hook("SMD-55, SMD-56", ["look around"]), "place") === ""
+      && HF(hook("NODE-22, NODE-24", ["bump node-22 to node-24"]), "asks") === "" && HF(hook("SMD-2125, SMD-7", ["start smd-2125"]), "bogus") === "SMD-2125",
+    "…with the hook's word: the asks' every ticket; the place's those a prompt names, never widened; another team's still the model's; a word it does not send read as none");
+  assert(HF(late, headerTickets(lateSession).from) === "SMD-1,SMD-2" && headerTickets(lateSession).from === "asks"
+      && HF(anchoredLate, headerTickets(anchoredSession).from) === "SMD-610" && headerTickets(anchoredSession).from === "place",
+    `…as the hook's own headerTickets says of its sessions (${headerTickets(lateSession).from}, ${headerTickets(anchoredSession).from})`);
+  assert(JSON.stringify(ruleSubject({ content: hook("SMD-2125, SMD-7", ["start smd-2125"]), metadata: { tickets_from: "asks" } })) === JSON.stringify({ keys: ["ticket:SMD-2125", "ticket:SMD-7"], by: "first_line" }),
+    "…ruleSubject reads the word off the thought's metadata");
   // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
   const two = hook("SMD-7, SMD-8", ["start smd-8", "and smd-7"]);
   assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" })

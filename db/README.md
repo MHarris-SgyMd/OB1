@@ -3835,15 +3835,17 @@ will do before it claims anything.
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
 records its own subjects when a rule finds them: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), alone;
-else a session summary's header tickets that one of the session's listed
-prompts names, in any case (not its title, which may be the harness's own and
-name the branch's ticket). The hook's header lists the tickets a session's
+else a session summary's header tickets: every one when the capture hook says
+the session's asks named them (`metadata.tickets_from` `asks`, the hook from
+1.8.0), else those one of the session's listed prompts names, in any case (not
+its title, which may be the harness's own and name the branch's ticket). The hook's header lists the tickets a session's
 prompts named, from every prompt, and its branch's or directory's only when
 they named none: a session on a branch may have done other work. The summary
 lists only 12 prompts, each cut at 200 characters, so where it shows them in
 part (`- … and N more`, or a prompt clipped) every listed ticket is keyed once
 a listed prompt names one, unless the header's own branch or project names
-them all, a header the branch's words may have given. A header listing a ticket
+them all, a header the branch's words may have given; that guess is for a
+summary without the hook's word, which says `place` for the branch's. A header listing a ticket
 of another team than the first ticket its own project and branch name is left
 to the model: the hook learns a team from each ticket-shaped word of a branch,
 so on `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it. A prompt

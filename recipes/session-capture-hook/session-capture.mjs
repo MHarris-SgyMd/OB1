@@ -1023,6 +1023,20 @@ function promptLabel(i) {
 const when = (iso) => iso.slice(0, 16).replace("T", " ");
 
 /**
+ * The tickets a summary's header lists, at most three, and where they came from: `asks`, those the episode's asks
+ * named; else `place`, those its branch or directory names; null for none (SMD-2013). The capture sends `from` as
+ * `metadata.tickets_from` (SMD-3306 PR 7a-3b-2): the brain's subject rule keys a session by its header's tickets, and
+ * the text alone cannot say which kind of list it holds — the summary lists only 12 asks, each cut at 200
+ * characters, and an ask in lower case before a team is known counts for none.
+ */
+export function headerTickets(s) {
+  const named = s.named ? [...s.named] : [];
+  if (named.length) return { tickets: named.slice(0, 3), from: "asks" };
+  const place = anchorOf(s.cwd, s.branch).slice(0, 3);
+  return { tickets: place, from: place.length ? "place" : null };
+}
+
+/**
  * Render the summary — the session's, or one episode's — as one thought.
  * Deterministic: the same transcript renders the same text, which is what the
  * fingerprint and the state compare; and an episode's text depends on nothing
@@ -1036,8 +1050,7 @@ export function renderSummary(s) {
   const prompts = distinctPrompts(s.prompts);
   // The tickets first (SMD-2013): those the asks named, else the one the branch
   // or the directory names — a search for the ticket lands on this episode.
-  const named = s.named ? [...s.named] : [];
-  const tickets = (named.length ? named : anchorOf(s.cwd, s.branch)).slice(0, 3).join(", ");
+  const tickets = headerTickets(s).tickets.join(", ");
   const head = ["Session summary", tickets, s.harness, project, s.branch ? `(${s.branch})` : "", day].filter(Boolean).join(" — ").replace(" — (", " (");
   const parts = [head];
   const title = oneLine(s.title || prompts[0] || "");
@@ -1676,10 +1689,13 @@ export async function postCapture(cfg, payload) {
   // summary from a derived one, and a redacted one from a clean one): the model
   // that wrote the summary if one did (SMD-2014), and the COUNT of secrets
   // blanked from it (SMD-2168) — the count alone, never the reasons or offsets,
-  // which the text's markers already name.
+  // which the text's markers already name; and where its header's tickets came
+  // from, the asks or the place (SMD-3306 PR 7a-3b-2), for the brain's subject
+  // rule, which the text alone leaves to guess.
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
+  if (payload.tickets_from) meta.tickets_from = payload.tickets_from;
   if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
@@ -1863,6 +1879,7 @@ export function prepare(hook, opts = {}) {
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
       ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
+      ...(headerTickets(cleaned.ep).from ? { tickets_from: headerTickets(cleaned.ep).from } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running

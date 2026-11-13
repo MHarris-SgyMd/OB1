@@ -7,9 +7,10 @@
  * same work: a property of each thought's own subject, not of a pair (SMD-3299). The subject is found in this order:
  *   1. `metadata`: the ticket the thought is filed under, `metadata.ticket` else `metadata.issue` (the fields
  *      node_state reads, 068), when it is a ticket id;
- *   2. `first_line`: a session summary's header tickets its listed prompts name, every one when the summary shows
- *      its prompts in part and its own branch and project do not name them all, none when it lists another team's
- *      ticket than its branch's (sessionHeaderTickets). The capture hook's header lists the tickets a session's prompts
+ *   2. `first_line`: a session summary's header tickets: every one when the capture hook says its asks named
+ *      them (metadata.tickets_from), else those its listed prompts name — without the hook's word, every one when
+ *      the summary shows its prompts in part and its own branch and project do not name them all — none when it
+ *      lists another team's ticket than its branch's (sessionHeaderTickets). The capture hook's header lists the tickets a session's prompts
  *      named, and the branch's or directory's only when they named none: that one is the session's work only when it
  *      says so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), each of its
@@ -197,7 +198,17 @@ const ASKED_MORE = /^- … and [0-9]+ more$/;
 const clipped = (line: string): boolean => line.endsWith("…") && line.length - 2 >= 199;
 
 /**
- * A session summary's header tickets: those the header lists that one of the session's listed prompts names, in any
+ * The metadata key the capture hook (recipes/session-capture-hook, from 1.8.0) sends with a session summary: where its
+ * header's tickets came from, `asks` (those the episode's asks named) or `place` (its branch's or directory's), which
+ * the text cannot say (SMD-3306 PR 7a-3b-2, after three review passes each found the rule's guesses at it wrong).
+ */
+export const TICKETS_FROM = "tickets_from";
+
+/**
+ * A session summary's header tickets. With the hook's word on where they came from (`from`, TICKETS_FROM): `asks`,
+ * every listed ticket, each named by an ask, shown or not; `place`, those a listed prompt names, as version 2 read a
+ * header. Without it — a summary from a hook before 1.8.0, or a brain that refused the key — the rest of this reading:
+ * those the header lists that one of the session's listed prompts names, in any
  * case, in the header's order, each once; and every one it lists when the summary shows its prompts in part — a
  * `- … and N more` line past the 12 it lists, or a prompt clipped at its 200 characters — and a listed prompt names one
  * of them; else none. The hook's header lists the tickets the session's prompts named, from every prompt, so a ticket a
@@ -226,7 +237,7 @@ const clipped = (line: string): boolean => line.endsWith("…") && line.length -
  * blank line between its parts; `Title: …`, passed over; `Asked (N prompts):` and its `- …` items, read. The first line
  * of any other shape ends the read, so the outcome's lines, and a `- ` line no `Asked` heads, never count.
  */
-export function sessionHeaderTickets(content: string): string[] {
+export function sessionHeaderTickets(content: string, from?: unknown): string[] {
   const lines = content.split(HOOK_LINE);
   const at = lines.findIndex((l) => l.trim() !== "");
   const listed = at < 0 ? undefined : HEADER_TICKETS.exec(lines[at])?.[1].split(", ");
@@ -240,6 +251,8 @@ export function sessionHeaderTickets(content: string): string[] {
   const home = [...rest.toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).find(isTicket);
   const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
   if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
+  // Where the list came from, when the hook says (TICKETS_FROM): the asks' tickets every one, each named by an ask.
+  if (from === "asks") return tickets;
   const anchored = tickets.every((t) => nameOf(t).test(rest));
   const named = new Set<string>();
   let asked = false, inPart = false;
@@ -251,7 +264,8 @@ export function sessionHeaderTickets(content: string): string[] {
       for (const t of tickets) if (nameOf(t).test(line)) named.add(t);
     } else break;
   }
-  return named.size === 0 ? [] : inPart && !anchored ? tickets : tickets.filter((t) => named.has(t));
+  // The place's, those a listed prompt names, as version 2 read a header; with no word, the guesses above.
+  return named.size === 0 ? [] : inPart && !anchored && from !== "place" ? tickets : tickets.filter((t) => named.has(t));
 }
 
 /**
@@ -264,7 +278,7 @@ export function sessionHeaderTickets(content: string): string[] {
 export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; by: Exclude<SubjectBy, "model"> } | null {
   const filed = metadataTicket(row.metadata);
   if (filed) return { keys: [`ticket:${filed}`], by: "metadata" };
-  const header = sessionHeaderTickets(row.content);
+  const header = sessionHeaderTickets(row.content, row.metadata?.[TICKETS_FROM]);
   return header.length ? { keys: header.map((t) => `ticket:${t}`), by: "first_line" } : null;
 }
 
