@@ -987,6 +987,19 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   assert(!cleaned.includes(KEY) && !cleaned.includes("dXNlcjpwYXNzd29yZA") && !cleaned.includes("sk-proj-0123") && !/[\n\x1b\x07\u200b]/.test(cleaned) && !/\u{E0041}/u.test(cleaned)
     && (cleaned.match(/\[redacted\]/g) ?? []).length >= 4 && /zerowidthtag/.test(cleaned),
     `the provider's words: the key and credential shapes redacted, one line, no escape or invisible character (${cleaned})`);
+  // The one table `check` and the reply's advice read (review pass 5), each status class: the key for a 401, 402 or 403
+  // (a 402 its account's credit), the model for a 404, the model and its width for a 400, 413 or 422, nothing more for
+  // a redirect or a body, which name the base.
+  const { checksFor, adviceFor } = await import("./core/provider-refusal.ts");
+  const KEYS = ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"];
+  const table: [number | undefined, string, string[], RegExp][] = [
+    [401, "provider_401", KEYS, /its key \(OB1_LLM_API_KEY/], [403, "provider_403", KEYS, /its key/], [402, "provider_402", KEYS, /credit of the account behind its key/],
+    [404, "provider_404", ["OB1_EMBEDDING_MODEL"], /embedding model it serves/], [400, "provider_400", ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"], /a shorter or plainer one may land/],
+    [422, "provider_422", ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"], /a setting it is sent with/], [307, "provider_307", [], /sets OB1_LLM_BASE_URL where it points/],
+    [200, "provider_body", [], /a proxy, a gateway/], [418, "provider_418", [], /^An operator checks OB1_LLM_BASE_URL; retrying/],
+  ];
+  const misclassed = table.filter(([status, reason, check, advice]) => JSON.stringify(checksFor(status, reason)) !== JSON.stringify(check) || !advice.test(adviceFor({ status, reason, setting: "OB1_LLM_BASE_URL" })));
+  assert(misclassed.length === 0, `checksFor and adviceFor read one class per status (wrong: ${JSON.stringify(misclassed.map((t) => t[0]))})`);
   // A credential's shape, not a word: a provider's "Basic authentication failed" is kept (review pass 5: it was redacted).
   const plainWords = providerSaid("Basic authentication failed; Bearer token missing", { key: KEY });
   assert(plainWords === "Basic authentication failed; Bearer token missing", `words that name no credential are kept (${plainWords})`);
