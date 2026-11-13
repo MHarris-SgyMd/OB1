@@ -762,12 +762,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // widens priority_assertions' close CHECK with `deleted`, adds the delete
   // triggers on thoughts and ob1_entities, the sweep and its helpers, and
   // replaces 016's merge_entities, refusing by name without 016, 116 or 133
-  // ([20ca]) — all recorded by the
+  // ([20ca]); 137 replaces 129's ten-argument agenda, ordering a tie by the
+  // count of open items each unblocks, refusing by name without 034, 068,
+  // 115, 122, 123 or 129 ([20cb]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 107, `030 is among the last one hundred and seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 108, `030 is among the last one hundred and eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6370,6 +6372,54 @@ console.log("\n[20ca] Migration 136: onto a populated brain at the file before i
   const closedBefore = await closed();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the136 });
   assert(await closed() === closedBefore && await reason(onLiving) === null, `a re-apply is a no-op: nothing more closed (${closedBefore})`);
+  await sql.close();
+}
+
+console.log("\n[20cb] Migration 137: onto a populated brain at the file before it — refused by name without 129's ten-argument agenda, nothing replaced; then applied: of two Mediums tied at 2.2, the one blocking 5 open tickets comes before the one blocking 3 whose key sorts first, under a nine-argument call too; a re-apply a no-op (SMD-4264)");
+{
+  const the137 = MIGRATIONS.find((f) => /^\d{3}_agenda_unblocks_order\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the137 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const W = { name: "upgrade-op", via: "open-brain", scope: "write" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ticket = async (issue: string, blockedBy: string | null) => {
+    const content = `upgrade 137: ${issue}`;
+    const meta = { source: "linear", issue, status: "Backlog", status_type: "backlog", project: "Upgrade 137", linear_updated_at: "2027-03-01T00:00:00Z" };
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify(meta)}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    if (blockedBy) await sql`SELECT record_source_links(${id}::uuid, 'linear', (${JSON.stringify([{ relation: "blocked_by", target: blockedBy }])}::text)::jsonb)`;
+  };
+  // Two Mediums with no date: SMD-9741 blocking 3 open tickets, SMD-9742 blocking 5.
+  await ticket("SMD-9741", null); await ticket("SMD-9742", null);
+  for (let i = 1; i <= 3; i++) await ticket(`SMD-97410${i}`, "SMD-9741");
+  for (let i = 1; i <= 5; i++) await ticket(`SMD-97420${i}`, "SMD-9742");
+  for (const issue of ["SMD-9741", "SMD-9742"]) {
+    await sql`SELECT assert_priority('ticket', ${issue}, 2, NULL, NULL, NULL, NULL, NULL, false, (${JSON.stringify(W)}::text)::jsonb)`;
+  }
+  type A = { items: { key: string; effective: number; unblocks: number }[] };
+  const read = async (args: 9 | 10) => ((args === 9
+    ? await sql`SELECT agenda('{"project": "Upgrade 137"}'::jsonb, NULL, 100, false, false, false, NULL, '2027-03-10T15:00:00Z', false) AS a`
+    : await sql`SELECT agenda('{"project": "Upgrade 137"}'::jsonb, NULL, 100, false, false, false, NULL, '2027-03-10T15:00:00Z', false, 'priority') AS a`)[0] as { a: A }).a;
+  const keys = (a: A) => a.items.map((i) => `${i.key}:${i.effective}:${i.unblocks}`).join(" ");
+  const body = async () => String((await sql`SELECT prosrc FROM pg_proc WHERE proname = 'agenda' AND pronargs = 10`)[0]?.prosrc ?? "");
+  const before = await read(10), bodyBefore = await body();
+
+  // Without 129's ten-argument agenda: refused by name, nothing replaced.
+  await sql`ALTER FUNCTION agenda(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text) RENAME TO agenda_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 }).then(() => "applied", (e: Error) => e.message);
+  const made = Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'agenda' AND pronargs = 10`)[0].c);
+  await sql`ALTER FUNCTION agenda_away(jsonb, jsonb, int, boolean, boolean, boolean, jsonb, timestamptz, boolean, text) RENAME TO agenda`;
+  assert(/^migration 137 needs 034, 068, 115, 122, 123 and 129 \(.*the ten-argument agenda\); this schema lacks one/.test(without) && made === 0 && await body() === bodyBefore,
+    `without 129's ten-argument agenda the file is refused by name, nothing replaced (${without.slice(0, 90)} | ${made})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });
+  const after = await read(10), afterNine = await read(9);
+  assert(keys(before) === "SMD-9741:2.2:3 SMD-9742:2.2:5" && keys(after) === "SMD-9742:2.2:5 SMD-9741:2.2:3" && keys(afterNine) === keys(after)
+      && /COALESCE\(\(k\.s->>'unblocks'\)::int, 0\) DESC/.test(await body()) && !/COALESCE\(\(k\.s->>'unblocks'\)::int, 0\) DESC/.test(bodyBefore),
+    `applied: the tie at 2.2 goes to the one blocking 5, which key order put second; a nine-argument call the same (${keys(before)} → ${keys(after)} | ${keys(afterNine)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });
+  assert(keys(await read(10)) === keys(after), "a re-apply is a no-op: the same read");
   await sql.close();
 }
 
