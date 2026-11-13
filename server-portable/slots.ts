@@ -406,16 +406,14 @@ function relayClient(env: Record<string, string | undefined>, log: (line: string
       const sentAt = backs;
       return new Promise((resolve, reject) => {
         if (signal.aborted) return reject(signal.reason);
-        let answered = false;
         const end = () => { waiting.delete(id); clearTimeout(timer); signal.removeEventListener("abort", onAbort); hold(-1); };
         // `retry`: the broker was away (the relay's grace, or no word in time), so the call asks again at the next back;
         // a base it does not broker, or a bad frame, is its own share for good (review pass 5).
         const own = (retry: boolean) => { end(); resolve({ own: true, retry, backs: sentAt }); };
-        const timer = setTimeout(() => { if (!answered) { send({ slot: "done", id }); own(true); } }, RELAY_ANSWER_MS);
+        const timer = setTimeout(() => { send({ slot: "done", id }); own(true); }, RELAY_ANSWER_MS);
         const onAbort = () => { send({ slot: "done", id }); end(); reject(signal.reason); };
         signal.addEventListener("abort", onAbort, { once: true });
         waiting.set(id, (word, why) => {
-          answered = true;
           if (word === "queued") { clearTimeout(timer); told(); return; }
           if (word === "own") return own(why === "away");
           end();
@@ -435,9 +433,11 @@ function relayClient(env: Record<string, string | undefined>, log: (line: string
  * database. Returns `uninstall`, which puts back the hook it replaced and ends
  * every wait, a call already running keeping its slot until it ends; and the
  * settings' problems, said through `log`, the defaults then standing in.
- * Under `off` no hook is set. `maxWaitS` is --max-wait's, DEFAULT_MAX_WAIT_S
- * unless given, or not a finite number. `connectS` bounds a connection's
- * opening and each statement, CONNECT_S unless a test asks for less.
+ * Under `off` no hook is set, unless the coordinator's relay is in (`env`,
+ * process.env unless given, says OB1_SLOT_RELAY=ipc). `maxWaitS` is
+ * --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a finite number.
+ * `connectS` bounds a connection's opening and each statement, CONNECT_S
+ * unless a test asks for less.
  */
 export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number; env?: Record<string, string | undefined> }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));
@@ -483,8 +483,8 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
     if (l.busy) waiting();
     return new Promise((resolve, reject) => {
       if (signal.aborted) return reject(signal.reason);
-      // Its age from the call's first ask (`since`), so a call asked again after the relay's `back` keeps its place in
-      // 2c-2's order rather than starting over (SMD-3379 PR 3b-1, review pass 5).
+      // Its age from the call's first ask (`since`), so a call asked again after the relay's `back` reaches --max-wait
+      // as if it had waited here all along, though it queues behind those already here (SMD-3379 PR 3b-1, review pass 5).
       const entry: Turn = { waiting, first, at: Math.min(since ?? Infinity, performance.now()), go: () => { signal.removeEventListener("abort", onAbort); resolve(); } };
       const onAbort = () => { l.queue.splice(l.queue.indexOf(entry), 1); reject(signal.reason); };
       signal.addEventListener("abort", onAbort, { once: true });
@@ -513,7 +513,8 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
    * The turn handed to the next call queued, or given up: the longest queued of those whose pass goes first or that
    * have waited --max-wait, else the longest queued (PR 2c-2). The queue is in the order the calls asked here, so the
    * first such is the longest queued here; a call asked again after the relay's `back` carries its age from its first
-   * ask (`since`, SMD-3379 PR 3b-1), which counts toward --max-wait, not its place. The waiter is never passed over: a call queued after it waits for its slot. A call
+   * ask (`since`, SMD-3379 PR 3b-1), which counts toward --max-wait, not its place. The waiter is never passed over:
+   * a call queued after it waits for its slot. A call
    * passed over that has queued RECHECK_MS or more is told it waits — not only once a waiter finds no slot free, which a
    * share with slots to spare never does (review pass 2: an extraction call behind seven consolidation workers waited
    * 10 s on the hook untold, N12's clock, the stall clock and a stop's sweep reading it as running) — and one passed

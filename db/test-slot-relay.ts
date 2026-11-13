@@ -4,8 +4,8 @@
  * broker (deploy/federated/broker.ts) started in this process on a free port, the relay (db/slot-relay.ts) as the
  * coordinator opens it, and passes as child processes started with an IPC channel, as supervise.ts starts them, each
  * installing server-portable/slots.ts's hook and making model calls through the seam. The children's database is one
- * nothing answers, so a call that takes its own share runs at once (the semaphore failing open), uncounted at the
- * broker — which is how a test tells `own` from a broker grant.
+ * nothing answers, so a call that takes its own share runs at once (the semaphore failing open); a test tells `own`
+ * from a broker grant by the relay's count (`state().own`).
  *
  *   bun test-slot-relay.ts
  */
@@ -53,7 +53,7 @@ async function call(m) {
   const stop = m.abortAfter ? AbortSignal.timeout(m.abortAfter) : undefined;
   const at = performance.now();
   try {
-    await withCallWaits({ waiting: () => send({ ev: "waiting", id: m.id }), running: () => {} }, () => asPass(m.pass ?? "extract", () =>
+    await withCallWaits({ waiting: () => send({ ev: "waiting", id: m.id }), running: () => {} }, () => asPass("extract", () =>
       modelCall({ type: "chat", model: "m", base: m.base ?? ${JSON.stringify(BASE)}, purpose: "test", cls: m.cls ?? "background", ...(stop ? { signal: stop } : {}) }, async () => {
         send({ ev: "run", id: m.id, ms: Math.round(performance.now() - at) });
         await new Promise((r) => ends.set(m.id, r));
@@ -63,7 +63,6 @@ async function call(m) {
 }
 process.on("message", (m) => {
   if (m?.cmd === "call") void call(m);
-  else if (m?.cmd === "raw") process.send(m.frame);
   else if (m?.cmd === "burst") {
     // n calls at once, each ending as it runs: how many ran, and the most at once.
     let ran = 0, now = 0, most = 0;
@@ -74,7 +73,6 @@ process.on("message", (m) => {
     }))).then(() => send({ ev: "burst", ran, most }));
   }
   else if (m?.cmd === "end") ends.get(m.id)?.();
-  else if (m?.cmd === "once") void call({ id: "once" }).then(() => send({ ev: "onceDone" }));
 });
 send({ ev: "ready" });
 // A follower stays up on its own handles (its database, its timers), not on the relay's channel: so does this one,
@@ -84,7 +82,7 @@ else if (process.argv[2] !== "none") setInterval(() => {}, 1000);
 `);
 
 type Ev = { ev: string; id?: string; line?: string; ms?: number };
-type Pass = { evs: Ev[]; port: RelayPort | null; proc: ReturnType<typeof Bun.spawn>; cmd(m: object): void; saw(ev: string, id?: string): boolean; wait(ev: string, id?: string, ms?: number): Promise<boolean> };
+type Pass = { evs: Ev[]; proc: ReturnType<typeof Bun.spawn>; cmd(m: object): void; saw(ev: string, id?: string): boolean; wait(ev: string, id?: string, ms?: number): Promise<boolean> };
 
 /** A pass started as supervise.ts starts one under a relay: a channel, OB1_SLOT_RELAY=ipc, the relay's frames to its port. */
 async function startPass(port: RelayPort | null, opts: { relayEnv?: boolean; mode?: string; raw?: string } = {}): Promise<Pass> {
@@ -98,7 +96,7 @@ async function startPass(port: RelayPort | null, opts: { relayEnv?: boolean; mod
   port?.attach((m) => { if (proc.exitCode === null && proc.signalCode === null) proc.send(m); });
   void proc.exited.then(() => port?.detach());
   const saw = (ev: string, id?: string) => evs.some((e) => e.ev === ev && (id === undefined || e.id === id));
-  const p: Pass = { evs, port, proc, cmd: (m) => proc.send(m), saw, wait: (ev, id, ms = 3000) => until(() => saw(ev, id), ms) };
+  const p: Pass = { evs, proc, cmd: (m) => proc.send(m), saw, wait: (ev, id, ms = 3000) => until(() => saw(ev, id), ms) };
   await p.wait("ready", undefined, 5000);
   return p;
 }
@@ -261,7 +259,7 @@ section("[4] the broker away: a grace, then own shares, and every call running c
   } finally { await relay.stop(); await b.stop(); }
 }
 
-section("[7] past the broker's limit: asks wait in the relay, never on their own share");
+section("[5] past the broker's limit: asks wait in the relay, never on their own share");
 await withBroker(registry({ slots: 1 }), async (b) => {
   const relay = relayTo(b, KEYS.stable);
   await upOf(relay);
@@ -277,7 +275,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await kill(a); await relay.stop();
 });
 
-section("[8] a broker frozen, a bad frame, a refused key, `off`");
+section("[6] a broker frozen, a bad frame, a refused key, `off`");
 {
   // The broker as a process of its own, frozen (SIGSTOP) with its socket open: the relay drops it once it has said
   // nothing for idle_s, and the waiting call runs on its own share after the grace.
@@ -351,7 +349,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await kill(off); await relay2.stop();
 });
 
-section("[5] what the broker does not broker, a live call, a stop while waiting");
+section("[7] what the broker does not broker, a live call, a stop while waiting");
 await withBroker(registry({ slots: 1 }), async (b) => {
   const relay = relayTo(b, KEYS.stable);
   await upOf(relay);
@@ -375,7 +373,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await kill(a); await relay.stop();
 });
 
-section("[6] no relay, a silent relay, a pass that exits");
+section("[8] no relay, a silent relay, a pass that exits");
 await withBroker(registry({ slots: 1 }), async (b) => {
   const relay = relayTo(b, KEYS.stable);
   await upOf(relay);
@@ -478,13 +476,14 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
   b = startBroker(reg, { port: port0, log: () => {} });
   try {
     await sleep(1500);
-    ok(!got.some((m) => m.slot === "own"), "a broker gone 2 s is found again within the 3 s grace: no ask takes its own share", got);
+    ok(!got.some((m) => m.slot === "own"), "a broker gone 2 s is found again within the grace: no ask takes its own share", got);
     ok(got.some((m) => m.slot === "back"), "and each pass is told the broker is back, so a call waiting on its own share asks again", got);
     ok(pool(b).background === 1 && pool(b).waiting.stable === 1, "the grant re-registered and the ask asked again", b.snapshot());
     port.detach();
   } finally { await relay.stop(); await b.stop(); }
 }
 
+section("[10] a link cut under a call, a broker that never answers, the broker's limit on live calls");
 {
   // The link cut under a running call (a TCP proxy between relay and broker): the broker keeps the grant, the relay's
   // held on its next socket takes it back, and the other brain's ask is never handed the slot meanwhile.
@@ -606,6 +605,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await relay.stop();
 });
 
+section("[11] the broker's list of bases; a refused key met after an outage");
 {
   // A stand-in broker: its hello names one base and it never answers an ask, or names none and answers each ask "no
   // server". The relay answers a base outside the list itself, at once; and turns a broker's "no server" into own.
@@ -641,7 +641,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
     // Before any hello the list is unknown: an unlisted ask parks and a call on one runs; at the hello the ask is
     // answered own and neither reaches the broker (review pass 8: each told `no server`, the running one each socket).
     away = true;
-    const r3 = startRelay({ url: `ws://127.0.0.1:${fake.port}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+    const r3 = startRelay({ url: `ws://127.0.0.1:${port0}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
     const p3 = r3.port("probe");
     const got3: { slot: string; id: string }[] = [];
     p3.attach((m) => got3.push(m));

@@ -12,7 +12,8 @@
 #               brains re-register the slots they hold (default 10);
 #   idle_s      a brain's connection silent this long is closed, its asks
 #               withdrawn and its slots kept 5 s for its return (default
-#               10, at least 8: a brain cut off holds no slot longer).
+#               10, at least 8): a brain cut off holds its slots no longer
+#               than this and those 5 s.
 # servers       each model server the brains share, by a name of your own:
 #   bases       every base URL a brain reaches it by (its OB1_LLM_BASE_URL,
 #               OB1_CHAT_BASE_URL…), each one server's;

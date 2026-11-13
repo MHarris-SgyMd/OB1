@@ -1005,7 +1005,7 @@ jobs:
       # SMD-3379 PR 3b-1: the coordinator's slot relay end to end — the host's
       # broker in the process, the relay, and passes started with a channel as
       # supervise.ts starts them, each through server-portable/slots.ts's hook.
-      # No database: a call on its own share runs at once, uncounted.
+      # No database: a call on its own share runs at once, its semaphore failing open.
       - name: The coordinator's slot relay (no database)
         working-directory: db
         run: bun test-slot-relay.ts

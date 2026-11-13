@@ -25,7 +25,8 @@
 //                                     one its call held before it connected: after the broker's restart, or its own
 //                                     socket's drop (counted as it is, past the room if need be; said once a socket
 //                                     outside the warm-up)
-//                   {op:"done", id}   the call ended, or the ask is withdrawn; ignored for an id not held (lapsed)
+//                   {op:"done", id}   the call ended, or the ask is withdrawn; a grant kept from its closed socket
+//                                     given back; ignored for an id neither held nor kept (lapsed)
 //                   {op:"ping", id}   answered {op:"pong", id}: a brain's own liveness check (PR 3b-1's relay)
 //                   {op:"synced", id} every call still running re-registered (`held`): that relay's kept grants (ids
 //                                     `<id>:…`) no held named are given back now, not at KEEP_MS, and those of a relay
@@ -66,7 +67,8 @@
 //                fewer than `slots`: a live call in flight, any brain's, takes background's room.
 //   whose turn   the waiting brain that has had the least background slot time there — remembered with a half-life of
 //                USE_HALF_LIFE_S (300 s), its grants' running time added, and a brain coming to a pool where others
-//                are at work — asking, or back with calls running (`held`) — starting level with the least of them — ties going round from the brain served last: two
+//                are at work — asking, or back with calls running (`held`) — starting level with the least of them —
+//                ties going round from the brain served last: two
 //                backlogged brains split the slot time whatever the room, about half each for calls well under the
 //                half-life (a call is never cut short: one of 71 s beside 50 ms calls has 0.54, of 300 s 0.64); a
 //                grant taken back at lease_s is charged all of it; a brain with one call at a time has less than
@@ -135,6 +137,8 @@ const YAML_WORDS = new Set(["y", "n", "yes", "no", "on", "off", "true", "false",
 const isMapping = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isInt = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi;
 const isNum = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+/** The relay an id is of: its prefix to the first ":", which that relay's `synced` named; "" for none. */
+const relayOf = (id: string): string => (id.includes(":") ? id.slice(0, id.indexOf(":")) : "");
 
 /** A model server's base as a share knows it: server-portable/slots.ts's normalisedBase, the same words (test-broker.ts holds them equal). */
 export function normalisedBase(base: string): string {
@@ -231,12 +235,12 @@ type Conn = {
   id: number; brain: Brain; brainAt: number; heldLate: boolean; waiting: number; sent: (m: object) => void; held: Map<string, Ask | Grant>;
   /** When it was last heard (performance.now, real time even under a test's clock): a frame or a pong. */
   heardAt: number;
+  /** heardAt on the test's clock, which charges slot time. */
+  heardClock: number;
   /** Ends the socket at once (its close handler runs): the broker's own liveness. */
   end: () => void;
   /** The id prefix of the relay that sent `synced` on it, once it has. */
   syncedPrefix?: string;
-  /** heardAt on the test's clock, which charges slot time. */
-  heardClock: number;
   /** When the brain's newer socket asked it whether it lives (a ping at that socket's open). */
   probedAt?: number;
   closed?: boolean;
@@ -294,13 +298,14 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const twinsSeen = reg.brains.map(() => 0);
   /** The relays speaking on a brain's open sockets; two at once marks it twins, said once. */
   const noteTwins = (b: number): Set<string> => {
-    const speaking = new Set([...connsBy[b]].map((c) => c.syncedPrefix).filter((x): x is string => !!x));
+    const relays = (cs: Conn[]) => new Set(cs.map((c) => c.syncedPrefix).filter((x): x is string => !!x));
+    const speaking = relays([...connsBy[b]]);
     // Twins only by sockets alive by the probe: a coordinator swapped behind a half-open socket is no second coordinator
     // (review pass 7: its old socket, not yet probed out, marked the brain twins for the broker's life). The mark lapses
     // TWIN_LAPSE_MS after two live relays were last seen — looked for each tick of the broker's liveness, not only at
     // a socket's event (review pass 8: twins steady 60 s lapsed at one's close, its grant given back, 2 calls on 1 slot)
     // — so a misconfiguration put right does not pin the brain.
-    const live = new Set([...connsBy[b]].filter((c) => !(c.probedAt !== undefined && c.heardAt < c.probedAt)).map((c) => c.syncedPrefix).filter((x): x is string => !!x));
+    const live = relays([...connsBy[b]].filter((c) => !(c.probedAt !== undefined && c.heardAt < c.probedAt)));
     const now = performance.now();
     if (live.size > 1) {
       if (!twins[b]) log(`brain ${reg.brains[b].name}: two relays speak on its key at once — two coordinators share it, a misconfiguration; each keeps its own grants, and each reconnect may count a call twice for a moment`);
@@ -438,7 +443,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
 
   const release = (x: Ask | Grant) => {
     if (x.conn.held.get(x.id) === x) x.conn.held.delete(x.id);
-    if (x.kind === "ask") { if (x.pool.queues[x.conn.brainAt].delete(x)) x.conn.waiting--; prune(x.pool); return; }
+    if (x.kind === "ask") { withdraw(x); prune(x.pool); return; }
     if (x.live) { if (!x.pool.live.delete(x)) return; x.pool.liveBy[x.conn.brainAt]--; } else {
       if (!x.pool.bg.delete(x)) return;
       const now = clock();
@@ -469,7 +474,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       conn.syncedPrefix = id;
       const speaking = noteTwins(conn.brainAt);
       for (const oid of [...keptBy[conn.brainAt].keys()]) {
-        const pre = oid.includes(":") ? oid.slice(0, oid.indexOf(":")) : "";
+        const pre = relayOf(oid);
         if (pre === id || (!twins[conn.brainAt] && !speaking.has(pre))) freeKept(conn.brainAt, oid);
       }
       return;
@@ -487,12 +492,12 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const server = serverOf.get(normalisedBase(m.base));
     if (!server) { conn.sent({ op: "no", id, why: "server" }); return; }
     let p = poolFor(server, model);
-    // A `held` outside the warm-up — a brain back after its socket dropped, its calls still running — is counted as
-    // it is: those calls run whether counted or not. Said once a socket, since it can take background past its room.
-    if (m.op === "held" && !warming() && !conn.heldLate) { conn.heldLate = true; log(`brain ${conn.brain.name} (socket ${conn.id}) re-registers held slots outside the warm-up: counted, past the room if need be`); }
+    const adopt = (g: Grant) => { g.conn = conn; conn.held.set(id, g); conn.sent({ op: "go", id }); };
     if (m.op === "held") {
+      // A `held` outside the warm-up — a brain back after its socket dropped, its calls still running — is counted as
+      // it is: those calls run whether counted or not. Said once a socket, since it can take background past its room.
+      if (!warming() && !conn.heldLate) { conn.heldLate = true; log(`brain ${conn.brain.name} (socket ${conn.id}) re-registers held slots outside the warm-up: counted, past the room if need be`); }
       const live = cls === "live";
-      const adopt = (g: Grant) => { g.conn = conn; conn.held.set(id, g); conn.sent({ op: "go", id }); };
       // Its own grant back, kept since its socket closed: taken up again, not counted twice — if it is still counted
       // (the lease's sweep may have taken it: then it lapsed); one of another pool or class given back, not doubled.
       const o = keptBy[conn.brainAt].get(id)?.g;
@@ -526,7 +531,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     for (const c of connsBy[conn.brainAt]) {
       if (c === conn) continue;
       const x = c.held.get(id);
-      if (x?.kind === "grant" && x.pool === p && !x.live) { c.held.delete(id); x.conn = conn; conn.held.set(id, x); conn.sent({ op: "go", id }); return; }
+      if (x?.kind === "grant" && x.pool === p && !x.live) { c.held.delete(id); adopt(x); return; }
       if (x?.kind === "ask" && x.pool === p) { olderAt = Math.min(olderAt, x.at); withdraw(x); }
     }
     // A brain coming to a pool where others are at work starts level with the least of them, not at nothing: else it
@@ -610,17 +615,16 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         // Its grants kept counted a while, for the brain's next socket to take back (`held`, same id), else given back.
         const keep = keepMs > 0 && !stopping;
         // A relay already synced on a newer socket has named every call it still runs there: its grants left here are
-        // given back, not kept (review pass 4).
-        const synced = [...noteTwins(conn.brainAt)];
-        // A brain whose relay has synced on another socket keeps nothing of this one: its own grants are there, and a
-        // replaced coordinator's never come back (review pass 5).
+        // given back, not kept (review pass 4); and a brain whose relay has synced there keeps nothing of this socket, a
+        // replaced coordinator's never coming back (review pass 5).
+        const synced = noteTwins(conn.brainAt);
         const token = ++keepings;
         let kept = 0;
         for (const x of grants) {
           // Given back now: no keeping; a socket the probe found dead; or the brain's relay synced on a newer socket — any
           // relay, but for twins only the grant's own (review pass 6).
-          const pre = x.id.includes(":") ? x.id.slice(0, x.id.indexOf(":")) : "";
-          if (!keep || conn.probeEnded || (twins[conn.brainAt] ? synced.includes(pre) : synced.length > 0)) { release(x); continue; }
+          const pre = relayOf(x.id);
+          if (!keep || conn.probeEnded || (twins[conn.brainAt] ? synced.has(pre) : synced.size > 0)) { release(x); continue; }
           const mine = keptBy[conn.brainAt];
           freeKept(conn.brainAt, x.id);
           mine.set(x.id, { g: x, token });
@@ -713,7 +717,7 @@ function selfCheck() {
     ["a base is normalised: host lower-cased, trailing slashes gone", ok(base.replace("http://host.containers.internal:11434/v1", "HTTP://Host.Containers.Internal:11434/v1//"))?.servers[0].bases[0] === "http://host.containers.internal:11434/v1"],
     ["a reserve of one slot's server defaults to 1, and 0 is allowed", ok(base.replace("slots: 3", "slots: 1"))?.servers[0].reserve === 1 && ok(base.replace("slots: 3", "slots: 3\n    reserve: 0"))?.servers[0].reserve === 0],
     ["a reserve past the slots is refused", /reserve: the slots background never takes/.test(problems(base.replace("slots: 3", "slots: 3\n    reserve: 4")))],
-    ["slots outside 1..16 are refused", [0, 17, 2.5, "3"].every((s) => /slots: its parallel setting/.test(problems(base.replace("slots: 3", `slots: ${JSON.stringify(s)}`))))],
+    ["slots not a whole number from 1 to 16 are refused", [0, 17, 2.5, "3"].every((s) => /slots: its parallel setting/.test(problems(base.replace("slots: 3", `slots: ${JSON.stringify(s)}`))))],
     ["a base twice, in one server or two, is refused", /named twice/.test(problems(base.replace("bases: [http://host.containers.internal:11434/v1]", "bases: [http://host.containers.internal:11434/v1, http://host.containers.internal:11434/v1/]"))) && /servers.ollama's too/.test(problems(base.replace("brains:", "  other:\n    bases: [http://host.containers.internal:11434/v1]\n    slots: 1\nbrains:")))],
     ["a base with credentials, a query or no http is refused", ["http://u:p@h:1/v1", "http://h:1/v1?x=1", "ftp://h/v1", "not a url"].every((b) => /is no http\(s\) URL/.test(problems(base.replace("http://host.containers.internal:11434/v1", b))))],
     ["the key itself, in place of its hash, is refused by name", /that is the key itself/.test(problems(base.replace(h("a"), `${KEY_PREFIX}${h("b")}`)))],

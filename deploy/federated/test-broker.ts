@@ -606,7 +606,7 @@ await withBroker(registry(), async (b) => {
   ok((await fetch(`http://127.0.0.1:${b.port}/health`)).ok, "and the broker answers on");
 });
 
-section("[13] a closed socket's grants kept for the brain's return; a brain back with calls running starts level");
+section("[13] a closed socket's grants kept for the brain's return, moved between its sockets, freed at synced; silent and dead sockets; twins; a brain back with calls running starts level");
 await withBroker(registry({ slots: 2, reserve: 0 }), async (b, lines) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   ask(s, "g1", "background"); ask(s, "g2", "background");
@@ -789,7 +789,6 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 8 }), async (b) => {
 
 /** A brain's socket that stops answering when told: a raw client that never answers pings, its frames sent by hand. */
 async function rawBrain(b: Broker, key: string) {
-  const net = await import("node:net");
   const frame = (text: string) => { const body = Buffer.from(text), mask = Buffer.from([1, 2, 3, 4]); return Buffer.concat([Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]), mask, Buffer.from(body.map((x, i) => x ^ mask[i % 4]))]); };
   const sock = net.connect(b.port, "127.0.0.1");
   let got = "", closed = false;
@@ -899,7 +898,7 @@ await withBroker(registry({ slots: 1, reserve: 0, idle: 30 }), async (b) => {
   ask(c, "c1", "background"); await c.next("queued", "c1");
   const t0 = performance.now();
   const s = await connect(b, KEYS.third);
-  ok(!!(await c.next("go", "c1", 4500)) && performance.now() - t0 < 4500, `a probe-ended socket's grant is given back at its end, not kept ${5} s (${Math.round(performance.now() - t0)} ms)`, performance.now() - t0);
+  ok(!!(await c.next("go", "c1", 4500)) && performance.now() - t0 < 4500, `a probe-ended socket's grant is given back at its end, not kept 5 s (${Math.round(performance.now() - t0)} ms)`, performance.now() - t0);
   // Opens coming fast do not keep a dead socket alive: a second dead socket, new sockets opened every 1.5 s.
   const dead = await rawBrain(b, KEYS.third);
   dead.send({ op: "ask", id: "h", base: BASE, model: "qwen3:8b", cls: "background" });

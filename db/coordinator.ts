@@ -192,8 +192,9 @@ export const OWNED: ReadonlySet<string> = new Set(Object.values(CHILDREN).flatMa
 export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT", "OB1_SLOT_BROKER_URL", "OB1_SLOT_BROKER_KEY"];
 
 /**
- * The relay's settings, where both are set: the broker's WebSocket URL and the brain's key to it; else null, and no
- * child is started with a channel. A URL that is no ws:// or wss:// one is said, and null. Pure.
+ * The relay's settings, where both are set: the broker's WebSocket URL and the brain's key to it; null where neither
+ * is, and no child is started with a channel; a `problem` to say where one is unset or the URL is no ws:// or wss://
+ * one, and no relay either. Pure.
  */
 export function relaySettings(env: Record<string, string | undefined>): { url: string; key: string } | { problem: string } | null {
   const url = env.OB1_SLOT_BROKER_URL?.trim(), key = env.OB1_SLOT_BROKER_KEY?.trim();
