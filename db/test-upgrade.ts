@@ -764,12 +764,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // replaces 016's merge_entities, refusing by name without 016, 116 or 133
   // ([20ca]); 137 replaces 129's ten-argument agenda, ordering a tie by the
   // count of open items each unblocks, refusing by name without 034, 068,
-  // 115, 122, 123 or 129 ([20cb]) — all recorded by the
+  // 115, 122, 123 or 129 ([20cb]); 138 replaces 133's two writers, their answers naming
+  // the item and every statement closed, and adds
+  // ob1_priority_closed_json, refusing by name without 115, 116, 117,
+  // 122 or 133 ([20cc]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 108, `030 is among the last one hundred and eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 109, `030 is among the last one hundred and nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6420,6 +6423,136 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
     `applied: the tie at 2.2 goes to the one blocking 5, which key order put second; a nine-argument call the same (${keys(before)} → ${keys(after)} | ${keys(afterNine)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the137 });
   assert(keys(await read(10)) === keys(after), "a re-apply is a no-op: the same read");
+  await sql.close();
+}
+
+console.log("\n[20cc] Migration 138: onto a populated brain at the file before it — refused by name without 133's ob1_priority_lock_key, nothing made; then applied: a key's two statements left open at 137 on a ticket and its row, a clear naming the ticket lists both, newest first, and names the ticket; a set closing two lists both; a set racing a delete that closed the key's statement replaces nothing, and a restatement of the one left open is unchanged; a re-apply a no-op (SMD-4238)");
+{
+  const the138 = MIGRATIONS.find((f) => /^\d{3}_priority_replies_name_every_close\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the138 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const OP = JSON.stringify({ name: "upgrade-op", via: "open-brain", scope: "write" });
+  type Answer = { outcome: string; item?: { kind: string; key: string }; closed?: { id: string; item: { kind: string } }[]; assertion: { id: string } | null; replaced?: { id: string } | null };
+  // A ticket as board-sync writes it: its own row, a linear source row (053).
+  const ticketRow = async (issue: string) => {
+    const content = `upgrade 138: ${issue}`;
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    return id;
+  };
+  // A key's statement written raw, as a late row or a by-name statement leaves two open in one pool.
+  const raw = async (kind: string, key: string, level: number) =>
+    String((await sql`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+      VALUES (${kind}, ${key}, ${level}::smallint, 'upgrade-op', (SELECT canonical_agent_id FROM ob1_agents WHERE label = 'upgrade-op'), 'operator', 'operator', 'write', false, 1, clock_timestamp()) RETURNING id`)[0].id);
+  const clear = async (kind: string, key: string) => ((await sql`SELECT clear_priority(${kind}, ${key}, (${OP}::text)::jsonb) AS r`)[0] as { r: Answer }).r;
+  const put = async (kind: string, key: string, level: number) =>
+    ((await sql`SELECT assert_priority(${kind}, ${key}, ${level}::int, NULL, NULL, NULL, NULL, NULL, false, (${OP}::text)::jsonb) AS r`)[0] as { r: Answer }).r;
+
+  // At 137: a key's two statements open in one pool, on the ticket and its row; the clear names the newest alone.
+  const row = await ticketRow("SMD-9997");
+  await raw("ticket", "SMD-9997", 1);
+  const onRow = await raw("thought", row, 5);
+  const at137 = await clear("ticket", "SMD-9997");
+
+  // Without 133's ob1_priority_lock_key: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_priority_lock_key(text, text) RENAME TO ob1_priority_lock_key_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the138 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_priority_lock_key_away(text, text) RENAME TO ob1_priority_lock_key`;
+  const made = async () => (await sql`SELECT to_regprocedure('ob1_priority_closed_json(uuid[])') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 138 needs 133 \(ob1_priority_lock_key\); this schema lacks it/.test(without) && !(await made()),
+    `without 133's ob1_priority_lock_key the file is refused by name; nothing made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the138 });
+  const t1 = await raw("ticket", "SMD-9997", 2);
+  const r1 = await raw("thought", row, 4);
+  const both = await clear("ticket", "smd-9997");
+  const t2 = await raw("ticket", "SMD-9997", 3);
+  const r2 = await raw("thought", row, 2);
+  const setBoth = await put("thought", row, 1);
+  assert(at137.outcome === "cleared" && at137.closed === undefined && at137.item === undefined && at137.assertion?.id === onRow
+         && both.outcome === "cleared" && both.item?.kind === "ticket" && both.item?.key === "SMD-9997" && both.closed?.map((c) => c.id).join() === `${r1},${t1}`
+         && setBoth.outcome === "asserted" && setBoth.closed?.map((c) => c.id).join() === `${r2},${t2}` && setBoth.replaced?.id === r2 && await made(),
+    `applied: a clear naming the ticket lists the key's statements on the row and the ticket, newest first, and names the ticket as 116 keys it; a set lists both it closed (at 137 the clear named the newest alone: ${JSON.stringify(Object.keys(at137))})`);
+
+  // A set run while another session's delete_thought holds the deleted thought's statements' row locks, uncommitted,
+  // and answered once the delete commits (a raise read as a value). Probed only once the set waits on a row lock in its
+  // own session — one connection, whose backend pid it reads, pg_locks being the cluster's (review pass 3) — never on a
+  // guess at its timing.
+  const setPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  const underDelete = async (deleted: string, set: () => Promise<Answer>, what: string): Promise<Answer> => {
+    const other = new SQL({ url: URL_, max: 1 });
+    let answer: Promise<Answer> = Promise.resolve({ outcome: "never ran", assertion: null });
+    try {
+      await other.begin(async (tx) => {
+        await tx`SELECT delete_thought(${deleted}::uuid, (${OP}::text)::jsonb)`;
+        answer = set().catch((e: Error): Answer => ({ outcome: `raised: ${e.message.split("\n")[0]}`, assertion: null }));
+        let waiting = false;
+        for (let i = 0; i < 200 && !waiting; i++) {
+          waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${setPid} AND locktype IN ('transactionid', 'tuple')`)[0].n) > 0;
+          if (!waiting) await Bun.sleep(50);
+        }
+        if (!waiting) throw new Error(`[20cc] ${what} never waited on a row lock within 10 s`);
+      });
+      return await answer;
+    } finally {
+      await other.close();
+    }
+  };
+  const reasonOf = async (id: string) => ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${id}::uuid`)[0] as { close_reason: string | null }).close_reason;
+
+  // A delete racing a set (review pass 1): the delete's trigger closes the key's statement on the thought, and the set,
+  // having read it open, waits on its row lock. Once the delete commits, the statement is no longer open: the set
+  // replaces nothing and lists nothing, rather than naming a statement it never closed as `replaced`. The set's own
+  // statement on the deleted thought is the gap 136 left to ob1_close_orphan_priorities (the maintainer kept it, review
+  // pass 2), not this row's to hold.
+  const raced = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 138: a note deleted under a set') RETURNING id`)[0].id);
+  const onRaced = (await put("thought", raced, 2)).assertion!.id;
+  const raceAnswer = await underDelete(raced, () => put("thought", raced, 4), "the set");
+  const racedReason = await reasonOf(onRaced);
+  assert(raceAnswer.outcome === "asserted" && raceAnswer.replaced === null && JSON.stringify(raceAnswer.closed) === "[]" && racedReason === "deleted",
+    `a set racing a delete that closed the key's statement replaces nothing and lists nothing: the statement is the delete's, closed as deleted (${raceAnswer.outcome}, replaced ${JSON.stringify(raceAnswer.replaced ?? null)?.slice(0, 40)}, ${racedReason})`);
+
+  // The same race with two statements in one pool (review pass 2): the key's statement on a ticket and a newer one on
+  // its row, the row deleted under a set restating the ticket's word for word. The set waits on the row's statement,
+  // which the delete closes; the one left open is the same statement, so the set is unchanged, writing nothing,
+  // rather than counting the two it read before the lock and replacing the ticket's with a copy of itself.
+  const row98 = await ticketRow("SMD-9998");
+  const onTicket98 = (await put("ticket", "SMD-9998", 3)).assertion!.id;
+  await raw("thought", row98, 5);
+  const restated = await underDelete(row98, () => put("ticket", "SMD-9998", 3), "the restatement");
+  const ticketReason = await reasonOf(onTicket98);
+  assert(restated.outcome === "unchanged" && restated.assertion?.id === onTicket98 && ticketReason === null,
+    `a restatement racing a delete that closed the key's other statement in the pool is unchanged: the one left open says the same, and stays (${restated.outcome}, ${ticketReason})`);
+
+  // And with the older statement the one closing (review pass 3): the key's newest on a ticket, an older one on its
+  // row, the row deleted under a restatement of the ticket's. The set locks every statement of the key's still open,
+  // so it waits on the row's, which the delete closes; then the one left is the same words, and the set is unchanged.
+  // Locking the newest alone (pass 2's), the set counted the row's still open, waited only in its UPDATE, and wrote a
+  // copy of the ticket's. The fixture: the ticket's statement as the writer makes it, the row's written raw after it,
+  // then the ticket's copied raw (its words exactly) as the newest — the first closed before, as 116's index keeps one
+  // open an item and maker — so the row's and the copy are both open.
+  const row96 = await ticketRow("SMD-9996");
+  const first96 = (await put("ticket", "SMD-9996", 3)).assertion!.id;
+  await raw("thought", row96, 5);
+  const onTicket96 = crypto.randomUUID();
+  await sql`UPDATE priority_assertions SET closed_at = clock_timestamp(), close_reason = 'replaced', closed_by = ${onTicket96}::uuid WHERE id = ${first96}::uuid`;
+  await sql`INSERT INTO priority_assertions (id, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
+      maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+    SELECT ${onTicket96}::uuid, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
+           maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, clock_timestamp()
+      FROM priority_assertions WHERE id = ${first96}::uuid`;
+  const restated96 = await underDelete(row96, () => put("ticket", "SMD-9996", 3), "the restatement of the newest");
+  const ticket96Reason = await reasonOf(onTicket96);
+  assert(restated96.outcome === "unchanged" && restated96.assertion?.id === onTicket96 && ticket96Reason === null,
+    `a restatement racing a delete of the key's older statement in the pool is unchanged too: every open one is locked before the count (${restated96.outcome}, ${ticket96Reason})`);
+
+  // A re-apply is a no-op: the writers answer as before.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the138 });
+  const again = await clear("thought", row);
+  assert(again.outcome === "cleared" && again.closed?.map((c) => c.id).join() === setBoth.assertion?.id && again.item?.key === row,
+    `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
   await sql.close();
 }
 

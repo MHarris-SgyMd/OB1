@@ -30,6 +30,12 @@ export type Refusal =
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
   | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }
+  // The embedding call failed where nothing could be done without it (SMD-2892): a search, capture or edit whose
+  // provider answered an error that is no outage (a credential refused, a model not there: final), or an edit whose
+  // provider did not answer (retryable; a capture lands without the vector, a search answers by its literals).
+  // `retryable` is providerDown's (embed.ts providerFault); `base`, masked, only to a key that can read (SMD-2284's
+  // rule for a capture's provider); `provider`, the provider's own capped words, to the text alone.
+  | { code: "EMBEDDING_PROVIDER_ERROR"; retryable: boolean; reason: string; detail: string; status?: number; setting: "OB1_LLM_BASE_URL"; check: string[]; base?: string; provider?: string }
   // capture_thought's shapes, refused before any model call (032, SMD-2014).
   | { code: "REFUSED_SUPERSEDES_SHAPE"; retryable: false; value: string; orNull: boolean } // `supersedes` is not a thought id (update_thought's also takes null)
   | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id
@@ -177,6 +183,9 @@ const FACTS: Facts = {
   REFUSED_CURSOR: (r) => ({ ...(r.reason ? { reason: r.reason } : {}), ...(r.sort ? { sort: r.sort } : {}), ...(r.made ? { made: r.made } : {}) }),
   // The provider's marker word and what was matched: the endpoint and the literals are in the text.
   EMBEDDING_PROVIDER_UNAVAILABLE: (r) => ({ reason: r.reason, matched: r.matched }),
+  // The marker word, the provider's status and the setting to check: the endpoint (a reader's alone) and the
+  // provider's own words ride the text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does — a URL is no token.
+  EMBEDDING_PROVIDER_ERROR: (r) => ({ reason: r.reason, ...(r.status !== undefined ? { status: r.status } : {}), setting: r.setting, check: r.check }),
   REFUSED_SUPERSEDES_SHAPE: none,
   REFUSED_DERIVED_FROM_SHAPE: none,
   // Which rule, and the key, so a client reading values knows what to drop
@@ -260,7 +269,7 @@ const FACTS: Facts = {
 
 /** A refusal as a value: its code, whether a retry can help, and its declared facts (FACTS). */
 export function refusalValue(r: Refusal): Record<string, unknown> {
-  return { code: r.code, retryable: r.retryable, ...(FACTS[r.code] as (r: Refusal) => Record<string, unknown>)(r) };
+  return { code: r.code, retryable: r.retryable, ...((FACTS[r.code] ?? none) as (r: Refusal) => Record<string, unknown>)(r) };
 }
 
 /**

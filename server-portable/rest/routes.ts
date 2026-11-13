@@ -20,7 +20,9 @@ export type { CallOptions } from "../core/index.ts";
  * conflicts, 422 a reference to nothing or a refusal the store named that
  * this server does not know (REFUSED), 501 a mode not built, 503 retry —
  * with Retry-After when the refusal is retryable, without it when the server waits
- * on an operator (CLAIM_UNATTRIBUTED's and PRIORITY_UNATTRIBUTED's set-up causes).
+ * on an operator (CLAIM_UNATTRIBUTED's and PRIORITY_UNATTRIBUTED's set-up causes,
+ * and EMBEDDING_PROVIDER_ERROR's provider answering an error: its key, its model,
+ * its address, a gateway's body, or a setting it will not take).
  */
 export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
   NOT_FOUND: 404,
@@ -30,6 +32,7 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_CURSOR: 400,
   REFUSED_THREAD_INPUT: 400,
   EMBEDDING_PROVIDER_UNAVAILABLE: 503,
+  EMBEDDING_PROVIDER_ERROR: 503,
   REFUSED_SUPERSEDES_SHAPE: 400,
   REFUSED_DERIVED_FROM_SHAPE: 400,
   REFUSED_METADATA_SHAPE: 400,
