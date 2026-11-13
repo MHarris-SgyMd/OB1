@@ -6619,6 +6619,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   const errOf = (e: unknown) => String((e as { errno?: string }).errno ?? (e as Error).message);
   let capture: Promise<string> = Promise.resolve("not started"), opened: Promise<string> = Promise.resolve("not started");
   const settled: string[] = [];
+  let waitedThenRefused = false;
   await sql.begin(async (tx) => {
     await tx`SELECT forget_thought(${r}::uuid, (${ACT}::text)::jsonb)`;
     capture = other`SELECT upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb) AS r`
@@ -6626,8 +6627,10 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
     opened = other`SELECT open_item('a race item', NULL, NULL, ${r}::uuid, NULL, false, (${ACT}::text)::jsonb) AS r`
       .then((x) => JSON.stringify((x[0] as { r: unknown }).r), errOf).finally(() => settled.push("item"));
     await new Promise((res) => setTimeout(res, 400));
+    // Read before the commit: once it lands the waiters are released, and on a fast runner they settle before the
+    // line after the transaction runs (CI, first push).
+    waitedThenRefused = settled.length === 0;
   });
-  const waitedThenRefused = settled.length === 0;
   const [cap, item] = [await capture, await opened];
   await other.close();
   const leftR = (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE content LIKE 'upgrade 139: the race%') AS t,
