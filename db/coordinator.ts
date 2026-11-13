@@ -83,6 +83,9 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
 import { MIN_RELAY_KEY, RELAY_PATH, RELAY_PORT, serveRelay, startRelay, type Relay, type RelayListener } from "./slot-relay.ts";
+
+/** The longest the coordinator's first `synced` waits for the api's socket: within the broker's KEEP_MS (5 s), above the api's 1 s redial. */
+export const SYNC_WAIT_MS = 2500;
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
 import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S, rowWriter } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
@@ -504,7 +507,9 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const listenKey = env.OB1_SLOT_RELAY_KEY?.trim() || null;
   const rs = plan.children.length || listenKey ? relaySettings(env) : null;
   if (rs && "problem" in rs) writer.err(rs.problem);
-  relay = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err, onChange: () => row.changed() }) : null;
+  // With the api's sockets listened for, the first hello's `synced` waits for the api's calls to be named (review pass 1 of 3b-2).
+  const listening = !!listenKey && listenKey.length >= MIN_RELAY_KEY;
+  relay = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err, onChange: () => row.changed(), ...(listening ? { syncWaitMs: SYNC_WAIT_MS } : {}) }) : null;
   if (relay && plan.children.length) writer.err(`coordinator: the passes ask the host's slot broker through this process (OB1_SLOT_BROKER_URL), their own shares while it is away`);
   listener = listenKey ? listenForApi(relay, listenKey, opts.relayPort ?? RELAY_PORT, writer.err, () => row.changed()) : null;
   const children = plan.children.map((child) => {

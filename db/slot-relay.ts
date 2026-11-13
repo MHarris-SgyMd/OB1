@@ -77,7 +77,15 @@ export type RelayPort = {
 /** What a test reads of the relay, and the coordinator's row (`broker` and `since`, the start of that state). */
 export type RelayState = { broker: "up" | "down"; boot: string | null; since: number; asks: number; parked: number; grants: number; own: number };
 
-export type Relay = { port(child: string): RelayPort; state(): RelayState; stop(): Promise<void> };
+export type Relay = {
+  port(child: string): RelayPort;
+  state(): RelayState;
+  stop(): Promise<void>;
+  /** An api's socket opened (serveRelay): a `synced` held for the api's calls is sent once they are named. */
+  apiBack?(): void;
+};
+/** How long after an api's socket opens its `running` frames are taken as named: they follow its open at once. */
+export const API_NAMED_MS = 200;
 
 type Entry = {
   child: string;
@@ -114,7 +122,7 @@ export function childFrame(m: unknown): ChildFrame | "bad" | null {
 }
 
 /** Opens the relay: one socket to the broker at `url` with `key`, kept open, and a port per child. */
-export function startRelay(opts: { url: string; key: string; log?: (line: string) => void; reconnectMs?: { first: number; max: number }; graceMs?: number; helloMs?: number; onChange?: () => void }): Relay {
+export function startRelay(opts: { url: string; key: string; log?: (line: string) => void; reconnectMs?: { first: number; max: number }; graceMs?: number; helloMs?: number; onChange?: () => void; syncWaitMs?: number }): Relay {
   const log = opts.log ?? ((line: string) => console.error(line));
   const backoff = opts.reconnectMs ?? RECONNECT_MS;
   const graceMs = opts.graceMs ?? GRACE_MS;
@@ -151,6 +159,18 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   let saidDown = false;
   const saidOnce = new Set<string>();
   const once = (what: string, line: string) => { if (!saidOnce.has(what)) { saidOnce.add(what); log(line); } };
+  /** The first hello's `synced`, held for the api's calls (`syncWaitMs`): the socket it is owed on, its bound, and whether an api's socket has opened. */
+  const syncWait = opts.syncWaitMs ?? 0;
+  let syncPending: WebSocket | null = null;
+  let syncTimer: ReturnType<typeof setTimeout> | null = null;
+  let apiSeen = false;
+  const sendSynced = (sock: WebSocket) => {
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = null;
+    if (syncPending !== sock) return;
+    syncPending = null;
+    if (open && ws === sock) { try { sock.send(JSON.stringify({ op: "synced", id: nonce })); } catch { /* close follows */ } }
+  };
 
   /** `away` on an `own` given for want of a broker — the grace, or past it — which the child asks again at `back`. */
   const tell = (e: Entry, slot: RelayFrame["slot"], away = false) => {
@@ -215,7 +235,14 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     for (const [relayId, e] of [...entries]) if (e.kind === "parked" && unlisted(e)) { forget(relayId); tell(e, "own"); }
     for (const [relayId, e] of entries) if ((e.kind === "grant" || e.kind === "own") && !unlisted(e)) { e.on = epoch; sock.send(JSON.stringify(heldFrame(relayId, e))); held++; }
     // Every call it runs named: any grant the broker kept for it beyond these is given back now (review pass 3).
-    sock.send(JSON.stringify({ op: "synced", id: nonce }));
+    // At this process's first hello, with the api's sockets listened for (`syncWaitMs`), not until the api's socket is
+    // back and its calls named, at most that long: the api outlives a coordinator recreated, its calls running, and a
+    // `synced` before they are named gave their slots to another brain while they ran (review pass 1 of 3b-2: 4 calls on
+    // 2 slots for 3.5 s). The broker keeps them KEEP_MS (5 s) meanwhile; the wait is less.
+    if (epoch === 1 && syncWait > 0 && !apiSeen) {
+      syncPending = sock;
+      syncTimer = setTimeout(() => sendSynced(sock), syncWait);
+    } else sock.send(JSON.stringify({ op: "synced", id: nonce }));
     // Each pass told the broker is back: a call still waiting on its own share asks again (review pass 4: a deep backlog
     // sent to own shares past the grace drained there for 45 s, the broker back).
     for (const send of senders.values()) { try { send({ slot: "back", id: "" }); } catch { /* going */ } }
@@ -228,6 +255,8 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   const lost = (sock: WebSocket, why: string) => {
     if (ws !== sock) return;
     ws = null;
+    // A `synced` owed on it is owed no more: the next socket's hello sends its own.
+    if (syncPending === sock) { syncPending = null; if (syncTimer) clearTimeout(syncTimer); syncTimer = null; }
     const was = open;
     open = false;
     atBroker = 0;
@@ -240,7 +269,9 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     if (downAt === null) downAt = performance.now();
     if (!grace) grace = setTimeout(graceOver, Math.max(0, graceMs - (performance.now() - downAt)));
     if (stopped) return;
-    since = Date.now();
+    // The state's start, moved only as it changes: a redial that fails is no new outage (review pass 1 of 3b-2: an hour
+    // down read as a second, each failed dial its start).
+    if (was) since = Date.now();
     if (!saidDown) {
       saidDown = true;
       // At most once a minute, with the count unsaid since: a link flapping every few seconds is one line a minute.
@@ -434,8 +465,14 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       for (const e of entries.values()) if (e.kind === "ask") asks++; else if (e.kind === "parked") parked++; else if (e.kind === "grant") grants++; else own++;
       return { broker: open ? "up" : "down", boot, since, asks, parked, grants, own };
     },
+    apiBack() {
+      apiSeen = true;
+      const sock = syncPending;
+      if (sock) { if (syncTimer) clearTimeout(syncTimer); syncTimer = setTimeout(() => sendSynced(sock), API_NAMED_MS); }
+    },
     async stop() {
       stopped = true;
+      if (syncTimer) clearTimeout(syncTimer);
       clearInterval(quietAsks);
       if (retry) clearTimeout(retry);
       if (grace) clearTimeout(grace);
@@ -454,12 +491,16 @@ export const RELAY_PORT = 8096;
 export const RELAY_PATH = "/v1/relay";
 /** The most sockets it holds at once: the api's, one a process, and a spare for one replaced while its last closes. */
 export const MAX_RELAY_SOCKETS = 8;
-/** A frame's most bytes: an ask is a few hundred, its base at most 2048. */
-export const RELAY_FRAME_MAX = 4096;
-/** Seconds a socket may say nothing before the listener drops it: the api pings every third of it. */
-export const RELAY_IDLE_S = 30;
+/** A frame's most bytes: an ask is a few hundred, its base at most 2048 characters, each up to three bytes in UTF-8 (review
+ *  pass 1 of 3b-2: at 4096 a non-ASCII base closed the api's socket, again at each socket while its call ran). */
+export const RELAY_FRAME_MAX = 16_384;
+/** Seconds a socket may say nothing before the listener drops it: the api's ping every 3.3 s, three missed (review pass 1 of
+ *  3b-2: at 30 s a half-open socket kept its calls counted 20 s beside the api's next). */
+export const RELAY_IDLE_S = 10;
 
-export type RelayListener = { port: number; sockets(): number; stop(): void };
+/** `stop` closes every socket and the port: the api's calls left as they are, for the coordinator's stop, its relay stopping
+ *  too — or, `detach`, each done, its sockets cut while the relay lives on. */
+export type RelayListener = { port: number; sockets(): number; stop(opts?: { detach?: boolean }): void };
 
 /**
  * The coordinator's listener for the brain's servers (SMD-3379 PR 3b-2; docs/brain-coordinator.md, row 2): the api's
@@ -482,6 +523,8 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
   type Data = { name: string; port: RelayPort | null };
   const open = new Set<import("bun").ServerWebSocket<Data>>();
   let refusedSaid = false;
+  /** Stopping: the coordinator going, its relay with it. */
+  let stopping = false;
   const server = Bun.serve<Data, never>({
     port: opts.port ?? RELAY_PORT,
     ...(opts.hostname ? { hostname: opts.hostname } : {}),
@@ -508,6 +551,7 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
         const port = relay.port(ws.data.name);
         ws.data.port = port;
         port.attach((m) => { ws.send(JSON.stringify(m)); });
+        relay.apiBack?.();
         opts.onChange?.();
       },
       message(ws, msg) {
@@ -518,7 +562,10 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
       },
       close(ws) {
         if (!open.delete(ws)) return;
-        ws.data.port?.detach();
+        // A socket closed by the coordinator's stop leaves the api's calls as they are — still running there, and kept
+        // counted at the broker by the relay's own close for the next coordinator to have named (review pass 1 of 3b-2: a
+        // recreate's stop said each `done`, and their slots went to another brain while they ran).
+        if (!stopping) ws.data.port?.detach();
         ws.data.port = null;
         free.push(ws.data.name);
         opts.onChange?.();
@@ -528,7 +575,8 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
   return {
     port: server.port as number,
     sockets: () => open.size,
-    stop() {
+    stop(o) {
+      stopping = o?.detach !== true;
       for (const ws of [...open]) { try { ws.close(1001, "the coordinator is stopping"); } catch { /* gone */ } }
       void server.stop(true);
     },

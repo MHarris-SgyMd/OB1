@@ -419,12 +419,17 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
     turn, as a pass's does.
 
   While the coordinator is away (recreated, or not yet up), each api call
-  takes the api's own share at once. The api dials again every few seconds
-  and counts its calls still running once a socket is back. Without the key,
+  takes the api's own share at once. The api dials again every second and
+  counts its calls still running once a socket is back. A recreated
+  coordinator leaves them counted at the broker for up to 2.5 s, until the
+  api's socket is back, so their slots aren't handed to another brain while
+  they run. Without the key,
   only each server's `reserve` keeps room for live calls.
 - **Checking it.** Preflight's `slot relay` row reads the key beside the
   coordinator's row: whether the coordinator listens for the api, and since
-  when the broker has answered. `brain_info`'s tasks say the same on the
+  when the broker has answered or been away. A key that differs between the
+  two (one of them recreated alone) is the api's to say: its log names the
+  401. `brain_info`'s tasks say the same on the
   coordinator's line. The api's `background slots:` lines say when it reaches
   the coordinator, loses it, or is refused (a 401, naming
   `OB1_SLOT_RELAY_KEY`).

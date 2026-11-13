@@ -1903,7 +1903,8 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
   const wordsOf = (b: ReturnType<typeof coord>) => taskStates({ heartbeats: [], ignored: 0, coordinator: b! }).tasks[0]!.words;
   assert(relayed?.relay?.broker === "up" && relayed.relay.sockets === 1 && passesOnly?.relay?.sockets === undefined && read?.relay === undefined && badRelays.every((r) => r === null)
       && /^runs board-sync, sleep; relays the passes' and the api's \(1 socket\) model-call slots to the host's broker, which has answered for 5 min \(OB1_PASSES/.test(wordsOf(relayed))
-      && /; relays the passes' model-call slots to the host's broker, which has not answered for 50 s \(/.test(wordsOf(passesOnly)) && !/relays/.test(wordsOf(read)),
+      && /; relays the passes' model-call slots to the host's broker, which has not answered for 50 s \(/.test(wordsOf(passesOnly)) && !/relays/.test(wordsOf(read))
+      && /^runs no pass; relays the api's \(2 sockets\) model-call slots to the host's broker, which has answered/.test(wordsOf(coord({ ...value, passes: [], children: {}, relay: { broker: "up", for_s: 5, sockets: 2 } }))),
     `the coordinator's relay mark is read, said in its words, and one not of the shape refuses the row (${wordsOf(relayed)} | ${wordsOf(passesOnly)}; ${badRelays.map((r) => (r === null ? "·" : "KEPT")).join("")})`);
   // parseHeartbeats hands the row to its own parser: carried when of the shape, counted as ignored when not, never read as a worker's.
   const withRow = parseHeartbeats([{ key: "heartbeat:coordinator", value: JSON.stringify(value), at, age_s: 10 }]);

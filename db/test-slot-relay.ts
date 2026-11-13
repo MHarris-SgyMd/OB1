@@ -48,7 +48,7 @@ writeFileSync(CHILD, `
 import { installBackgroundSlots } from ${JSON.stringify(join(SP, "slots.ts"))};
 import { asPass, modelCall, withCallWaits } from ${JSON.stringify(join(SP, "model-call.ts"))};
 const send = (m) => process.send?.(m);
-installBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: process.argv[3] ?? "chat=1", connectS: 1, log: (l) => send({ ev: "log", line: l }) });
+installBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: process.argv[3] ?? "chat=1", connectS: 1, log: (l) => send({ ev: "log", line: l }), relaySocket: process.env.NO_SOCKET !== "1" });
 const ends = new Map();
 async function call(m) {
   const stop = m.abortAfter ? AbortSignal.timeout(m.abortAfter) : undefined;
@@ -727,7 +727,7 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   api.cmd({ cmd: "call", id: "a4" });
   ok(await api.wait("waiting", "a4") && pool(b).waiting.stable === 2, "and an api call behind both", b.snapshot());
   // The coordinator recreated: the listener gone, then back on the same port.
-  listener.stop();
+  listener.stop({ detach: true });
   ok(await until(() => logsOf(api).some((l) => /coordinator's socket was lost/.test(l))), "the api says the socket was lost", logsOf(api));
   ok(await api.wait("run", "a4", 800), "its call waiting at the broker takes its own share at once (its 1 s bound was cleared at `queued`)");
   ok(await pass1.wait("run", "p1") && await until(() => pool(b).background === 1 && pool(b).live === 0 && relay.state().grants === 1 && relay.state().own === 0),
@@ -744,18 +744,18 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await pass1.wait("ended", "p1");
   ok(await until(() => pool(b).background === 0 && relay.state().grants === 0), "and nothing is held after", { pool: pool(b), relay: relay.state() });
   // Past the most sockets: refused, said by the api, its calls on its own share.
-  listener.stop();
+  listener.stop({ detach: true });
   listener = serveRelay(relay, { key: RKEY, port: lport, hostname: "127.0.0.1", log: () => {}, maxSockets: 1 });
   ok(await until(() => listener.sockets() === 1, 5000), "the first api's socket back");
   const second = await startApi(lport);
-  ok(await until(() => logsOf(second).some((l) => /HTTP 503/.test(l)), 5000) && listener.sockets() === 1, "a socket past the listener's most is refused (503), and the api says so", logsOf(second));
+  ok(await until(() => logsOf(second).some((l) => /holds its most sockets \(503\)/.test(l)), 5000) && listener.sockets() === 1, "a socket past the listener's most is refused (503), and the api says so", logsOf(second));
   second.cmd({ cmd: "call", id: "s1" });
   ok(await second.wait("run", "s1", 800), "and its calls take its own share");
   await kill(api);
   ok(await until(() => listener.sockets() === 1 && logsOf(second).some((l) => /asks the host's slot broker through the coordinator/.test(l)), 8000), "a killed api's socket closes at the coordinator, and its place is taken by the next to dial", { sockets: listener.sockets(), logs: logsOf(second) });
   await kill(second); await kill(pass1);
   ok(await until(() => listener.sockets() === 0), "and that one's closes as it is killed");
-  listener.stop();
+  listener.stop({ detach: true });
   await relay.stop();
 });
 await withBroker(registry({ slots: 1 }), async (b) => {
@@ -769,30 +769,113 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   api.cmd({ cmd: "call", id: "h1" });
   api.cmd({ cmd: "call", id: "h2" });
   ok(await api.wait("run", "h1") && await api.wait("waiting", "h2"), "one call on a grant, one waiting at the broker");
-  listener.stop();
+  listener.stop({ detach: true });
   listener = serveRelay(relay, { key: RKEY, port, hostname: "127.0.0.1", log: () => {} });
   ok(await api.wait("run", "h2", 800) && await until(() => listener.sockets() === 1 && pool(b).background === 2, 3000),
     "the coordinator back at once: the waiting call runs on its own share at the loss, both counted at the new socket", { pool: pool(b), relay: relay.state() });
   for (const id of ["h1", "h2"]) api.cmd({ cmd: "end", id });
   ok(await api.wait("ended", "h2") && await until(() => pool(b).background === 0), "and given back as they end", b.snapshot());
   await kill(api);
+  listener.stop({ detach: true });
+  await relay.stop();
+});
+await withBroker(registry({ slots: 1 }), async (b) => {
+  // A coordinator recreated while the api's call runs: the new one's first `synced` waits for the api's socket and its
+  // calls named, so the slot is not handed to another brain meanwhile (review pass 1 of 3b-2: 4 calls on 2 slots, 3.5 s).
+  const r1 = relayTo(b, KEYS.stable);
+  await upOf(r1);
+  let listener = serveRelay(r1, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  const port = listener.port;
+  const api = await startApi(port);
+  await until(() => listener.sockets() === 1);
+  api.cmd({ cmd: "call", id: "s1" });
+  ok(await api.wait("run", "s1") && await until(() => pool(b).background === 1), "the api's call on the brain's grant", b.snapshot());
+  const canary = relayTo(b, KEYS.canary);
+  await upOf(canary);
+  const other = await startPass(canary.port("sleep"));
+  other.cmd({ cmd: "call", id: "o1" });
+  ok(await other.wait("waiting", "o1"), "another brain's call waits for the slot");
+  // The coordinator's stop: its listener and its relay together, the api's call left to the broker's keeping.
   listener.stop();
+  await r1.stop();
+  const r2 = startRelay({ url: `ws://127.0.0.1:${b.port}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 }, syncWaitMs: 2500 });
+  listener = serveRelay(r2, { key: RKEY, port, hostname: "127.0.0.1", log: () => {} });
+  await upOf(r2);
+  ok(await until(() => listener.sockets() === 1 && r2.state().own === 1, 3000), "the api's socket back on the new coordinator, its call named", r2.state());
+  await sleep(800);
+  ok(!other.saw("run", "o1") && pool(b).background === 1, "the other brain still waits: the slot is the api's call's, counted once", b.snapshot());
+  api.cmd({ cmd: "end", id: "s1" });
+  ok(await other.wait("run", "o1", 3000), "and is granted once the api's call ends");
+  other.cmd({ cmd: "end", id: "o1" });
+  ok(await other.wait("ended", "o1") && await until(() => pool(b).background === 0), "nothing held after", b.snapshot());
+  for (const p of [api, other]) await kill(p);
+  listener.stop({ detach: true });
+  await r2.stop(); await canary.stop();
+});
+await withBroker(parseRegistry(`broker:\n  warm_s: 0\n  lease_s: 1\nservers:\n  ollama:\n    bases: [${BASE}]\n    slots: 1\n    reserve: 0\nbrains:\n  stable:\n    key: "${hashKey(KEYS.stable)}"\n`).registry!, async (b) => {
+  // A grant the broker took back past its lease is not counted again at the api's next socket (review pass 1 of 3b-2),
+  // and an api away a few seconds dials again within its 1 s bound.
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  let listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  const port = listener.port;
+  const api = await startApi(port);
+  await until(() => listener.sockets() === 1);
+  api.cmd({ cmd: "call", id: "k1" });
+  ok(await api.wait("run", "k1") && await until(() => pool(b).background === 1), "a grant, counted", b.snapshot());
+  ok(await until(() => pool(b).background === 0 && relay.state().grants === 0, 4000), "taken back at the broker's lease, and by the relay", b.snapshot());
+  await sleep(200);
+  listener.stop({ detach: true });
+  await sleep(4000);
+  listener = serveRelay(relay, { key: RKEY, port, hostname: "127.0.0.1", log: () => {} });
+  const back = performance.now();
+  ok(await until(() => listener.sockets() === 1, 3000) && performance.now() - back < 1500, "after 4 s away, the api dials again within its 1 s bound", Math.round(performance.now() - back));
+  await sleep(300);
+  ok(pool(b).background === 0 && relay.state().own === 0, "and the lapsed call is not counted again", { pool: pool(b), relay: relay.state() });
+  api.cmd({ cmd: "end", id: "k1" });
+  ok(await api.wait("ended", "k1"), "the call ends all the same");
+  await kill(api);
+  listener.stop({ detach: true });
   await relay.stop();
 });
 {
+  // A script with the key in its environment that does not ask for the socket (every one but the api) dials nothing,
+  // and exits on its own (review pass 1 of 3b-2: the socket held it open).
+  const script = join(DIR, "script.ts");
+  writeFileSync(script, `import { installBackgroundSlots } from ${JSON.stringify(join(SP, "slots.ts"))};\ninstallBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: "chat=1", connectS: 1, log: (l) => console.log(l), relaySocket: process.env.ASK === "1" });\n`);
+  const exits = async (ask: string) => {
+    const p = Bun.spawn([process.execPath, "--no-env-file", script], { env: { PATH: process.env.PATH ?? "", HOME: DIR, ASK: ask, OB1_SLOT_RELAY_KEY: RKEY, OB1_SLOT_RELAY_URL: "ws://127.0.0.1:1/v1/relay" }, stdout: "pipe", stderr: "pipe" });
+    const exited = await Promise.race([p.exited.then(() => true), sleep(3000).then(() => false)]);
+    if (!exited) { p.kill("SIGKILL"); await p.exited; }
+    return { exited, out: await new Response(p.stdout).text() };
+  };
+  const [plain, asking] = [await exits("0"), await exits("1")];
+  ok(plain.exited && !/coordinator/.test(plain.out) && !asking.exited, "a script with the key that does not ask for the socket dials nothing and exits on its own (one that asks is held open by it)", { plain, asking: asking.exited });
+}
+{
   // The api's own refusals: another key (named), no coordinator listening (said), a key too short (never dialled).
   const relayless = startRelay({ url: "ws://127.0.0.1:1/v1/slots", key: KEYS.stable, log: () => {}, graceMs: 0 });
+  const downSince = relayless.state().since;
   const listener = serveRelay(relayless, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  // A frame past 4096 bytes that a pass's checks take — a base of 2048 non-ASCII characters — keeps the socket (review pass 1 of 3b-2).
+  const raw = new WebSocket(`ws://127.0.0.1:${listener.port}${RELAY_PATH}`, { headers: { "x-brain-key": RKEY } } as unknown as string[]);
+  let rawClosed = false;
+  raw.onclose = () => { rawClosed = true; };
+  await until(() => raw.readyState === 1);
+  raw.send(JSON.stringify({ slot: "running", id: "big", base: `http://h/${"é".repeat(2030)}`, model: "m", cls: "background" }));
+  ok(await until(() => relayless.state().own === 1, 1000) && !rawClosed, "a frame of a 2048-character non-ASCII base is taken, the socket kept", { own: relayless.state().own, rawClosed });
+  raw.close();
   const wrong = await startApi(listener.port, { OB1_SLOT_RELAY_KEY: "relay-key-of-another-brain" });
   ok(await until(() => logsOf(wrong).some((l) => /refused OB1_SLOT_RELAY_KEY \(401\)/.test(l)), 5000), "an api with another key names it (401)", logsOf(wrong));
   wrong.cmd({ cmd: "call", id: "w1" });
   ok(await wrong.wait("run", "w1", 800), "and its calls take its own share");
-  listener.stop();
+  listener.stop({ detach: true });
   const nobody = await startApi(listener.port);
   ok(await until(() => logsOf(nobody).some((l) => /does not answer at/.test(l)), 5000), "an api with no coordinator listening says so", logsOf(nobody));
   const short = await startApi(listener.port, { OB1_SLOT_RELAY_KEY: "short-key" });
   ok(await until(() => logsOf(short).some((l) => /shorter than 16 characters/.test(l))) && !logsOf(short).some((l) => /does not answer/.test(l)), "an api with a key too short says so, and dials nothing", logsOf(short));
   for (const p of [wrong, nobody, short]) await kill(p);
+  ok(relayless.state().broker === "down" && relayless.state().since === downSince, "a broker never reached is down since the relay began, not since its last failed dial (review pass 1 of 3b-2)", { since: relayless.state().since, downSince });
   await relayless.stop();
 }
 {
@@ -801,13 +884,22 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   const fake = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })), websocket: { message() {}, sendPings: false } });
   const relayless = startRelay({ url: "ws://127.0.0.1:1/v1/slots", key: KEYS.stable, log: () => {}, graceMs: 0 });
   const listener = serveRelay(relayless, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  // And a half-open one: a socket upgraded with the key that then sends nothing, not even a pong (review pass 1 of 3b-2).
+  const halfOpen = serveRelay(relayless, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
+  let upgraded = false;
+  const rawSock = await Bun.connect({ hostname: "127.0.0.1", port: halfOpen.port, socket: { data(_s, d) { if (/^HTTP\/1\.1 101/.test(String(d))) upgraded = true; } } });
+  rawSock.write(`GET ${RELAY_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-brain-key: ${RKEY}\r\n\r\n`);
   const [api, idle] = [await startApi(fake.port as number), await startApi(listener.port)];
+  ok(upgraded && halfOpen.sockets() === 1, "the half-open socket is taken", { upgraded, sockets: halfOpen.sockets() });
   ok(await until(() => [api, idle].every((p) => logsOf(p).some((l) => /asks the host's slot broker through the coordinator/.test(l))), 3000), "the api's socket opens", logsOf(api));
   ok(await until(() => logsOf(api).some((l) => /lost \(silent for 10 s\)/.test(l)), 14_000), "a socket silent 10 s is dropped, said", logsOf(api));
-  await sleep(1500);
+  // A tick past the silent one's drop (the api's pings are 3.3 s apart): an idle socket unanswered would be dropped by now.
+  await sleep(4000);
   ok(!logsOf(idle).some((l) => /lost/.test(l)) && listener.sockets() === 1, "an idle socket the coordinator answers is kept as long", logsOf(idle));
+  ok(halfOpen.sockets() === 0, "a socket that says nothing at all is dropped by the listener at its 10 s bound, its calls with it", halfOpen.sockets());
+  halfOpen.stop({ detach: true });
   await kill(api); await kill(idle);
-  listener.stop(); await relayless.stop();
+  listener.stop({ detach: true }); await relayless.stop();
   void fake.stop(true);
 }
 

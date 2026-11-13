@@ -2200,7 +2200,7 @@ export function taskStates(workers: { heartbeats: readonly WorkerHeartbeat[]; ig
     // Its relay (SMD-3379 PR 3b): the broker's state, and the api's sockets where it listens for them.
     const r = c.relay;
     const relayed = r === undefined ? ""
-      : `; relays the passes'${r.sockets === undefined ? "" : ` and the api's (${r.sockets} socket${r.sockets === 1 ? "" : "s"})`} model-call slots to the host's broker, ${r.broker === "up" ? "which has answered" : "which has not answered"} for ${ago(r.for_s + c.ageS)}`;
+      : `; relays ${runs.length ? `the passes'${r.sockets === undefined ? "" : " and "}` : ""}${r.sockets === undefined ? "" : `the api's (${r.sockets} socket${r.sockets === 1 ? "" : "s"})`}${!runs.length && r.sockets === undefined ? "no one's" : ""} model-call slots to the host's broker, ${r.broker === "up" ? "which has answered" : "which has not answered"} for ${ago(r.for_s + c.ageS)}`;
     const what = (runs.length ? `runs ${runs.join(", ")}` : "runs no pass") + relayed;
     tasks.push({
       task: "coordinator", job: null, key: COORDINATOR_KEY, coordinated: false, at: c.at, ageS: c.ageS,

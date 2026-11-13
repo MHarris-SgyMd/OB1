@@ -293,6 +293,39 @@ if (!existsSync(composePath)) {
     api.stop("SIGTERM");
     ok(await Promise.race([api.done.then(() => true), Bun.sleep(5000).then(() => false)]), "and it stops with no pass to wait for");
   } finally { await broker.stop(); }
+  // Listening, its relay's first hello holds `synced` until the api's socket is back and its calls named (review pass 1
+  // of 3b-2): a stand-in broker records what the coordinator's relay sends.
+  {
+    const ops: { op: string; at: number }[] = [];
+    const fakeBroker = Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })),
+      websocket: {
+        open(ws) { ws.send(JSON.stringify({ op: "hello", brain: "b", boot: "x", idle_s: 10, max_waiting: 1024, servers: [{ bases: ["http://h:1/v1"] }] })); },
+        message(ws, m) { const f = JSON.parse(String(m)); ops.push({ op: f.op, at: performance.now() }); if (f.op === "ping") ws.send(JSON.stringify({ op: "pong", id: f.id })); },
+      },
+    });
+    const key = "relay-key-of-this-brain-0123";
+    const lines: string[] = [];
+    const c = coordinate({
+      env: { PATH: process.env.PATH ?? "", OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${fakeBroker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: key }, sql: null, asOwnUsers: false,
+      children: [], writer: { out: () => {}, err: (l) => lines.push(l) }, relayPort: 0,
+    });
+    const port = Number(/on :(\d+)\/v1\/relay/.exec(lines.join("\n"))?.[1] ?? 0);
+    await Bun.sleep(1000);
+    const before = ops.filter((o) => o.op === "synced").length;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/relay`, { headers: { "x-brain-key": key } } as unknown as string[]);
+    let openedAt = 0;
+    ws.onopen = () => { openedAt = performance.now(); ws.send(JSON.stringify({ slot: "running", id: "r1", base: "http://h:1/v1", model: "m", cls: "background" })); };
+    for (let i = 0; i < 40 && !ops.some((o) => o.op === "synced"); i++) await Bun.sleep(50);
+    const held = ops.findIndex((o) => o.op === "held"), synced = ops.findIndex((o) => o.op === "synced");
+    ok(before === 0 && openedAt > 0 && held >= 0 && synced > held,
+      `listening, the first hello's synced waits for the api's socket and follows its calls' held (${before} before; ${ops.map((o) => o.op).join(", ")})`);
+    ws.close();
+    c.stop("SIGTERM");
+    await Promise.race([c.done, Bun.sleep(5000)]);
+    void fakeBroker.stop(true);
+  }
   // Its row: the relay's mark, its age counted back from the stamp, the api's sockets where it listens.
   const mark = (relay?: { broker: "up" | "down"; since: number; sockets?: number } | null) =>
     JSON.stringify(coordinatorValue({ id: "i", host: "h", passes: [], children: [], keys: new Map(), states: new Map(), now: 10_000, everyS: 60, relay }).relay ?? null);

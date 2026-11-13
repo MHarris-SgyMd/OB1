@@ -352,8 +352,9 @@ type RelayClient = {
 export const MIN_RELAY_KEY = 16;
 /** The coordinator's listener for the api (SMD-3379 PR 3b-2, db/slot-relay.ts's serveRelay), on the brain's network: OB1_SLOT_RELAY_URL in its place. */
 export const RELAY_URL = "ws://coordinator:8096/v1/relay";
-/** The api's reconnect to the coordinator: from the first, doubling to the most. */
-export const RELAY_RECONNECT_MS = { first: 500, max: 5000 } as const;
+/** The api's reconnect to the coordinator: from the first, doubling to the most — quick, as its calls running are uncounted
+ *  until a socket is back (review pass 1 of 3b-2: at 5 s a recreated coordinator's broker handed their slots on). */
+export const RELAY_RECONNECT_MS = { first: 250, max: 1000 } as const;
 /** A socket to the coordinator silent this long is dropped: the api pings every third of it, the listener answers. */
 export const RELAY_SILENCE_MS = 10_000;
 
@@ -375,6 +376,9 @@ function relayCore(t: { send(m: object): void; reach(): Reach; hold(d: 1 | -1): 
   const heard = (m: unknown) => {
     const f = m as { slot?: string; id?: string; why?: string } | null;
     if (f?.slot === "back") return sayBack();
+    // A grant the broker took back past its lease is not counted again at a later socket (the broker's protocol: no
+    // `held` for it; review pass 1 of 3b-2).
+    if (f?.slot === "lapsed" && typeof f.id === "string") { running.delete(f.id); return; }
     if (typeof f?.id !== "string" || (f.slot !== "go" && f.slot !== "queued" && f.slot !== "own")) return;
     waiting.get(f.id)?.(f.slot, f.why);
   };
@@ -433,11 +437,12 @@ function relayCore(t: { send(m: object): void; reach(): Reach; hold(d: 1 | -1): 
 
 /**
  * The relay client: over this process's IPC channel where the coordinator started it with one and said so
- * (OB1_SLOT_RELAY=ipc, a pass), else over a socket to the coordinator where OB1_SLOT_RELAY_KEY is set (the api, PR
- * 3b-2); null elsewhere — a pass run by hand from a checkout, an api with no key — which keeps the semaphore alone.
+ * (OB1_SLOT_RELAY=ipc, a pass), else over a socket to the coordinator where the process asks for one (`socket`: the api
+ * alone, PR 3b-2) and OB1_SLOT_RELAY_KEY is set — a script run by hand with the key in its environment dials nothing,
+ * whose socket would hold it open (review pass 1 of 3b-2); null elsewhere — a pass run by hand from a checkout, an api with no key — which keeps the semaphore alone.
  */
-function relayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
-  return ipcRelayClient(env, log) ?? socketRelayClient(env, log);
+function relayClient(env: Record<string, string | undefined>, log: (line: string) => void, socket: boolean): RelayClient | null {
+  return ipcRelayClient(env, log) ?? (socket ? socketRelayClient(env, log) : null);
 }
 
 /**
@@ -518,6 +523,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     try {
       const r = await fetch(url.replace(/^ws/, "http"), { headers: { "x-brain-key": key }, redirect: "error", signal: AbortSignal.timeout(2000) });
       if (r.status === 401) return ["401", `the coordinator refused OB1_SLOT_RELAY_KEY (401) — set the same key for the api and the coordinator, and recreate both`];
+      if (r.status === 503) return ["503", `the coordinator's relay at ${url} holds its most sockets (503) — more api processes than it takes, or sockets of one gone and not yet dropped`];
       return [`http${r.status}`, `no slot relay at ${url} (HTTP ${r.status}) — is OB1_SLOT_RELAY_URL the coordinator's ${new URL(url).pathname === "/v1/relay" ? "listener" : "/v1/relay"}?`];
     } catch (e) {
       return ["none", `the coordinator does not answer at ${url} (${(e as Error).message}) — it listens once OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY name the host's broker beside OB1_SLOT_RELAY_KEY, and it is running`];
@@ -576,7 +582,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       ws = null;
       core.answerAll(true);
       void whyRefused().then(([kind, why]) => {
-        once(`refused:${kind}`, `background slots: ${why}; ${own}, and it is dialled again every ${RELAY_RECONNECT_MS.max / 1000} s at most`);
+        once(`refused:${kind}`, `background slots: ${why}; ${own}, and it is dialled again every ${RELAY_RECONNECT_MS.max / 1000} s`);
         again();
       });
     };
@@ -609,12 +615,12 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
  * settings' problems, said through `log`, the defaults then standing in.
  * Under `off` no hook is set, unless the coordinator's relay is in (`env`,
  * process.env unless given, says OB1_SLOT_RELAY=ipc, or holds
- * OB1_SLOT_RELAY_KEY). `maxWaitS` is
+ * OB1_SLOT_RELAY_KEY where `relaySocket` asks for the api's socket). `maxWaitS` is
  * --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a finite number.
  * `connectS` bounds a connection's opening and each statement, CONNECT_S
  * unless a test asks for less.
  */
-export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number; env?: Record<string, string | undefined> }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
+export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number; env?: Record<string, string | undefined>; relaySocket?: boolean }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));
   const setting = slotsSettingFrom(opts.raw, opts.modelSlots);
   for (const p of setting.problems) log(p);
@@ -622,7 +628,7 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   // The coordinator's relay, where it started this process with one (SMD-3379 PR 3b-1) or the key to its socket is
   // here (the api, PR 3b-2): read before `off`, which holds
   // nothing to this process's own shares but leaves the host's broker in (review pass 1: `off` dropped it unsaid).
-  const relay = relayClient(opts.env ?? process.env, log);
+  const relay = relayClient(opts.env ?? process.env, log, opts.relaySocket === true);
   if (!setting.set && !setting.defaults && !relay) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
   const ended = new AbortController();
   const stop = opts.stop ? AbortSignal.any([opts.stop, ended.signal]) : ended.signal;

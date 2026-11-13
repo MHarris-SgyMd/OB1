@@ -3875,7 +3875,7 @@ else {
         `a coordinator that does not listen warns, naming the broker's settings or the recreate (${noBroker} | ${passesOnly})`);
       assert(/^\s*!\s+slot relay\s+the coordinator listens for the api, but the host's broker had not answered it for 60 s at its last stamp/.test(down) && /slot relay:" lines say why/.test(down),
         `a broker away warns, its time counted from the row's stamp (${down})`);
-      assert(/^\s*✓\s+slot relay\s+the api asks the host's slot broker through the coordinator, which listens for it and whose broker had answered for 5 min/.test(up),
+      assert(/^\s*✓\s+slot relay\s+the coordinator listens for the api, and its broker had answered for 5 min at its last stamp — the api's log says/.test(up),
         `listening, the broker answering: ok, whatever the count of api sockets at the api's start (${up})`);
     } finally {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
