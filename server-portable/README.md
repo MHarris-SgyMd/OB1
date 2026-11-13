@@ -1498,7 +1498,7 @@ Their refusals:
 | `WRITE_SCOPE_REQUIRED` | 403 | A principal without write scope reaching a writer through a caller of the core's own. |
 | `NOT_FOUND` | 404 | The thought was deleted between the capture and the record. |
 
-capture_thought's own refusals (a refused egress, a provider down) stand for a capture.
+capture_thought's own refusals (a refused egress; the embedding provider refusing the call, `EMBEDDING_PROVIDER_ERROR`, 503, SMD-2892) stand for a capture; a provider that is down lands the output without its vector, as any capture.
 A role without the `deliverables` grant group has the deliverable calls fail, naming the
 table, and nothing else. Preflight's `deliverables` row checks the functions and the
 grant.
