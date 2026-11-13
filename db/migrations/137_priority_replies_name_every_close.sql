@@ -17,23 +17,24 @@
 --   thought …", and the winner was placed relative to the row.
 --
 -- WHAT
---   * assert_priority and clear_priority (133's, carried) gain two
---     keys in every answer: `item`, the item named as ob1_priority_item keys
---     it, and `closed`, every statement the call closed, newest first ([]
---     when it closed none). `replaced` and `assertion` stay, the newest of
---     `closed`, for a reader of the old keys.
+--   * assert_priority and clear_priority (133's, carried) gain two keys in
+--     every answer: `item`, the item named as ob1_priority_item keys it, and
+--     `closed`, every statement the call closed, newest first ([] when it
+--     closed none). `replaced` and `assertion` stay, the newest of `closed`,
+--     for a reader of the old keys.
 --   * ob1_priority_closed_json(ids): the statements with those ids as 116's
 --     ob1_priority_json renders each, newest first.
 --   * `closed` holds what the call's own UPDATE closed. A statement that a
 --     delete closed between the call's read and its write (136's trigger
 --     takes no priority lock) is not among them.
---   * TWO CHANGES OF BEHAVIOUR in assert_priority (review passes 1-3):
---     it locks every one of the key's statements in the pool still open,
---     where 133 locked the newest it had read alone, so a delete can no
---     longer close one between the lock and the UPDATE, and `replaced` is
---     always one it closed; and the `unchanged` test counts the statements
---     locked, not those read before the lock, so a restatement of the one a
---     racing delete left open is `unchanged` rather than a copy of itself.
+--   * TWO CHANGES OF BEHAVIOUR in assert_priority (review passes 1-4):
+--     it locks every one of the key's statements in the pool still open, in
+--     the items' order, where 133 locked the newest it had read alone, so a
+--     delete can no longer close one between the lock and the UPDATE, and
+--     `replaced` is always one it closed; and the `unchanged` test counts
+--     the statements locked, not those read before the lock, so a
+--     restatement of the one a racing delete left open is `unchanged`
+--     rather than a copy of itself.
 --     Both writers re-project only the items whose statements they closed
 --     (a delete's own trigger projects the ones it closed).
 --
@@ -45,8 +46,9 @@
 --
 -- SAFETY
 --   Two functions replaced with their signatures and return types; one new
---   STABLE SQL function. No table, grant or row changes. The answers only
---   gain keys. MINOR under FORK.md's version rules. test-schema [124],
+--   STABLE SQL function. No table, grant or row changes. The answers gain
+--   keys, and assert_priority's lock and `unchanged` test change as above.
+--   MINOR under FORK.md's version rules. test-schema [124],
 --   test-upgrade [20cb].
 --
 -- Prerequisites
@@ -288,7 +290,7 @@ BEGIN
   -- Every item whose statement this call closed, and the item named, made
   -- current (one a delete closed meanwhile is its trigger's to project).
   PERFORM ob1_priority_project(t.item_kind, t.item_key)
-     FROM (SELECT DISTINCT a.item_kind, a.item_key FROM priority_assertions a WHERE a.id = ANY(v_closed)
+     FROM (SELECT a.item_kind, a.item_key FROM priority_assertions a WHERE a.id = ANY(v_closed)
            UNION SELECT v_item.kind, v_item.key) t
     ORDER BY t.item_kind, t.item_key;
   v_win := ob1_priority_winner(v_item.kind, v_item.key);

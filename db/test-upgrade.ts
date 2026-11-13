@@ -6425,32 +6425,41 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
          && setBoth.outcome === "asserted" && setBoth.closed?.map((c) => c.id).join() === `${r2},${t2}` && setBoth.replaced?.id === r2 && await made(),
     `applied: a clear naming the ticket lists the key's statements on the row and the ticket, newest first, and names the ticket as 116 keys it; a set lists both it closed (at 136 the clear named the newest alone: ${JSON.stringify(Object.keys(at136))})`);
 
-  // A delete racing a set (review pass 1): another session deletes a thought, its trigger closing the key's statement
-  // there as deleted, uncommitted; the set reads that statement open, then waits on its row lock. Once the delete
-  // commits, the statement is no longer open: the set replaces nothing and lists nothing, rather than naming a
-  // statement it never closed as `replaced`. The set's own statement on the deleted thought is the gap 136 left to
-  // ob1_close_orphan_priorities (the maintainer kept it, review pass 2), not this row's to hold.
-  const raced = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 137: a note deleted under a set') RETURNING id`)[0].id);
-  // The set's own session (one connection): the probe waits on its lock alone, pg_locks being the cluster's (review
-  // pass 3: any other session's wait read as the set's).
+  // A set run while another session's delete_thought holds the deleted thought's statements' row locks, uncommitted,
+  // and answered once the delete commits (a raise read as a value). Probed only once the set waits on a row lock in its
+  // own session — one connection, whose backend pid it reads, pg_locks being the cluster's (review pass 3) — never on a
+  // guess at its timing.
   const setPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
-  const onRaced = (await put("thought", raced, 2)).assertion!.id;
-  const other = new SQL({ url: URL_, max: 1 });
-  let racing: Promise<Answer> = Promise.resolve({ outcome: "never ran", assertion: null });
-  await other.begin(async (tx) => {
-    await tx`SELECT delete_thought(${raced}::uuid, (${OP}::text)::jsonb)`;
-    racing = put("thought", raced, 4).catch((e: Error): Answer => ({ outcome: `raised: ${e.message.split("\n")[0]}`, assertion: null }));
-    // Probed only once the set waits on the statement's row lock, never on a guess at its timing.
-    let waiting = false;
-    for (let i = 0; i < 200 && !waiting; i++) {
-      waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${setPid} AND locktype IN ('transactionid', 'tuple')`)[0].n) > 0;
-      if (!waiting) await Bun.sleep(50);
+  const underDelete = async (deleted: string, set: () => Promise<Answer>, what: string): Promise<Answer> => {
+    const other = new SQL({ url: URL_, max: 1 });
+    let answer: Promise<Answer> = Promise.resolve({ outcome: "never ran", assertion: null });
+    try {
+      await other.begin(async (tx) => {
+        await tx`SELECT delete_thought(${deleted}::uuid, (${OP}::text)::jsonb)`;
+        answer = set().catch((e: Error): Answer => ({ outcome: `raised: ${e.message.split("\n")[0]}`, assertion: null }));
+        let waiting = false;
+        for (let i = 0; i < 200 && !waiting; i++) {
+          waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${setPid} AND locktype IN ('transactionid', 'tuple')`)[0].n) > 0;
+          if (!waiting) await Bun.sleep(50);
+        }
+        if (!waiting) throw new Error(`[20cb] ${what} never waited on a row lock within 10 s`);
+      });
+      return await answer;
+    } finally {
+      await other.close();
     }
-    if (!waiting) throw new Error("[20cb] the set never waited on the deleted statement's row lock within 10 s");
-  });
-  const raceAnswer = await racing;
-  await other.close();
-  const racedReason = ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${onRaced}::uuid`)[0] as { close_reason: string | null }).close_reason;
+  };
+  const reasonOf = async (id: string) => ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${id}::uuid`)[0] as { close_reason: string | null }).close_reason;
+
+  // A delete racing a set (review pass 1): the delete's trigger closes the key's statement on the thought, and the set,
+  // having read it open, waits on its row lock. Once the delete commits, the statement is no longer open: the set
+  // replaces nothing and lists nothing, rather than naming a statement it never closed as `replaced`. The set's own
+  // statement on the deleted thought is the gap 136 left to ob1_close_orphan_priorities (the maintainer kept it, review
+  // pass 2), not this row's to hold.
+  const raced = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 137: a note deleted under a set') RETURNING id`)[0].id);
+  const onRaced = (await put("thought", raced, 2)).assertion!.id;
+  const raceAnswer = await underDelete(raced, () => put("thought", raced, 4), "the set");
+  const racedReason = await reasonOf(onRaced);
   assert(raceAnswer.outcome === "asserted" && raceAnswer.replaced === null && JSON.stringify(raceAnswer.closed) === "[]" && racedReason === "deleted",
     `a set racing a delete that closed the key's statement replaces nothing and lists nothing: the statement is the delete's, closed as deleted (${raceAnswer.outcome}, replaced ${JSON.stringify(raceAnswer.replaced ?? null)?.slice(0, 40)}, ${racedReason})`);
 
@@ -6461,21 +6470,8 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
   const row98 = await ticketRow("SMD-9998");
   const onTicket98 = (await put("ticket", "SMD-9998", 3)).assertion!.id;
   await raw("thought", row98, 5);
-  const other2 = new SQL({ url: URL_, max: 1 });
-  let restating: Promise<Answer> = Promise.resolve({ outcome: "never ran", assertion: null });
-  await other2.begin(async (tx) => {
-    await tx`SELECT delete_thought(${row98}::uuid, (${OP}::text)::jsonb)`;
-    restating = put("ticket", "SMD-9998", 3).catch((e: Error): Answer => ({ outcome: `raised: ${e.message.split("\n")[0]}`, assertion: null }));
-    let waiting = false;
-    for (let i = 0; i < 200 && !waiting; i++) {
-      waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${setPid} AND locktype IN ('transactionid', 'tuple')`)[0].n) > 0;
-      if (!waiting) await Bun.sleep(50);
-    }
-    if (!waiting) throw new Error("[20cb] the restatement never waited on the deleted row's statement within 10 s");
-  });
-  const restated = await restating;
-  await other2.close();
-  const ticketReason = ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${onTicket98}::uuid`)[0] as { close_reason: string | null }).close_reason;
+  const restated = await underDelete(row98, () => put("ticket", "SMD-9998", 3), "the restatement");
+  const ticketReason = await reasonOf(onTicket98);
   assert(restated.outcome === "unchanged" && restated.assertion?.id === onTicket98 && ticketReason === null,
     `a restatement racing a delete that closed the key's other statement in the pool is unchanged: the one left open says the same, and stays (${restated.outcome}, ${ticketReason})`);
 
@@ -6483,13 +6479,12 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
   // row, the row deleted under a restatement of the ticket's. The set locks every statement of the key's still open,
   // so it waits on the row's, which the delete closes; then the one left is the same words, and the set is unchanged.
   // Locking the newest alone (pass 2's), the set counted the row's still open, waited only in its UPDATE, and wrote a
-  // copy of the ticket's.
-  // The ticket's statement as the writer makes it, then the row's written raw after it, then the ticket's copied raw
-  // (its words exactly) as the newest, the first closed as replaced by the copy: both the row's and the copy open.
+  // copy of the ticket's. The fixture: the ticket's statement as the writer makes it, the row's written raw after it,
+  // then the ticket's copied raw (its words exactly) as the newest — the first closed before, as 116's index keeps one
+  // open an item and maker — so the row's and the copy are both open.
   const row96 = await ticketRow("SMD-9996");
   const first96 = (await put("ticket", "SMD-9996", 3)).assertion!.id;
   await raw("thought", row96, 5);
-  // One open statement an item and maker (116's index): the first closed, then its copy written.
   const onTicket96 = crypto.randomUUID();
   await sql`UPDATE priority_assertions SET closed_at = clock_timestamp(), close_reason = 'replaced', closed_by = ${onTicket96}::uuid WHERE id = ${first96}::uuid`;
   await sql`INSERT INTO priority_assertions (id, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
@@ -6497,21 +6492,8 @@ console.log("\n[20cb] Migration 137: onto a populated brain at the file before i
     SELECT ${onTicket96}::uuid, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
            maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, clock_timestamp()
       FROM priority_assertions WHERE id = ${first96}::uuid`;
-  const other3 = new SQL({ url: URL_, max: 1 });
-  let restating96: Promise<Answer> = Promise.resolve({ outcome: "never ran", assertion: null });
-  await other3.begin(async (tx) => {
-    await tx`SELECT delete_thought(${row96}::uuid, (${OP}::text)::jsonb)`;
-    restating96 = put("ticket", "SMD-9996", 3).catch((e: Error): Answer => ({ outcome: `raised: ${e.message.split("\n")[0]}`, assertion: null }));
-    let waiting = false;
-    for (let i = 0; i < 200 && !waiting; i++) {
-      waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${setPid} AND locktype IN ('transactionid', 'tuple')`)[0].n) > 0;
-      if (!waiting) await Bun.sleep(50);
-    }
-    if (!waiting) throw new Error("[20cb] the restatement never waited on the deleted row's older statement within 10 s");
-  });
-  const restated96 = await restating96;
-  await other3.close();
-  const ticket96Reason = ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${onTicket96}::uuid`)[0] as { close_reason: string | null }).close_reason;
+  const restated96 = await underDelete(row96, () => put("ticket", "SMD-9996", 3), "the restatement of the newest");
+  const ticket96Reason = await reasonOf(onTicket96);
   assert(restated96.outcome === "unchanged" && restated96.assertion?.id === onTicket96 && ticket96Reason === null,
     `a restatement racing a delete of the key's older statement in the pool is unchanged too: every open one is locked before the count (${restated96.outcome}, ${ticket96Reason})`);
 
