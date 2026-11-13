@@ -2383,11 +2383,19 @@ const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
     : a.closeReason === "deleted" ? `closed at ${a.closedAt}, when its item was deleted`
     : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
-  : ` The item's winner is ${statementText(v.winner)}${asked ? onOther(v.winner, asked) : ""}.`;
+  : ` The item's winner is ${statementText(v.winner)}${onOther(v.winner, asked)}.`;
+/**
+ * The statements a write closed, newest first: each its level, where it stood if not on the item named (a ticket and
+ * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238). Its callers set
+ * two or more between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read
+ * as one more item).
+ */
+const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
+  closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
     ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
@@ -2401,14 +2409,19 @@ const priorityRefusal = (r: Refusal) =>
 
 export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
   v.outcome === "unchanged"
-    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.assertion.item)}`
-    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement${onOther(v.replaced, v.assertion.item)}, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id, v.assertion.item)}`,
+    ? `Your statement on ${itemText(v.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.item)}`
+    : `Set ${itemText(v.item)} to ${statementText(v.assertion)}.${
+      v.closed.length === 1 ? ` It replaces your earlier statement, ${closedList(v.closed, v.item)}, which stays in the history.`
+      : v.closed.length > 1 ? ` It replaces your ${v.closed.length} earlier statements — ${closedList(v.closed, v.item)} — which stay in the history.`
+      : ""}${winnerText(v, v.assertion.id, v.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
-  v.assertion
-    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null, v.assertion.item)}`
-    : `You have no statement open on that item: nothing to clear.${winnerText(v, null, null)}`,
+  v.closed.length === 1
+    ? `Cleared your statement on ${itemText(v.item)}, ${closedList(v.closed, v.item)}; it stays in the history.${winnerText(v, null, v.item)}`
+    : v.closed.length > 1
+    ? `Cleared your ${v.closed.length} statements on ${itemText(v.item)} — ${closedList(v.closed, v.item)} — which stay in the history.${winnerText(v, null, v.item)}`
+    : `You have no statement open on ${itemText(v.item)}: nothing to clear.${winnerText(v, null, v.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>

@@ -207,7 +207,7 @@ function definedIn(file: string): string[] {
  * on supersession_proposals [74] reads, and 111 last defines
  * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
  * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
- * whose door and thread functions it does not define. 138 carries 055's
+ * whose door and thread functions it does not define. 139 carries 055's
  * audit gate with the redact arm (SMD-1723), and 055, whose diff rule,
  * capture payload and backfill it does not define; a re-apply of 046 reverts
  * them ([51]). 137 is 129's
@@ -215,7 +215,7 @@ function definedIn(file: string): string[] {
  * carries 129, whose nine-argument wrapper it does not define and whose
  * agenda it needs ([110] drops both).
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "138": ["055"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -5325,8 +5325,8 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
     `three partial indexes and no more: the rows still waiting for a kind or a trust, by name, for a door, and (055) for their payload — the census, the backfills and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
   assert(/INCLUDE \(canonical_agent_id, actor_kind\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(actor_context \? 'via'::text\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
     `…the kind index carrying the agent id and the kind so the census filters and groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
-  assert(lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("138") && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("update_thought").startsWith("099") && lastDefinerOf("delete_thought").startsWith("060"),
-    `060 is the last definer of delete_thought and of the audit trigger (append then project, the trigger the check — [56]), 099 of update_thought (088's body — 073's, answering what it did — with an unlink taking the review lock) and 080 of upsert_thought (061's lineage envelope over 060's bodies — [57] — with the trust stamp, [66], and 080's 'keep', [71]); 138 of the refusal trigger (055's body — 046's with the payload arm, [51] — and the redact arm, [125]) (${lastDefinerOf("delete_thought")})`);
+  assert(lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("139") && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("update_thought").startsWith("099") && lastDefinerOf("delete_thought").startsWith("060"),
+    `060 is the last definer of delete_thought and of the audit trigger (append then project, the trigger the check — [56]), 099 of update_thought (088's body — 073's, answering what it did — with an unlink taking the review lock) and 080 of upsert_thought (061's lineage envelope over 060's bodies — [57] — with the trust stamp, [66], and 080's 'keep', [71]); 139 of the refusal trigger (055's body — 046's with the payload arm, [51] — and the redact arm, [126]) (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
   assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
@@ -7688,7 +7688,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
     await db.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": true}'::jsonb WHERE id = '${RAW}'`);  // a raw metadata touch: an update event with no content
     // The deletes as raw statements under the actor: the trigger under test writes the tombstone. delete_thought
     // since 060 appends its own, so under 046's trigger it would write two; which body an earlier section's restore
-    // left installed is not this differential's to depend on (SMD-1723: 138 carries 055, so that restore now
+    // left installed is not this differential's to depend on (SMD-1723: 139 carries 055, so that restore now
     // re-applies 060).
     for (const id of [c1.id, RAW]) {
       await db.transaction(async (tx) => {
@@ -7711,7 +7711,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 10 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("138") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 138's refusal trigger (carrying 055, whose gate it holds with the redact arm) and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 10 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm) and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -7942,8 +7942,8 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   // last defines, so 055 re-applied alone puts 055's back — the state the
   // restore below repairs and preflight's audit events check names. Nor are
   // the stamp trigger and its two arms, which 073 last defines (SMD-1724):
-  // the same restore puts 073's back. Nor is the refusal trigger, which 138
-  // last defines with its redact arm (SMD-1723): the restore puts 138's back.
+  // the same restore puts 073's back. Nor is the refusal trigger, which 139
+  // last defines with its redact arm (SMD-1723): the restore puts 139's back.
   const bodiesBefore = JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('ob1_thought_diff', 'ob1_append_thought_event', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`));
   // An index under the name with an earlier revision's predicate — pass 4's,
   // two clauses — is what the re-apply replaces (sixth review pass's drop,
@@ -8757,7 +8757,7 @@ console.log("\n[56] Migration 060: the write functions append then project — t
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
   assert(trigs.map((t) => t.n).join(",") === "priority_close_on_thought_delete,thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_refuse_forgotten,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
-    `nineteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), 138 the refusal of a forgotten text ([125]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+    `nineteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), 139 the refusal of a forgotten text ([126]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -19616,6 +19616,8 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
   const closedAfter = await closedCount();
   assert(closedAfter === closedBefore && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
     `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} → ${closedAfter})`);
+  // 133's writers are 137's now (SMD-4238): the shipped ones put back for the sections after.
+  await restoreShipped("assert_priority", "clear_priority");
 }
 
 console.log("\n[121] Migration 134: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
@@ -20488,10 +20490,131 @@ console.log("\n[124] Migration 137: within one level the agenda puts the item th
   assert(keys(await ten("priority")) === expected && keys(await ten("due")) === expected, "a re-apply is a no-op: the same reads under both orders");
 }
 
-console.log("\n[125] Migration 138: forget a thought — refused CITED while an active citation leans on it, nothing touched; then forgotten: no row anywhere holds its text or its id (the log's events redacted in place, kept with their actor; the child's derived_from stripped and the child listed; the relation facet targeting it, the expired citation of it, the page section built on it with the page re-rendered, the priority statements on it, on its open item and taking a due time from it, the item with its events and a close proposal citing it, its deliverable's events, the query log's references), each counted in the evidence; the projections without drift; the ledger's row; the same text refused OB005 on capture and on edit unless reinstated; a twin's text kept and named; forgetting again FORGOTTEN, an unknown id NOT_FOUND; the redact amendment refusing each unlawful change; the guards refusing an unrelated delete; delete_thought unchanged; the shape; a re-apply a no-op (SMD-1723)");
+console.log("\n[125] Migration 138: a priority write names every statement it closed and the item it was asked about — a clear naming a ticket that closes the key's statements on the ticket and its row lists both, newest first, each on its own item, and names the ticket as 116 keys it; a set closing two lists both, replaced the newest of them, each closed by the new statement; one closed, a list of one; none, []; unchanged and nothing to clear name the item and close none; a refusal names the item and closes none; a statement of the pool another key holds untouched and unlisted; ob1_priority_closed_json's order and its empty list; a re-apply a no-op (SMD-4238)");
+{
+  type Assertion = { id: string; item: { kind: string; key: string }; level: number; maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
+  type Answer = { outcome: string; code: string | null; assertion: Assertion | null; replaced?: Assertion | null; winner: Assertion | null; item?: { kind: string; key: string }; closed?: Assertion[] };
+  const file = files.find((f) => /^\d{3}_priority_replies_name_every_close\.sql$/.test(f)) ?? "no NNN_priority_replies_name_every_close.sql";
+  // Applied again first, as each section's own file is: the rows below hold 138's writers whatever ran before.
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[125] op', 'operator'), ('[125] bot', 'agent')`);
+  const OP = { name: "[125] op", scope: "write" }, BOT = { name: "[125] bot", scope: "write" }, READER = { name: "[125] op", scope: "read" };
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[125] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  // A ticket as board-sync writes it: its own row, a linear source row (053). Returns the row's id.
+  const ticket = async (issue: string) => {
+    const content = `[125] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    return id;
+  };
+  const put = async (kind: string, key: string, level: number, actor: object) =>
+    (await db.query<{ r: Answer }>(`SELECT assert_priority($1, $2, $3, NULL, NULL, NULL, NULL, NULL, false, $4::jsonb) AS r`, [kind, key, level, JSON.stringify(actor)])).rows[0].r;
+  const clear = async (kind: string, key: string, actor: object) =>
+    (await db.query<{ r: Answer }>(`SELECT clear_priority($1, $2, $3::jsonb) AS r`, [kind, key, JSON.stringify(actor)])).rows[0].r;
+  // A key's statement written raw, as a by-name statement or a row recorded late leaves two open in one pool; spaced so
+  // each has its own instant (PGlite's clock can repeat a millisecond).
+  const raw = async (kind: string, key: string, level: number, maker: string) => {
+    await Bun.sleep(5);
+    return (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ($1, $2, $3, $4, (SELECT canonical_agent_id FROM ob1_agents WHERE label = $4), 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [kind, key, level, maker])).rows[0].id;
+  };
+  const row = async (id: string) =>
+    (await db.query<{ close_reason: string | null; closed_by: string | null }>(`SELECT close_reason, closed_by::text FROM priority_assertions WHERE id = $1::uuid`, [id])).rows[0];
+  const ids = (a: Answer) => (a.closed ?? []).map((c) => c.id).join();
+  // The item an answer names (jsonb orders an object's keys its own way).
+  const named = (a: Answer, kind: string, key: string) => a.item?.kind === kind && a.item?.key === key;
+  const items = (a: Answer) => (a.closed ?? []).map((c) => `${c.item.kind}:${c.level}`).join();
+
+  // The shape: the two writers and the new function name 138; the new one STABLE SQL.
+  const fns = (await db.query<{ n: string; v: string; l: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, l.lanname AS l, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname IN ('assert_priority', 'clear_priority', 'ob1_priority_closed_json') ORDER BY 1`)).rows;
+  assert(fns.length === 3 && fns.every((f) => /[Mm]igration 138 \/ SMD-4238/.test(f.c ?? "")) && fns.find((f) => f.n === "ob1_priority_closed_json")?.v === "s"
+         && fns.find((f) => f.n === "ob1_priority_closed_json")?.l === "sql",
+    `three functions name 138: the two writers replaced, ob1_priority_closed_json new (STABLE, SQL) (${fns.map((f) => `${f.n}:${f.v}:${f.l}`).join(", ")})`);
+
+  const rowA = await ticket("SMD-9991");
+  await ticket("SMD-9992");
+
+  // The ticket's Verify: a key holding statements on both a ticket and its row clears the ticket. Both close, named
+  // newest first, each on its own item; the reply names the ticket as asked, keyed as 116 keys it; another key's
+  // statement on the row stands, unlisted, and is the winner after.
+  const onTicket = await raw("ticket", "SMD-9991", 1, "[125] op");
+  const onRow = await raw("thought", rowA, 5, "[125] op");
+  const botsRow = await put("thought", rowA, 3, BOT);
+  const both = await clear(" Ticket ", " smd-9991 ", OP);
+  assert(both.outcome === "cleared" && named(both, "ticket", "SMD-9991") && ids(both) === `${onRow},${onTicket}`
+         && items(both) === "thought:5,ticket:1" && both.assertion?.id === onRow && both.closed?.every((c) => c.close_reason === "cleared" && c.closed_at !== null)
+         && both.winner?.id === botsRow.assertion?.id && (await row(botsRow.assertion!.id)).close_reason === null,
+    `a clear naming the ticket closes the key's statements on the ticket and its row, lists both newest first on their own items, names the ticket as 116 keys it; another key's stands, the winner (${both.outcome}; ${JSON.stringify(both.item)}; ${items(both)})`);
+
+  // A set closing two: both listed newest first, `replaced` the newest, each closed by the new statement.
+  const t2 = await raw("ticket", "SMD-9991", 2, "[125] op");
+  const r2 = await raw("thought", rowA, 4, "[125] op");
+  const setBoth = await put("thought", rowA, 1, OP);
+  const newId = setBoth.assertion?.id ?? "";
+  assert(setBoth.outcome === "asserted" && named(setBoth, "thought", rowA) && ids(setBoth) === `${r2},${t2}` && setBoth.replaced?.id === r2
+         && (await row(t2)).closed_by === newId && (await row(r2)).closed_by === newId && setBoth.closed?.every((c) => c.close_reason === "replaced" && c.closed_by === newId),
+    `a set closing the key's statements on the row and the ticket lists both, newest first, replaced the newest, each closed by the new statement (${items(setBoth)})`);
+
+  // One closed: a list of one, the same as `replaced`. None (a first statement): []. The same again: unchanged, [].
+  const one = await put("ticket", "SMD-9991", 2, OP);
+  const first = await put("ticket", "SMD-9992", 3, OP);
+  const same = await put("ticket", "SMD-9992", 3, OP);
+  assert(one.outcome === "asserted" && ids(one) === newId && one.replaced?.id === newId && named(one, "ticket", "SMD-9991")
+         && first.outcome === "asserted" && JSON.stringify(first.closed) === "[]" && first.replaced === null
+         && same.outcome === "unchanged" && JSON.stringify(same.closed) === "[]" && named(same, "ticket", "SMD-9992"),
+    `one closed is a list of one, the replaced statement; a first statement closes none ([]); the same again is unchanged and closes none, naming the item (${ids(one)} | ${JSON.stringify(first.closed)} | ${same.outcome})`);
+
+  // A single clear: a list of one, the assertion. Nothing to clear: [], the item named, the winner the pool's (on the row).
+  const clearOne = await clear("ticket", "SMD-9991", OP);
+  const nothing = await clear("ticket", "SMD-9991", OP);
+  assert(clearOne.outcome === "cleared" && ids(clearOne) === one.assertion?.id && clearOne.assertion?.id === one.assertion?.id
+         && nothing.outcome === "nothing_to_clear" && JSON.stringify(nothing.closed) === "[]" && named(nothing, "ticket", "SMD-9991")
+         && nothing.winner?.item.kind === "thought" && nothing.winner?.id === botsRow.assertion?.id,
+    `a single clear lists the one it closed; nothing to clear lists none and names the ticket, the winner the pool's on its row (${nothing.outcome}; winner on ${nothing.winner?.item.kind})`);
+
+  // A refusal names the item and closes none: a read-only envelope (both writers), and an item the brain does not hold.
+  const roSet = await put("ticket", "smd-9991", 2, READER);
+  const roClear = await clear("ticket", "smd-9991", READER);
+  const missing = await put("ticket", "SMD-9993", 2, OP);
+  // Every other refusal site too (review pass 4): a capture key on a ticket (ITEM_NOT_YOURS), and a due reference to
+  // a thought the brain does not hold (ITEM_NOT_FOUND after the item's own check).
+  const notYours = await put("ticket", "SMD-9991", 2, { name: "[125] op", scope: "capture" });
+  const noRef = (await db.query<{ r: Answer }>(`SELECT assert_priority('ticket', 'SMD-9991', 2, NULL, NULL, 'thought', '11111111-2222-4333-8444-555555555124', NULL, false, $1::jsonb) AS r`,
+    [JSON.stringify(OP)])).rows[0].r;
+  assert(notYours.code === "ITEM_NOT_YOURS" && noRef.code === "ITEM_NOT_FOUND" && [notYours, noRef].every((a) => JSON.stringify(a.closed) === "[]" && named(a, "ticket", "SMD-9991")),
+    `a capture key's refusal and a missing due reference's name the item and close none (${notYours.code}, ${noRef.code})`);
+  assert(roSet.code === "READ_ONLY_KEY" && roClear.code === "READ_ONLY_KEY" && missing.code === "ITEM_NOT_FOUND"
+         && [roSet, roClear, missing].every((a) => JSON.stringify(a.closed) === "[]")
+         && named(roSet, "ticket", "SMD-9991") && named(roClear, "ticket", "SMD-9991")
+         && named(missing, "ticket", "SMD-9993"),
+    `a refusal, read-only on either writer or an item not held, names the item as 116 keys it and closes none (${roSet.code}, ${roClear.code}, ${missing.code})`);
+
+  // ob1_priority_closed_json: newest first by seq whatever the ids' order; [] for none and for NULL.
+  const order = (await db.query<{ r: Assertion[] }>(`SELECT ob1_priority_closed_json(ARRAY[$1, $2, $3]::uuid[]) AS r`, [onTicket, t2, onRow])).rows[0].r.map((a) => a.id).join();
+  const empty = (await db.query<{ a: unknown; b: unknown }>(`SELECT ob1_priority_closed_json('{}'::uuid[]) AS a, ob1_priority_closed_json(NULL) AS b`)).rows[0];
+  assert(order === `${t2},${onRow},${onTicket}` && JSON.stringify(empty.a) === "[]" && JSON.stringify(empty.b) === "[]",
+    `ob1_priority_closed_json lists newest first whatever the ids' order, and [] for none or NULL (${order === `${t2},${onRow},${onTicket}`}, ${JSON.stringify(empty)})`);
+
+  // A re-apply is a no-op: the writers answer as before.
+  await reapply(file.slice(0, 4));
+  const again = await put("ticket", "SMD-9992", 4, OP);
+  assert(again.outcome === "asserted" && ids(again) === first.assertion?.id && named(again, "ticket", "SMD-9992"),
+    `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
+}
+
+console.log("\n[126] Migration 139: forget a thought — refused CITED while an active citation leans on it, nothing touched; then forgotten: no row anywhere holds its text or its id (the log's events redacted in place, kept with their actor; the child's derived_from stripped and the child listed; the relation facet targeting it, the expired citation of it, the page section built on it with the page re-rendered, the priority statements on it, on its open item and taking a due time from it, the item with its events and a close proposal citing it, its deliverable's events, the query log's references), each counted in the evidence; the projections without drift; the ledger's row; the same text refused OB005 on capture and on edit unless reinstated; a twin's text kept and named; forgetting again FORGOTTEN, an unknown id NOT_FOUND; the redact amendment refusing each unlawful change; the guards refusing an unrelated delete; delete_thought unchanged; the shape; a re-apply a no-op (SMD-1723)");
 {
   const file = files.find((f) => /^\d{3}_forget_thought\.sql$/.test(f)) ?? "no NNN_forget_thought.sql";
-  // Earlier sections re-applied 055's gate and 116's, 117's and 134's guards: put 138's back first.
+  // Earlier sections re-applied 055's gate and 116's, 117's and 134's guards: put 139's back first.
   await reapply(file.slice(0, 4));
   type J = Record<string, unknown>;
   const q = async <T = J>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
@@ -20520,7 +20643,7 @@ console.log("\n[125] Migration 138: forget a thought — refused CITED while an 
   const fn = await one<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description(p.oid, 'pg_proc')) AS c FROM pg_proc p WHERE p.proname = 'forget_thought'`);
   const gate = await one<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE proname = 'thought_audit_refuse_mutation'`);
   const lcols = (await q<{ c: string }>(`SELECT column_name AS c FROM information_schema.columns WHERE table_name = 'thought_forgotten' ORDER BY ordinal_position`)).map((r) => r.c).join(",");
-  assert(fn.n === 1 && /migration 138 \/ SMD-1723/i.test(fn.c ?? "") && /ob1:audit-amend-redacts-forgotten-only/.test(gate.src)
+  assert(fn.n === 1 && /migration 139 \/ SMD-1723/i.test(fn.c ?? "") && /ob1:audit-amend-redacts-forgotten-only/.test(gate.src)
       && /ob1:audit-amend-fills-payload-only/.test(gate.src) && /ob1:audit-amend-fills-null-only/.test(gate.src)
       && lcols === "id,thought_id,forgotten_at,actor_name,actor_agent_id,fingerprints,evidence",
     `forget_thought and its comment; the gate's three named amendments; the ledger's seven columns (${lcols})`);

@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 138: forget a thought — forget_thought removes it from every store
+-- Migration 139: forget a thought — forget_thought removes it from every store
 --                in the brain that holds its text, redacts its events in the
 --                log, and records the forgetting in a ledger (SMD-1723 PR 1)
 -- =============================================================================
@@ -90,7 +90,7 @@
 --   triggers added; the refusal on thoughts fires only for a fingerprint the
 --   ledger holds. Each role able to write thoughts is granted SELECT on the
 --   ledger, which the refusal reads. MINOR under the version rules.
---   test-schema [125], test-upgrade [20cc].
+--   test-schema [126], test-upgrade [20cd].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 034 (query_log), 042 (citations), 055 (the
@@ -113,7 +113,7 @@ BEGIN
      OR to_regclass('open_item_events') IS NULL OR to_regclass('deliverable_events') IS NULL
      OR NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('query_log') AND attname = 'result_items' AND NOT attisdropped) THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 138 needs 016, 034, 055, 060, 064, 067, 116, 117, 123 and 134 (content_fingerprint_of, query_log.result_items, ob1_capture_payload, delete_thought, page_sections, rebuild_derived, priority_assertions, open_item_events, deliverable_events); this schema lacks one',
+      MESSAGE = 'migration 139 needs 016, 034, 055, 060, 064, 067, 116, 117, 123 and 134 (content_fingerprint_of, query_log.result_items, ob1_capture_payload, delete_thought, page_sections, rebuild_derived, priority_assertions, open_item_events, deliverable_events); this schema lacks one',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -126,7 +126,7 @@ $qc$;
 -- ---------------------------------------------------------------------------
 ALTER TABLE thought_audit ADD COLUMN IF NOT EXISTS redacted_at timestamptz;
 COMMENT ON COLUMN thought_audit.redacted_at IS
-  'When forget_thought redacted this event''s text (the redact amendment, migration 138 / SMD-1723); NULL for an event never redacted.';
+  'When forget_thought redacted this event''s text (the redact amendment, migration 139 / SMD-1723); NULL for an event never redacted.';
 
 CREATE OR REPLACE FUNCTION ob1_audit_redacted_diff(p_diff jsonb, p_action text)
 RETURNS jsonb
@@ -165,7 +165,7 @@ AS $$
   FROM d, m
 $$;
 COMMENT ON FUNCTION ob1_audit_redacted_diff(jsonb, text) IS
-  'What forget_thought''s redaction leaves of a thought_audit diff (migration 138 / SMD-1723): a capture''s content the marker ''[forgotten]'' (always, so the payload amendment can never fill it) and its metadata {"forgotten": true}; an update''s content and metadata before and after, each that held a value, the same; a tombstone''s previous_content and previous_metadata the same. Ids (derived_from, supersedes), fingerprints, the vector''s presence and times are kept. The redact amendment of thought_audit_refuse_mutation holds an UPDATE to exactly this.';
+  'What forget_thought''s redaction leaves of a thought_audit diff (migration 139 / SMD-1723): a capture''s content the marker ''[forgotten]'' (always, so the payload amendment can never fill it) and its metadata {"forgotten": true}; an update''s content and metadata before and after, each that held a value, the same; a tombstone''s previous_content and previous_metadata the same. Ids (derived_from, supersedes), fingerprints, the vector''s presence and times are kept. The redact amendment of thought_audit_refuse_mutation holds an UPDATE to exactly this.';
 
 CREATE OR REPLACE FUNCTION ob1_forgetting()
 RETURNS uuid
@@ -178,7 +178,7 @@ AS $$
               THEN current_setting('ob1.forgetting', true)::uuid END
 $$;
 COMMENT ON FUNCTION ob1_forgetting() IS
-  'The thought forget_thought is forgetting in this transaction (the setting ob1.forgetting), or NULL: the one test the redact amendment and the relaxed guards of 116, 117 and 134 read. Migration 138 / SMD-1723.';
+  'The thought forget_thought is forgetting in this transaction (the setting ob1.forgetting), or NULL: the one test the redact amendment and the relaxed guards of 116, 117 and 134 read. Migration 139 / SMD-1723.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Immutable by rule: 055's gate verbatim — 008's refusal, 046's backfill
@@ -322,7 +322,7 @@ BEGIN
   IF TG_OP = 'UPDATE' AND current_setting('ob1.audit_amend', true) = 'redact' THEN
     -- ob1:audit-amend-redacts-forgotten-only — a CONTRACT SENTINEL, not prose
     -- (the 014 convention); test-schema reads it. The third named amendment
-    -- (138, SMD-1723), after backfill and payload: an event of the thought
+    -- (139, SMD-1723), after backfill and payload: an event of the thought
     -- forget_thought is forgetting in this transaction, once that thought is
     -- deleted, its diff replaced by what ob1_audit_redacted_diff leaves of it
     -- and redacted_at stamped with now(), once — every other column
@@ -357,7 +357,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION thought_audit_refuse_mutation() IS
-  'thought_audit''s guard (trigger thought_audit_immutable, and thought_audit_immutable_truncate): every DELETE and every truncation refused, and every UPDATE but its three named amendments — backfill (046: a NULL actor_kind, trust or origin filled with what the row derives to), payload (055: a capture row''s diff.content and diff.created_at filled where absent), and redact (138: an event of the thought forget_thought is forgetting, once deleted, its diff replaced by ob1_audit_redacted_diff and redacted_at stamped, once). Migrations 008, 046, 055 and 138 / SMD-1723.';
+  'thought_audit''s guard (trigger thought_audit_immutable, and thought_audit_immutable_truncate): every DELETE and every truncation refused, and every UPDATE but its three named amendments — backfill (046: a NULL actor_kind, trust or origin filled with what the row derives to), payload (055: a capture row''s diff.content and diff.created_at filled where absent), and redact (139: an event of the thought forget_thought is forgetting, once deleted, its diff replaced by ob1_audit_redacted_diff and redacted_at stamped, once). Migrations 008, 046, 055 and 139 / SMD-1723.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The ledger: what was forgotten, when, by whom, and the evidence
@@ -374,7 +374,7 @@ CREATE TABLE IF NOT EXISTS thought_forgotten (
 CREATE INDEX IF NOT EXISTS thought_forgotten_thought_idx ON thought_forgotten (thought_id);
 CREATE INDEX IF NOT EXISTS thought_forgotten_fingerprints_idx ON thought_forgotten USING gin (fingerprints);
 COMMENT ON TABLE thought_forgotten IS
-  'One row per thought forget_thought removed: when, by whom (the key''s name and agent id), every fingerprint its text had that no standing thought holds, and the evidence the call returned (what each store gave up, the children it could not rebuild, the twins that keep the text, the copies outside the brain). Append-only. A capture or edit to a text whose fingerprint it holds is refused OB005 unless ob1.reinstate_forgotten is on. Migration 138 / SMD-1723.';
+  'One row per thought forget_thought removed: when, by whom (the key''s name and agent id), every fingerprint its text had that no standing thought holds, and the evidence the call returned (what each store gave up, the children it could not rebuild, the twins that keep the text, the copies outside the brain). Append-only. A capture or edit to a text whose fingerprint it holds is refused OB005 unless ob1.reinstate_forgotten is on. Migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_forgotten_guard()
 RETURNS trigger
@@ -387,7 +387,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_forgotten_guard() IS
-  'Refuses every UPDATE and DELETE of thought_forgotten, and its truncation — for the owner too. Migration 138 / SMD-1723.';
+  'Refuses every UPDATE and DELETE of thought_forgotten, and its truncation — for the owner too. Migration 139 / SMD-1723.';
 
 DROP TRIGGER IF EXISTS thought_forgotten_append_only ON thought_forgotten;
 CREATE TRIGGER thought_forgotten_append_only
@@ -431,7 +431,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_refuse_forgotten_text() IS
-  'Refuses (OB005, DETAIL {forgotten_at}) a thought written with a text whose fingerprint thought_forgotten holds — a capture, or an edit that changes the text — unless ob1.reinstate_forgotten is on for the transaction. Reads the writer''s content_fingerprint and content_fingerprint_of(content). Migration 138 / SMD-1723.';
+  'Refuses (OB005, DETAIL {forgotten_at}) a thought written with a text whose fingerprint thought_forgotten holds — a capture, or an edit that changes the text — unless ob1.reinstate_forgotten is on for the transaction. Reads the writer''s content_fingerprint and content_fingerprint_of(content). Migration 139 / SMD-1723.';
 
 DROP TRIGGER IF EXISTS thoughts_refuse_forgotten ON thoughts;
 CREATE TRIGGER thoughts_refuse_forgotten
@@ -453,7 +453,7 @@ AS $$
           OR EXISTS (SELECT 1 FROM open_item_events e WHERE e.item_id::text = p_item AND e.origin_thought_id = ob1_forgetting()))
 $$;
 COMMENT ON FUNCTION ob1_forgetting_item(text) IS
-  'Whether an open item (by its id as text) was read from the thought this transaction is forgetting (ob1_forgetting): the guards of 116 and 117 admit the forget''s delete of its rows. Migration 138 / SMD-1723.';
+  'Whether an open item (by its id as text) was read from the thought this transaction is forgetting (ob1_forgetting): the guards of 116 and 117 admit the forget''s delete of its rows. Migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_priority_assertions_guard()
 RETURNS trigger
@@ -475,7 +475,7 @@ BEGIN
       MESSAGE = 'priority_assertions is append-only: a row changes only to close its window, once',
       ERRCODE = 'restrict_violation';
   END IF;
-  -- 138 (SMD-1723): forget_thought deletes a statement on the thought it is
+  -- 139 (SMD-1723): forget_thought deletes a statement on the thought it is
   -- forgetting, or on an open item read from it, or one taking its due time
   -- from either — a reason may hold the text. Nothing else.
   IF TG_OP = 'DELETE' AND ob1_forgetting() IS NOT NULL
@@ -491,14 +491,14 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_assertions_guard() IS
-  'Refuses an UPDATE of priority_assertions other than an open row closing its window once (closed_at, close_reason, closed_by), every TRUNCATE, and every DELETE but forget_thought''s of a statement on the thought it is forgetting, on an open item read from it, or taking its due time from either (ob1_forgetting, 138) — for the owner too. Migration 116 / SMD-3663. The forget''s delete admitted by migration 138 / SMD-1723.';
+  'Refuses an UPDATE of priority_assertions other than an open row closing its window once (closed_at, close_reason, closed_by), every TRUNCATE, and every DELETE but forget_thought''s of a statement on the thought it is forgetting, on an open item read from it, or taking its due time from either (ob1_forgetting, 139) — for the owner too. Migration 116 / SMD-3663. The forget''s delete admitted by migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_item_events_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  -- 138 (SMD-1723): forget_thought deletes the events of an item read from
+  -- 139 (SMD-1723): forget_thought deletes the events of an item read from
   -- the thought it is forgetting — an item's text is the thought's.
   IF TG_OP = 'DELETE' AND ob1_forgetting_item(OLD.item_id::text) THEN
     RETURN OLD;
@@ -509,7 +509,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_events_guard() IS
-  'Refuses every UPDATE of open_item_events, every TRUNCATE, and every DELETE but forget_thought''s of the events of an item read from the thought it is forgetting (ob1_forgetting_item, 138) — for the owner too. Migration 117 / SMD-3665. The forget''s delete admitted by migration 138 / SMD-1723.';
+  'Refuses every UPDATE of open_item_events, every TRUNCATE, and every DELETE but forget_thought''s of the events of an item read from the thought it is forgetting (ob1_forgetting_item, 139) — for the owner too. Migration 117 / SMD-3665. The forget''s delete admitted by migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_item_proposals_guard()
 RETURNS trigger
@@ -530,7 +530,7 @@ BEGIN
       MESSAGE = 'open_item_close_proposals: a row changes only to be decided, once',
       ERRCODE = 'restrict_violation';
   END IF;
-  -- 138 (SMD-1723): forget_thought deletes a proposal whose evidence is the
+  -- 139 (SMD-1723): forget_thought deletes a proposal whose evidence is the
   -- thought it is forgetting, or on an item read from it.
   IF TG_OP = 'DELETE' AND ob1_forgetting() IS NOT NULL
      AND (OLD.evidence_thought_id = ob1_forgetting() OR ob1_forgetting_item(OLD.item_id::text)) THEN
@@ -542,14 +542,14 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_proposals_guard() IS
-  'Refuses an UPDATE of open_item_close_proposals other than a pending row being decided once (decision, decided_at, decider_name, decider_agent_id, decision_reason), every TRUNCATE, and every DELETE but forget_thought''s of a proposal whose evidence is the thought it is forgetting or on an item read from it (138) — for the owner too. Migration 117 / SMD-3665. The forget''s delete admitted by migration 138 / SMD-1723.';
+  'Refuses an UPDATE of open_item_close_proposals other than a pending row being decided once (decision, decided_at, decider_name, decider_agent_id, decision_reason), every TRUNCATE, and every DELETE but forget_thought''s of a proposal whose evidence is the thought it is forgetting or on an item read from it (139) — for the owner too. Migration 117 / SMD-3665. The forget''s delete admitted by migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_deliverable_events_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  -- 138 (SMD-1723): forget_thought deletes the events of the deliverable that
+  -- 139 (SMD-1723): forget_thought deletes the events of the deliverable that
   -- is the thought it is forgetting; an outcome may quote it.
   IF TG_OP = 'DELETE' AND ob1_forgetting() IS NOT NULL AND OLD.thought_id = ob1_forgetting() THEN
     RETURN OLD;
@@ -560,7 +560,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_deliverable_events_guard() IS
-  'Refuses every UPDATE of deliverable_events, every TRUNCATE, and every DELETE but forget_thought''s of the events of the deliverable that is the thought it is forgetting (138) — for the owner too. Migration 134 / SMD-1715. The forget''s delete admitted by migration 138 / SMD-1723.';
+  'Refuses every UPDATE of deliverable_events, every TRUNCATE, and every DELETE but forget_thought''s of the events of the deliverable that is the thought it is forgetting (139) — for the owner too. Migration 134 / SMD-1715. The forget''s delete admitted by migration 139 / SMD-1723.';
 
 -- ---------------------------------------------------------------------------
 -- 6. forget_thought
@@ -829,7 +829,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION forget_thought(uuid, jsonb) IS
-  'Forget a thought: remove it and everything in the database holding its text, in one transaction, and return the evidence (migration 138 / SMD-1723). No row: {ok:false, error:NOT_FOUND}, or FORGOTTEN with forgotten_at when the ledger has it. Cited by an active citation: {ok:false, error:CITED, id, cited_by, citations}, as delete_thought (the operator detaches first). Else, after the supersession lock and the row: rebuild_derived(id, ''forget'', true, its fingerprints) (windows, entity links, orphaned entities, snapshot vectors); relation facets targeting it and expired or superseded citations of it deleted; its id stripped from other thoughts'' derived_from (those listed irreproducible); page sections whose evidence names it deleted through delete_page_section, each page re-rendered and listed in pages (its own log keeps the earlier render); priority statements on it, on open items read from it, or taking a due time from either deleted and re-projected; those items, their events and close proposals (and proposals whose evidence it is) deleted; the query log''s result_ids and result_items cleared of it, and its action rows on it deleted; the row deleted through delete_thought; its deliverable''s events deleted; every event of it in thought_audit redacted (the redact amendment); a thought_forgotten row written. Returns {ok:true, id, forgotten_at, removed{relations, inactive_citations, derived_refs, page_sections, priority_statements, item_proposals, item_events, items, query_log_rows, deliverable_events, audit_events}, rebuild, irreproducible[] (thoughts derived from it, for a person to review), pages[] (pages re-rendered without a section), twins[] (standing thoughts holding the same text), outside[] (copies beyond the brain)}.';
+  'Forget a thought: remove it and everything in the database holding its text, in one transaction, and return the evidence (migration 139 / SMD-1723). No row: {ok:false, error:NOT_FOUND}, or FORGOTTEN with forgotten_at when the ledger has it. Cited by an active citation: {ok:false, error:CITED, id, cited_by, citations}, as delete_thought (the operator detaches first). Else, after the supersession lock and the row: rebuild_derived(id, ''forget'', true, its fingerprints) (windows, entity links, orphaned entities, snapshot vectors); relation facets targeting it and expired or superseded citations of it deleted; its id stripped from other thoughts'' derived_from (those listed irreproducible); page sections whose evidence names it deleted through delete_page_section, each page re-rendered and listed in pages (its own log keeps the earlier render); priority statements on it, on open items read from it, or taking a due time from either deleted and re-projected; those items, their events and close proposals (and proposals whose evidence it is) deleted; the query log''s result_ids and result_items cleared of it, and its action rows on it deleted; the row deleted through delete_thought; its deliverable''s events deleted; every event of it in thought_audit redacted (the redact amendment); a thought_forgotten row written. Returns {ok:true, id, forgotten_at, removed{relations, inactive_citations, derived_refs, page_sections, priority_statements, item_proposals, item_events, items, query_log_rows, deliverable_events, audit_events}, rebuild, irreproducible[] (thoughts derived from it, for a person to review), pages[] (pages re-rendered without a section), twins[] (standing thoughts holding the same text), outside[] (copies beyond the brain)}.';
 
 -- ---------------------------------------------------------------------------
 -- 7. Every role that writes thoughts reads the ledger, which the refusal on

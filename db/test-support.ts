@@ -95,7 +95,7 @@ const TABLES = [
   // place is free. Its CASCADE takes the helpers whose arguments or result are
   // its row type, and its triggers.
   "deliverable_events",
-  // 138's ledger of forgotten thoughts (SMD-1723): no foreign key either way —
+  // 139's ledger of forgotten thoughts (SMD-1723): no foreign key either way —
   // it records thoughts that are gone — so its place is free. Its CASCADE takes
   // its triggers.
   "thought_forgotten",
@@ -443,6 +443,8 @@ const FUNCTIONS = [
   "ob1_priority_close_items(text, text[])",
   "ob1_priority_close_deleted()",
   "ob1_close_orphan_priorities()",
+  // 138 (SMD-4238): the writers' closed lists.
+  "ob1_priority_closed_json(uuid[])",
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row
   // type of 117's go with its table's CASCADE, and are named anyway).
@@ -540,7 +542,7 @@ const FUNCTIONS = [
   "deliverable_history(text)",
   "ob1_deliverable_projection_drift()",
   "ob1_rebuild_deliverable_projection()",
-  // 138 (SMD-1723): forgetting — the redaction's diff, the forget's setting,
+  // 139 (SMD-1723): forgetting — the redaction's diff, the forget's setting,
   // the ledger's guard, the refusal on thoughts, the item test and the call.
   "ob1_audit_redacted_diff(jsonb, text)",
   "ob1_forgetting()",
