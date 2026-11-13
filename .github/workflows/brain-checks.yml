@@ -1965,8 +1965,10 @@ jobs:
           # SMD-3476: the planted check, in the coordinator's own container as
           # root with its confinement — each child its own user, one unable to
           # read another's /proc/<pid>/environ, which it reads with the users
-          # dropped. The suite is no file of the image's: mounted for this run alone.
-          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" coordinator db/test-coordinator.ts --require-root
+          # dropped. The suite is no file of the image's: mounted for this run alone,
+          # with the slot broker its relay row starts (SMD-3379 PR 3b-1), a file
+          # of the federated project's, self-contained.
+          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" -v "$PWD/federated/broker.ts:/app/deploy/federated/broker.ts:ro" coordinator db/test-coordinator.ts --require-root
 
       # SMD-2678, SMD-3214, SMD-3476: the coordinator with OB1_PASSES=sleep,
       # the same way. Its supervisor holds the scheduler without a worker key
