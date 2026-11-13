@@ -31,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantStatements, quoteIdent, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey } from "./config.mjs";
 import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
@@ -6356,7 +6356,11 @@ console.log("\n[20ca] Migration 136: onto a populated brain at the file before i
   // what it left.
   const ROLE = "ob1_upgrade_136_nopriority";
   await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE}`);
-  for (const st of grantStatements(ROLE, { groups: ["capture", "server"] })) await sql.unsafe(st);
+  // The groups as a brain at 136 holds them: an object a later file adds (138's thought_forgotten in the capture
+  // group) is skipped, as migrate.ts --grant skips it on a partly migrated database.
+  const present136 = new Set(((await sql.unsafe(grantPresenceSql(grantedObjects(["capture", "server"])))) as { name: string; present: boolean }[])
+    .filter((r) => r.present).map((r) => r.name));
+  for (const st of grantStatements(ROLE, { groups: ["capture", "server"], present: present136 })) await sql.unsafe(st);
   const byRole = await thought("upgrade 136: deleted by a role without the priority grants"), onByRole = await put("thought", byRole, 2);
   let roleDelete = "";
   try {
