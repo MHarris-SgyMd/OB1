@@ -27,12 +27,15 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
+import { adviceFor, type EmbeddingProviderError } from "./core/provider-refusal.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
+import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
+import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
@@ -109,6 +112,18 @@ function guard(v: unknown, key = ""): unknown {
 
 /** A refusal a tool's renderer has no sentence for — a code it does not return. Not reached; said rather than thrown. */
 const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
+
+/**
+ * An embedding call that failed where nothing could be done without it (SMD-2892): the provider, the setting to
+ * check, and — to a key that can read — where it is and its own words. `Error:` while it is away (the same call lands
+ * once it answers), `Refused:` on its other answers (an operator's to mend), as the session hook's prose rule reads them.
+ */
+function providerErrorText(r: EmbeddingProviderError, what: string): string {
+  const at = r.base ? `the embedding provider at ${r.base}` : "the brain's embedding provider";
+  if (r.retryable) return `Error: ${what} was not done — ${at} is unavailable: ${r.detail}. The same call can land once it answers.`;
+  const said = r.provider ? ` It said: ${JSON.stringify(oneLine(snipText(r.provider, 200)))}` : "";
+  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. ${adviceFor(r)}${said}`;
+}
 
 /**
  * A fault an operation threw — the store down, a missing migration — said as
@@ -380,6 +395,7 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
   if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
+  if (r.code === "EMBEDDING_PROVIDER_ERROR") return providerErrorText(r, "the search");
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
   if (r.code === "REFUSED_WEIGHTS") return weightsRefusal(r);
   return unknownRefusal(r);
@@ -1545,6 +1561,7 @@ function captureRefusal(r: Refusal): string {
         : "a `derived_from` id";
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
+    case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the capture");
     default: return unknownRefusal(r);
   }
 }
@@ -1732,6 +1749,7 @@ function mutationRefusalText(r: Refusal): string {
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
     case "REFUSED_SOURCE_RESERVED": return `Refused: \`metadata_patch.source: "${r.source}"\` is the board's own label, which only its importers write. Patch without it.`;
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
+    case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the edit (its new text needs its vector)");
     case "NOT_FOUND":
       return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
     case "REFUSED_STALE_READ":
@@ -2365,11 +2383,19 @@ const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
     : a.closeReason === "deleted" ? `closed at ${a.closedAt}, when its item was deleted`
     : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
-  : ` The item's winner is ${statementText(v.winner)}${asked ? onOther(v.winner, asked) : ""}.`;
+  : ` The item's winner is ${statementText(v.winner)}${onOther(v.winner, asked)}.`;
+/**
+ * The statements a write closed, newest first: each its level, where it stood if not on the item named (a ticket and
+ * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238). Its callers set
+ * two or more between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read
+ * as one more item).
+ */
+const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
+  closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
     ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
@@ -2383,14 +2409,19 @@ const priorityRefusal = (r: Refusal) =>
 
 export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
   v.outcome === "unchanged"
-    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.assertion.item)}`
-    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement${onOther(v.replaced, v.assertion.item)}, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id, v.assertion.item)}`,
+    ? `Your statement on ${itemText(v.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.item)}`
+    : `Set ${itemText(v.item)} to ${statementText(v.assertion)}.${
+      v.closed.length === 1 ? ` It replaces your earlier statement, ${closedList(v.closed, v.item)}, which stays in the history.`
+      : v.closed.length > 1 ? ` It replaces your ${v.closed.length} earlier statements — ${closedList(v.closed, v.item)} — which stay in the history.`
+      : ""}${winnerText(v, v.assertion.id, v.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
-  v.assertion
-    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null, v.assertion.item)}`
-    : `You have no statement open on that item: nothing to clear.${winnerText(v, null, null)}`,
+  v.closed.length === 1
+    ? `Cleared your statement on ${itemText(v.item)}, ${closedList(v.closed, v.item)}; it stays in the history.${winnerText(v, null, v.item)}`
+    : v.closed.length > 1
+    ? `Cleared your ${v.closed.length} statements on ${itemText(v.item)} — ${closedList(v.closed, v.item)} — which stay in the history.${winnerText(v, null, v.item)}`
+    : `You have no statement open on ${itemText(v.item)}: nothing to clear.${winnerText(v, null, v.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>
@@ -2708,3 +2739,59 @@ export const renderListItems = (o: Outcome<ListItemsResult, ListItemsCode>): Rep
       ...v.items.map((i) => `- ${itemLine(i)}${i.overdue ? " (overdue)" : ""}${i.pendingProposals ? ` (${i.pendingProposals} close${i.pendingProposals === 1 ? "" : "s"} proposed)` : ""}`),
     ].join("\n"),
   itemRefusal, AS_JSON);
+
+
+// ── Deliverables (SMD-1715 PR 2, migration 134) ──────────────────────────────
+// Each reply's value is its JSON (AS_JSON), as the items' are: a verification's method and finding are data a reader
+// of the value needs. In the text they are words a key gave, quoted on one line.
+
+/** One deliverable: its thought, status, spec and checkpoint, who recorded it. */
+const deliverableLine = (d: Deliverable) =>
+  `deliverable ${d.thoughtId}, ${d.status}: meant to meet spec ${d.specRef}, at checkpoint ${quoted(d.checkpoint, 80)}, recorded by ${oneLine(snipText(d.capturedBy, 80))} at ${d.capturedAt}`;
+const verificationLine = (v: DeliverableVerification) =>
+  `checked by ${oneLine(snipText(v.by, 80))} at ${v.at} (${quoted(v.method, 80)}): ${quoted(v.finding)}`;
+const deliverableEventLine = (e: DeliverableEvent) =>
+  `- ${e.at} ${e.event === "captured" ? "recorded" : `set ${e.status}`} by ${oneLine(snipText(e.maker.name, 80))}`
+  + `${e.event === "verification" ? ` (${quoted(e.method ?? "", 80)}): ${quoted(e.finding ?? "")}` : ""}`;
+const deliverableRefusal = (r: Refusal) =>
+  r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a deliverable is recorded and verified by a write key alone.`
+  : r.code === "NOT_FOUND" ? `Refused: thought ${r.id} was deleted before it could be recorded as a deliverable.`
+  : r.code === "SPEC_NOT_FOUND" ? `Refused: the brain holds no thought ${r.spec} to be the spec. Capture what was asked first, and pass its id.${r.left ? ` The output was captured before the spec was found gone, as thought ${r.left}, which stays and names no deliverable: delete it if it is not wanted.` : ""}`
+  : r.code === "SPEC_IS_SELF" ? `Refused: this output's text is the spec's own (thought ${r.id}), and a thought cannot be its own spec.`
+  : r.code === "ALREADY_A_DELIVERABLE"
+    ? `Refused: thought ${r.id} is a deliverable already, recorded by ${oneLine(snipText(r.recordedBy, 80))}, meant to meet spec ${r.spec} at checkpoint ${quoted(r.checkpoint, 80)}. A deliverable keeps the spec, the checkpoint and the key it was recorded with; reworked output is a new deliverable at its new checkpoint (two checkpoints that differ only in letter case or white space name one thought).`
+  : r.code === "OUTPUT_EXISTS"
+    ? `Refused: this output's text, with its checkpoint line, is thought ${r.id} already, which is not a deliverable; a deliverable is a thought its key wrote from its spec. Nothing was recorded. Change the output's words or the checkpoint.`
+  : r.code === "NOT_A_DELIVERABLE"
+    ? r.deleted ? `Refused: deliverable ${r.id}'s thought was deleted; its events stay as history, and it takes no more verifications.` : `Refused: thought ${r.id} is not a deliverable; capture_deliverable records one.`
+  : r.code === "ILLEGAL_TRANSITION"
+    ? `Refused: deliverable ${r.id} does not move ${r.from} → ${r.to}. The moves allowed are unverified → verified or corrected, verified → corrected, and corrected → verified.`
+  : r.code === "VERIFY_NOT_YOURS"
+    ? `Refused: your key ${r.as === "author" ? "is one the brain records as writing this deliverable's thought" : "recorded this deliverable"}, so another key verifies it (deliverable ${r.id}). You may mark it corrected.`
+  : captureRefusal(r);
+
+/** What became of the capture's vector, when it was not made: the one fact about the thought a deliverable's reply says. */
+const captureNote = (c: CaptureSummary | null) =>
+  c?.noVector === "refused" ? " Its thought was saved without a vector: the egress policy refused the embedding call; it is embedded once the call is allowed."
+  : c?.noVector === "provider_down" ? " Its thought was saved without a vector: the embedding provider did not answer; it is embedded once it does."
+  : "";
+
+export const renderCaptureDeliverable = (o: Outcome<CaptureDeliverableResult, CaptureDeliverableCode>): Reply => render(o, (v) =>
+  v.outcome === "captured"
+    ? `Recorded ${deliverableLine(v.deliverable)}. Another key verifies it (verify_deliverable).${captureNote(v.capture)}`
+    : `That deliverable is recorded already — ${deliverableLine(v.deliverable)} — so ${v.capture === null ? "nothing was written" : "nothing was recorded; this call's capture landed on its thought"}.`,
+  deliverableRefusal, AS_JSON);
+
+export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, VerifyDeliverableCode>): Reply => render(o, (v) =>
+  `Set it ${v.to} (it was ${v.from}): ${deliverableLine(v.deliverable)}${v.deliverable.verification ? `; ${verificationLine(v.deliverable.verification)}` : ""}.`,
+  deliverableRefusal, AS_JSON);
+
+export const renderDeliverableHistory = (o: Outcome<DeliverableHistoryResult, DeliverableHistoryCode>): Reply => render(o, (v) =>
+  [
+    v.deliverable
+      ? `${deliverableLine(v.deliverable)}${v.deliverable.verification ? `; last ${verificationLine(v.deliverable.verification)}` : "; not checked yet"}.`
+      : `Deliverable ${v.events[0]?.thoughtId ?? "?"}: its thought was deleted, and its events stay as history.`,
+    `Every event, oldest first (${v.events.length}):`,
+    ...v.events.map(deliverableEventLine),
+  ].join("\n"),
+  deliverableRefusal, AS_JSON);

@@ -207,9 +207,12 @@ function definedIn(file: string): string[] {
  * on supersession_proposals [74] reads, and 111 last defines
  * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
  * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
- * whose door and thread functions it does not define.
+ * whose door and thread functions it does not define. 137 is 129's
+ * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
+ * carries 129, whose nine-argument wrapper it does not define and whose
+ * agenda it needs ([110] drops both).
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -18294,7 +18297,7 @@ console.log("\n[110] Migration 123: the agenda — unsettled tickets and open it
   const catalogAfter = await catalog();
   assert(keys(await ag({ project: P })) === keys(freed) && catalogAfter === catalogBefore && /"cons":\[\d+,\d+\]/.test(catalogAfter),
     `a re-apply is a no-op: the same read, and the log's two CHECKs and its column the same objects (${catalogBefore}; ${catalogAfter})`);
-  // The shipped agenda back: the last definer's (129's), which drops 123's eight-argument one.
+  // The shipped agenda back: the last definer's (137's, carrying 129's, which drops 123's eight-argument one).
   await restoreShipped("agenda");
 }
 
@@ -19601,6 +19604,8 @@ console.log("\n[120] Migration 133: a ticket and its own rows are one item to th
   const closedAfter = await closedCount();
   assert(closedAfter === closedBefore && JSON.stringify(await openOn([T, R])) === JSON.stringify(["thought:[120] op:5"]) && await drift() === 0,
     `a re-apply is a no-op: nothing more closed, the same statements open, no drift (${closedBefore} → ${closedAfter})`);
+  // 133's writers are 137's now (SMD-4238): the shipped ones put back for the sections after.
+  await restoreShipped("assert_priority", "clear_priority");
 }
 
 console.log("\n[121] Migration 134: deliverables — deliverable_events append-only (an UPDATE, a DELETE and a TRUNCATE refused); the transitions checked on every insert, a raw one too (the first event a capture of a thought and spec that exist, each later one a verification keeping the capture's spec and checkpoint and moving the status by one of the four allowed moves); the `deliverable` facet admitted only as the events' projection, so a raw UPDATE of its status (forbidden or allowed) and a facet with no events are refused, and deleted only with its thought; record_deliverable and verify_deliverable's outcomes and refusals as values (WRITE_SCOPE_REQUIRED, SPEC_NOT_FOUND, SPEC_IS_SELF, THOUGHT_NOT_FOUND, ALREADY_A_DELIVERABLE, NOT_A_DELIVERABLE, ILLEGAL_TRANSITION naming from and to, VERIFY_NOT_YOURS by name or agent id), malformed arguments raised 22023; a deleted thought's events kept as history; the drift check and the rebuild; the payload the same in any time zone; the shape; a re-apply a no-op (SMD-1715)");
@@ -20390,6 +20395,208 @@ console.log("\n[123] Migration 136: a deleted item's priority statements close �
   assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(upper)).close_reason === null && (await row(kept.id)).close_reason === null
          && await closedCount() === before && await drift() === 0,
     `on upgrade the statements on a thought and an entity gone before 136, and on a thought key that is no uuid, close as deleted; a living thought's stay open, keyed in upper case too; a re-apply closes nothing more (${reasons.join(", ")})`);
+}
+
+console.log("\n[124] Migration 137: within one level the agenda puts the item that unblocks more first — after the sooner due time and before kind and key, under both orders, so a Medium blocking 50 open items leads Mediums blocking 6 and 3 whose keys sort first, and of two at 2.1 the one blocking 2 leads the one blocking 1; no score moves, so a Low blocking 50 stays below a Medium blocking none; the due order breaks a tie on the moment by the count too; 129's body re-applied puts key order back; the shape; a re-apply a no-op (SMD-4264)");
+{
+  const file = files.find((f) => /^\d{3}_agenda_unblocks_order\.sql$/.test(f)) ?? "no NNN_agenda_unblocks_order.sql";
+  const the129 = files.find((f) => /^\d{3}_agenda_order\.sql$/.test(f)) ?? "no NNN_agenda_order.sql";
+  // [117] re-applied 129's ten-argument agenda: put this file's back first.
+  await reapply(file.slice(0, 4));
+  const P = "Agenda [124]";
+  const NOW = "2027-03-10T15:00:00Z";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('ag124-op', 'operator')`);
+  const OP = { name: "ag124-op", scope: "write" };
+  type Ag = { items: { key: string; effective: number; unblocks: number }[]; total: number; left_out: { blocked: number } };
+  const ticket = async (issue: string, blockedBy: string[] = []) => {
+    const content = `${issue} — [124] ${issue}\nbody`;
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "ag124-op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+        [content, JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", project: P, labels: [], linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    if (blockedBy.length) {
+      await db.query(`SELECT record_source_links($1::uuid, 'linear', $2::text::jsonb)`, [id, JSON.stringify(blockedBy.map((target) => ({ relation: "blocked_by", target })))]);
+    }
+  };
+  const put = (issue: string, level: number, due: string | null = null) =>
+    db.query(`SELECT assert_priority('ticket', $1, $2::int, $3::timestamptz, NULL, NULL, NULL, NULL, false, $4::jsonb)`, [issue, level, due, JSON.stringify(OP)]);
+  // Each blocker, then the open tickets it blocks (blocked_by on theirs). UB-6 blocks the same 50 as UB-2.
+  const blocks: [string, number][] = [["UB-1", 3], ["UB-2", 50], ["UB-3", 6], ["UB-4", 1], ["UB-5", 2], ["UB-7", 0], ["UB-8", 3], ["UB-9", 5]];
+  for (const [b, n] of blocks) {
+    await ticket(b);
+    for (let i = 1; i <= n; i++) await ticket(`${b}0${String(i).padStart(2, "0")}`, b === "UB-2" ? ["UB-2", "UB-6"] : [b]);
+  }
+  await ticket("UB-6");
+  // Mediums with no date, but UB-8 and UB-9, due at one moment; UB-6 a Low. The blocked tickets state nothing.
+  for (const b of ["UB-1", "UB-2", "UB-3", "UB-4", "UB-5", "UB-7"]) await put(b, 2);
+  await put("UB-8", 2, "2027-03-20T00:00:00Z"); await put("UB-9", 2, "2027-03-20T00:00:00Z");
+  await put("UB-6", 1);
+  const scope = JSON.stringify({ project: P });
+  const ten = async (order: string) =>
+    (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz, false, $3) AS a`, [scope, NOW, order])).rows[0].a;
+  const nine = async () => (await db.query<{ a: Ag }>(`SELECT agenda($1::jsonb, NULL, 100, false, false, false, NULL, $2::timestamptz, false) AS a`, [scope, NOW])).rows[0].a;
+  const keys = (a: Ag) => a.items.map((i) => `${i.key.slice(3)}:${i.effective}:${i.unblocks}`).join(" ");
+
+  // The shape: the ten-argument agenda's body orders by the count before kind and key, and its comment says so,
+  // naming 137; still plpgsql, STABLE, no argument defaulted.
+  const fn = (await db.query<{ src: string; c: string | null; l: string; v: string; d: string }>(
+    `SELECT p.prosrc AS src, obj_description(p.oid, 'pg_proc') AS c, l.lanname AS l, p.provolatile::text AS v, pg_get_function_arguments(p.oid) AS d
+       FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname = 'agenda' AND p.pronargs = 10`)).rows[0];
+  assert(/\(k\.s->>'due_at'\)::timestamptz ASC NULLS LAST,\s+COALESCE\(\(k\.s->>'unblocks'\)::int, 0\) DESC,\s+k\.c->>'kind', k\.c->>'key'\) AS rank/.test(fn.src)
+      && /then the sooner due time, then the more open items it unblocks \(122's count, to its cap\), then kind and key/.test(fn.c ?? "")
+      && /each tie by effective, then the more it unblocks, then kind and key/.test(fn.c ?? "") && /129 \(SMD-4192\) and 137 \(SMD-4264\)/.test(fn.c ?? "")
+      && fn.l === "plpgsql" && fn.v === "s" && !/DEFAULT/.test(fn.d),
+    `the ten-argument agenda orders by the unblocks count after the due time and before kind and key, its comment saying so for 137; plpgsql, STABLE, nothing defaulted (${fn.l}:${fn.v}; ${(fn.c ?? "").slice(-90)})`);
+
+  // priority: the two dated Mediums first (the sooner due time comes before the count: both 2.2, one moment, UB-9
+  // blocking 5 before UB-8 blocking 3); then the undated at 2.2 by the count, 50, 6, 3, where key order put UB-1
+  // first; then the two at 2.1, the one blocking 2 first; then the Medium blocking none (2); the Low blocking 50 last
+  // (1.2), as no score moved. The blocked tickets are left out.
+  const expected = "9:2.2:5 8:2.2:3 2:2.2:50 3:2.2:6 1:2.2:3 5:2.1:2 4:2.1:1 7:2:0 6:1.2:50";
+  const byPriority = await ten("priority"), byNine = await nine();
+  assert(keys(byPriority) === expected && keys(byNine) === expected && byPriority.total === 9 && byPriority.left_out.blocked === 70,
+    `within one level the more an item unblocks, the sooner it comes, after the due time and before the key; a Low blocking 50 stays below a Medium blocking none; a nine-argument call the same (${keys(byPriority)} | ${keys(byNine)} | ${byPriority.total}, ${byPriority.left_out.blocked} blocked)`);
+
+  // due: the dated two first, a tie on the moment and on effective broken by the count; the undated after, as priority.
+  const byDue = await ten("due");
+  assert(keys(byDue) === expected,
+    `under due a tie on the moment and on effective goes to the one unblocking more, the undated after in priority's order (${keys(byDue)})`);
+
+  // 129's body re-applied: key order again among the ties (the mechanism's own mutant, held here). Then 137's back.
+  await reapply(the129.slice(0, 4));
+  const keyOrder = keys(await ten("priority"));
+  await reapply(file.slice(0, 4));
+  assert(keyOrder === "8:2.2:3 9:2.2:5 1:2.2:3 2:2.2:50 3:2.2:6 4:2.1:1 5:2.1:2 7:2:0 6:1.2:50" && keys(await ten("priority")) === expected,
+    `129's order put the ties in key order, the item blocking 50 behind those blocking 3 and 6; 137 re-applied puts the count first again (${keyOrder})`);
+
+  // A re-apply is a no-op: the same reads.
+  await reapply(file.slice(0, 4));
+  assert(keys(await ten("priority")) === expected && keys(await ten("due")) === expected, "a re-apply is a no-op: the same reads under both orders");
+}
+
+console.log("\n[125] Migration 138: a priority write names every statement it closed and the item it was asked about — a clear naming a ticket that closes the key's statements on the ticket and its row lists both, newest first, each on its own item, and names the ticket as 116 keys it; a set closing two lists both, replaced the newest of them, each closed by the new statement; one closed, a list of one; none, []; unchanged and nothing to clear name the item and close none; a refusal names the item and closes none; a statement of the pool another key holds untouched and unlisted; ob1_priority_closed_json's order and its empty list; a re-apply a no-op (SMD-4238)");
+{
+  type Assertion = { id: string; item: { kind: string; key: string }; level: number; maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
+  type Answer = { outcome: string; code: string | null; assertion: Assertion | null; replaced?: Assertion | null; winner: Assertion | null; item?: { kind: string; key: string }; closed?: Assertion[] };
+  const file = files.find((f) => /^\d{3}_priority_replies_name_every_close\.sql$/.test(f)) ?? "no NNN_priority_replies_name_every_close.sql";
+  // Applied again first, as each section's own file is: the rows below hold 138's writers whatever ran before.
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[125] op', 'operator'), ('[125] bot', 'agent')`);
+  const OP = { name: "[125] op", scope: "write" }, BOT = { name: "[125] bot", scope: "write" }, READER = { name: "[125] op", scope: "read" };
+  const thoughtAs = async (content: string, metadata: object | null = null) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[125] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
+    });
+    return id;
+  };
+  // A ticket as board-sync writes it: its own row, a linear source row (053). Returns the row's id.
+  const ticket = async (issue: string) => {
+    const content = `[125] ${issue}`;
+    const id = await thoughtAs(content, { source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" });
+    await db.query(`SELECT record_thought_source($1::uuid, 'linear', $2, $3, 'text/markdown')`, [id, issue, content]);
+    return id;
+  };
+  const put = async (kind: string, key: string, level: number, actor: object) =>
+    (await db.query<{ r: Answer }>(`SELECT assert_priority($1, $2, $3, NULL, NULL, NULL, NULL, NULL, false, $4::jsonb) AS r`, [kind, key, level, JSON.stringify(actor)])).rows[0].r;
+  const clear = async (kind: string, key: string, actor: object) =>
+    (await db.query<{ r: Answer }>(`SELECT clear_priority($1, $2, $3::jsonb) AS r`, [kind, key, JSON.stringify(actor)])).rows[0].r;
+  // A key's statement written raw, as a by-name statement or a row recorded late leaves two open in one pool; spaced so
+  // each has its own instant (PGlite's clock can repeat a millisecond).
+  const raw = async (kind: string, key: string, level: number, maker: string) => {
+    await Bun.sleep(5);
+    return (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ($1, $2, $3, $4, (SELECT canonical_agent_id FROM ob1_agents WHERE label = $4), 'operator', 'operator', 'write', false, 1, now()) RETURNING id::text`, [kind, key, level, maker])).rows[0].id;
+  };
+  const row = async (id: string) =>
+    (await db.query<{ close_reason: string | null; closed_by: string | null }>(`SELECT close_reason, closed_by::text FROM priority_assertions WHERE id = $1::uuid`, [id])).rows[0];
+  const ids = (a: Answer) => (a.closed ?? []).map((c) => c.id).join();
+  // The item an answer names (jsonb orders an object's keys its own way).
+  const named = (a: Answer, kind: string, key: string) => a.item?.kind === kind && a.item?.key === key;
+  const items = (a: Answer) => (a.closed ?? []).map((c) => `${c.item.kind}:${c.level}`).join();
+
+  // The shape: the two writers and the new function name 138; the new one STABLE SQL.
+  const fns = (await db.query<{ n: string; v: string; l: string; c: string | null }>(
+    `SELECT p.proname AS n, p.provolatile AS v, l.lanname AS l, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+      WHERE s.nspname = 'public' AND p.proname IN ('assert_priority', 'clear_priority', 'ob1_priority_closed_json') ORDER BY 1`)).rows;
+  assert(fns.length === 3 && fns.every((f) => /[Mm]igration 138 \/ SMD-4238/.test(f.c ?? "")) && fns.find((f) => f.n === "ob1_priority_closed_json")?.v === "s"
+         && fns.find((f) => f.n === "ob1_priority_closed_json")?.l === "sql",
+    `three functions name 138: the two writers replaced, ob1_priority_closed_json new (STABLE, SQL) (${fns.map((f) => `${f.n}:${f.v}:${f.l}`).join(", ")})`);
+
+  const rowA = await ticket("SMD-9991");
+  await ticket("SMD-9992");
+
+  // The ticket's Verify: a key holding statements on both a ticket and its row clears the ticket. Both close, named
+  // newest first, each on its own item; the reply names the ticket as asked, keyed as 116 keys it; another key's
+  // statement on the row stands, unlisted, and is the winner after.
+  const onTicket = await raw("ticket", "SMD-9991", 1, "[125] op");
+  const onRow = await raw("thought", rowA, 5, "[125] op");
+  const botsRow = await put("thought", rowA, 3, BOT);
+  const both = await clear(" Ticket ", " smd-9991 ", OP);
+  assert(both.outcome === "cleared" && named(both, "ticket", "SMD-9991") && ids(both) === `${onRow},${onTicket}`
+         && items(both) === "thought:5,ticket:1" && both.assertion?.id === onRow && both.closed?.every((c) => c.close_reason === "cleared" && c.closed_at !== null)
+         && both.winner?.id === botsRow.assertion?.id && (await row(botsRow.assertion!.id)).close_reason === null,
+    `a clear naming the ticket closes the key's statements on the ticket and its row, lists both newest first on their own items, names the ticket as 116 keys it; another key's stands, the winner (${both.outcome}; ${JSON.stringify(both.item)}; ${items(both)})`);
+
+  // A set closing two: both listed newest first, `replaced` the newest, each closed by the new statement.
+  const t2 = await raw("ticket", "SMD-9991", 2, "[125] op");
+  const r2 = await raw("thought", rowA, 4, "[125] op");
+  const setBoth = await put("thought", rowA, 1, OP);
+  const newId = setBoth.assertion?.id ?? "";
+  assert(setBoth.outcome === "asserted" && named(setBoth, "thought", rowA) && ids(setBoth) === `${r2},${t2}` && setBoth.replaced?.id === r2
+         && (await row(t2)).closed_by === newId && (await row(r2)).closed_by === newId && setBoth.closed?.every((c) => c.close_reason === "replaced" && c.closed_by === newId),
+    `a set closing the key's statements on the row and the ticket lists both, newest first, replaced the newest, each closed by the new statement (${items(setBoth)})`);
+
+  // One closed: a list of one, the same as `replaced`. None (a first statement): []. The same again: unchanged, [].
+  const one = await put("ticket", "SMD-9991", 2, OP);
+  const first = await put("ticket", "SMD-9992", 3, OP);
+  const same = await put("ticket", "SMD-9992", 3, OP);
+  assert(one.outcome === "asserted" && ids(one) === newId && one.replaced?.id === newId && named(one, "ticket", "SMD-9991")
+         && first.outcome === "asserted" && JSON.stringify(first.closed) === "[]" && first.replaced === null
+         && same.outcome === "unchanged" && JSON.stringify(same.closed) === "[]" && named(same, "ticket", "SMD-9992"),
+    `one closed is a list of one, the replaced statement; a first statement closes none ([]); the same again is unchanged and closes none, naming the item (${ids(one)} | ${JSON.stringify(first.closed)} | ${same.outcome})`);
+
+  // A single clear: a list of one, the assertion. Nothing to clear: [], the item named, the winner the pool's (on the row).
+  const clearOne = await clear("ticket", "SMD-9991", OP);
+  const nothing = await clear("ticket", "SMD-9991", OP);
+  assert(clearOne.outcome === "cleared" && ids(clearOne) === one.assertion?.id && clearOne.assertion?.id === one.assertion?.id
+         && nothing.outcome === "nothing_to_clear" && JSON.stringify(nothing.closed) === "[]" && named(nothing, "ticket", "SMD-9991")
+         && nothing.winner?.item.kind === "thought" && nothing.winner?.id === botsRow.assertion?.id,
+    `a single clear lists the one it closed; nothing to clear lists none and names the ticket, the winner the pool's on its row (${nothing.outcome}; winner on ${nothing.winner?.item.kind})`);
+
+  // A refusal names the item and closes none: a read-only envelope (both writers), and an item the brain does not hold.
+  const roSet = await put("ticket", "smd-9991", 2, READER);
+  const roClear = await clear("ticket", "smd-9991", READER);
+  const missing = await put("ticket", "SMD-9993", 2, OP);
+  // Every other refusal site too (review pass 4): a capture key on a ticket (ITEM_NOT_YOURS), and a due reference to
+  // a thought the brain does not hold (ITEM_NOT_FOUND after the item's own check).
+  const notYours = await put("ticket", "SMD-9991", 2, { name: "[125] op", scope: "capture" });
+  const noRef = (await db.query<{ r: Answer }>(`SELECT assert_priority('ticket', 'SMD-9991', 2, NULL, NULL, 'thought', '11111111-2222-4333-8444-555555555124', NULL, false, $1::jsonb) AS r`,
+    [JSON.stringify(OP)])).rows[0].r;
+  assert(notYours.code === "ITEM_NOT_YOURS" && noRef.code === "ITEM_NOT_FOUND" && [notYours, noRef].every((a) => JSON.stringify(a.closed) === "[]" && named(a, "ticket", "SMD-9991")),
+    `a capture key's refusal and a missing due reference's name the item and close none (${notYours.code}, ${noRef.code})`);
+  assert(roSet.code === "READ_ONLY_KEY" && roClear.code === "READ_ONLY_KEY" && missing.code === "ITEM_NOT_FOUND"
+         && [roSet, roClear, missing].every((a) => JSON.stringify(a.closed) === "[]")
+         && named(roSet, "ticket", "SMD-9991") && named(roClear, "ticket", "SMD-9991")
+         && named(missing, "ticket", "SMD-9993"),
+    `a refusal, read-only on either writer or an item not held, names the item as 116 keys it and closes none (${roSet.code}, ${roClear.code}, ${missing.code})`);
+
+  // ob1_priority_closed_json: newest first by seq whatever the ids' order; [] for none and for NULL.
+  const order = (await db.query<{ r: Assertion[] }>(`SELECT ob1_priority_closed_json(ARRAY[$1, $2, $3]::uuid[]) AS r`, [onTicket, t2, onRow])).rows[0].r.map((a) => a.id).join();
+  const empty = (await db.query<{ a: unknown; b: unknown }>(`SELECT ob1_priority_closed_json('{}'::uuid[]) AS a, ob1_priority_closed_json(NULL) AS b`)).rows[0];
+  assert(order === `${t2},${onRow},${onTicket}` && JSON.stringify(empty.a) === "[]" && JSON.stringify(empty.b) === "[]",
+    `ob1_priority_closed_json lists newest first whatever the ids' order, and [] for none or NULL (${order === `${t2},${onRow},${onTicket}`}, ${JSON.stringify(empty)})`);
+
+  // A re-apply is a no-op: the writers answer as before.
+  await reapply(file.slice(0, 4));
+  const again = await put("ticket", "SMD-9992", 4, OP);
+  assert(again.outcome === "asserted" && ids(again) === first.assertion?.id && named(again, "ticket", "SMD-9992"),
+    `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

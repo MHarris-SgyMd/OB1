@@ -1625,6 +1625,17 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
 const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "").join("\n");
 
 /**
+ * Whether a refusal is the brain's embedding provider refusing the call (SMD-2892): EMBEDDING_PROVIDER_ERROR, any
+ * status. Its key, its model, its address, a gateway's answer, or a request it refuses — a 400 included, which a
+ * hosted provider answers to every call for a setting it will not take (the maintainer's call, 2026-11-12: kept, as
+ * before the code, rather than lose every summary to a misconfigured brain). Such a payload is kept, as a transient
+ * is, until the mend lands it or the week is up.
+ */
+export function providerMends(result) {
+  return result?.structuredContent?.code === "EMBEDDING_PROVIDER_ERROR";
+}
+
+/**
  * The server's machine-readable verdict on a result (SMD-1978), read from the
  * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
  * for a server from before that field, derived from the prose rules unchanged.
@@ -1649,7 +1660,7 @@ export function verdictOf(result, text) {
     const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
       : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
       : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
-        : (sc.retryable !== true && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2)
+        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2), and never on EMBEDDING_PROVIDER_ERROR, whose provider's words may say metadata (SMD-2892)
           : null;
     return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
   }
@@ -1737,7 +1748,11 @@ export async function postCapture(cfg, payload) {
     // worth keeping (first review pass: every isError was "refused", and a brain
     // whose database was down for a minute lost the session for good).
     const v = verdictOf(result, text);
-    const err = new CaptureError(v.retryable ? "failed" : "refused", `capture ${v.retryable ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
+    // Kept by its code too (SMD-2892): the brain's embedding provider refusing it — a key or a model an operator
+    // mends — is final for the call and no fault of the summary's, so the payload waits for the mend as an outage's
+    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal.
+    const kept = v.retryable || providerMends(result);
+    const err = new CaptureError(kept ? "failed" : "refused", `capture ${kept ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
     // A pointer the server could not judge: a failure ON the pointer, counted by
     // postPending so the last attempt can drop it (eighth review pass).
     if (v.on === "supersedes") err.on = "supersedes";
@@ -2699,7 +2714,9 @@ export async function postWrite(cfg, op) {
       if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, supersedes, names no thought there` };
       continue;
     }
-    if (v.retryable) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    // The receiving brain's embedding provider refusing it (a key or a model its operator mends, SMD-2892): held as a
+    // fault is, not given up — its edits and delete would otherwise meet NOT_FOUND there (review pass 1).
+    if (v.retryable || providerMends(result)) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
     return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}` };
   }
   return { dead: true, line: `not copied (given up): ${opLabel(op)} — still refused after dropping ${dropped.join(", ")}` };

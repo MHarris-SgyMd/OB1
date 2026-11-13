@@ -195,6 +195,8 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 `--state` defaults to `~/.local/share/open-brain/agent-runner`. Each run's records stay in `probes/<time>/` there: the settings, the guard's logs, the streams and each probe's outcome. Clones and temp directories are removed. When every probe passes, the run writes `probe-stamp.json` there, recording Claude Code's path, checksum and version, Bun's and git's checksums, the macOS build, each profile and probe file's hash, and the set of probes that passed; a failed run deletes any earlier stamp and writes none. Cut 2b starts a session only under a stamp that matches. Run the probes again after any change to the profile or probe files, and before moving to a new Claude Code, Bun, git or macOS version (the stamp pins each, so an unprobed change makes cut 2b refuse to start).
 
+**The brief probe (the model probe).** One probe needs a model: that a worker given the brief gets past CLAUDE.md step 1 — it does the task instead of stopping because it can't run `git fetch`, `gh` or `list_claims`. Only a model reasons past step 1, so it can't use the scripted stand-in; it runs apart from the sweep, as `--brief-probe --anthropic-key <file>`. That is one real-model worker session at the runner's real model and effort (`claude-opus-5-5`, `xhigh`; decision 4), bounded at $2 and 20 turns for the trivial task, on a trivial, clean ticket, under the real profile with the real repo CLAUDE.md in its config directory — so the claim ceremony is actually there to get past. It passes when the worker edits the clone and fails when it stalls at step 1; the clone and temp directory are removed, a `brief-probe.json` verdict and the session's record stay. It is not part of the stamp, and its verdict logic has offline self-check coverage.
+
 **What they found on 2.1.319** (2026-11-07). All 35 pass; a first review pass then hardened the self-check and added probes. The design took these from them:
 
 * **The temp directory is short.** Claude Code keeps child commands in `<CLAUDE_CODE_TMPDIR>/claude-<uid>` only while that path is at most 44 bytes (the binary's own constant). Otherwise it falls back to the shared `/tmp/claude-<uid>`, which the profile denies, and every command exits 1. So a session's temp directory is `/private/tmp/obr-<8 hex>`, not a directory in the run's record.
@@ -217,10 +219,28 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
 
+## The live run (`live-run.ts`)
+
+The executor runs one ticket end to end with the real clients — the capstone of cut 2c. Two modes, so the money path is never the default:
+
+* `--plan --ticket SMD-NNNN`: loads the config and keys, takes the ticket (its full fields fetched from Linear, Verify and the named ids parsed, checked for a character that doesn't show), provisions the runner's bare repository (a local clone of the main checkout, fetched each run), and prints what a run would do. No session, no claim, no Linear write, no spend.
+* `--execute --ticket SMD-NNNN --claude <path> --sha256 <hex> --version <x.y.z>`: the real run. It refuses a ticket not labelled `agent-ready`, checks the probe stamp (so the profile is as-probed — run the mock probes on this Claude Code first), then assembles the real `RunDeps` and `LiveDeps` and runs `liveRun`: claim on stable, move to In Progress, the worker and review sessions on the pinned Claude Code (the Anthropic key through `apiKeyHelper`), the gate, the release and the hand-back to Backlog. Up to about $13, with no PR (cut 3 publishes). The branch stays in the bare repository; the run's record stays under `runs/<run>/`.
+
+The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
+
+## The publish step (`publish.ts`)
+
+On a run that passed the gate, the runner publishes as the bot (cut 3a is the logic; the live client and the schedule are 3b and 3c). Two pieces, both offline-tested (`publish-check.ts`):
+
+* **`buildPrBody`** composes the PR body from the run's own computed fields — the ticket, the diff's stat, the gate, the sessions — then the worker's report and the review's open findings as model text. Each model section is masked of claim tokens, scanned with the session hook's `scanForSecrets`, and put in a code block whose fence is longer than any run of backticks inside it, so the model output can't break out of the block, render, link or mention anyone. A flagged section is withheld with a count, not shown; the whole body stays under GitHub's 65,536-character cap, and if two model sections would pass it they are dropped whole (never cut mid-fence) with a note pointing at the run record.
+* **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push to the bot's fork, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws.
+
+The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
+
 ## Cuts still to come
 
 Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. Driving real sessions end to end needs a model (cut 2c).
 
 * **2c:** the outward steps, over the runner's own keys (SMD-4089): the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
-* **3:** publishing and reconciliation, and the launchd schedule.
+* **3:** publishing, reconciliation and the launchd schedule, in three PRs — **3a, the publish step (`publish.ts`), is built** (offline); **3b** the live GitHub client, the wiring into the live run and reconcile (needs SMD-4089's GitHub identity); **3c** the launchd schedule (needs SMD-3606).
 * **4:** the pilot and its report (SMD-4091).

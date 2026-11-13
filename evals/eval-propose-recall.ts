@@ -11,8 +11,9 @@
  * It also reports candidate count per doc (the decide-cost proxy), which channel
  * found each hit, and the misses (what the proposer cannot see).
  *
- * Run against the dogfood stable brain (read-only):
- *   podman run … --network open-brain_data --env-file deploy/.env … \
+ * Run against the dogfood stable brain (read-only), on its data network,
+ * <project>_data (open-brain_data for the default project):
+ *   podman run … --network <project>_data --env-file deploy/.env … \
  *     bun /repo/evals/eval-propose-recall.ts
  */
 import { SQL } from "bun";

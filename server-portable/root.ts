@@ -71,6 +71,14 @@ export type Env = {
    */
   OB1_BACKGROUND_SLOTS?: string;
   /**
+   * Set by the coordinator alone, to `ipc`, in the environment of each pass it
+   * starts with a channel to its slot relay (SMD-3379 PR 3b-1): the pass's
+   * model calls then ask the host's slot broker through it, their own shares
+   * (OB1_BACKGROUND_SLOTS) where it says so. Never set by hand, and not
+   * forwarded by compose: the api has no channel.
+   */
+  OB1_SLOT_RELAY?: string;
+  /**
    * A local model server's parallel calls per model (SMD-3379 PR 2b-2b), 1 to
    * 16: compose hands the bundled Ollama the same as OLLAMA_NUM_PARALLEL, and
    * the background slots' defaults leave one of them for live calls (a server

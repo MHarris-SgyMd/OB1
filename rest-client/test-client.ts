@@ -141,6 +141,10 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     decide_item_close: { id: ID, accept: true, reason: "agreed" },
     item_history: { id: ID },
     list_items: { status: "unsettled", overdue: true, origin_thought: ID, plugin: "home-maintenance", limit: 7 },
+    // Deliverables (SMD-1715 PR 2): a deliverable's thought id in the path; the output, the finding and the rest in the body.
+    capture_deliverable: { content: "shipped the thing & more?", spec: ID, checkpoint: "c0ffee" },
+    verify_deliverable: { id: ID, status: "verified", method: "review & tests", finding: "it meets the spec?" },
+    deliverable_history: { id: ID },
     // The agenda (SMD-3669): its scope and flags ride the query string.
     agenda: { source: "linear", project: "Retrieval & more?", label: "bug", holder: "mine", limit: 7, include_blocked: true, include_claimed: true, include_proposed: true },
     // plan_context (SMD-2684): the request rides the body.

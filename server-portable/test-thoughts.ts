@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, refuseRedirect, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
 import { createProviderHealth, DEFAULT_REPROBE_INTERVAL_S, heardFrom, inContainer, isLoopback, probeable, probeClears, probeProvider, reprobeIntervalFrom, startProviderReprobe, startsDegraded } from "./provider-health.ts";
@@ -36,7 +36,7 @@ import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, norma
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
 import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
-import { DUE_ONLY_LEVEL, INFER_PROMPT, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
+import { citedIn, DUE_ONLY_LEVEL, flooredIn, forWriter, INFER_PROMPT, INFER_PROMPT_VERSION, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
 
 const { assert, report } = createAssert();
 
@@ -955,6 +955,74 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   ] as [string, unknown][])
     assert(providerDown(e) === null, `${what} is not an outage: it still fails the call (${said(e)})`);
 
+  // SMD-2892: providerFault, the same failures as a caller is told them. retryable is providerDown's alone; the
+  // provider's other answers final with their status and words; what is no provider's answer, null (still a fault).
+  const fault = (e: unknown) => JSON.stringify(providerFault(e));
+  for (const [what, e, reason] of [["a refused connection", refused, "provider_unreachable"], ["the deadline", new ProviderError("x", "timeout"), "provider_timeout"], ["a 429", http(429), "provider_429"], ["a 503", http(503), "provider_503"]] as [string, unknown, string][])
+    assert(providerFault(e)?.retryable === true && providerFault(e)?.reason === reason, `providerFault: ${what} is retryable, ${reason} (${fault(e)})`);
+  assert(providerFault(http(429))?.status === 429 && providerFault(refused)?.status === undefined, "…an outage carries the provider's status when it answered one");
+  for (const [what, e, reason, detail] of [
+    ["a 401", http(401, "{\"error\":\"bad key\"}"), "provider_401", "it answered 401 (its credential was refused)"], ["a 403", http(403), "provider_403", "it answered 403 (its credential was refused)"],
+    ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400 (it refused the request: this text, or a setting sent with it such as the model)"],
+    ["a 402", http(402), "provider_402", "it answered 402 (payment is required: the account's credit)"], ["a 413", http(413), "provider_413", "it answered 413 (it refused the request: this text, or a setting sent with it such as the model)"], ["a 422", http(422), "provider_422", "it answered 422 (it refused the request: this text, or a setting sent with it such as the model)"],
+    ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200, "<html>"), "provider_body", "it answered 200 with a body that is not JSON"],
+  ] as [string, ProviderError, string, string][]) {
+    const f = providerFault(e);
+    assert(f?.retryable === false && f.reason === reason && f.detail === detail && f.status === e.status && f.provider === (e.body || undefined) && !JSON.stringify(f).includes("http://x"),
+      `providerFault: ${what} is final, ${reason}, said "${detail}", its status and the provider's own words, never the base (${fault(e)})`);
+  }
+  for (const [what, e] of [["an egress refusal", new ProviderError("refused by the egress gate", "egress")], ["the width mismatch", new Error("Embedding width mismatch")], ["a TypeError with no code", new TypeError("x")], ["null", null]] as [string, unknown][])
+    assert(providerFault(e) === null, `providerFault: ${what} is no provider's answer, so null: still a fault (${fault(e)})`);
+  // A 200 holding no embedding (a gateway's error object): a body error, said so (review pass 1: a plain Error, raw).
+  const empty = providerFault(new ProviderError("http://x/v1 returned no embedding for model m", "body", 200, '{"error":{"message":"No successful provider responses."}}', true));
+  assert(empty?.retryable === false && empty.reason === "provider_body" && empty.detail === "it answered 200 with no embedding in its answer" && /No successful provider/.test(empty.provider ?? ""),
+    `providerFault: a 200 with no embedding is final, provider_body, said so, the gateway's words kept (${JSON.stringify(empty)})`);
+  // The provider's words cleaned before a reply tells them or a log prints them (review pass 4): the brain's own key and
+  // credential shapes redacted (an echoing endpoint sends the Authorization back), one line (no forged log line), no
+  // terminal escape, no invisible character a model would read.
+  const { providerSaid, providerLogWords } = await import("./core/provider-refusal.ts");
+  const KEY = "abcd1234efgh5678";
+  const hostile = `{"headers":{"authorization":"Bearer ${KEY}","proxy":"Basic dXNlcjpwYXNzd29yZA==","x":"sk-proj-0123456789abcdef"}}\n{"door":"api","outcome":"ok"}\x1b]52;c;ZXZpbA==\x07 zero\u200bwidth\u{E0041}tag your ${KEY} again`;
+  const cleaned = providerSaid(hostile, { key: KEY });
+  assert(!cleaned.includes(KEY) && !cleaned.includes("dXNlcjpwYXNzd29yZA") && !cleaned.includes("sk-proj-0123") && !/[\n\x1b\x07\u200b]/.test(cleaned) && !/\u{E0041}/u.test(cleaned)
+    && (cleaned.match(/\[redacted\]/g) ?? []).length >= 4 && /zerowidthtag/.test(cleaned),
+    `the provider's words: the key and credential shapes redacted, one line, no escape or invisible character (${cleaned})`);
+  // The one table `check` and the reply's advice read (review pass 5), each status class: the key for a 401, 402 or 403
+  // (a 402 its account's credit), the model for a 404, the model and its width for a 400, 413 or 422, nothing more for
+  // a redirect or a body, which name the base.
+  const { checksFor, adviceFor } = await import("./core/provider-refusal.ts");
+  const KEYS = ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"];
+  const table: [number | undefined, string, string[], RegExp][] = [
+    [401, "provider_401", KEYS, /its key \(OB1_LLM_API_KEY/], [403, "provider_403", KEYS, /its key/], [402, "provider_402", KEYS, /credit of the account behind its key/],
+    [404, "provider_404", ["OB1_EMBEDDING_MODEL"], /embedding model it serves/], [400, "provider_400", ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"], /a shorter or plainer one may land/],
+    [422, "provider_422", ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"], /a setting it is sent with/], [307, "provider_307", [], /sets OB1_LLM_BASE_URL where it points/],
+    [200, "provider_body", [], /a proxy, a gateway/], [418, "provider_418", [], /^An operator checks OB1_LLM_BASE_URL; retrying/],
+  ];
+  const misclassed = table.filter(([status, reason, check, advice]) => JSON.stringify(checksFor(status, reason)) !== JSON.stringify(check) || !advice.test(adviceFor({ status, reason, setting: "OB1_LLM_BASE_URL" })));
+  assert(misclassed.length === 0, `checksFor and adviceFor read one class per status (wrong: ${JSON.stringify(misclassed.map((t) => t[0]))})`);
+  // The Authorization the endpoint sends, by value: a base's userinfo goes as Basic, and a base64 with no digit or `=`
+  // passed the shape rule (review pass 6: `x:abcdefghij` is `eDphYmNkZWZnaGlq`).
+  const basicEcho = providerSaid('{"headers":{"authorization":"Basic eDphYmNkZWZnaGlq"}} and again eDphYmNkZWZnaGlq', { key: undefined, headers: { Authorization: "Basic eDphYmNkZWZnaGlq" } });
+  assert(!basicEcho.includes("eDphYmNkZWZnaGlq"), `the endpoint's own Basic credential redacted by value (${basicEcho})`);
+  // The refusal's base masked when the base carried userinfo (review pass 6: unheld here).
+  const { embeddingProviderError } = await import("./core/provider-refusal.ts");
+  const masked = embeddingProviderError(http(401), { base: "https://provider.example/v1", userinfo: true, key: undefined, headers: {} }, true);
+  assert(masked?.base === "https://***@provider.example/v1", `a refusal names the base with its userinfo masked (${masked?.base})`);
+  // A credential's shape, not a word: a provider's "Basic authentication failed" is kept (review pass 5: it was redacted).
+  const plainWords = providerSaid("Basic authentication failed; Bearer token missing", { key: KEY });
+  assert(plainWords === "Basic authentication failed; Bearer token missing", `words that name no credential are kept (${plainWords})`);
+  const logged = providerLogWords(new ProviderError(`Embeddings request to http://x/v1 failed: 401 ${hostile}`, "http", 401, hostile), { key: KEY });
+  assert(!logged.includes(KEY) && !/[\n\x1b]/.test(logged) && logged.startsWith("Embeddings request to http://x/v1 failed: 401 "), `…and a log line the same (${logged.slice(0, 120)})`);
+  // A 200 holding no embedding is told by its own error words, never the whole answer.
+  const { answerWords } = await import("./embed.ts");
+  assert(answerWords({ error: { message: "No successful provider responses." } }) === "No successful provider responses." && answerWords({ error: "quota" }) === "quota"
+    && answerWords({ message: "m" }) === "m" && answerWords({ headers: { authorization: `Bearer ${KEY}` }, json: { input: "the thought" } }) === "" && answerWords(null) === "",
+    "answerWords: an answer's error or message alone, never an echo of the request");
+  // A redirect: never followed, and where it points is the provider's words, for a reader to set the base (review pass 1).
+  const moved = providerFault(refuseRedirect("Embeddings", "http://x/v1", new Response(null, { status: 307, headers: { location: "https://user:pw@y.example/v1?key=k" } })));
+  assert(moved?.retryable === false && moved.reason === "provider_307" && moved.detail === "it answered 307 (a redirect, never followed)" && moved.provider === "redirecting to https://***@y.example/v1?…",
+    `providerFault: a 307 is final, and where it points is its words, userinfo and query masked (${JSON.stringify(moved)})`);
+
   for (const code of ["ETIMEDOUT", "ENETUNREACH", "ETIMEOUT"]) assert(providerDown(Object.assign(new Error("x"), { code }))?.reason === "provider_unreachable", `${code} is an outage`);
   assert(providerDown(Object.assign(new Error("x"), { syscall: "getaddrinfo" }))?.detail === "its name does not resolve" && providerDown(Object.assign(new Error("x"), { code: "ENOTFOUND" }))?.detail === "its name does not resolve (ENOTFOUND)",
     "a failed resolution is read by the syscall alone and by the code alone");
@@ -1112,6 +1180,43 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     // The handshake's own error, whatever the platform calls it (EPROTO on macOS), not some other throw in capture.
     const tlsSaid = `${String(eTls)} ${(eTls as { code?: unknown })?.code ?? ""}`;
     assert(eTls !== undefined && providerDown(eTls) === null && /TLS|SSL|EPROTO|handshake/i.test(tlsSaid) && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${tlsSaid})`);
+    // An endpoint echoing the request (the brain's own Authorization in it), and a 2xx nested past JSON.stringify's
+    // depth (review pass 4): each refused coded, provider_body, and the key in neither the refusal nor its words.
+    const echo = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => Response.json({ headers: Object.fromEntries(req.headers), error: { message: `echo of ${req.headers.get("authorization")}` } }) });
+    const deep = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(`{"data":${"[".repeat(120_000)}${"]".repeat(120_000)}}`, { headers: { "content-type": "application/json" } }) });
+    try {
+      for (const [what, port] of [["an echoing endpoint", echo.port], ["a deep nest", deep.port]] as const) {
+        const ctx4 = createContext({
+          env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_LLM_API_KEY: "secret-key-0123456789", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+          store: async () => ({ captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000b4", existed: false }) }) as never,
+          door: "test",
+        });
+        const out = await capture(ctx4, { name: "writer", scope: "write", keyHash: "h" } as never, { content: `a thought sent to ${what}` } as never).then((o) => o, (e) => e);
+        assert(out?.ok === false && out.refusal.code === "EMBEDDING_PROVIDER_ERROR" && out.refusal.reason === "provider_body" && !JSON.stringify(out).includes("secret-key-0123456789"),
+          `${what}: refused coded, provider_body, the brain's key nowhere in it (${JSON.stringify(out).slice(0, 220)})`);
+      }
+    } finally {
+      echo.stop(true);
+      deep.stop(true);
+    }
+    // The same misconfigured chat while the embeddings refuse the brain's key (SMD-2892 review pass 1): the chat's throw
+    // no longer wins the race — the capture is refused coded, the provider's verdict, and still nothing is written.
+    // Its 401 comes after the chat's handshake fails, so the chat's throw reaches Promise.all first (review pass 2: an
+    // at-once 401 never raced, and the wait on the embedding went unheld).
+    const keyless = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async () => { await Bun.sleep(400); return new Response(JSON.stringify({ error: "bad key" }), { status: 401 }); } });
+    try {
+      const written3: unknown[] = [];
+      const ctx3 = createContext({
+        env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${keyless.port}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+        store: async () => ({ captureThought: async (args: unknown) => { written3.push(args); return { id: "00000000-0000-4000-8000-0000000000b3", existed: false }; } }) as never,
+        door: "test",
+      });
+      const both = await capture(ctx3, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought both endpoints fail" } as never).then((o) => o, (e) => e);
+      assert(both?.ok === false && both.refusal.code === "EMBEDDING_PROVIDER_ERROR" && both.refusal.status === 401 && written3.length === 0,
+        `a chat call's runtime throw beside the embeddings' 401: refused EMBEDDING_PROVIDER_ERROR, nothing written (${JSON.stringify(both).slice(0, 200)})`);
+    } finally {
+      keyless.stop(true);
+    }
   } finally {
     plain.stop(true);
   }
@@ -1323,7 +1428,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       const t = await mendOnce(ctx, newMendState());
       bad.delete("");
       const st = ctx.providerHealth.state();
-      assert(t.down !== null && st.status === "answering" && st.fault === "its answer was not JSON", `a tick of broken bodies: the tick's outage, the state's fault (${JSON.stringify(st)})`);
+      assert(t.down !== null && st.status === "answering" && st.fault === "its answer was not JSON, or held no embedding", `a tick of broken bodies: the tick's outage, the state's fault (${JSON.stringify(st)})`);
     }
     // The provider away for many ticks over many rows, some of them failed
     // before: two calls a tick at most, whatever the rows' history.
@@ -2395,7 +2500,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   }
   // What a real call says (review pass 4: one rule on every path): a vector,
   // answering; a 4xx, a broken body or an answer the call could not use,
-  // answering with a fault — the provider is there, a capture fails outright;
+  // answering with a fault — the provider is there, a capture, a search or an edit is refused (SMD-2892);
   // an outage; an egress refusal nothing.
   {
     const lines: string[] = [];
@@ -2407,7 +2512,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     heardFrom(h, started, new Error("embedding width 3, expected 4"));
     assert(faultOf() === "its answer could not be used", `a width mismatch: answering, with its fault (${JSON.stringify(h.state())})`);
     heardFrom(h, started, new ProviderError("x answered a body that is not JSON", "body"));
-    assert(faultOf() === "its answer was not JSON", "a broken body: answering, with its fault");
+    assert(faultOf() === "its answer was not JSON, or held no embedding", "a broken body: answering, with its fault");
     heardFrom(h, performance.now(), new ProviderError("x failed: 503", "http", 503));
     assert(h.state().status === "unreachable", "a 503 is an outage");
     heardFrom(h, performance.now(), new ProviderError("x failed: 404", "http", 404));
@@ -2567,7 +2672,8 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   }
 
   // update_thought's re-embed feeds the state too (review pass 1): an outage
-  // refuses the edit whole, as before, and says so; an answer clears it.
+  // refuses the edit whole, as before, and says so; an answer clears it. Refused
+  // coded since SMD-2892 (EMBEDDING_PROVIDER_ERROR, retryable), not thrown.
   {
     const uid = "00000000-0000-4000-8000-0000000000d1";
     const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
@@ -2575,30 +2681,31 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     let port = closedNow();
     const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });
     try {
-      let threw: unknown;
-      try { await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never); } catch (e) { threw = e; }
-      assert(threw !== undefined && providerDown(threw) !== null && ectx.providerHealth.state().status === "unreachable", `an edit whose provider is down: refused whole, the state unreachable (${JSON.stringify(ectx.providerHealth.state())})`);
+      const edit = await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never);
+      assert(!edit.ok && edit.refusal.code === "EMBEDDING_PROVIDER_ERROR" && edit.refusal.retryable === true && ectx.providerHealth.state().status === "unreachable",
+        `an edit whose provider is down: refused whole, coded and retryable, the state unreachable (${JSON.stringify(edit)} ${JSON.stringify(ectx.providerHealth.state())})`);
       port = embedsOk.port!;
       await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "newer text" } as never);
       assert(ectx.providerHealth.state().status === "answering", "…and an edit it answers: answering");
     } finally { embedsOk.stop(true); }
   }
 
-  // A capture or a search the provider refuses with a 4xx: the call fails, as
-  // before, and the provider is there — answering (review pass 1, the mender's rule).
+  // A capture or a search the provider refuses with a 4xx: refused coded, final
+  // (SMD-2892), where each threw the provider's error; and the provider is
+  // there — answering (review pass 1, the mender's rule).
   {
     const refuses = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
     try {
       const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
-      let capThrew = false;
-      try { await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never); } catch { capThrew = true; }
-      assert(capThrew && fctx.providerHealth.state().status === "answering", `a capture refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      const cap = await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never);
+      assert(!cap.ok && cap.refusal.code === "EMBEDDING_PROVIDER_ERROR" && cap.refusal.retryable === false && cap.refusal.status === 400 && fctx.providerHealth.state().status === "answering",
+        `a capture refused 400: refused coded and final, and the provider answering (${JSON.stringify(cap)} ${JSON.stringify(fctx.providerHealth.state())})`);
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
       const { searchThoughts: st } = await import("./core/reads.ts");
-      let searchThrew = false;
-      try { await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never); } catch { searchThrew = true; }
-      assert(searchThrew && fctx.providerHealth.state().status === "answering", `a search refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      const found = await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+      assert(!found.ok && found.refusal.code === "EMBEDDING_PROVIDER_ERROR" && found.refusal.retryable === false && fctx.providerHealth.state().status === "answering",
+        `a search refused 400: refused coded and final, and the provider answering (${JSON.stringify(found)} ${JSON.stringify(fctx.providerHealth.state())})`);
     } finally { refuses.stop(true); }
   }
 
@@ -3120,6 +3227,208 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
       && readAnswer({ level: "urgent", level_phrase: "not urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "high", level_phrase: "no rush" }, "no rush on this", TUE).level === null
       && readAnswer({ level: "low", level_phrase: "no rush" }, "no rush on this", TUE).level?.value === 1 && readAnswer({ level: "high", level_phrase: "no time to lose" }, "no time to lose here", TUE).level?.value === 3,
     "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands, and emphasis (\"never been more urgent\") is no negation");
+  // SMD-4226: a label cited for another item is no level of the text's own (v1 read 10 of its 38 summary levels so),
+  // read only in a shape that cites: review pass 1 found nearness alone dropping the writer's own level.
+  const export944 = "SMD-944 — Add keyword search — vector-only retrieval cannot find an exact token\nProject: Retrieval & Ranking · Status: Done (completed) · Priority: High · Parent: none";
+  const citedCases: [string, string, boolean][] = [
+    ["Medium", "Filed SMD-1768 (Medium) for the drift.", true],
+    ["SMD-2627 (Medium):", "Next: SMD-2627 (Medium): the gate.", true],
+    ["Medium, Release Engineering", "Filed SMD-2742 — Medium, Release Engineering.", true],
+    ["Medium", "Filed SMD-2742 — Medium, Release Engineering.", true],
+    ["High", "SMD-2368, `platform`, High, in Welcome Agent Turn Reliability.", true],
+    ["Backlog, Low", "SMD-2719 is Backlog, Low now.", true],
+    ["Low", "Tickets: Backlog, Low", false],
+    ["High-priority", "It is the only High-priority open child in the project.", true],
+    ["Medium-priority", "It's the only Medium-priority ticket left in the line", true],
+    ["High-priority", "It is one of two High-priority children still open", true],
+    ["highest-priority", "It is the highest-priority open child in the project", true],
+    ["highest value open issue", "the highest value open issue for the project", true],
+    ["Medium", "| SMD-1 | one thought per episode | Medium |", true],
+    ["urgent", "İstanbul trip: SMD-1 (urgent)", true],
+    ["High", "SMD-3333 is the gate. It is yours, High, Todo in cycle 21, due 11-05.", true],
+    ["Urgent", "Owner, Urgent priority and cycle unchanged.", true],
+    ["Owner, Urgent priority and cycle unchanged.", "Started. Owner, Urgent priority and cycle unchanged.", true],
+    ["High-priority", "the only child left, under the High-priority SMD-1350", true],
+    ["Urgent", "Urgent, due Friday: rent", false],
+    ["Urgent", "Urgent, todo: call the bank", false],
+    ["High", "Next ticket: SMD-4300 · Priority: High", true],
+    ["Priority: High", "Next ticket: SMD-4300 · Priority: High", true],
+    ["High", "Picked SMD-4300 | Status: Todo | Priority: High", true],
+    ["High", "Board now:\nSMD-12 · Status: Todo · Priority: High\nSMD-13 · Status: Todo · Priority: Low", true],
+    ["High", "SMD-944 — Fix login (Priority: High)", false],
+    ["High", "SMD-944 Fix login, Priority: High", false],
+    ["High", "SMD-12 · Priority: High · blocks SMD-13", true],
+    ["High", "SMD-4300 was set to High priority", true],
+    ["High", "SMD-4300 was bumped to High", true],
+    ["High", "SMD-4300 now High", true],
+    ["High", "SMD-4300 has High priority", true],
+    ["High", "Filed SMD-4300 with priority High", true],
+    ["High", "SMD-12 → High", true],
+    ["High", "SMD-12 -> High", true],
+    ["High", "Q4-2026 High priority: launch the shop", false],
+    ["High", "Filed SMD-4300 (Priority: High) for the follow-up.", true],
+    ["Priority: High", "Filed SMD-4300 (Priority: High) for the follow-up.", true],
+    ["High", "Filed SMD-4300, Priority: High, in Retrieval.", true],
+    ["High", "SMD-12 is High priority now", true],
+    ["High", "Moved SMD-12 to High", true],
+    ["Medium", "SMD-3670's priority is Medium", true],
+    ["High", "SMD-12 High", true],
+    ["urgent", "SMD-12 moved along nicely this week after the long review, and so it went done, urgent: call mom", false],
+    ["Medium", "Filed SMD-12, Medium is the garden's level", false],
+    ["it’s Medium", "SMD-12 (it’s Medium) stays", true],
+    ["urgent", "Done, urgent: call mom", false],
+    ["high", "Todo, high: dentist", false],
+    ["urgent", "Things to do, urgent: renew passport", false],
+    ["Urgent", "Urgent, Todo: call the bank", false],
+    ["Q4-2026 high priority", "Q4-2026 high priority: launch the shop", false],
+    ["mid-2025 high", "Project mid-2025 high priority", false],
+    ["Phase-2: high priority", "Phase-2: high priority for the garden", false],
+    ["Urgent", "Urgent COVID-19 booster", false],
+    ["COVID-19 (urgent)", "COVID-19 (urgent) booster", false],
+    ["Med", "Filed SMD-1768 (Medium) for the drift.", false],
+    ["Medium", "Filed SMD-1768 [Medium]", true],
+    ["Medium", "Filed SMD-1768: Medium, follow-up", true],
+    ["High", "SMD-12 · High · Backlog", true],
+    ["it's Medium", "SMD-12 (it’s Medium) stays", true],
+    ["Medium", "SMD-12 is filed. Medium is the garden's level", false],
+    ["urgent", "Filed SMD-12. Rent (urgent)", false],
+    ["urgent", "SMD-12 is something the team will get to after the long holiday weekend ends, the rent (urgent)", false],
+    ["urgent", "the only High-priority open child is done, and this one is urgent", false],
+    ["urgent", "Filed SMD-12\nRent (urgent)", false],
+    ["urgent", "urgent: fix SMD-12 today", false],
+    // The writer's own level stands, in every shape review pass 1 found dropped.
+    ["Urgent", "Urgent: the landlord wants an answer by Friday", false],
+    ["Priority: High", export944, false],
+    ["Priority: High", "SMD-944 — Fix login\nPriority: High", false],
+    ["Priority: High", "SMD-944 · Status: Todo · Priority: High", false],
+    ["Priority: Urgent", "ABC-12 Renew passport\nStatus: Todo\nPriority: Urgent", false],
+    ["urgent", "So, urgent: the landlord wants an answer by Friday", false],
+    ["Urgent", "Mom, Urgent: call the bank", false],
+    ["high priority", "Tuesday, high priority: send the report", false],
+    ["Urgent", "Urgent, Friday: renew the lease", false],
+    ["Low priority", "Low priority, Saturday job: clean the garage", false],
+    ["this is urgent, please call", "this is urgent, please call", false],
+    ["urgent", "COVID-19 booster is urgent this week", false],
+    ["high priority", "Read ISO-8601 spec, high priority", false],
+    ["urgent", "Ask GPT-4 to draft it, urgent", false],
+    ["important", "My flight UA-123 is important to catch", false],
+    ["urgent", "SMD-12 is urgent: the demo is Friday", false],
+    ["urgent", "I need to fix SMD-12 today, it's urgent", false],
+    ["Urgent: fix SMD-12 before the demo", "Urgent: fix SMD-12 before the demo", false],
+    ["Urgent", "SMD-12 done.\nUrgent: call the landlord by Friday", false],
+    ["Urgent", "SMD-3410 stays first. Urgent and the date stand.", false],
+    ["urgent", "The only task left is urgent", false],
+    ["most urgent", "the most urgent item on my list is the rent", false],
+    ["Top priority", "Top priority: fix the bug", false],
+    ["highest priority", "my highest priority item is the visa", false],
+    ["urgent", "Call the plumber (urgent) about the leak", false],
+    ["Urgent", "Rent payment (Urgent)", false],
+    ["urgent", "Finish the deck (urgent, by Friday)", false],
+    ["Urgent", "| Pay rent | Urgent |", false],
+    ["urgent", "İstanbul trip: book it, urgent", false],
+    ["Medium", "SMD-12 (Medium) is done, and the release notes went out. Medium is how much the garden matters now", false],
+  ];
+  const citedWrong = citedCases.filter(([p, t, want]) => citedIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
+  assert(citedWrong.length === 0, `a label cited for another item is read only in a shape that cites: a key's clause ending in "(", "[", ",", ":", "·" or a dash, a board move from a key to a capitalised level, a key beside the level, a table row with a key, a board status or field, a level just before a key, a rank among items, another ticket's "Priority:" field; the writer's own level stands, a ticket's own export, a name, a flight or a standard's number beside it included (wrong: ${citedWrong.join("; ")})`);
+  const citedRead = readAnswer({ level: "medium", level_phrase: "SMD-2627 (Medium):" }, "Next: SMD-2627 (Medium): the gate.", TUE);
+  const citedDue = readAnswer({ level: "low", level_phrase: "Backlog, Low", due_phrase: "by Friday" }, "SMD-2719 is Backlog, Low now; I'll file it by Friday", TUE);
+  assert(citedRead.level?.cited === true && citedRead.level.value === 2
+      && readAnswer({ level: "high", level_phrase: "Priority: High" }, export944, TUE).level?.cited === undefined
+      && readAnswer({ level: "urgent", level_phrase: "urgent", due_phrase: "by Friday" }, "So, urgent: the landlord wants an answer by Friday", TUE).level?.cited === undefined,
+    "readAnswer marks a cited label's level and leaves it standing; a ticket's own export and the writer's own urgency are unmarked");
+  // SMD-4226, the maintainer's choice after review pass 2: only an agent-kind writer's cited level is dropped.
+  assert(forWriter(citedRead, "agent")?.level === null && forWriter(citedDue, "agent")?.due?.day === "2026-11-06" && forWriter(citedDue, "agent")?.level === null
+      && JSON.stringify(forWriter(citedRead, "operator")?.level) === JSON.stringify({ value: 2, word: "medium", phrase: "SMD-2627 (Medium):" })
+      && forWriter(citedRead, null)?.level?.value === 2 && forWriter(null, "agent") === null
+      && JSON.stringify(forWriter(readAnswer({ level: "urgent", level_phrase: "Urgent" }, "Urgent: the landlord wants an answer by Friday", TUE), "agent")?.level) === JSON.stringify({ value: 3, word: "urgent", phrase: "Urgent" }),
+    "forWriter drops a cited level for an agent-kind writer and keeps the due day beside it; anyone else's cited level stands, unmarked; an uncited level stands for every writer");
+  // SMD-4226: the earliest something can happen is no deadline (v1 read "can't happen before 11-03" as one), read only
+  // in the floor's own construction: review pass 1 found a negation alone dropping "not later than" deadlines.
+  const flooredCases: [string, string, boolean][] = [
+    ["before 11-03", "the cut, which can't happen before 11-03.", true],
+    ["can't happen before 11-03", "the cut, which can't happen before 11-03.", true],
+    ["11-03", "the cut, which can't happen before 11-03.", true],
+    ["until Friday", "not until Friday", true],
+    ["Friday", "not until Friday", true],
+    ["before the 12th", "it cannot start before the 12th", true],
+    ["Friday", "no sooner than Friday, then", true],
+    ["tomorrow", "ship it tomorrow at the earliest", true],
+    ["tomorrow", "tomorrow, or later", true],
+    ["by Friday", "the landlord wants an answer by Friday", false],
+    ["before the 12th", "pay the deposit before the 12th", false],
+    ["15 November", "Urgent: tax payment due not later than 15 November", false],
+    ["later than 15 November", "Urgent: tax payment due not later than 15 November", false],
+    ["past Friday", "The landlord can't wait past Friday", false],
+    ["can't wait past Friday", "The landlord can't wait past Friday", false],
+    ["past Friday", "It must not slip past Friday", false],
+    ["Friday", "This won't wait beyond Friday", false],
+    ["Friday", "It cannot be later than Friday", false],
+    ["by Friday", "Do not forget rent by Friday", false],
+    ["by Friday", "if not by Friday, then by Monday", false],
+    ["the deadline by Friday", "do not miss the deadline by Friday", false],
+    ["by Friday", "I can't stress enough that it is due by Friday", false],
+    ["by Friday", "PR 2 starts by Friday at the latest", false],
+    ["by Monday", "The migration starts by Monday", false],
+    ["by Monday", "Starting by Monday, file the weekly report", false],
+    ["before Friday", "Fieldwork begins before Friday", false],
+    ["Friday", "due a week from Friday", false],
+    ["tomorrow", "the day after tomorrow", false],
+    ["can't happen before 11-03", "if it can't happen before 11-03, escalate", false],
+    ["by Friday, or later if blocked", "finish the draft by Friday, or later if blocked", false],
+    ["Friday", "after Friday the office reopens", true],
+    ["before Friday", "if it doesn't ship before Friday, we lose the slot", false],
+    ["after Friday", "only after Friday", true],
+    ["starting Monday", "starting Monday, the pool hours change", true],
+    ["until Friday", "The report isn't due until Friday", false],
+    ["until the 1st", "rent isn't due until the 1st", false],
+    ["until Friday", "I don't need it until Friday", false],
+    ["Monday", "not needed until Monday", false],
+    ["until the 15th", "the payment isn't required until the 15th", false],
+    ["until Friday", "You don't have long until Friday", false],
+    ["Friday", "Only 3 days. Not long until Friday", false],
+    ["until the 30th", "It's not too late until the 30th: register", false],
+    ["until Friday", "can't rest until Friday", false],
+    ["by Monday", "start by Monday on the taxes", false],
+    ["by Friday", "finish the draft by Friday, or later if blocked", false],
+    ["Friday", "Friday, earliest possible", false],
+    ["after the meeting but before Friday", "after the meeting but before Friday", false],
+    ["from now until Friday", "from now until Friday", false],
+    ["Friday", "if it doesn't ship before Friday, we lose the slot", false],
+    ["until Friday", "this can't slip; nothing ships until Friday", true],
+    ["Friday", "it won't be ready before Friday", true],
+    ["Friday", "Not urgent but before Friday please", false],
+    ["the 15th", "If it's not paid before the 15th, there's a late fee", false],
+    ["before the 15th", "If it's not paid before the 15th, there's a late fee", false],
+    ["before Friday", "Not urgent but before Friday please: return library books", false],
+    ["before Friday", "do not forget before Friday: the rent", false],
+    ["until Friday", "Do not wait until Friday to pay rent", false],
+    ["before Friday", "it can't happen before Friday; or pay before Friday", false],
+    ["Monday", "doesn't open until Monday", true],
+    ["until Monday", "Don't start until Monday", true],
+    ["Monday", "isn't ready until Monday", true],
+    ["Monday", "starting Monday", true],
+    ["the 12th", "from the 12th onwards", true],
+    ["Monday", "Monday earliest", true],
+    ["Friday", "Friday at earliest", true],
+    ["Friday", "only after Friday", true],
+    ["Friday", "Friday at the soonest", true],
+  ];
+  const flooredWrong = flooredCases.filter(([p, t, want]) => flooredIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
+  assert(flooredWrong.length === 0, `a floor is read in its own construction — a negated start ("can't happen before", "doesn't open until"), a bare "not until", "no sooner than", "starting" or "after" before it, "at the earliest" or "onwards" after it — and a negated deadline stands ("isn't due until", "not later than", "can't wait past", "start by", "a week from", "if it can't happen before …") (wrong: ${flooredWrong.join("; ")})`);
+  const flooredRead = readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE);
+  const notLater = readAnswer({ level: "urgent", level_phrase: "Urgent", due_phrase: "15 November", due_date: "2026-11-15" }, "Urgent: tax payment due not later than 15 November", TUE);
+  assert(flooredRead.due?.floored === true && flooredRead.level?.value === 3 && notLater.due?.day === "2026-11-15" && notLater.due.floored === undefined,
+    "readAnswer marks a floor's due day and leaves the level beside it; a \"not later than\" deadline is unmarked");
+  // SMD-4226, the maintainer's choice after review pass 3: a floor is dropped for an agent-kind writer alone, and a writer
+  // of no kind (null: never classified, an importer, an unread stamp) keeps both marks' halves.
+  assert(forWriter(flooredRead, "agent")?.due === null && forWriter(flooredRead, "agent")?.level?.value === 3
+      && JSON.stringify(forWriter(flooredRead, "operator")?.due) === JSON.stringify({ day: "2026-11-03", phrase: "before 11-03", by: "model" })
+      && forWriter(flooredRead, null)?.due?.day === "2026-11-03" && forWriter(flooredRead, "ingested")?.due?.day === "2026-11-03"
+      && forWriter(citedRead, null)?.level?.value === 2 && forWriter(citedRead, "ingested")?.level?.value === 2,
+    "forWriter drops a floored due day for an agent-kind writer and keeps the level beside it; an operator, an importer or a writer of no kind keeps both, unmarked");
+  assert(INFER_PROMPT_VERSION === 2 && INFER_PROMPT.includes("carries its own priority field") && INFER_PROMPT.includes("Not a level:") && INFER_PROMPT.includes("Not a deadline:")
+      && INFER_PROMPT.includes("where one item ranks among others") && INFER_PROMPT.includes("the earliest something can happen"),
+    "the prompt is v2 (SMD-4226): a ticket's own field, what is no level, what is no deadline; a prompt edited without its version bumped shows here");
   // Review pass 2: the deadline quoted as the level (the local 7B read "I need the slides by Friday" as High).
   const slides = "Before the meeting, I need the slides by Friday.";
   const asLevel = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday" }, slides, TUE);
@@ -3149,10 +3458,10 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   assert([null, "x", [1], 3].every((a) => { const r = readAnswer(a, verify, TUE); return r.level === null && r.due === null; }), "an answer that is not an object reads as nothing");
 
   const st = inferredStatement(read);
-  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === 'inferred from the text (v1): urgent from "Urgent"; due 2026-11-06 from "by Friday"',
+  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): urgent from "Urgent"; due 2026-11-06 from "by Friday"`,
     `the statement: High, due by the end of 2026-11-06 (UTC), its reason quoting both phrases (${JSON.stringify(st)})`);
   const dueOnly = inferredStatement({ level: null, due: { day: "2026-11-13", phrase: "next Friday", by: "model" } });
-  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v1): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
+  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
       && inferredStatement({ level: { value: 1, word: "low", phrase: "no rush" }, due: null })?.dueAt === undefined
       && inferredStatement({ level: null, due: null }) === null && inferredStatement(null) === null,
     `a due phrase alone states Medium, saying so and whose date it is; a level alone no due time; nothing read, nothing stated (${JSON.stringify(dueOnly)})`);
@@ -3193,13 +3502,16 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     const b = await req.json() as { messages: { content: string }[] };
     const isInfer = b.messages[0].content === INFER_PROMPT;
     calls[isInfer ? "infer" : "tags"]++;
-    const answer = isInfer ? { level: "high", level_phrase: "matters", due_phrase: "tomorrow" } : { topics: ["t"], type: "idea" };
+    const cited = b.messages[1]?.content.includes("SMD-12 (Medium)");
+    const answer = !isInfer ? { topics: ["t"], type: "idea" } : cited ? { level: "medium", level_phrase: "Medium", due_phrase: null } : { level: "high", level_phrase: "matters", due_phrase: "tomorrow" };
     return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
   } });
   try {
     const stated: Record<string, unknown>[] = [];
     let existed = false, assertFails = false;
+    let stamp: "throws" | string | null = null, stampReads = 0;
     const stubStore = {
+      getThought: async () => { stampReads++; if (stamp === "throws") throw new Error("the row is away"); return { id: "00000000-0000-4000-8000-0000000000c1", content: "", metadata: stamp === null ? {} : { actor_kind: stamp }, created_at: null }; },
       captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000c1", existed }),
       keyAtText: async () => (existed ? { id: "00000000-0000-4000-8000-0000000000c1", clientKey: null } : null),
       assertPriority: async (o: Record<string, unknown>) => { if (assertFails) throw new Error("the store is away"); stated.push(o); return { outcome: "asserted" }; },
@@ -3233,14 +3545,41 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     try { faulted = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
     assert(faulted.ok && stated.length === 1 && errs.some((e) => /the inferred priority of thought \S+ was not stated: the store is away/.test(e)),
       `a store fault stating it is logged, and the capture stands (${errs.filter((e) => /inferred/.test(e)).join(" | ")})`);
+    // SMD-4226: a level cited for another ticket reads the row's stamp; an agent's is dropped, an operator's stands, and
+    // a stamp that can't be read leaves it standing (the maintainer's choice after review pass 3), logged.
+    assertFails = false;
+    const citedText = "Filed SMD-12 (Medium) for review";
+    const statedBefore = stated.length, readsBefore = stampReads;
+    stamp = "agent";
+    const byAgent = await capture(ctxWith(true), writer, { content: citedText } as never);
+    const afterAgent = stated.length;
+    stamp = "operator";
+    const byOperator = await capture(ctxWith(true), writer, { content: citedText } as never);
+    const operatorStated = stated.at(-1);
+    stamp = "throws";
+    const stampErrs: string[] = [];
+    console.error = (...a: unknown[]) => { stampErrs.push(a.join(" ")); };
+    let byUnread;
+    try { byUnread = await capture(ctxWith(true), writer, { content: citedText } as never); } finally { console.error = realErr; }
+    assert(byAgent.ok && afterAgent === statedBefore && byOperator.ok && stated.length === statedBefore + 2 && operatorStated?.level === 2
+        && byUnread?.ok && stated.at(-1)?.level === 2 && stampReads === readsBefore + 3 && stampErrs.some((e) => /the writer of thought \S+ was not read, so its marked halves stand: the row is away/.test(e)),
+      `a cited level: the stamp read; an agent's dropped, an operator's stated, and one whose stamp can't be read stated and logged (${afterAgent - statedBefore} | ${stated.length - statedBefore} | ${stampReads - readsBefore})`);
+    stamp = null;
+    const statedBeforeNoKind = stated.length;
+    await capture(ctxWith(true), writer, { content: citedText } as never);
+    assert(stated.length === statedBeforeNoKind + 1 && stated.at(-1)?.level === 2, "a cited level whose row carries no kind is stated: only an agent stamp drops it");
+    const readsBeforePlain = stampReads;
+    await capture(ctxWith(true), writer, { content: "this matters, due tomorrow, a plain one" } as never);
+    assert(stampReads === readsBeforePlain, "a reading with nothing marked reads no stamp");
     // The chat endpoint refusing the connection: the runtime's error the inference throws is caught by the capture,
     // which lands with the tags' outage marker and states nothing (review pass 1: no test held that catch).
     assertFails = false;
+    const statedBeforeRefused = stated.length;
     const refusedErrs: string[] = [];
     console.error = (...a: unknown[]) => { refusedErrs.push(a.join(" ")); };
     let refused;
     try { refused = await capture(ctxWith(true, closedPort), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
-    assert(refused.ok && stated.length === 1 && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
+    assert(refused.ok && stated.length === statedBeforeRefused && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
       `a chat endpoint that refuses the connection: the capture lands, nothing stated (${refusedErrs.filter((e) => /inferred/.test(e)).join(" | ")})`);
   } finally {
     chat.stop(true);

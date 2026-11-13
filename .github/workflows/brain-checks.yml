@@ -292,6 +292,19 @@ jobs:
       # secrets is the maintainer's, on the brain host.
       - name: The agent runner's identity setup
         run: bun scripts/agent-runner/setup.ts --self-check
+      # SMD-4087 cut 2c-3: the real-deps executor's offline logic — the Verify and
+      # named-id parsers, the brief-ticket builder on a stub Linear client, the
+      # bare-repo provisioning, the commitlint parser, and the session-path layout
+      # (record and config in subdirs so pathsProblem passes). No session, no model, no spend.
+      - name: The agent runner's executor
+        run: bun scripts/agent-runner/live-run.ts --self-check
+      # SMD-4087 cut 3a: the publish step's offline logic — buildPrBody (the dynamic
+      # fence the model text can't break out of, the secret withholding, the token
+      # masking and the body cap) and the publish sequence (the step-8 renew verdict,
+      # the push, the draft PR and the PR-link comment) on stubs. No key, no network,
+      # no model; the real push and the live wiring need SMD-4089's GitHub identity (cut 3b).
+      - name: The agent runner's publish step
+        run: bun scripts/agent-runner/publish-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -1024,6 +1037,14 @@ jobs:
       - name: Coordinator (no database)
         working-directory: db
         run: bun test-coordinator.ts
+
+      # SMD-3379 PR 3b-1: the coordinator's slot relay end to end — the host's
+      # broker in the process, the relay, and passes started with a channel as
+      # supervise.ts starts them, each through server-portable/slots.ts's hook.
+      # No database: a call on its own share runs at once, its semaphore failing open.
+      - name: The coordinator's slot relay (no database)
+        working-directory: db
+        run: bun test-slot-relay.ts
 
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
       # to main alone, the one run that publishes them, and after a failed
@@ -1951,8 +1972,10 @@ jobs:
           # SMD-3476: the planted check, in the coordinator's own container as
           # root with its confinement — each child its own user, one unable to
           # read another's /proc/<pid>/environ, which it reads with the users
-          # dropped. The suite is no file of the image's: mounted for this run alone.
-          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" coordinator db/test-coordinator.ts --require-root
+          # dropped. The suite is no file of the image's: mounted for this run alone,
+          # with the slot broker its relay row starts (SMD-3379 PR 3b-1), a file
+          # of the federated project's, self-contained.
+          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" -v "$PWD/federated/broker.ts:/app/deploy/federated/broker.ts:ro" coordinator db/test-coordinator.ts --require-root
 
       # SMD-2678, SMD-3214, SMD-3476: the coordinator with OB1_PASSES=sleep,
       # the same way. Its supervisor holds the scheduler without a worker key

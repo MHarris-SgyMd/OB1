@@ -20,7 +20,9 @@ export type { CallOptions } from "../core/index.ts";
  * conflicts, 422 a reference to nothing or a refusal the store named that
  * this server does not know (REFUSED), 501 a mode not built, 503 retry —
  * with Retry-After when the refusal is retryable, without it when the server waits
- * on an operator (CLAIM_UNATTRIBUTED's and PRIORITY_UNATTRIBUTED's set-up causes).
+ * on an operator (CLAIM_UNATTRIBUTED's and PRIORITY_UNATTRIBUTED's set-up causes,
+ * and EMBEDDING_PROVIDER_ERROR's provider answering an error: its key, its model,
+ * its address, a gateway's body, or a setting it will not take).
  */
 export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
   NOT_FOUND: 404,
@@ -30,6 +32,7 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_CURSOR: 400,
   REFUSED_THREAD_INPUT: 400,
   EMBEDDING_PROVIDER_UNAVAILABLE: 503,
+  EMBEDDING_PROVIDER_ERROR: 503,
   REFUSED_SUPERSEDES_SHAPE: 400,
   REFUSED_DERIVED_FROM_SHAPE: 400,
   REFUSED_METADATA_SHAPE: 400,
@@ -71,6 +74,14 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   PROPOSAL_DECIDED: 409,
   PROPOSAL_YOURS: 403,
   CONFIRM_NOT_YOURS: 403,
+  WRITE_SCOPE_REQUIRED: 403,
+  SPEC_NOT_FOUND: 422,
+  SPEC_IS_SELF: 409,
+  ALREADY_A_DELIVERABLE: 409,
+  OUTPUT_EXISTS: 409,
+  NOT_A_DELIVERABLE: 404,
+  ILLEGAL_TRANSITION: 409,
+  VERIFY_NOT_YOURS: 403,
   CLAIMS_UNREADABLE: 503,
   ORDER_UNAVAILABLE: 503,
   REFUSED_WEIGHTS: 400,
@@ -159,6 +170,10 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   set_item_status: { method: "POST", path: "/v1/items/{id}/status", ok: 200, call: CALLS.set_item_status },
   propose_item_close: { method: "POST", path: "/v1/items/{id}/proposals", ok: 200, call: CALLS.propose_item_close },
   decide_item_close: { method: "POST", path: "/v1/item-proposals/{id}/decision", ok: 200, call: CALLS.decide_item_close },
+  // Deliverables (SMD-1715 PR 2, migration 134): a deliverable by its thought's id in the path, a verification posted to it.
+  capture_deliverable: { method: "POST", path: "/v1/deliverables", ok: 200, call: CALLS.capture_deliverable },
+  deliverable_history: { method: "GET", path: "/v1/deliverables/{id}", ok: 200, call: CALLS.deliverable_history },
+  verify_deliverable: { method: "POST", path: "/v1/deliverables/{id}/verifications", ok: 200, call: CALLS.verify_deliverable },
 };
 
 /** The `{field}` names a route's path fills, in order — core/calls.ts's, which a plugin's manifest is checked by too. */

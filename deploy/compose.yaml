@@ -1498,6 +1498,13 @@ services:
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
       OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
+      # The host's slot broker (SMD-3379 PR 3b-1, deploy/federated/): its
+      # WebSocket URL, e.g. ws://host.containers.internal:8095/v1/slots, and
+      # this brain's key to it (federated.ts key). The coordinator's alone: no
+      # pass is handed them, each asks through it. Unset, the passes keep their
+      # own shares (OB1_BACKGROUND_SLOTS), as before.
+      OB1_SLOT_BROKER_URL: ${OB1_SLOT_BROKER_URL:-}
+      OB1_SLOT_BROKER_KEY: ${OB1_SLOT_BROKER_KEY:-}
     # The server's host alias (SMD-1875): the passes dial OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias
@@ -2192,7 +2199,7 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:d880b6e3f23c9942485493efab94f930e546195ed947744db0eaa64ebfd56e99"
+      ob1.grafana-dashboard: "sha256:d03dbda34aa86ea3ced6ca9cd22cb13252f0baffbe172f3fb38638bcce8a1e65"
       ob1.grafana-alert-rules: "sha256:ff31383605e19b20dadd7cfb3876824c8f773cb3ca3faa9f77e9b3d889e79cdc"
       ob1.grafana-dashboard-provider: "sha256:386d684e6960c7b6d164558b23fcb7deda92aa548d557fa48c33922820976a5d"
     # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
@@ -2606,7 +2613,7 @@ configs:
             "type": "timeseries",
             "id": 7,
             "title": "Server failures, by error type",
-            "description": "Each failed request's fault code (STORE_UNAVAILABLE or FAILED) or, with neither, its outcome.",
+            "description": "Each failed request's fault code (STORE_UNAVAILABLE, FAILED or EMBEDDING_PROVIDER_ERROR) or, with none, its outcome.",
             "datasource": {"type": "prometheus", "uid": "prometheus"},
             "gridPos": {"x": 12, "y": 17, "w": 12, "h": 7},
             "targets": [

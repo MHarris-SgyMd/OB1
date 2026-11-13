@@ -74,13 +74,22 @@ audit row records the word (`thought_audit.actor_context.vector_failed`:
 write's call failed, which on a re-capture is not that the row has no vector),
 and `search_thoughts_keyword` finds it at once. The vector mender gives it its
 vector once the provider answers (below); so does the same text captured again,
-or a re-embed pass. Any other
-embedding failure still fails the capture — a 4xx (an input the model refuses, a
-credential, a model that is not there), a body that is not JSON, a vector of the
-wrong width — because those say the brain is misconfigured, and a thought with
-no vector is invisible to semantic search. An edit (`update_thought`) whose
-provider does not answer is refused whole, as before: nothing is lost, and
-storing the new text would clear a vector the thought had.
+or a re-embed pass. The provider's
+other answers still fail the capture — a 4xx (an input the model refuses, a
+credential, a model that is not there), a redirect, a 2xx that is not JSON or
+holds no embedding — because those say the brain is misconfigured, and a thought
+with no vector is invisible to semantic search: refused `EMBEDDING_PROVIDER_ERROR`
+(SMD-2892), final (REST 503, no `Retry-After`). Its values — the REST body, the
+MCP `structuredContent` — are the word (`provider_401` …), the provider's
+status, `setting` (`OB1_LLM_BASE_URL`) and `check`, the settings to look at for
+that status (the key for a 401, 402 or 403, the model for a 404, the model and
+its width for a 400, 413 or 422); its MCP text says the same in words, and to a
+key that can read names the endpoint and the provider's own words, which the
+REST core's log carries too. A vector of the wrong width is still a
+fault. An edit (`update_thought`) whose provider fails is refused whole, as
+before, coded the same way: retryable while the provider does not answer (REST
+503 with `Retry-After`), final otherwise. Nothing is lost, and storing the new
+text would clear a vector the thought had.
 
 A search whose query embedding the provider does not answer (the same
 `providerDown` outages) is answered by the hybrid's exact-literal arm alone —
@@ -96,8 +105,9 @@ held only by thoughts outside the search's filter, `said_by`, `actor` or
 search unavailable]` and adds `vectorFailed` and a `note`; with nothing found it
 is refused `EMBEDDING_PROVIDER_UNAVAILABLE` (retryable; REST 503), saying the
 same of its literals, since an empty list would read as nothing stored. The query log records the
-search as arm `literal` (migration 106). Any other embedding failure still
-fails the search.
+search as arm `literal` (migration 106). The provider's other answers refuse
+the search `EMBEDDING_PROVIDER_ERROR`, final, as a capture's do (SMD-2892) —
+`search_thoughts`, `search` and `plan_context` alike.
 
 The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
 no vector its vector, by itself — one the provider did not answer for, one the
@@ -176,7 +186,8 @@ mender tick's — and by its own probes:
   answered: reachable, nothing yet said of the calls). With a `fault`, a call
   the provider answered and refused or answered unusably — a 4xx (a model not
   pulled, a key refused), a body that is not JSON, a vector of the wrong
-  width: the provider is there, and a capture fails outright until it is fixed.
+  width: the provider is there, and a capture, a search or an edit of a
+  thought's text is refused (`EMBEDDING_PROVIDER_ERROR`) until it is fixed.
 - `unreachable` since `since` (the first outage of the run), `at` the latest,
   the `reason` word and its `detail` for the latest, and `clears`: `probe`
   for an outage a `GET /models` can see (the probe's own, a call's failed
@@ -1302,10 +1313,14 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   same statement again is `unchanged`, nothing written. The reply names what it
   replaced and the item's winner, the lowest tier's newest statement. A ticket and
   its own board-sync rows are one item (SMD-4127, migration 133): a statement on
-  either replaces the caller's on the other, and the winner is the two's.
+  either replaces the caller's on the other, and the winner is the two's. The reply
+  names the item asked (`item`) and every statement it replaced (`closed`, newest
+  first, each on its own item; SMD-4238, migration 138); `replaced` is the newest.
 - **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
   the caller's own statement, never another key's, and names the winner after. On a
-  ticket or one of its rows it closes the caller's statements on both.
+  ticket or one of its rows it closes the caller's statements on both, and the reply
+  names the item asked (`item`) and every statement closed (`closed`, newest first;
+  `assertion` is the newest).
 - **`priority_history`** (`GET /v1/priorities/{kind}/{key}`, read scope): the winner
   and its level (null: unknown, not low), and every statement in the order written,
   each with its maker, tier, reason and how its window closed. A ticket's history and
@@ -1368,7 +1383,7 @@ it, each over REST and MCP alike:
 | `decide_item_close` | `POST /v1/item-proposals/{id}/decision` | capture | `{outcome: accepted\|rejected, proposal, item, event}` |
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
-| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, keyed, order, weights, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE`; `order=due` (migration 129, SMD-4192) lists the items with a due time first, soonest first, then the undated by priority (a stated None counts as undated), the answer's `order` saying which was applied; on a brain before 129 it is refused 503 `ORDER_UNAVAILABLE`; `weights[name]=value` (SMD-4193) overrides the default weights by name for this call, echoed as `weights` (null without), a bad one refused 400, naming it (`REFUSED_INPUT` for a name or a range, `REFUSED_WEIGHTS` for cap below `unblocks_many_at`) |
+| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, keyed, order, weights, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), a tie by the sooner due time, then the more open items it unblocks (migration 137, SMD-4264), then kind and key, each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE`; `order=due` (migration 129, SMD-4192) lists the items with a due time first, soonest first, then the undated by priority (a stated None counts as undated), the answer's `order` saying which was applied; on a brain before 129 it is refused 503 `ORDER_UNAVAILABLE`; `weights[name]=value` (SMD-4193) overrides the default weights by name for this call, echoed as `weights` (null without), a bad one refused 400, naming it (`REFUSED_INPUT` for a name or a range, `REFUSED_WEIGHTS` for cap below `unblocks_many_at`) |
 | `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values, little on this among them (SMD-4212: the best similarity of the first 8 hits under 0.74, the bar measured on qwen3-embedding:4b@1024; on another embedding a `little_not_measured` note says so, a note and not a coverage gap). One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
@@ -1426,6 +1441,74 @@ it, each over REST and MCP alike:
 Each writer is one statement in its own READ COMMITTED transaction holding the item's
 lock (117's rule). A role without the `items` grant group has the item calls fail, naming
 the table, and nothing else. Preflight's `open items` row checks the functions and the
+grant.
+
+### Deliverables (SMD-1715)
+
+A deliverable is a piece of agent output tied to the spec it was meant to meet (a
+thought's id), with a checkpoint (a commit hash or a content fingerprint) and a status:
+`unverified`, `verified` or `corrected` (migration 134, SMD-1715 PR 1). Three tools reach
+it, each over REST and MCP alike:
+
+| Tool | REST | Group | Answers |
+| --- | --- | --- | --- |
+| `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}`; `capture` null when nothing was captured |
+| `verify_deliverable` | `POST /v1/deliverables/{id}/verifications` | write | `{outcome: changed, deliverable, event, from, to}` |
+| `deliverable_history` | `GET /v1/deliverables/{id}` | read | `{deliverable, events}`; `deliverable` null when its thought was deleted |
+
+- **The capture is a capture_thought.** The output is captured as any thought is (its
+  egress, embedding, chunks and tags), its `derived_from` the spec, its text closing
+  with a `Checkpoint: …` line. So a new checkpoint is a new thought, and reworked output
+  is a new deliverable (the maintainer's definition, 2026-11-12). `capture` says what the
+  capture did by capture_thought's safe fields alone (`id`, `existed`, `chunks`,
+  `contextFailures`, and `noVector`: `refused` or `provider_down`), or is null when
+  nothing was captured.
+- **Everything is asked before the capture.** The capture and the record are two
+  statements, not one transaction (one transaction is SMD-4248). So the key's scope and
+  the spec (an id, or a thought's `client_key`, resolved once for both) are asked first.
+  Text that is a thought already, found before the capture or landed on by it, is
+  answered by what that thought is:
+  - a deliverable: 134's answer, writing nothing (`unchanged` for its own key, spec and
+    checkpoint, else `ALREADY_A_DELIVERABLE`);
+  - a thought this key captured from this spec that no deliverable names (a record that
+    did not land after an earlier call): recorded now;
+  - any other thought: `OUTPUT_EXISTS` (the maintainer, 2026-11-12).
+
+  Nothing is deleted. A record refused after a fresh capture leaves the thought; a
+  `SPEC_NOT_FOUND` names it (`left`), and a failed record leaves it for the same call to
+  record again. A text is matched by the thought's fingerprint, which ignores letter case
+  and runs of white space: two checkpoints that differ only there name one deliverable.
+- **What remains for SMD-4248:**
+  - another key capturing the same text while this call's model calls run has its row
+    merged into by this call's capture, before this call is refused;
+  - a thought left as above keeps its capture's side effects (proposed open items, an
+    inferred priority).
+- **A verification vouches for the output at its checkpoint,** not for the thought's
+  text, which stays editable. `verified`: it meets the spec. `corrected`: the check found
+  it wanting; corrected → verified is a later check overturning that finding.
+- **The finding is `finding`.** 134 stores a verification's finding as `outcome`; the
+  server names it `finding`, so no answer holds two `outcome`s.
+
+Their refusals:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured, unless the spec was deleted between the capture and the record: `left` then names the thought, which stays. |
+| `SPEC_IS_SELF` | 409 | The output's text is the spec's own, and a thought cannot be its own spec. |
+| `ALREADY_A_DELIVERABLE` | 409 | The thought is a deliverable recorded by another key, or at another spec or checkpoint; it names the one that stands (`recordedBy`, `spec`, `checkpoint`). |
+| `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable, and not this key's own leftover from this spec. Nothing is recorded. |
+| `NOT_A_DELIVERABLE` | 404 | No deliverable was recorded on the thought; `deleted` when its thought was deleted, its events kept. |
+| `ILLEGAL_TRANSITION` | 409 | The status does not move `from` → `to`. |
+| `VERIFY_NOT_YOURS` | 403 | A move to verified by the key that recorded the deliverable (`as: recorder`), or by a key the brain records as writing its thought (`as: author`). Either may mark it corrected. |
+| `WRITE_SCOPE_REQUIRED` | 403 | A principal without write scope reaching a writer through a caller of the core's own. |
+| `NOT_FOUND` | 404 | The thought was deleted between the capture and the record. |
+
+capture_thought's own refusals (the embedding provider refusing the call,
+`EMBEDDING_PROVIDER_ERROR`, 503, SMD-2892) stand for a capture; a provider that is down,
+or an egress policy keeping the text in, lands the output without its vector, as any
+capture.
+A role without the `deliverables` grant group has the deliverable calls fail, naming the
+table, and nothing else. Preflight's `deliverables` row checks the functions and the
 grant.
 
 ## Where a tool's logic lives (SMD-2283)
@@ -1558,7 +1641,8 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
   `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
   `citedBy`), and `REFUSED` for a refusal the store names that this server does not
-  know. A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
+  know. A search's, a capture's and an edit's: `EMBEDDING_PROVIDER_ERROR` (with its
+  `reason`, the provider's `status`, the `setting` and `check`, SMD-2892). A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
   `REFUSED_WRITER` (each with the proposal's `id`, the WRITER and lineage ones with the
   `flags` force would also waive), `REFUSED_REVIEW_ARGUMENT` (with its `problem`),
   `REFUSED_DIRECTION_REQUIRED` (with the `verdict`), `REFUSED_ALREADY_ACCEPTED`,
@@ -1653,7 +1737,8 @@ stripped (`X-Forwarded-Prefix`).
   (`core/refusal.ts`'s `FACTS`), never the caller's input or the store's words, at
   the status `rest/routes.ts`'s `REFUSAL_STATUS` gives it: 400 a shape to mend, 403 a
   rule, 404 nothing there, 409 a conflict, 422 a reference to nothing, 501 a mode
-  not built, 503 retry. Carried by a forwarder, a revoked or busy caller's key is
+  not built, 503 retry, or the brain waiting on its operator (with no `Retry-After`:
+  a refused key or model, a registry it cannot reach). Carried by a forwarder, a revoked or busy caller's key is
   named (`name`), for the MCP server's line (SMD-2287 PR 4b), and a refusal also holds itself whole
   as `refusal` — its words included, the caller's input quoted back and the
   store's or the egress gate's — so the MCP server says it as it always has
@@ -1662,8 +1747,8 @@ stripped (`X-Forwarded-Prefix`).
   bounds into its text. A refused input is a 400 `REFUSED_INPUT`
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
-  `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
-  carries `Retry-After`. Loose core inputs that reach Postgres (a non-UUID id
+  `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every
+  retryable 503 carries `Retry-After`. Loose core inputs that reach Postgres (a non-UUID id
   on update or delete) are still faults through both doors (SMD-2534);
   `list_thoughts`' limit, `days` and `after` are bounded in its schema since SMD-2995.
 - **The log** is one JSON line per request (`telemetry.ts`, SMD-1849) — the

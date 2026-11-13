@@ -184,6 +184,10 @@ const fake = Bun.serve({
       if (/\[\[slow\]\]/.test(content)) await slowGate();
       const id = uuid(1000 + n);
       if (/\[\[refused-naming-id\]\]/.test(content)) return err(`Refused: the thought with id ${id} will not hold this.`, { code: "REFUSED", retryable: false });
+      // The brain's embedding provider refusing its key (SMD-2892): final for the call, no fault of the summary's.
+      if (/\[\[embed-413\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 413 (it refused the request: this text, or a setting sent with it such as the model).", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_413", status: 413, setting: "OB1_LLM_BASE_URL" });
+      if (/\[\[embed-400\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 400 (it refused the request: this text, or a setting sent with it such as the model).", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_400", status: 400, setting: "OB1_LLM_BASE_URL" });
+      if (/\[\[embed-401\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" });
       return sse({ result: { content: [{ type: "text", text: `Captured as observation — id ${id} — topics` }] } });
     }
     return json({ error: { code: -32601, message: "Method not found" } });
@@ -1117,6 +1121,15 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   // error that saved a thought, a save whose vector did not attach, left with its code).
   const r2 = await postCapture(cfg, { text: "[[refused-naming-id]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   assert(r2 instanceof CaptureError && r2.kind === "refused" && r2.id === undefined, `a refusal whose words name an id is refused, not read as a save (${r2?.kind ?? JSON.stringify(r2)})`);
+  // The embedding provider refusing the brain's key (SMD-2892): final for the call, but the summary is not at fault, so
+  // the payload waits for an operator's mend as an outage's does — kept ("failed"), never dead on the first refusal.
+  const rEmbed = await postCapture(cfg, { text: "[[embed-401]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed instanceof CaptureError && rEmbed.kind === "failed" && /capture failed: Refused: the capture was not done/.test(rEmbed.message),
+    `an EMBEDDING_PROVIDER_ERROR, final as it is, keeps the payload (${rEmbed?.kind ?? JSON.stringify(rEmbed)}: ${String(rEmbed?.message).slice(0, 80)})`);
+  const rEmbed400 = await postCapture(cfg, { text: "[[embed-400]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed400 instanceof CaptureError && rEmbed400.kind === "failed", `…a 400 kept too, a setting the provider will not take for every call (the maintainer's call, 2026-11-12) (${rEmbed400?.kind})`);
+  const rEmbed413 = await postCapture(cfg, { text: "[[embed-413]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed413 instanceof CaptureError && rEmbed413.kind === "failed", `…and so is a 413 (${rEmbed413?.kind})`);
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.
   const bad = prepare({ session_id: "s-bad", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [b] = await postPending({ url: URL_, key: "wrong" }, bad.payloadPath);
@@ -2157,6 +2170,10 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     const vp = (text) => verdictOf({ isError: true }, text);
     const vD = vc({ code: "DERIVED_FROM_MISSING", retryable: false, positions: [2] }, "any prose at all");
     assert(vD.mend === "derived" && vD.retryable === false && vD.positions.join() === "2", "verdictOf reads DERIVED_FROM_MISSING and its positions from the code, whatever the prose");
+    // The provider's own words may say "metadata" (OpenRouter's upstream errors carry a `metadata` field): no mend of
+    // the capture's metadata for that, which would drop it and post again for nothing (SMD-2892 review pass 1).
+    const vE = vc({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, status: 401 }, 'Refused: … It said: {"error":{"metadata":{"provider_name":"OpenAI"}}}');
+    assert(vE.mend === null && vE.retryable === false, `an EMBEDDING_PROVIDER_ERROR whose provider words say metadata mends nothing (${JSON.stringify(vE)})`);
     const vU = vc({ code: "SUPERSEDES_UNJUDGED", retryable: true });
     assert(vU.retryable === true && vU.on === "supersedes" && vU.mend === null, "…SUPERSEDES_UNJUDGED is a kept transient marking the pointer, mending nothing");
     const vS = vc({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
@@ -2841,6 +2858,9 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     if (slowMs) await sleep(slowMs);
     if (/\[\[fault\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "update_thought failed: the REST core did not answer" }], structuredContent: { code: "FAILED", message: "the REST core did not answer" } } }));
     if (/\[\[meta\]\]/.test(String(args.content ?? "")) && args.metadata) return err("Refused: `metadata.reserved_x` is set by the server, not the caller.", { code: "REFUSED_METADATA_SHAPE", problem: "reserved_key" });
+    if (/\[\[embed-down\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Error: the edit (its new text needs its vector) was not done — the brain's embedding provider is unavailable: the connection was refused. The same call can land once it answers." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL", check: [] } } }));
+    if (/\[\[embed-401\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" } } }));
+    if (/\[\[embed-400\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 400 (it refused the request: this text, or a setting sent with it such as the model)." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_400", status: 400, setting: "OB1_LLM_BASE_URL" } } }));
     if (/\[\[invalid\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool capture_thought" }] } }));
     if (name === "capture_thought") {
       if (busy && /\[\[busy\]\]/.test(args.content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
@@ -3048,6 +3068,28 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   assert(inval.code === 1 && !queueIn().length && existsSync(DEAD) && readdirSync(DEAD).length === 1 && /not copied \(given up\): capture_thought .* Input validation error/.test(logOf(CANARY_ROOT)),
     "a copy refused as invalid input goes to writes/dead, the queue moving on");
   rmSync(DEAD, { recursive: true, force: true });
+  // The canary's embedding provider refusing its key (SMD-2892): held as a fault is, not given up, so the thought's
+  // later edits and delete still find it there once the operator mends the key (review pass 1: it went to dead/).
+  calls.length = 0;
+  const keyless = await post("capture_thought", { content: "[[embed-401]] a copy met by the canary's refused key" }, captured(S(37)));
+  assert(keyless.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 401/.test(keyless.err),
+    `a copy refused EMBEDDING_PROVIDER_ERROR for the canary's key holds the queue, not given up (${keyless.err.trim().slice(0, 140)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  // …and so does a 400 (the maintainer's call, 2026-11-12: a hosted provider answers it to every call for a setting it will
+  // not take, and giving each copy up would lose them all).
+  const refused400 = await post("capture_thought", { content: "[[embed-400]] a copy the canary's provider refuses with a 400" }, captured(S(38)));
+  assert(refused400.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 400/.test(refused400.err),
+    `a copy refused with a 400 holds the queue too (${refused400.err.trim().slice(0, 140)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  // A copied edit the canary refuses retryable (its provider away): kept by the code as by `retryable` (review pass 6:
+  // only final refusals were held).
+  const editAway = await post("update_thought", { id: S(73), content: "[[embed-down]] an edit copied while the canary's provider is away" }, [{ type: "text", text: `Updated ${S(73)} (content re-embedded).` }]);
+  assert(editAway.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: update_thought .* is unavailable/.test(editAway.err),
+    `a copied edit refused EMBEDDING_PROVIDER_ERROR, retryable, holds the queue (${editAway.err.trim().slice(0, 160)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
 
   // A copy kept for a week is given up, so a brain that never answers does not hold the queue for ever.
   away = true;

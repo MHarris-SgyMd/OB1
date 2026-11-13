@@ -391,8 +391,24 @@ free:
   never cut short, so a brain of minute-long calls has a little more (0.54
   of the time for 71 s calls beside 50 ms ones).
 
-**No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
-and fall back to the brain's own share while it is down.
+**A brain asks it through its coordinator** (SMD-3379 PR 3b-1), with
+`OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
+coordinator holds the brain's one connection, and its passes ask through it.
+While the broker is away, a call waits a few seconds for it, then runs on the
+brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
+back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
+
+- **One coordinator per key.** A second coordinator on the same key — one run
+  by hand from a checkout with the brain's environment, say — makes the
+  broker log "two relays speak on its key at once", and each reconnect may
+  count a call twice for a moment.
+- **Where to look.** The coordinator's `slot relay:` lines say when the broker
+  answers, is lost, or refused the key (a 401, naming `OB1_SLOT_BROKER_KEY`);
+  the broker's log says each brain's connections, a socket ended for not
+  answering, and a server over its slots.
+- **What 3b-1 does not cover.** The api's calls, live and background, are not
+  yet the broker's (SMD-3379 PR 3b-2): until then only each server's
+  `reserve` keeps room for live calls.
 
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
@@ -401,7 +417,7 @@ its port is published on the host's loopback alone.
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
-bun deploy/federated/federated.ts key --brain stable    # a key, shown once (for stable's deploy/.env as OB1_SLOT_BROKER_KEY, read from 3b), and its registry line
+bun deploy/federated/federated.ts key --brain stable    # a key, shown once (stable's deploy/.env: OB1_SLOT_BROKER_KEY), and its registry line
 # deploy/federated/federation.local.yaml: the shared servers (their bases, slots, reserve), each brain's key hash
 bun --no-env-file deploy/federated/federated.ts check   # the registry, the runtime, the port; starts nothing
 bun --no-env-file deploy/federated/federated.ts up
@@ -1243,7 +1259,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
 | `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
@@ -1457,7 +1473,7 @@ takes several and a stream can take minutes, to the keepalive's 600 s ceiling. I
 `error.type`, `mcp.method.name`, `ob1.door`, `ob1.rpc`, `ob1.tool` and
 `ob1.outcome`, each from a set the server's own words bound: never
 `ob1.agent` or `ob1.code`, an `error.type` that is a fault's code (`FAILED`,
-`STORE_UNAVAILABLE`) or else the outcome, and no `ob1.tool` for a request
+`STORE_UNAVAILABLE`, `EMBEDDING_PROVIDER_ERROR`) or else the outcome, and no `ob1.tool` for a request
 refused at its key on either door — that refusal is the key's, not the
 tool's — so a backend holds a series per route, tool and outcome, not per
 key, and a keyless caller cannot raise a tool's refusal rate. A request's
