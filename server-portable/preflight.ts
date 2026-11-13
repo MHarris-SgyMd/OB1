@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -237,11 +237,14 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * plan_context (SMD-2684) reads its board through the agenda, and answers without it: a gap, not a failure. 132's
  * setting is read by every ranked priority read (SELECT) and written by set_priority_weights (INSERT, UPDATE), and is
  * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
- * review pass 2).
+ * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
+ * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
+ * its own too.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
-  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings "));
+  const sources = ungranted.filter((g) => g.startsWith("thought_sources "));
+  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings ") && !g.startsWith("thought_sources "));
   const clauses: string[] = [];
   if (rest.length) {
     const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
@@ -252,12 +255,15 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
     const agenda = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT");
     clauses.push(`${failing} naming the table${agenda ? ", and so does agenda (SMD-3669)" : ""}`);
   }
+  if (sources.length) {
+    clauses.push("set_priority, clear_priority and priority_history on a thought or a ticket (or set_priority taking one's due time), agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources (migration 133)");
+  }
   if (weights.length) {
     clauses.push(weights.includes("priority_weight_settings SELECT")
       ? "every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings (migration 132)"
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
   }
-  const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT");
+  const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
 }
 
@@ -445,7 +451,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
@@ -3272,6 +3278,43 @@ if (configFailed) {
         }
 
         /**
+         * Migration 134's deliverables (SMD-1715 PR 2): the functions the deliverable tools call, under 134's
+         * signatures, and the server role's `deliverables` grant — soft, as the items group is (134's PRIVILEGES: a
+         * role without it is refused the deliverable calls alone, naming the table). Nothing to read before 134: a skip.
+         */
+        {
+          const DELIVERABLE_FNS = ["record_deliverable(text,text,text,jsonb)", "verify_deliverable(text,text,text,text,jsonb)", "deliverable_history(text)"];
+          // The group's grants from ROLE_GRANTS: its tables' and its sequence's (the event trigger draws each seq by nextval).
+          const DELIVERABLE_GRANTS = ROLE_GRANTS.deliverables.flatMap((g) => g.privileges.map((p) => [g.table ? "t" : "s", (g.table ?? g.sequence) as string, p] as const));
+          const dRows = await sql.unsafe(`
+            SELECT to_regclass('public.deliverable_events') IS NOT NULL AS has_table,
+                   ARRAY(SELECT f FROM unnest(ARRAY[${DELIVERABLE_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
+                   CASE WHEN to_regclass('public.deliverable_events') IS NULL THEN NULL
+                        ELSE ARRAY(SELECT g.o || ' ' || g.p FROM (VALUES ${DELIVERABLE_GRANTS.map(([k, o, p]) => `('${k}', '${o}', '${p}')`).join(", ")}) g(k, o, p)
+                                    -- CASE, not OR, as the items row's: the text form raises for an object not there.
+                                    WHERE CASE WHEN to_regclass('public.' || g.o) IS NULL THEN true
+                                               WHEN g.k = 's' THEN NOT has_sequence_privilege('public.' || g.o, g.p)
+                                               ELSE NOT has_table_privilege('public.' || g.o, g.p) END) END AS ungranted`)
+            .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const dl = Array.isArray(dRows) ? dRows[0] : null;
+          if (!dl) {
+            add("deliverables", "warn", `could not verify: ${(dRows as Error).message}`, "The check reads deliverable_events and 134's functions in public; the message says why it failed.");
+          } else if (!dl.has_table) {
+            add("deliverables", "skip", "not checked — deliverable_events does not exist (migration 134 not applied)");
+          } else if (dl.missing.length) {
+            add("deliverables", "fail", `migration 134's ${dl.missing.join(", ")} missing under 134's signature; the deliverable tools call them`,
+                ledgerRemedy("134", "Apply db/migrations/134_deliverables.sql."));
+          } else if (dl.ungranted?.length) {
+            // deliverable_history reads the events and the facet; the writers need every grant.
+            const reads = dl.ungranted.some((g) => g === "deliverable_events SELECT" || g === "thought_facets SELECT");
+            add("deliverables", "warn", `the server's role holds no ${dl.ungranted.join(", ")}: ${reads ? "every deliverable tool fails" : "capture_deliverable and verify_deliverable fail"} naming the table, and nothing else does`,
+                "Grant the deliverables group (SMD-1715): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups deliverables (db/README.md, Grants for a capturing role).");
+          } else {
+            add("deliverables", "ok", "record_deliverable, verify_deliverable, and deliverable_history present; the server's role holds the deliverables group");
+          }
+        }
+
+        /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,
          * which is correct only when the scan is iterative — hnsw.iterative_scan
          * in force for the call, normally as the function's own SET clause,
@@ -5283,6 +5326,9 @@ if (configFailed) {
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).
                 if (h.running && h.waitingMidPass?.length) return `${name} waits for the provider mid-pass — it stopped answering: check it, and the ${h.worker === "reembed" ? "embedding provider row here (--deep calls it)" : "model provider rows here (--deep probes chat)"}; the pass resumes on its own once it answers.`;
+                // Held by Linear's rate limit, by its own word (SMD-4133): it waits on its own; the fix is the hour's sum.
+                // A hold already past is said as past, as brain_info's words say it (review pass 1).
+                if (h.limited) return `${name}'s last pass was rate-limited by Linear: ${secondsSince(h, h.limited.until) < 0 ? `it sends no request until ${h.limited.until} (${limitByWords(h.limited)}), then passes again on its own` : `its hold ended at ${h.limited.until} (${limitByWords(h.limited)}), and its next trigger passes`}. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user: if this recurs, raise OB1_BOARD_SYNC_INTERVAL here or on the others, or give each brain a Linear user of its own (deploy/README.md, "What a pass costs", has the sum).`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
                   : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;

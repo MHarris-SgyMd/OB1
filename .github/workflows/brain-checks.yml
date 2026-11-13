@@ -280,6 +280,24 @@ jobs:
       # environment failure). No key; the live run that calls it is cut 2c-3.
       - name: The agent runner's Linear moves
         run: bun scripts/agent-runner/board-check.ts --self-check
+      # SMD-4087 cut 2c-3: the live run's wiring on stubs — the claim (claims.ts), the Linear
+      # moves (board.ts), the hand-back comment and the release wrapped around run.ts, with a
+      # stubbed fetch, a stubbed GraphQL client and a stub run() returning each outcome. No key,
+      # no network, no model; the run with the real keys and a model needs stable's /api route.
+      - name: The agent runner's live run
+        run: bun scripts/agent-runner/live-check.ts --self-check
+      # SMD-4089: the runner's identity setup tool on a temp directory — the shape
+      # gate, the 0600 write, the no-symlink write (O_NOFOLLOW), the owner-only read
+      # and the directory check. No clipboard, no network, no key; placing the real
+      # secrets is the maintainer's, on the brain host.
+      - name: The agent runner's identity setup
+        run: bun scripts/agent-runner/setup.ts --self-check
+      # SMD-4087 cut 2c-3: the real-deps executor's offline logic — the Verify and
+      # named-id parsers, the brief-ticket builder on a stub Linear client, the
+      # bare-repo provisioning, the commitlint parser, and the session-path layout
+      # (record and config in subdirs so pathsProblem passes). No session, no model, no spend.
+      - name: The agent runner's executor
+        run: bun scripts/agent-runner/live-run.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
@@ -590,6 +608,17 @@ jobs:
         working-directory: evals
         run: bun eval-priority.ts --self-check
 
+      # The inferred-priority measurement's rules (SMD-3670 PR 2): the
+      # registration against its pinned hash (the bar, the conventions, the
+      # population and the draw), a day counted from the capture, the draw's
+      # strata, the blind sheet read back, each half's precision and the
+      # verdict at the bar's edges, the raters' κ, and the committed fixture's
+      # shape (ids and numbers only). No database, no model; the run reads the
+      # dogfood brain by hand.
+      - name: Inferred priority eval rules
+        working-directory: evals
+        run: bun eval-inferred-priority.ts --self-check
+
       # The board replay's rules (SMD-3669 PR 3): an issue rebuilt from
       # Linear's history (state, priority, due date, parent, project, labels,
       # title and relations undone after the moment, every relation-change
@@ -717,9 +746,9 @@ jobs:
       # Every vendored server is a consumer of this server's auth module — the
       # extensions until SMD-2311 made the six plugins (change 64), and the
       # recipes' and integrations' HTTP APIs and workers (change 67; the
-      # webhook receiver and the agent-memory API until SMD-2690 made them
-      # plugins, and smart-ingest imports only listenOn and routable) — through a
-      # _shared/auth.ts beside it, a byte copy. Their suites and install live
+      # webhook receiver, the agent-memory API and smart-ingest, which took
+      # only listenOn and routable, until SMD-2690 made them plugins) — through
+      # a _shared/auth.ts beside it, a byte copy. Their suites and install live
       # in integrations/ since SMD-3747. One MCP stack
       # across the tree's installs — the test fails if server-portable's or
       # mcp-server's shared pins drift from these.

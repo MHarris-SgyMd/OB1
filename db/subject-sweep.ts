@@ -1,9 +1,10 @@
 /**
  * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought in the subject pool (migration
  * 113) is given its own subject, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
- * migration 111's record_thought_subject. A subject is current when it stands at the thought's text and was found
- * under the current rules and question, a model's with its reasoning on when the question is asked with it on
- * (subjectCurrent), and the ticket the thought is filed under agrees with it (filedTicketSql).
+ * migration 130's record_thought_subjects (a set, of one key until SMD-3306 PR 7a-3b-2). A subject is current when it
+ * stands at the thought's text and was found under the current rules and question, a model's with its reasoning on when
+ * the question is asked with it on (subjectCurrent), and the ticket the thought is filed under agrees with it
+ * (filedTicketSql).
  *
  *   bun db/extract-entities.ts --url … --subjects                # the rules, then the judge model for the rest
  *   bun db/extract-entities.ts --url … --subjects rules          # the rules alone: no model call
@@ -64,9 +65,9 @@
  * the extraction pass gave a current subject after it was pooled is finished unasked, so long as the rules agree now (a
  * ticket filed, moved or taken away is read again). A claim finished records that the thought was asked at its text
  * under the pool's key: one the model named nothing for is not asked again until its text, the ticket it is filed under
- * or the key changes ("asked, got nothing"), and an out-of-date subject standing on it is closed through
- * close_thought_subject (113), which closes it only while it is still the one read at the text read, so a subject a
- * pass wrote since stands. An answer that is not JSON with a subject, a timeout (a following run's when a one-token
+ * or the key changes ("asked, got nothing"), and the out-of-date subjects standing on it are closed through
+ * close_thought_subjects (130), which closes them only while they are still the set read at the text read, so a subject
+ * a pass wrote since stands. An answer that is not JSON with a subject, a timeout (a following run's when a one-token
  * call answers after it, or a stopping run's) or the provider refusing the thought's length, a row the egress gate
  * refuses, and a key the door refuses each fail the claim, counted, the subject standing; `--retry-failed` puts them
  * back in the pool. A judge model 10 of whose last 48 answers gave no subject — unread, or naming nothing — stops the
@@ -155,13 +156,16 @@ import { andList, consoleWriter, numberProblem, type Writer } from "./cli.ts";
 import { databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { HUNG_MARK } from "./config.mjs";
 
-/** 111's door, by its signature: the sweep's one write. */
-const DOOR = "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)";
+/** 130's door for a set, by its signature: the sweep's one write (SMD-3306 PR 7a-3b-1). */
+const DOOR = "record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)";
 
-/** 113's close, by its signature: the sweep's close of an out-of-date subject the model names nothing for. */
-const CLOSE = "close_thought_subject(uuid, uuid, text)";
+/** 130's close of a set, by its signature: the sweep's close of out-of-date subjects the model names nothing for. */
+const CLOSE = "close_thought_subjects(uuid, uuid[], text)";
 
-/** What the door needs of the role that calls it (111's comment), and where each grant comes from: the sweep's refusals and the pass's say this. */
+/**
+ * What the door needs of the role that calls it (111's and 130's comments), and where each grant comes from: the
+ * sweep's refusals and the pass's say this.
+ */
 export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT, UPDATE and SELECT on derivations (the capture group's)";
 
 /** What the pool needs of the role (113): the claims' reads and writes, and the pool's name in ob1_config. */
@@ -197,6 +201,11 @@ export const NAMING_WAIT = { sayMs: 30_000, quietMs: 1_000, pollMs: 250 };
  * run goes, so a test shortens `window`, as NAMING_WAIT is.
  */
 export const JUDGE_ALARM = { window: 48, share: 1 / 5 };
+/**
+ * The tries a thought's own write transaction gets when the server rolls it back to break a deadlock (40P01), as the
+ * pooling and db/threads.ts retry theirs three times: past them the thought fails, for --retry-failed.
+ */
+const DEADLOCK_TRIES = 3;
 
 /** Whether `noSubject` answers of a window trip the alarm: more than its share of the whole window. */
 export const judgeTrips = (noSubject: number, alarm: { window: number; share: number } = JUDGE_ALARM): boolean =>
@@ -384,13 +393,25 @@ class TimedOutDown extends ProviderDown {
   }
 }
 
-/** What record_thought_subject answers. */
-export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; id?: string; stale?: boolean; gone?: boolean };
+/**
+ * What record_thought_subjects answers (130): `added` when it wrote and closed nothing, `closed` when it closed and
+ * wrote nothing (a set narrowed), `replaced` when it did both, `kept` when it did neither.
+ */
+export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; ids?: string[]; stale?: boolean; gone?: boolean };
 
-/** One thought's subject through 111's door, at the fingerprint of the text it was found in. */
-export async function recordSubject(sql: SQL, row: { id: string; fingerprint: string }, key: string, by: SubjectBy, judgeKey: string, recipe: Recipe, agentId: string | null): Promise<SubjectWrite> {
-  const [r] = await sql`SELECT record_thought_subject(${row.id}::uuid, ${key}, ${by}, ${judgeKey}, ${agentId}::uuid, ${row.fingerprint}, ${recipe}::jsonb) AS r`;
+/**
+ * One thought's subjects through 130's door, one way's set (SMD-3306 PR 7a-3b-1: a set of one until PR 7a-3b-2's rules
+ * and question find more), at the fingerprint of the text they were found in.
+ */
+export async function recordSubject(sql: SQL, row: { id: string; fingerprint: string }, keys: string[], by: SubjectBy, judgeKey: string, recipe: Recipe, agentId: string | null): Promise<SubjectWrite> {
+  const [r] = await sql`SELECT record_thought_subjects(${row.id}::uuid, ${sql.array(keys, "TEXT")}::text[], ${by}, ${judgeKey}, ${agentId}::uuid, ${row.fingerprint}, ${recipe}::jsonb) AS r`;
   return r.r as SubjectWrite;
+}
+
+/** Whether two sets of keys are the same set, in any order; null (none standing) is the empty set. */
+export function sameKeys(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  const x = new Set(a ?? []), y = new Set(b ?? []);
+  return x.size === y.size && [...x].every((k) => y.has(k));
 }
 
 /**
@@ -575,13 +596,16 @@ export interface SubjectSweepOptions {
 const PAGE = 100;
 
 /**
- * A thought the sweep takes: its text and the fingerprint read, the ticket it is filed under, its standing subject's
- * facet, key, way and pass when one stands (at another text, or out of date), and whether that one is current at this
- * text.
+ * A thought the sweep takes: its text and the fingerprint read, the ticket it is filed under, its standing subjects'
+ * facets and keys (by key; null when none stands) and their way and pass when they stand (at another text, or out of
+ * date), and whether they are current at this text. Since 130 a thought's subjects are a set, one way's and one pass's
+ * as every writer writes them (SMD-3306 PR 7a-3b-1); a raw writer's mix reads as the least way and pass by name, and
+ * counts as current while any of its subjects is, so an out-of-date member a raw write left beside a current one stands
+ * (no door writes such a mix, and before 130 none could stand: 111 allowed one standing subject a thought).
  */
 type Candidate = {
   id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string; filed: string | null;
-  standing_id: string | null; standing_key: string | null; standing_by: string | null; standing_judge: string | null; current: boolean;
+  standing_ids: string[] | null; standing_keys: string[] | null; standing_by: string | null; standing_judge: string | null; current: boolean;
   /** A run's claim, not a dry run's: whether it carries a hang (HUNG_MARK), read as it is taken. */
   hung_before?: boolean;
 };
@@ -808,7 +832,7 @@ async function sweep(
   if (doorRows === null) return startStopped();
   const [{ door, close }] = doorRows as { door: boolean; close: boolean }[];
   if (!door || !close) {
-    return refused("tables", `\n  ${door ? "close_thought_subject is missing: the subject pool is migration 113's" : "record_thought_subject is missing: a thought's own subject is migration 111's"}. Apply it first:\n    cd db && bun migrate.ts --url …`);
+    return refused("tables", `\n  ${door ? "close_thought_subjects is missing" : "record_thought_subjects is missing"}: a thought's subjects as a set are migration 130's. Apply it first:\n    cd db && bun migrate.ts --url …`);
   }
   // The door's and the pool's grants, asked before any model call: a role that cannot write a subject is refused here,
   // not at its first write with a question already spent (review pass 1). A dry run says it instead.
@@ -822,7 +846,7 @@ async function sweep(
   if (grantRows === null) return startStopped();
   const [{ can, pools }] = grantRows as { can: boolean; pools: boolean }[];
   if ((!can || !pools) && !DRY_RUN) {
-    return refused("tables", `\n  This role cannot ${can ? "claim from the subject pool: it needs" : "write a thought's subject: record_thought_subject needs"} ${can ? POOL_GRANTS : DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
+    return refused("tables", `\n  This role cannot ${can ? "claim from the subject pool: it needs" : "write a thought's subject: record_thought_subjects needs"} ${can ? POOL_GRANTS : DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
   }
   if (!can) wouldRefuse.push("this role cannot write a thought's subject");
   if (!pools) wouldRefuse.push("this role cannot claim from the subject pool");
@@ -944,7 +968,10 @@ async function sweep(
   // filed since — which the fingerprint, the text's alone, does not see (review pass 4: a ticket moved before 113, or
   // under another pool, was never pooled at a naming). `after`, a page's cursor, bounds the facets read too, so a dry
   // run's pages each read from their cursor, not from the first facet (review pass 5: its pages read every facet before
-  // them, a dry run before a naming quadratic in the thoughts).
+  // them, a dry run before a naming quadratic in the thoughts). A rule's set is current here whatever that rule now
+  // finds at the same text, where a claim's rulesAgree asks for the rule's keys exactly and narrows it: a set wider
+  // than its rule finds is not pooled, so a rule that comes to find another set needs its version bumped
+  // (SUBJECT_RULE_VERSIONS) to be asked again (SMD-3306 PR 7a-3b-1's review pass 3, run-it; PR 7a-3b-2's header rule).
   const noCurrentSubject = (c: SQL, after = NIL_ID) => c`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
@@ -954,9 +981,19 @@ async function sweep(
          AND (CASE WHEN f.payload->>'by' = 'metadata' THEN f.payload->>'key' = 'ticket:' || ${filedTicketSql(c)}
                    ELSE ${filedTicketSql(c)} IS NULL END) IS TRUE)`;
   const NO_CURRENT_SUBJECT = noCurrentSubject(sql);
-  /** A thought's columns for the sweep, its standing subject beside it (`t` and `s`). */
+  /**
+   * A thought's standing subjects, one row however many stand (`s`, joined beside `t`): their facets and keys by key,
+   * and their way and pass. A plain join gave a row a subject (SMD-3306 PR 7a-3b-1: a set's thought taken once for
+   * each, its dry run counting it so).
+   */
+  const STANDING = sql`LEFT JOIN LATERAL (
+      SELECT array_agg(f.id::text ORDER BY f.payload->>'key', f.id) AS ids, array_agg(f.payload->>'key' ORDER BY f.payload->>'key', f.id) AS keys,
+             min(f.payload->>'by') AS way, min(f.payload->>'judge_key') AS judge
+        FROM thought_facets f
+       WHERE f.thought_id = t.id AND f.kind = 'subject' AND f.valid_until IS NULL) s ON true`;
+  /** A thought's columns for the sweep, its standing subjects beside it (`t` and STANDING's `s`). */
   const CANDIDATE = sql`t.id, t.content, t.created_at, t.metadata, COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) AS fingerprint, ${filedTicketSql(sql)} AS filed,
-           s.id::text AS standing_id, s.payload->>'key' AS standing_key, s.payload->>'by' AS standing_by, s.payload->>'judge_key' AS standing_judge,
+           s.ids AS standing_ids, s.keys AS standing_keys, s.way AS standing_by, s.judge AS standing_judge,
            NOT ${NO_CURRENT_SUBJECT} AS current`;
 
   // The pool's name, its naming and its pooling, one run at a time: a run takes the pool's lock, a session advisory lock
@@ -1499,16 +1536,17 @@ async function sweep(
    * subject elsewhere while the model was asked and handed back, is taken twice, so, and then its outcome, as --limit
    * counts it. `taken`, for --limit, counts that one too. `setBack`: those whose call the caller aborted (abortInHand),
    * put back unanswered, taken again when they come up. `overBudget`: those whose own write passed a scheduler's
-   * statement_timeout, failed. `ownError`: those the provider erred on again right after answering a probe, failed.
-   * `hungOwn`: those that hung the provider again, their claims marked hung (HUNG_MARK), failed — one whose call was
-   * aborted in hand counted there, out of setBack, as the probe after the abort finds it so, its place under --limit
-   * taken again. `pollsLost`, no thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed
-   * back taken twice, as an edited one is. `replaced` and `newKey` count within the recorded ones, `closed` within
-   * those the model named nothing for, `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
+   * statement_timeout, failed; `deadlocked`, those whose own write the server rolled back to break a deadlock, failed.
+   * `ownError`: those the provider erred on again right after answering a probe, failed. `hungOwn`: those that hung the
+   * provider again, their claims marked hung (HUNG_MARK), failed — one whose call was aborted in hand counted there,
+   * out of setBack, as the probe after the abort finds it so, its place under --limit taken again. `pollsLost`, no
+   * thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed back taken twice, as an edited
+   * one is. `replaced` and `newKey` count within the recorded ones, `closed` the subjects closed on those the model
+   * named nothing for (a set's each), `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's
    * when it released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and
    * those whose failure's release a lost poll handed back, which the failure count leaves out.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, deadlocked: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -1603,7 +1641,7 @@ async function sweep(
    * cast keeps the declared type (SMD-1932's way, as extract-entities.ts's configError).
    */
   let endedBy = null as { code: number; line: string } | null;
-  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, pollsLost: false, ownError: false, hungOwn: false };
+  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, deadlocked: false, pollsLost: false, ownError: false, hungOwn: false };
   /**
    * The judge's answer on the claim in hand, null until it answers (PR 5b): appended to the pool's window once the
    * claim is released (`judgedAlone`), or, for a claim this run finishes as named nothing, in the finish's own
@@ -1638,7 +1676,7 @@ async function sweep(
   };
 
   /** The claims this run failed, its leases spent while it ran aside: what --retry-failed would put back of its own. */
-  const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey + n.overBudget + n.ownError + n.hungOwn - n.lostFailed;
+  const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey + n.overBudget + n.deadlocked + n.ownError + n.hungOwn - n.lostFailed;
   /** What to run once the model is right, the claims this run failed named. */
   const runAgain = (lead: string) => {
     const failed = failedHere();
@@ -1683,7 +1721,7 @@ async function sweep(
    */
   const stampLine = (w: JudgeWindow, inHand: WindowAnswer | null) =>
     `\n  Another run's garbage-judge alarm tripped at ${cleanForDisplay(w.tripped)}${w.by.length ? `, on answers from ${andList(w.by.map(cleanForDisplay))}` : ""}, after this run began (db/subject-sweep.ts, JUDGE_ALARM), so this run, ${w.by.length === 0 || w.by.includes(cfg.judgeModel) ? "whose judge model is likely the same" : `of the same pool though its judge model, ${cfg.judgeModel}, gave none of those answers`}, stops here too` +
-    (inHand ? `, the claim in hand, which it named nothing for, back in the pool with that run's${inHand.c ? ` (the out-of-date subject it closed stays closed until it is asked again)` : ""}` : "") + "." +
+    (inHand ? `, the claim in hand, which it named nothing for, back in the pool with that run's${inHand.c ? ` (the out-of-date subject(s) it closed stay closed until it is asked again)` : ""}` : "") + "." +
     `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; ${runAgain("once the model is right,")}`;
 
   /** The line a database lost as a trip was written says: none of it, so the window still holds what tripped it. */
@@ -1761,7 +1799,7 @@ async function sweep(
       code: 3,
       line: `\n  ${unread + nothing} of the judge model's last ${w.answers.length} answers, across runs, gave no subject (${gave}), more than ${Math.round(JUDGE_ALARM.share * 100)}% of the ${window} the alarm reads (db/subject-sweep.ts, JUDGE_ALARM): the model, not the thoughts, is likely at fault, so the sweep stops here.` +
         `\n    Check OB1_JUDGE_MODEL (${models}), the chat endpoint and OB1_SUBJECT_REASONING. ` +
-        (back.size > 0 ? `The ${back.size} thought(s) it named nothing for are back in the pool${closed ? `, and the out-of-date subject it closed on ${closed} of them stays closed until each is asked again` : ""}. ` : "") +
+        (back.size > 0 ? `The ${back.size} thought(s) it named nothing for are back in the pool${closed ? `, and the out-of-date subject(s) it closed on ${closed} of them stay closed until each is asked again` : ""}. ` : "") +
         (retried > 0 ? `This run's --retry-failed returned ${retried} claim(s) chosen for failing: some of these thoughts may be at fault. ` : "") +
         runAgain("Once the model is right,") +
         // The hold's two ways out, whatever tripped it: a judge fixed but kept, a run of one thought checks it in, the
@@ -1863,7 +1901,7 @@ async function sweep(
     n.setBack--;
     n.hungOwn++;
     taken++;
-    if (row.standing_key !== null) n.leftOutOfDate++;
+    if (row.standing_keys !== null) n.leftOutOfDate++;
     sayOnce("hungOwn", `  ${row.id}: it hung the provider again (${why}): its claim fails as the thought's own; --retry-failed asks it again`);
     return "abortOwn";
   };
@@ -2059,6 +2097,39 @@ async function sweep(
   }
 
   /**
+   * A thought's own write transaction — the door's, or the finish of one named nothing — run again when the server
+   * rolls it back to break a deadlock (40P01), up to DEADLOCK_TRIES in all: nothing of it landed, its checks read again
+   * under the door's lock, and the answer in hand needs no new call (SMD-3306 PR 7a-3b-1's review pass 4, cold read and
+   * run-it: failed at once, a one-off deadlock left the set standing under a scheduler, which never runs
+   * --retry-failed). `again` resets what an attempt set outside its transaction. Past the hard stop, not run again.
+   */
+  const beginRetried = async <T>(fn: (tx: SQL) => Promise<T>, again: () => void = () => {}): Promise<T> => {
+    for (let tries = 1; ; tries++) {
+      try {
+        return (await sql.begin(fn)) as T;
+      } catch (e) {
+        if (sqlState(e) !== "40P01" || tries >= DEADLOCK_TRIES || hardStop.signal.aborted) throw e;
+        again();
+      }
+    }
+  };
+
+  /**
+   * A thought's own write — the door's, or the finish of one named nothing — the server rolled back to break a deadlock
+   * (40P01) each of DEADLOCK_TRIES times: since 130 a set's close or write moves several keys' threads, and a move
+   * across two keys can still deadlock at its commit (130's NOT HERE). The thought failed, for --retry-failed, said
+   * once and counted, as one past the budget is, and the run goes on, in any run (SMD-3306 PR 7a-3b-1's review pass 3,
+   * cold read: rethrown, it ended the run, a scheduler's sleep with it).
+   */
+  const deadlocked = (row: Candidate, e: unknown): Done | false => {
+    if (hardStop.signal.aborted) return false;
+    n.deadlocked++;
+    if (row.standing_keys !== null) n.leftOutOfDate++;
+    const why = `the server rolled its write's transaction back to break a deadlock, ${DEADLOCK_TRIES} times (${String((e as Error)?.message ?? e).slice(0, 200)})`;
+    return { release: "failed", error: why, say: () => sayOnce("deadlocked", `  ${row.id}: ${why}; --retry-failed returns it to the pool`) };
+  };
+
+  /**
    * A thought's own write — the door's, or the finish of one named nothing — past a scheduler's statement_timeout: the
    * thought failed, for --retry-failed, as a claim pass failed one on its own write until SMD-2636 PR 4 (now its pass
    * is held, sleep.ts), said once and counted,
@@ -2068,7 +2139,7 @@ async function sweep(
   const overBudget = (row: Candidate, e: unknown): Done | false => {
     if (hardStop.signal.aborted) return false;
     n.overBudget++;
-    if (row.standing_key !== null) n.leftOutOfDate++;
+    if (row.standing_keys !== null) n.leftOutOfDate++;
     const why = `its write passed the scheduler's statement_timeout (${String((e as Error)?.message ?? e).slice(0, 200)})`;
     return { release: "failed", error: why, say: () => sayOnce("overBudget", `  ${row.id}: ${why}; --retry-failed returns it to the pool`) };
   };
@@ -2126,7 +2197,7 @@ async function sweep(
     // read, or none where one was, is read again (review pass 2: 113's trigger pooled it, and it was finished as
     // current, its fingerprint the text's alone).
     const found = ruleSubject(row);
-    const rulesAgree = row.standing_by === "model" ? found === null : found !== null && found.key === row.standing_key && found.by === row.standing_by;
+    const rulesAgree = row.standing_by === "model" ? found === null : found !== null && sameKeys([found.key], row.standing_keys) && found.by === row.standing_by;
     if (row.current && rulesAgree) {
       n.current++;
       return { release: "succeeded" };
@@ -2135,12 +2206,13 @@ async function sweep(
     if (found && DRY_RUN) {
       // The door keeps a subject found the same way by the same pass at a moved text, and replaces any other standing
       // one: counted as a run would count it.
-      if (row.standing_key === found.key && row.standing_by === found.by && row.standing_judge === subjectRuleKey(found.by)) n.kept++;
+      if (sameKeys([found.key], row.standing_keys) && row.standing_by === found.by && row.standing_judge === subjectRuleKey(found.by)) n.kept++;
       else {
         n[found.by]++;
-        if (row.standing_key !== null) {
+        if (row.standing_keys !== null) {
           n.replaced++;
-          if (row.standing_key !== found.key) n.newKey++;
+          // A key the set did not hold (review pass 1: a set narrowed to one of its keys was counted a new key).
+          if (!row.standing_keys.includes(found.key)) n.newKey++;
         }
       }
       return { release: "none" };
@@ -2154,7 +2226,7 @@ async function sweep(
       // One holding a subject found at another text or under an older rule or question: it stands until a model's
       // answer replaces it. Under --subjects rules the claim is finished: the rules' pool is done with the thought, and
       // a run with the model pools it again.
-      if (row.standing_key !== null) n.leftOutOfDate++;
+      if (row.standing_keys !== null) n.leftOutOfDate++;
       return DRY_RUN ? { release: "none" } : { release: "succeeded" };
     } else {
       let a: Awaited<ReturnType<typeof ask>>;
@@ -2237,7 +2309,7 @@ async function sweep(
             transients = 0;
             streakPoison = null;
             streakPoisonWhy = "";
-            if (row.standing_key !== null) n.leftOutOfDate++;
+            if (row.standing_keys !== null) n.leftOutOfDate++;
             let say: () => void;
             if (again) {
               n.hungOwn++;
@@ -2293,12 +2365,12 @@ async function sweep(
       // Each outcome below but a closed subject writes nothing: a subject out of date stands, counted.
       if ("egress" in a) {
         n.egress++;
-        if (row.standing_key !== null) n.leftOutOfDate++;
+        if (row.standing_keys !== null) n.leftOutOfDate++;
         return { release: "failed", error: a.egress.slice(0, 500), say: () => sayOnce("egress", `  ${row.id}: ${a.egress.slice(0, 300)}`) };
       }
       if ("unanswered" in a) {
         n.unanswered++;
-        if (row.standing_key !== null) n.leftOutOfDate++;
+        if (row.standing_keys !== null) n.leftOutOfDate++;
         return { release: "failed", error: a.unanswered.slice(0, 500), say: () => sayOnce("unanswered", `  ${row.id}: no answer (${a.unanswered.slice(0, 300)}); --retry-failed asks it again`) };
       }
       // The judge's answer, for the alarm's window, whatever becomes of its claim (PR 5b).
@@ -2307,13 +2379,13 @@ async function sweep(
       // Not JSON with a subject: the model's failure for this thought, as the pass reads a malformed answer.
       if (a.answer === null) {
         n.unread++;
-        if (row.standing_key !== null) n.leftOutOfDate++;
+        if (row.standing_keys !== null) n.leftOutOfDate++;
         return { release: "failed", error: `${cfg.judgeModel}'s answer was not JSON of the expected shape`, say: () => sayOnce("unread", `  ${row.id}: ${cfg.judgeModel}'s answer was not JSON of the expected shape; --retry-failed asks it again`) };
       }
       if (a.key === null) {
         // Asked, got nothing: the claim finished is the record, so it is not asked again until its text, the ticket it
-        // is filed under or the pool changes; an out-of-date subject standing on it closes, if it is still the one read
-        // at the text read. Counted once the finish has answered: a text moved since is edited mid-sweep, a thought
+        // is filed under or the pool changes; the out-of-date subjects standing on it close, if they are still the set
+        // read at the text read. Counted once the finish has answered: a text moved since is edited mid-sweep, a thought
         // deleted is gone, and past the hard stop nothing is closed nor finished (review pass 1: each was counted as
         // named nothing). A subject written since the read, by another pass or another key's run, is one the answer
         // said nothing of: the thought goes back in the pool and the run reads what stands when it comes up (review
@@ -2328,11 +2400,11 @@ async function sweep(
         // back during the call, an edit made while the other was named left this run's claim, which finished at the old
         // text).
         if (hardStop.signal.aborted) return false;
-        type Close = { action: string; stale?: boolean; moved?: boolean };
+        type Close = { action: string; stale?: boolean; moved?: boolean; ids?: string[] };
         let fin: string | { c: Close | null; stale: boolean; gone: boolean; written: boolean; held: boolean; judged: boolean; alarm: { code: number; line: string } | null };
         tripping = null;
         try {
-          fin = await sql.begin(async (tx: SQL) => {
+          fin = await beginRetried(async (tx: SQL) => {
             const moved = await poolMoved(tx, true);
             if (moved !== null) return moved;
             await tx`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${row.id}::uuid::text, 0))`;
@@ -2349,8 +2421,10 @@ async function sweep(
             if (now === undefined) return { c: null, stale: false, gone: true, written: false, held: false, judged: false, alarm: null };
             if (!now.same) return { c: null, stale: true, gone: false, written: false, held: await back(), judged: false, alarm: null };
             let c: Close | null = null, written: boolean;
-            if (row.standing_id !== null) {
-              [{ c }] = (await tx`SELECT close_thought_subject(${row.id}::uuid, ${row.standing_id}::uuid, ${row.fingerprint}) AS c`) as { c: Close }[];
+            if (row.standing_ids !== null) {
+              // Every subject read, the set closed whole or not at all (SMD-3306 PR 7a-3b-1: one facet of a set
+              // answered moved, closing none, and the thought went back to the pool to be asked again within the run).
+              [{ c }] = (await tx`SELECT close_thought_subjects(${row.id}::uuid, ${tx.array(row.standing_ids, "UUID")}::uuid[], ${row.fingerprint}) AS c`) as { c: Close }[];
               // A text moved between that read and the close's own: the claim handed back as above. Never gone: a
               // delete waits on that read's FOR KEY SHARE until this transaction ends.
               if (c.stale) return { c, stale: true, gone: false, written: false, held: await back(), judged: false, alarm: null };
@@ -2373,11 +2447,14 @@ async function sweep(
             answer.f = true;
             answer.c = c?.action === "closed";
             return { c, stale: false, gone: false, written, held, judged: true, alarm: await judgedIn(tx, answer, true) };
+          }, () => {
+            tripping = null;
+            answer.f = answer.c = false;
           });
         } catch (e) {
           if (e === ROLLED_BACK) return false;
           if (sqlState(e) === "42501") {
-            endedBy = { code: 2, line: `\n  This role cannot close a thought's subject (${(e as Error).message.slice(0, 300)}): close_thought_subject needs UPDATE on thought_facets and on thoughts, and since a close re-links its thread (120) what the door does: ${DOOR_GRANTS}.` };
+            endedBy = { code: 2, line: `\n  This role cannot close a thought's subject (${(e as Error).message.slice(0, 300)}): close_thought_subjects needs UPDATE on thought_facets and on thoughts, and since a close re-links its thread (120) what the door does: ${DOOR_GRANTS}.` };
             return false;
           }
           if (databaseUnavailable(e)) {
@@ -2388,6 +2465,10 @@ async function sweep(
           if (budgetTimedOut(e)) {
             answer.f = answer.c = false;
             return overBudget(row, e);
+          }
+          if (sqlState(e) === "40P01") {
+            answer.f = answer.c = false;
+            return deadlocked(row, e);
           }
           throw e;
         }
@@ -2406,7 +2487,8 @@ async function sweep(
           if (!fin.held) n.lost++;
           if (fin.written) n.rewritten++;
           else {
-            if (fin.c?.action === "closed") n.closed++;
+            // Each subject of the set closed, the tally's words (review pass 1: a set counted as one).
+            if (fin.c?.action === "closed") n.closed += fin.c.ids?.length ?? 1;
             n.named++;
           }
         }
@@ -2421,16 +2503,16 @@ async function sweep(
     if (hardStop.signal.aborted) return false;
     let w: SubjectWrite | string;
     try {
-      w = await sql.begin(async (tx: SQL) => (await poolMoved(tx, true)) ?? (await recordSubject(tx, row, key, by, judge, recipe, agentId)));
+      w = await beginRetried(async (tx: SQL) => (await poolMoved(tx, true)) ?? (await recordSubject(tx, row, [key], by, judge, recipe, agentId)));
     } catch (e) {
       const state = sqlState(e);
       if (state === "22023") {
         n.refusedKey++;
-        if (row.standing_key !== null) n.leftOutOfDate++;
-        return { release: "failed", error: `record_thought_subject refused the key: ${(e as Error).message.slice(0, 400)}`, say: () => sayOnce("refusedKey", `  ${row.id}: record_thought_subject refused the key (${(e as Error).message.slice(0, 300)})`) };
+        if (row.standing_keys !== null) n.leftOutOfDate++;
+        return { release: "failed", error: `record_thought_subjects refused the key: ${(e as Error).message.slice(0, 400)}`, say: () => sayOnce("refusedKey", `  ${row.id}: record_thought_subjects refused the key (${(e as Error).message.slice(0, 300)})`) };
       }
       if (state === "42501") {
-        endedBy = { code: 2, line: `\n  This role cannot write a thought's subject (${(e as Error).message.slice(0, 300)}): record_thought_subject needs ${DOOR_GRANTS}.` };
+        endedBy = { code: 2, line: `\n  This role cannot write a thought's subject (${(e as Error).message.slice(0, 300)}): record_thought_subjects needs ${DOOR_GRANTS}.` };
         return false;
       }
       if (databaseUnavailable(e)) {
@@ -2438,6 +2520,7 @@ async function sweep(
         return false;
       }
       if (budgetTimedOut(e)) return overBudget(row, e);
+      if (state === "40P01") return deadlocked(row, e);
       throw e;
     }
     if (typeof w === "string") {
@@ -2456,13 +2539,14 @@ async function sweep(
       return { release: "none" };
     }
     if (w.action === "kept") n.kept++;
-    else if (w.action === "added" || w.action === "replaced") {
+    else if (w.action === "added" || w.action === "replaced" || w.action === "closed") {
+      // `closed`: a set narrowed to the keys found, the rest closed — a replacement, as a one-key door's answer said.
       n[by]++;
-      if (w.action === "replaced") {
+      if (w.action !== "added") {
         n.replaced++;
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
-        // reader wants.
-        if (row.standing_key !== key) n.newKey++;
+        // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key).
+        if (!(row.standing_keys ?? []).includes(key)) n.newKey++;
       }
     }
     return { release: "succeeded" };
@@ -2506,12 +2590,12 @@ async function sweep(
           rows = (newPool
             ? await sql`
                 SELECT ${CANDIDATE} FROM thoughts t
-                  LEFT JOIN thought_facets s ON s.thought_id = t.id AND s.kind = 'subject' AND s.valid_until IS NULL
+                  ${STANDING}
                  WHERE t.id > ${afterId}::uuid AND ${noCurrentSubject(sql, afterId)}
                  ORDER BY t.id LIMIT ${PAGE}`
             : await sql`
                 SELECT ${CANDIDATE} FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id
-                  LEFT JOIN thought_facets s ON s.thought_id = t.id AND s.kind = 'subject' AND s.valid_until IS NULL
+                  ${STANDING}
                  WHERE c.work_type = ${POOL} AND c.thought_id > ${afterId}::uuid
                    AND (c.status = 'pending' OR (${RETRY_FAILED}::boolean AND c.status = 'failed')
                         OR (c.status = 'claimed' AND c.ttl_expires_at < now() AND c.attempt_count < ${MAX_ATTEMPTS}))
@@ -2652,7 +2736,7 @@ async function sweep(
             SELECT ${CANDIDATE},
                    COALESCE((SELECT starts_with(c.last_error, ${HUNG_MARK}) FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${POOL}), false) AS hung_before
               FROM thoughts t
-              LEFT JOIN thought_facets s ON s.thought_id = t.id AND s.kind = 'subject' AND s.valid_until IS NULL
+              ${STANDING}
              WHERE t.id = ${id}::uuid`) as Candidate[];
         } catch (e) {
           if (budgetTimedOut(e)) {
@@ -2789,7 +2873,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
+  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.deadlocked, "failed on a write the server rolled back to break a deadlock"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const pollsLost = n.pollsLost ? `; ${n.pollsLost} poll(s) lost to the scheduler's statement_timeout` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";

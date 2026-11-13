@@ -61,7 +61,7 @@ To make the directory and put a key in it without the key reaching your shell's 
 (umask 077 && read -rs KEY && printf '%s\n' "$KEY" > ~/.config/open-brain/agent-runner/linear.key)   # paste the key, then Enter
 ```
 
-The parentheses keep `umask 077` to those commands alone.
+The parentheses keep `umask 077` to those commands alone. Or use `setup.ts` ("Provisioning and rotating the identities" below), which places any of the keys with a shape check and a read-back, and never prints the value.
 
 * **The keys** are at fixed paths, so no config can send a read elsewhere:
   * `linear.key`, the runner's own Linear key: required;
@@ -91,6 +91,29 @@ The parentheses keep `umask 077` to those commands alone.
 | `restUrl` | `null` | The stable brain's REST core, as this host reaches it. It must be http or https, with no credentials, query or fragment, and plain http only on a loopback address. Plain http proves nothing about the server: while stable is down, any process on this Mac that takes its port receives the key. |
 
 An unknown key is refused, and so is a file that isn't JSON. A refusal names the setting at fault and never quotes a value from the file. It counts unknown keys rather than naming them, since a name put there by mistake could be a secret. The labels' names are not config: they are SMD-4086's, fixed in the code.
+
+## Provisioning and rotating the identities (SMD-4089)
+
+The runner acts as itself, never as the maintainer: its own agent-kind brain key, Linear key, Anthropic key and (from cut 3) a GitHub identity. **Creating the accounts and minting the keys is the maintainer's**, on the brain host — CLAUDE.md's "Keys" is clear that sessions do not change keys. `setup.ts` only places a minted secret into its file and checks it; it never creates a key, and it never prints one.
+
+```bash
+bun scripts/agent-runner/setup.ts dirs                      # make the directory (0700), idempotent
+bun scripts/agent-runner/setup.ts install linear            # copy the key first; this reads it from the clipboard (pbpaste)
+bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
+bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork)
+bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot cannot push here (needs gh)
+```
+
+`install` reads the secret from the clipboard (or `--stdin`), checks it against the runner's own shape (the same `KEY_SHAPES` the dry run reads with), writes it `0600` without following a link, and reads it back through the same owner-only read the runner uses — so a value it stores is one the runner will read. It prints only a masked line, never the value. `verify` reports each secret's presence, mode and shape (and, with `--bot`, that the fork exists and the bot is not a collaborator here) without printing any value.
+
+**Rotating a key is the same two steps: install the new value, then revoke the old one at its provider.** The runner reads each file fresh on every run, so no runner restart is needed. Per identity:
+
+* **`brain.key` — the agent-kind brain key, on stable.** Mint it with the maintainer's "Keys" steps: `bun server-portable/keygen.ts --name agent-runner --scope write`, add the printed `agent-runner:write:<hash>` line to stable's `MCP_ACCESS_KEYS` (a line of its own — a repeated name stops the REST core), recreate the REST core so it re-reads the env (`compose … up -d --force-recreate api`), then `set_agent_kind('agent-runner','agent')` on stable's database so a claim reads `holderKind: "agent"`. Store the 64-hex key with `setup.ts install brain`. Rotate it only while the runner holds no live claims — a new name is a new agent id, which cannot renew or release the old key's claims (CLAUDE.md, "Keys") — then mint under a new name, install, recreate `api`, set the kind, and remove the old line once the runner has read the new key.
+* **`linear.key` — the runner's Linear key.** Create a Linear API key, `setup.ts install linear`, then revoke the old one in Linear. *Pilot (2026-11-11): this is the maintainer's own personal key, so the runner's Linear moves and its hand-back comment show as the maintainer. The SMD-4089 Verify bullet "a comment names the bot, not the maintainer" is deferred; to meet it, give the runner a separate Linear identity (a bot user or a Linear app) and install its key.*
+* **`anthropic.key` — the runner's Anthropic key.** Create a key in a Console workspace with a spend limit (the ceiling past the runner's own caps), `setup.ts install anthropic`, then revoke the old. Claude Code reads it through `apiKeyHelper` (`/bin/cat` of this file), so a rotation is just the install.
+* **`github.token` — the bot's GitHub token. Deferred to cut 3** (the first push; it is unused before then). When provisioned: a classic `public_repo` token on the bot account (decision 13: the bot pushes only to its own fork and opens the PR from there), `setup.ts install github`, then `setup.ts check-github <login>`. *The fork-versus-GitHub-App choice (decision 13 is a fork) is open and revisited at cut 3.* To rotate: mint a new token, install, revoke the old; an App would rotate its private key instead.
+
+`setup.ts --self-check` proves the shape gate, the `0600` write, the no-symlink write, the owner-only read and the directory check offline, on a temp directory — no clipboard, no network, no key. CI runs it.
 
 ## The criteria (SMD-4086)
 
@@ -172,6 +195,8 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 `--state` defaults to `~/.local/share/open-brain/agent-runner`. Each run's records stay in `probes/<time>/` there: the settings, the guard's logs, the streams and each probe's outcome. Clones and temp directories are removed. When every probe passes, the run writes `probe-stamp.json` there, recording Claude Code's path, checksum and version, Bun's and git's checksums, the macOS build, each profile and probe file's hash, and the set of probes that passed; a failed run deletes any earlier stamp and writes none. Cut 2b starts a session only under a stamp that matches. Run the probes again after any change to the profile or probe files, and before moving to a new Claude Code, Bun, git or macOS version (the stamp pins each, so an unprobed change makes cut 2b refuse to start).
 
+**The brief probe (the model probe).** One probe needs a model: that a worker given the brief gets past CLAUDE.md step 1 — it does the task instead of stopping because it can't run `git fetch`, `gh` or `list_claims`. Only a model reasons past step 1, so it can't use the scripted stand-in; it runs apart from the sweep, as `--brief-probe --anthropic-key <file>`. That is one real-model worker session at the runner's real model and effort (`claude-opus-5-5`, `xhigh`; decision 4), bounded at $2 and 20 turns for the trivial task, on a trivial, clean ticket, under the real profile with the real repo CLAUDE.md in its config directory — so the claim ceremony is actually there to get past. It passes when the worker edits the clone and fails when it stalls at step 1; the clone and temp directory are removed, a `brief-probe.json` verdict and the session's record stay. It is not part of the stamp, and its verdict logic has offline self-check coverage.
+
 **What they found on 2.1.319** (2026-11-07). All 35 pass; a first review pass then hardened the self-check and added probes. The design took these from them:
 
 * **The temp directory is short.** Claude Code keeps child commands in `<CLAUDE_CODE_TMPDIR>/claude-<uid>` only while that path is at most 44 bytes (the binary's own constant). Otherwise it falls back to the shared `/tmp/claude-<uid>`, which the profile denies, and every command exits 1. So a session's temp directory is `/private/tmp/obr-<8 hex>`, not a directory in the run's record.
@@ -193,6 +218,15 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 * **Claude Code sets two credentials for a command itself.** One is the token of its messaging socket, which the sandbox blocks. The other is its sandbox proxy's login, and the proxy refuses every host. Neither is the runner's.
 
 One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
+
+## The live run (`live-run.ts`)
+
+The executor runs one ticket end to end with the real clients — the capstone of cut 2c. Two modes, so the money path is never the default:
+
+* `--plan --ticket SMD-NNNN`: loads the config and keys, takes the ticket (its full fields fetched from Linear, Verify and the named ids parsed, checked for a character that doesn't show), provisions the runner's bare repository (a local clone of the main checkout, fetched each run), and prints what a run would do. No session, no claim, no Linear write, no spend.
+* `--execute --ticket SMD-NNNN --claude <path> --sha256 <hex> --version <x.y.z>`: the real run. It refuses a ticket not labelled `agent-ready`, checks the probe stamp (so the profile is as-probed — run the mock probes on this Claude Code first), then assembles the real `RunDeps` and `LiveDeps` and runs `liveRun`: claim on stable, move to In Progress, the worker and review sessions on the pinned Claude Code (the Anthropic key through `apiKeyHelper`), the gate, the release and the hand-back to Backlog. Up to about $13, with no PR (cut 3 publishes). The branch stays in the bare repository; the run's record stays under `runs/<run>/`.
+
+The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
 
 ## Cuts still to come
 

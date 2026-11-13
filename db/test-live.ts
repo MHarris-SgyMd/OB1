@@ -44,9 +44,9 @@ import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
-import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
+import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH, setFront } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, readHeartbeats, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -78,7 +78,7 @@ import { newestLive, passDumpFile, run as runSleep, schedulerSession, usText, ve
 import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
-import { linearClient } from "./linear-api.ts";
+import { LinearRateLimited, linearClient } from "./linear-api.ts";
 import { resolveEgressPolicy } from "../server-portable/egress.ts";
 import { setModelCallHook } from "../server-portable/model-call.ts";
 import type { LinearDoc } from "../evals/linear-corpus.ts";
@@ -4239,6 +4239,28 @@ if (want("9f")) {
   let poison = false;
   let slowMs = 0;
   let probeCalls = 0;
+  /**
+   * The provider crashing, as [10]'s stub (SMD-2641 PR 2): a row whose text holds `crashMarker`, or, while `crashCycles` is
+   * above zero, the next row's call whatever its text, crashes it — it and every call after answer 500 until
+   * `crashProbes` probes have found it down — and while `inFlightMs` is set every other row's call it is up for takes that
+   * long, so the other worker's is in flight when one crashes. `crashedBy` names whose call crashed it; `peakAfterCrashes`
+   * is the most row calls in flight at once once the crashes are spent.
+   */
+  let crashMarker: string | null = null;
+  let crashCycles = 0;
+  let crashProbes = 1;
+  let crashLeft: number | null = null;
+  let inFlightMs = 0;
+  const crashedBy: string[] = [];
+  let upCallsNow = 0;
+  let peakAfterCrashes = 0;
+  /** Once a hemlock note's call has been made this many times, every probe answers 401: the blame probe of its retry alone, refused (SMD-2641 PR 2). */
+  let refuseProbeAtHemlock = 0;
+  let hemlockCalls = 0;
+  /** Once a hemlock note's call has been made this many times, every probe hangs (counted): the blame probe held (review pass 1). */
+  let hangProbeAtHemlock = 0;
+  /** From a hemlock note's this-many-th call it answers 503, backpressure, not its 500 (review pass 1). */
+  let hemlock503At = 0;
   const axisFor = (text: string) => {
     let h = 0;
     for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -4257,8 +4279,37 @@ if (want("9f")) {
         embedProbesHung++;
         return neverAnswers();
       }
+      // The provider crashed (SMD-2641 PR 2): down until its probes have found it so `crashProbes` times.
+      if (crashLeft !== null) {
+        if (!probe) return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+        if (crashLeft > 0) {
+          crashLeft--;
+          return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+        }
+        crashLeft = null;
+      }
+      if (!probe && ((crashMarker !== null && input.includes(crashMarker)) || crashCycles > 0)) {
+        if (crashCycles > 0) crashCycles--;
+        crashedBy.push(input);
+        crashLeft = crashProbes;
+        // Its own answer a beat late, so the other worker's call is made by then.
+        await Bun.sleep(400);
+        return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+      }
+      if (!probe && inFlightMs > 0) {
+        upCallsNow++;
+        if (crashCycles === 0 && crashMarker === null) peakAfterCrashes = Math.max(peakAfterCrashes, upCallsNow);
+        await Bun.sleep(inFlightMs);
+        upCallsNow--;
+        if (crashLeft !== null) return Response.json({ error: { message: "stub: the runner crashed" } }, { status: 500 });
+      }
       if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
       if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
+      if (probe && hangProbeAtHemlock > 0 && hemlockCalls >= hangProbeAtHemlock) {
+        embedProbesHung++;
+        return neverAnswers();
+      }
+      if (probe && refuseProbeAtHemlock > 0 && hemlockCalls >= refuseProbeAtHemlock) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
       // The probe's refusal past the 160 characters its words are cut at in the closing line (review pass 3).
       if (probe && probeRefused401) return Response.json({ error: { message: `stub: invalid api key — ${"the key was revoked by its owner; ".repeat(5)}` } }, { status: 401 });
       if (probe && probeDownNext) {
@@ -4286,6 +4337,8 @@ if (want("9f")) {
       if (input.includes("zz-overlong")) return Response.json({ error: { message: "stub: the input exceeds the model's context length" } }, { status: 400 });
       // A slow hemlock note answers its 500 after 1 s, so a second worker has claimed its own thought by then, on a slow runner too (review pass 4: 500 ms).
       if (poison && input.includes("hemlock")) {
+        hemlockCalls++;
+        if (hemlock503At > 0 && hemlockCalls >= hemlock503At) return Response.json({ error: { message: "stub: overloaded" } }, { status: 503 });
         if (input.includes("slow hemlock")) await Bun.sleep(1000);
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
       }
@@ -4374,6 +4427,13 @@ if (want("9f")) {
       await pollUntil(async () => (claim = await claimOf(id)) !== undefined && claim.status !== "claimed", 5_000);
       return claim;
     };
+    /** The "(n of 3 before it is recorded failed)" counts of a follower's lines, in order: "1,2" for a suspect failed at its third outage alone (SMD-2641 PR 2). */
+    const aloneOf = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the probe after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    /** Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (SMD-2641 PR 2; the mutant: no outage begun). */
+    const waitsAfterFailure = (lines: string[]) => {
+      const at = lines.findIndex((l) => /: provider error again with this thought alone in flight at 3 outages/.test(l));
+      return at >= 0 && lines.slice(at).some((l) => /^ {2}the embedding provider is not answering \(/.test(l));
+    };
 
     // The provider not answering at the start is waited out, its line said; once it answers the follower pools.
     providerDown503 = true;
@@ -4415,7 +4475,8 @@ if (want("9f")) {
     assert(sentBackAgain && claimAgain?.status === "pending" && claimAgain.last_error === null && midAgain,
       `…and the thought, re-embedded since, is no suspect at the next outage: back to the pool unrecorded again, then re-embedded (sent back again ${sentBackAgain}, embedded ${midAgain}; claim ${JSON.stringify(claimAgain)})`);
 
-    // A row the provider fails again right after it answered a probe is the row's own: recorded failed, not cycled for ever.
+    // A row the provider fails again when it is retried alone, a probe made at once answering, is the row's own: recorded
+    // failed, not cycled for ever (SMD-2641 PR 2; before, again right after a probe answered).
     poison = true;
     const sick = liveFollower();
     await sick.idle();
@@ -4428,11 +4489,119 @@ if (want("9f")) {
     const sickExit = await sick.stop();
     poison = false;
     const sickWaits = waitsOf(sick.lines);
-    assert(recordedSick && /provider error again right after the provider answered a probe, so this thought's/.test(sickClaim?.last_error ?? "") && sickExit === "exit 0",
-      `a row that draws the provider's error again right after a probe answered is recorded failed as its own (${sickClaim?.last_error?.slice(0, 120)}; ${sickExit})`);
+    assert(recordedSick && /^provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: .*\(--retry-failed revisits it\)$/.test(sickClaim?.last_error ?? "") && sickExit === "exit 0",
+      `a row that draws the provider's error again, retried alone, a probe made at once answering, is recorded failed as its own (${sickClaim?.last_error?.slice(0, 120)}; ${sickExit})`);
     assert(recordedSick2 && sickWaits.length === 2 && sickWaits[1] === sickWaits[0],
       `…and the next poisoned thought's outage starts the schedule over, the one before recorded failed since (recorded ${recordedSick2}; waits ${JSON.stringify(sickWaits)})`);
     await sql`DELETE FROM thoughts WHERE id = ${sickThought}::uuid OR id = ${sickThought2}::uuid`;
+
+    // A suspect retried alone whose blame probe is refused — a key revoked while it was away — ends the follower with
+    // 2, refused provider, nothing failed: the request's, not the thought's (SMD-2641 PR 2). The stub refuses every
+    // probe once the hemlock note's second call is made, so the outage's wait answers first.
+    poison = true;
+    hemlockCalls = 0;
+    refuseProbeAtHemlock = 2;
+    let blameRefusedEnd: string | null = null;
+    let blameThought = "";
+    const blameRefused = liveFollower();
+    try {
+      await blameRefused.idle();
+      blameThought = await newThought("the hemlock note whose blame probe is refused");
+      blameRefusedEnd = await blameRefused.ended(20_000);
+    } finally {
+      poison = false;
+      refuseProbeAtHemlock = 0;
+    }
+    const blameRefusedClaim = await claimOf(blameThought);
+    assert(blameRefusedEnd === "exit 2" && blameRefusedClaim?.status === "pending" && hemlockCalls === 2
+        && blameRefused.lines.some((l) => /a probe's embedding call was refused \(Embeddings request .* 401 /.test(l)),
+      `a suspect retried alone whose blame probe is refused ends the follower with 2, the thought pending, the refusal said (${blameRefusedEnd}; claim ${JSON.stringify(blameRefusedClaim)}; ${hemlockCalls} hemlock call(s))`);
+    await sql`DELETE FROM thoughts WHERE id = ${blameThought}::uuid`;
+
+    // A suspect retried alone, its blame probe hung, the call in hand aborted by the pass's caller (abortInHand): set
+    // back, no outage counted against it, then re-embedded (review pass 1, mutant: the set-back after the probe dropped).
+    {
+      let abortBlame: InHandAbort | undefined;
+      poison = true;
+      hemlockCalls = 0;
+      hangProbeAtHemlock = 2;
+      const hungFrom = embedProbesHung;
+      const aborted = liveFollower({ onPass: (_st, a) => { abortBlame = a; } });
+      let abortedThought = "";
+      let abortedEmbedded = false;
+      try {
+        await aborted.idle();
+        abortedThought = await newThought("the hemlock note whose blame probe is aborted in hand");
+        await pollUntil(async () => embedProbesHung > hungFrom, 20_000);
+        poison = false;
+        hangProbeAtHemlock = 0;
+        abortBlame?.();
+        abortedEmbedded = await pollUntil(() => atModel(abortedThought), 20_000);
+      } finally {
+        poison = false;
+        hangProbeAtHemlock = 0;
+      }
+      const abortedExit = await aborted.stop();
+      const abortedAlone = aborted.lines.filter((l) => /alone in flight, the probe after it unanswered/.test(l)).length;
+      assert(embedProbesHung > hungFrom && abortedEmbedded && abortedAlone === 0 && abortedExit === "exit 0",
+        `a blame probe whose call the pass's caller aborts sets the suspect back, no outage counted, then re-embedded (hung ${embedProbesHung - hungFrom}; embedded ${abortedEmbedded}; alone lines ${abortedAlone}; ${abortedExit})`);
+      await sql`DELETE FROM thoughts WHERE id = ${abortedThought}::uuid`;
+    }
+
+    // A stop during a suspect's blame probe hands it back unrecorded, no outage counted (review pass 1, mutant: the
+    // stop's check after the probe dropped — at a third outage alone, a stop recorded the thought failed).
+    {
+      poison = true;
+      hemlockCalls = 0;
+      hangProbeAtHemlock = 2;
+      const hungFrom = embedProbesHung;
+      const stopped = liveFollower();
+      let stoppedThought = "";
+      let stoppedExit = "";
+      try {
+        await stopped.idle();
+        stoppedThought = await newThought("the hemlock note whose blame probe meets a stop");
+        await pollUntil(async () => embedProbesHung > hungFrom, 20_000);
+        stoppedExit = await stopped.stop();
+      } finally {
+        poison = false;
+        hangProbeAtHemlock = 0;
+      }
+      const stoppedClaim = await claimOf(stoppedThought);
+      const stoppedAlone = stopped.lines.filter((l) => /alone in flight, the probe after it unanswered/.test(l)).length;
+      assert(embedProbesHung > hungFrom && stoppedAlone === 0 && stoppedClaim?.status === "pending" && stoppedClaim.last_error === null && stoppedExit === "exit 0",
+        `a stop during a blame probe counts no outage against the suspect: back in the pool unrecorded (alone lines ${stoppedAlone}; claim ${JSON.stringify(stoppedClaim)}; ${stoppedExit})`);
+      await sql`DELETE FROM thoughts WHERE id = ${stoppedThought}::uuid`;
+    }
+
+    // A suspect retried alone that meets backpressure — a 503, no suspect's error — while the provider answers probes is
+    // not blamed: never failed, re-embedded once the 503s stop (review pass 1, mutant: the blame's gate on the suspect).
+    {
+      poison = true;
+      hemlockCalls = 0;
+      hemlock503At = 2;
+      const held = liveFollower();
+      let heldThought = "";
+      let heldEmbedded = false;
+      try {
+        await held.idle();
+        heldThought = await newThought("the hemlock note that meets a 503 when retried alone");
+        await pollUntil(async () => hemlockCalls >= 2, 20_000);
+        await Bun.sleep(500);
+        poison = false;
+        hemlock503At = 0;
+        heldEmbedded = await pollUntil(() => atModel(heldThought), 20_000);
+      } finally {
+        poison = false;
+        hemlock503At = 0;
+      }
+      // Out of hand: the vector is written before the claim's release reaches the row (SMD-3612; review pass 2, a flake).
+      const heldClaim = await claimOutOfHand(heldThought);
+      const heldExit = await held.stop();
+      assert(heldEmbedded && heldClaim?.status === "succeeded" && heldExit === "exit 0",
+        `a suspect retried alone that meets a 503 is not blamed: re-embedded once it stops (embedded ${heldEmbedded}; claim ${JSON.stringify(heldClaim)}; ${heldExit})`);
+      await sql`DELETE FROM thoughts WHERE id = ${heldThought}::uuid`;
+    }
 
     // The provider refusing the request itself mid-pass ends the follower, refused `provider`, nothing marked failed.
     const keyed = liveFollower();
@@ -4516,9 +4685,10 @@ if (want("9f")) {
     await sql`DELETE FROM thoughts WHERE id = ${refusedHangs}::uuid`;
 
     // A deadline whose probe gets no answer is the provider's outage, the thought back in the pool unrecorded, not the
-    // thought's (SMD-2636 PR 3b, the build's mutant: probedFault's outage read the thought's passed every row). Once
-    // the wait's probe answers, the same again is the suspect's own, recorded failed (review pass 1's mutants: the
-    // suspect dropped on this path, or the second round handed back, passed every row and cycled for ever).
+    // thought's (SMD-2636 PR 3b, the build's mutant: probedFault's outage read the thought's passed every row). Retried
+    // alone after the wait, the same again — its own deadline's probe unanswered, not probed twice — is an outage it was
+    // alone at, and at the third the suspect's own, recorded failed (SMD-2641 PR 2; review pass 1's mutants: the suspect
+    // dropped on this path, or the second round handed back, passed every row and cycled for ever).
     const deadDown = liveFollower();
     await deadDown.idle();
     probeDownAfterDeadline = true;
@@ -4530,7 +4700,7 @@ if (want("9f")) {
       downHangs = await newThought("a zz-deadline thought whose probe meets an outage");
       // In the probe's words, cut at 160 and marked (review pass 5: the mark was held by no row).
       downSentBack = await deadDown.saw(new RegExp(`the embedding provider is not answering \\(Embeddings request .* 503 .*…\\) — ${downHangs} goes back to the pool unrecorded`));
-      downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 20_000);
+      downFailed = await pollUntil(async () => (await claimOf(downHangs))?.status === "failed", 60_000);
       downClaim = await claimOf(downHangs);
     } finally {
       probeDownAfterDeadline = false;
@@ -4539,9 +4709,116 @@ if (want("9f")) {
     const deadDownExit = await deadDown.stop();
     assert(downSentBack && deadDownExit === "exit 0",
       `a deadline whose probe gets no answer is an outage: the thought back in the pool unrecorded, said as the probe's 503 (sent back ${downSentBack}; ${deadDownExit})`);
-    assert(downFailed && /^provider error again right after the provider answered a probe, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? ""),
-      `…and, once the wait's probe answers, the same again is the suspect's own: recorded failed (${JSON.stringify(downClaim)})`);
+    const downWaitsAfter = waitsAfterFailure(deadDown.lines);
+    const downAlone = aloneOf(deadDown.lines);
+    assert(downFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* timed out/.test(downClaim?.last_error ?? "") && downAlone === "1,2" && downWaitsAfter,
+      `…and, retried alone, the same again three times, its own probe unanswered each, is the suspect's own: recorded failed, the follower waiting after it (${JSON.stringify(downClaim)}; alone ${downAlone}; waits after ${downWaitsAfter})`);
     await sql`DELETE FROM thoughts WHERE id = ${downHangs}::uuid`;
+
+    // SMD-2641 PR 2: two workers, a poison thought crashing the provider beside an innocent one in flight: both suspects,
+    // retried one at a time, each handed back at the pool's front — the poison failed at its third outage alone, its probe
+    // unanswered each time, the innocent re-embedded, each claim's attempt refunded at every hand-back. Then a crash at the
+    // next call after each recovery, whatever is in flight, three times, twice on a suspect retried alone: nothing failed,
+    // and the drain after the isolated one takes the four behind with both workers at once.
+    // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+    await (async () => {
+      const isolatedSaid = (lines: string[]) => lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the drain goes back to 2; one that errs again alone is blamed only on a probe made at once$/.test(l));
+      try {
+        inFlightMs = 1000;
+        crashProbes = 1;
+        crashMarker = "crash-poison";
+        crashedBy.length = 0;
+        const pair = liveFollower({ workers: 2 });
+        await pair.idle();
+        // A thought re-embedded before the outage, its model moved during the wait: the poll after the wait returns it to
+        // the pool behind the suspects, not at the date it was first pooled — ahead of them, its claim ended the isolation
+        // (review pass 1, cold read).
+        const movedId = await newThought("a thought re-embedded before the outage");
+        const movedFirst = await pollUntil(() => atModel(movedId), 15_000);
+        // One statement, so one poll pools both and each worker claims one.
+        const [{ id: poisonId }, { id: innocentId }] = (await sql`INSERT INTO thoughts (content) VALUES ('a crash-poison thought takes the provider down'), ('an innocent thought beside it') RETURNING id::text AS id`) as { id: string }[];
+        const pairBack = await pair.saw(new RegExp(`${poisonId} goes back to the pool unrecorded`));
+        if (pairBack) await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${movedId}::uuid`;
+        const poisonFailed = await pollUntil(async () => (await claimOf(poisonId))?.status === "failed", 60_000);
+        const innocentDone = await pollUntil(() => atModel(innocentId), 30_000);
+        const movedAgain = await pollUntil(() => atModel(movedId), 30_000);
+        const poisonClaim = await claimOf(poisonId);
+        const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array([poisonId, innocentId], "TEXT")}::uuid[]) AND work_type = ${OWN_KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
+        const pairExit = await pair.stop();
+        assert(poisonFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* 500/.test(poisonClaim?.last_error ?? "")
+            && innocentDone && pairBack && movedFirst && movedAgain && aloneOf(pair.lines) === "1,2" && waitsAfterFailure(pair.lines) && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid(pair.lines) && attempts.join(",") === "1,1" && pairExit === "exit 0",
+          `two re-embed workers, a poison thought crashing the provider beside an innocent one: both suspects, retried one at a time — the poison failed at its third outage alone, the innocent re-embedded, each attempt refunded (SMD-2641 PR 2; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentDone}; alone ${aloneOf(pair.lines)}; ${crashedBy.length} crash(es); isolated said ${isolatedSaid(pair.lines)}; waits after the failure ${waitsAfterFailure(pair.lines)}; attempts ${attempts.join(",")}; ${pairExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ${poisonId}::uuid OR id = ${innocentId}::uuid OR id = ${movedId}::uuid`;
+
+        crashMarker = null;
+        crashedBy.length = 0;
+        crashCycles = 3;
+        peakAfterCrashes = 0;
+        // Polled every 30 s: the drains after each wait and after the isolated drain run at once (review pass 1, mutant: pollNow),
+        // timed from the first outage. The thoughts go in before the follower starts, so its first drain takes them.
+        const timerIds = ((await sql`INSERT INTO thoughts (content) VALUES ('a timer thought names the pager'), ('a timer thought names the runbook'),
+            ('a timer thought behind, one'), ('a timer thought behind, two'), ('a timer thought behind, three'), ('a timer thought behind, four') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const timer = liveFollower({ workers: 2, follow: 30 });
+        const timerFirst = await timer.saw(/goes back to the pool unrecorded/, 45_000);
+        const timerAt = Date.now();
+        const timerDone = await pollUntil(async () => (await Promise.all(timerIds.map(atModel))).every(Boolean), 60_000);
+        const timerMs = Date.now() - timerAt;
+        const timerFailed = (await Promise.all(timerIds.map(claimOf))).filter((c) => c?.status === "failed").length;
+        const timerExit = await timer.stop();
+        assert(timerFirst && timerDone && timerMs < 25_000 && timerFailed === 0 && crashCycles === 0 && crashedBy.length === 3 && aloneOf(timer.lines) === "1,2" && peakAfterCrashes === 2 && timerExit === "exit 0",
+          `a provider crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six re-embedded, the drain after the isolated one with both workers at once (SMD-2641 PR 2; done ${timerDone}, ${timerFailed} failed; ${crashedBy.length} crash(es); alone ${aloneOf(timer.lines)}; ${peakAfterCrashes} call(s) in flight at most; polled every 30 s, all within ${timerMs} ms of the first outage; ${timerExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(timerIds, "TEXT")}::uuid[])`;
+
+        // One worker, batch 2, a poison thought with two behind it: the isolated claim is one thought, so the ones behind
+        // never end the isolation and the poison is failed at its third outage alone (review pass 1, mutant: the batch of
+        // one). Its first outage down for four probes, so the two land in the pool before its wait answers.
+        crashMarker = "crash-poison";
+        crashedBy.length = 0;
+        crashProbes = 4;
+        const batched = liveFollower({ batch: 2 });
+        await batched.idle();
+        const [{ id: batchPoison }] = (await sql`INSERT INTO thoughts (content) VALUES ('a crash-poison thought in a batch of two') RETURNING id::text AS id`) as { id: string }[];
+        const batchFirstBack = await batched.saw(new RegExp(`${batchPoison} goes back to the pool unrecorded`));
+        const batchBehind = ((await sql`INSERT INTO thoughts (content) VALUES ('a thought behind it in the batch, one'), ('a thought behind it in the batch, two') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        crashProbes = 1;
+        const batchPoisonFailed = await pollUntil(async () => (await claimOf(batchPoison))?.status === "failed", 60_000);
+        crashMarker = null;
+        const batchBehindDone = await pollUntil(async () => (await Promise.all(batchBehind.map(atModel))).every(Boolean), 30_000);
+        const batchedExit = await batched.stop();
+        // One worker: the isolated line says no "one worker, before the drain goes back to" (review pass 3, mutant).
+        const batchLine = batched.lines.some((l) => l === "  retrying the last outage's 1 suspect thought(s) one at a time; one that errs again alone is blamed only on a probe made at once");
+        assert(batchFirstBack && batchPoisonFailed && batchBehindDone && batchLine && crashedBy.length === 4 && aloneOf(batched.lines) === "1,2" && batchedExit === "exit 0",
+          `batch 2, the isolated claim is one thought: the poison failed at its third outage alone, the two behind re-embedded after (failed ${batchPoisonFailed}; behind ${batchBehindDone}; one-worker line ${batchLine}; ${crashedBy.length} crash(es); alone ${aloneOf(batched.lines)}; ${batchedExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ${batchPoison}::uuid OR id = ANY(${sql.array(batchBehind, "TEXT")}::uuid[])`;
+
+        // Two workers, both suspects deleted during the outage: the isolated drain claims a thought no suspect, so the
+        // isolation ends and the four behind go two at a time (review pass 1, mutant: claimed() dropped).
+        crashedBy.length = 0;
+        // Down for three probes, answered at the fourth (~4.5 s in at a 300 ms first wait): time to delete the suspects first.
+        crashProbes = 3;
+        peakAfterCrashes = 0;
+        const gone = liveFollower({ workers: 2 });
+        await gone.idle();
+        crashCycles = 1;
+        const goneIds = ((await sql`INSERT INTO thoughts (content) VALUES ('a suspect deleted mid-outage, one'), ('a suspect deleted mid-outage, two') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const bothBack = await pollUntil(async () => goneIds.every((id) => gone.lines.some((l) => l.includes(`${id} goes back to the pool unrecorded`))), 15_000);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(goneIds, "TEXT")}::uuid[])`;
+        const behindIds = ((await sql`INSERT INTO thoughts (content) VALUES ('behind a deleted suspect, one'), ('behind a deleted suspect, two'), ('behind a deleted suspect, three'), ('behind a deleted suspect, four') RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const behindDone = await pollUntil(async () => (await Promise.all(behindIds.map(atModel))).every(Boolean), 60_000);
+        const goneExit = await gone.stop();
+        assert(bothBack && behindDone && peakAfterCrashes === 2 && goneExit === "exit 0",
+          `both suspects deleted mid-outage, the isolation ends at the first claim of another: the four behind two at a time (back ${bothBack}; done ${behindDone}; ${peakAfterCrashes} call(s) in flight at most; ${goneExit})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(behindIds, "TEXT")}::uuid[])`;
+      } finally {
+        crashMarker = null;
+        crashCycles = 0;
+        crashLeft = null;
+        inFlightMs = 0;
+        crashProbes = 1;
+        hangProbeAtHemlock = 0;
+        hemlock503At = 0;
+      }
+    })();
 
     // Another worker's outage is joined unprobed (SMD-2636 PR 3b, as extract's, PR 3a's review pass 1): under two
     // workers a slow hemlock note's 500 begins an outage while a deadline thought's call is still in hand, which, met
@@ -4624,8 +4901,10 @@ if (want("9f")) {
     const limitedExit = await limited.stop();
     // Rows getting past the limit each cycle start the schedule over: the waits do not grow (review pass 3: they doubled at every cycle).
     const limitedWaits = waitsOf(limited.lines);
-    assert(limitedFailed === 0 && limitedDone === 6 && limitedExit === "exit 0",
-      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six (${limitedFailed} failed, ${limitedDone} done; ${limitedExit})`);
+    // …and makes no suspect, so no drain after its outages isolates (SMD-2641 PR 2, review pass 3, mutant: a 429's thought made a suspect).
+    const limitedIsolated = limited.lines.filter((l) => /retrying the last outage's/.test(l)).length;
+    assert(limitedFailed === 0 && limitedDone === 6 && limitedIsolated === 0 && limitedExit === "exit 0",
+      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six, no drain isolated (${limitedFailed} failed, ${limitedDone} done; ${limitedIsolated} isolated drain(s); ${limitedExit})`);
     assert(limitedWaits.length >= 2 && limitedWaits.every((w) => w === limitedWaits[0]),
       `…each cycle that re-embedded something starts the probe's schedule over, so the waits stay at the first (${JSON.stringify(limitedWaits)})`);
     for (const id of limitedThoughts) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
@@ -4777,6 +5056,26 @@ if (want("9f")) {
     assert(gatedIdle && gatedWaiting && gatedProbed && gatedClaimInOutage?.status !== "failed" && gatedEmbedded && gatedExit === "exit 0",
       `with the probe's own subject refused by the gate, an outage waits, probing under the thought's subject: nothing recorded failed through two probes' 503s, then re-embedded (idle ${gatedIdle}, waiting ${gatedWaiting}, probed ${gatedProbed}, embedded ${gatedEmbedded}; claim in the outage ${JSON.stringify(gatedClaimInOutage)}; ${gatedExit})`);
     await sql`DELETE FROM thoughts WHERE id = ${gatedThought}::uuid`;
+
+    // The blame probe goes under the same subject (SMD-2641 PR 2, review pass 3, mutant: under the probe's own, which the
+    // gate refuses, the blame read a refusal and ended the follower with 2 at its first suspect retried alone): a hemlock
+    // note the gate passes by its type, retried alone, its blame probe answering — recorded failed, the follower running on.
+    poison = true;
+    const gatedPoison = liveFollower({ env: gatedEnv });
+    let gatedPoisonEnd: string | null = "running";
+    let gatedPoisonThought = "";
+    try {
+      await gatedPoison.idle();
+      [{ id: gatedPoisonThought }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('the gated hemlock note', ${{ type: "gated-outage" }}) RETURNING id::text AS id`;
+      await pollUntil(async () => (await claimOf(gatedPoisonThought))?.status === "failed", 20_000);
+    } finally {
+      poison = false;
+    }
+    const gatedPoisonClaim = await claimOf(gatedPoisonThought);
+    gatedPoisonEnd = await gatedPoison.stop();
+    assert(gatedPoisonClaim?.status === "failed" && /^provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: /.test(gatedPoisonClaim.last_error ?? "") && gatedPoisonEnd === "exit 0",
+      `with the probe's own subject refused by the gate, a suspect retried alone is blamed on a probe under its own subject: recorded failed as answered, the follower running on, a stop 0 (${gatedPoisonClaim?.status}: ${gatedPoisonClaim?.last_error?.slice(0, 100)}; ${gatedPoisonEnd})`);
+    await sql`DELETE FROM thoughts WHERE id = ${gatedPoisonThought}::uuid`;
 
     // A poll's statement past the session's statement_timeout ends the follower, its row failed — no longer swallowed.
     const timed = liveFollower({ session: { statement_timeout: "1s" } });
@@ -5130,7 +5429,7 @@ if (want("10")) {
    * calls so a follower's start costs no counted call.
    */
   let downUntil = 0;
-  let down: "503" | "404" | "408" | "hang" = "503";
+  let down: "503" | "404" | "408" | "500" | "hang" = "503";
   /** A 408's words: a gateway's, which classifyError reads as a deadline and the follower as an answer (SMD-3311 review pass 2). */
   let body408 = "litellm.Timeout: Request timed out.";
   let probes = 0;
@@ -5149,6 +5448,27 @@ if (want("10")) {
   const downPrompts: string[] = [];
   /** While set, every probe hangs (SMD-2636 PR 2, review pass 4). */
   let probeHangs = false;
+  /**
+   * The provider crashing (SMD-2641): a call whose thought holds `crashMarker` — a poison thought — or, while
+   * `crashCycles` is above zero, the next call whatever its thought — a crash on a timer, landing on whatever is in
+   * flight — crashes it: it and every request after it answer 500 until `crashProbes` probes have found it down
+   * (outage.arm). While `inFlightMs` is set every other call it is up for takes that long before it is answered, so
+   * another worker's call is in flight when one crashes, and meets it. `crashedBy` names whose call crashed it, in order.
+   */
+  let crashMarker: string | null = null;
+  let crashCycles = 0;
+  let crashProbes = 1;
+  let inFlightMs = 0;
+  const crashedBy: string[] = [];
+  /** While set, the call that crashes the provider hangs rather than answering 500: its deadline is the probe's to decide (review pass 1). */
+  let crashHangs = false;
+  /** A probe answered when `callScript` has this many left: the model missing (as while Ollama pulls it), or this status — the blame probe's own answer, armed by the stub, not raced from a poll (review passes 1 and 2). */
+  const probeAtScriptLeft = new Map<number, "missing" | number>();
+  /** Calls the stub is up for in flight now, and the most at once once the crashes are spent: the isolated pass ended, the next with every worker. */
+  let upCallsNow = 0;
+  /** "crash" for each crash and each call it was up for's thought, in order: whose call came after the last crash (review pass 1). */
+  const callOrder: string[] = [];
+  let peakAfterCrashes = 0;
   /** While above zero, the next calls answer 400 naming the answer budget, as an endpoint that refuses `max_tokens` does (extract's maxTokensFatal). */
   let refuseBudget = 0;
   /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
@@ -5169,10 +5489,34 @@ if (want("10")) {
       if (isProbe) probesAsked++;
       // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 4).
       if (isProbe && probeHangs) return neverAnswers();
+      // The provider crashing on a poison thought, or on a timer, whatever is in flight (SMD-2641).
+      if (!isProbe && (crashMarker !== null || crashCycles > 0 || inFlightMs > 0)) {
+        const asked = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        if (!outage.down(false) && ((crashMarker !== null && asked.includes(crashMarker)) || crashCycles > 0)) {
+          if (crashCycles > 0) crashCycles--;
+          crashedBy.push(asked);
+          callOrder.push("crash");
+          down = "500";
+          outage.arm(crashProbes);
+          if (crashHangs) return neverAnswers();
+          // Its own answer a beat late, so the other worker's call is made by then.
+          await Bun.sleep(400);
+          return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
+        }
+        // Only a call the provider is up for is in flight that long: one it is down for answers at once.
+        if (inFlightMs > 0 && !outage.down(false)) {
+          callOrder.push(asked);
+          upCallsNow++;
+          if (crashCycles === 0 && crashMarker === null) peakAfterCrashes = Math.max(peakAfterCrashes, upCallsNow);
+          await Bun.sleep(inFlightMs);
+          upCallsNow--;
+        }
+      }
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (!isProbe) downPrompts.push(body.messages?.find((m) => m.role === "user")?.content ?? "");
         if (down === "hang") return neverAnswers();
         if (down === "408") return new Response(JSON.stringify({ error: { message: body408 } }), { status: 408 });
+        if (down === "500") return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
         return down === "404"
           ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
           : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -5182,6 +5526,12 @@ if (want("10")) {
         // The statuses the next probes answer, in order (SMD-2636 PR 3a): a gateway's 503 while it restarts.
         const probeStatus = probeScript.shift();
         if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
+        const planned = probeAtScriptLeft.get(callScript.length);
+        if (planned !== undefined) probeAtScriptLeft.delete(callScript.length);
+        if (planned === "missing") {
+          return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
+        }
+        if (typeof planned === "number") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: planned });
         // A key revoked while the provider was away: the wait's probe refused (SMD-2636 PR 2).
         if (probeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         if (body.model === "absent-model") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
@@ -5731,8 +6081,8 @@ if (want("10")) {
         created.push(poisoned);
         const poisonFailed = await pollUntil(async () => (await claimRow(poisoned))?.status === "failed", 25_000);
         const poisonRow = await claimRow(poisoned);
-        assert(poisonFailed && /^provider error again right after the provider answered a probe, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonRow?.last_error ?? "") && !settled,
-               `a thought that draws the error again right after a probe answered is its own: recorded failed, the follower still running (${poisonRow?.status}: ${poisonRow?.last_error?.slice(0, 120)})`);
+        assert(poisonFailed && /^provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonRow?.last_error ?? "") && !settled,
+               `a thought that draws the error again, retried alone after its outage, with a probe made at once answering, is its own (SMD-2641): recorded failed, the follower still running (${poisonRow?.status}: ${poisonRow?.last_error?.slice(0, 120)})`);
         const failedOthers = (await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed' AND thought_id = ANY(${sql.array([busy, pulled, hung], "TEXT")}::uuid[])`)[0].n;
         assert(failedOthers === 0, `…and none of the outages' thoughts is failed (${failedOthers})`);
       } finally {
@@ -5971,8 +6321,8 @@ if (want("10")) {
       created.push(crasher);
       await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(crasher)) ?? ""), 45_000);
       const crasherRow = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${crasher}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
-      assert(crasherRow?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(crasherRow.last_error ?? ""),
-             `a thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again right after the probe answered, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${callScript.length} scripted left)`);
+      assert(crasherRow?.status === "failed" && /^provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: /.test(crasherRow.last_error ?? ""),
+             `a thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again, retried alone, a probe made at once answering, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${callScript.length} scripted left)`);
     } finally {
       callScript.length = 0;
       answer429 = 0;
@@ -5987,6 +6337,216 @@ if (want("10")) {
     }
     assert(followCode === 0, `…and the follower exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /refuse|rejected/.test(l)).join(" | ").slice(0, 200)})`);
   }
+
+  // SMD-2641: with two workers a provider crash's blame was a race — a poison thought crashing the provider made the
+  // innocent thought in flight beside it a suspect too, and both, re-claimed, met its next crash right after a probe
+  // answered and were failed as their own — and a provider crashing on a timer failed whichever suspect it met first.
+  // Now the follower retries an outage's suspects one at a time, one worker, and blames one that errs again alone only
+  // on a probe made at once: no answer, an outage it was alone at, and at the third its own. A poison thought beside an
+  // innocent one, in both orders: the poison failed at its third outage alone, the innocent extracted. A crash at the
+  // next call after each recovery, whatever is in flight, three times, twice on a suspect alone: nothing failed.
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage(1000, 2000);
+    const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+    const created: string[] = [];
+    /** One follower (two workers, unless `o` says) over `texts`, seeded in order before it starts, until each is finished, the follower ends, or `ms` pass; then stopped. */
+    const followOver = async (texts: string[], ms: number, o: { workers?: number; follow?: number; timeout?: number; limit?: number } = {}) => {
+      const ids: string[] = [];
+      for (const text of texts) ids.push(await seed(text));
+      created.push(...ids);
+      const lines: string[] = [];
+      const ac = new AbortController();
+      let code = -1;
+      const startedAt = Date.now();
+      const running = runExtract({ url: URL_!, env, workers: o.workers ?? 2, follow: o.follow ?? 1, timeout: o.timeout ?? 5, ...(o.limit ? { limit: o.limit } : {}), signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      let tookMs = -1;
+      try {
+        if (await pollUntil(async () => code !== -1 || (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms)) tookMs = Date.now() - startedAt;
+      } finally {
+        ac.abort();
+        await running;
+      }
+      return { ids, lines, code, tookMs, claims: await Promise.all(ids.map(claimOf)) };
+    };
+    /** The alone lines' counts, in order: "1,2" for a suspect failed at its third outage alone. */
+    const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3 before it is recorded failed\), and the follower waits/;
+    try {
+      // setFront's date (review pass 3, mutants: the now() cap, the oldest pending row): a claim handed back lands just
+      // before the oldest row pending, its attempt refunded — and, the pool dated ahead (the sleep scheduler's
+      // stoppedLast), at now(), not past it.
+      {
+        const front = [await seed("Fay's front note one."), await seed("Fay's front note two."), await seed("Fay's front note three.")];
+        const claimFront = async (ownAt: string) => sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'front-row', claimed_at = now(),
+            ttl_expires_at = now() + interval '1 minute', attempt_count = 1, enqueued_at = now() + ${ownAt}::interval WHERE thought_id = ${front[0]}::uuid AND work_type = ${KEY}`;
+        const dateRest = async (a: string, b: string) => {
+          await sql`UPDATE thought_work_claims SET enqueued_at = now() + ${a}::interval WHERE thought_id = ${front[1]}::uuid AND work_type = ${KEY}`;
+          await sql`UPDATE thought_work_claims SET enqueued_at = now() + ${b}::interval WHERE thought_id = ${front[2]}::uuid AND work_type = ${KEY}`;
+        };
+        await dateRest("-2 hours", "-1 hour");
+        await claimFront("0 seconds");
+        const backBehind = await setFront(sql, KEY, "front-row", front[0]);
+        const [behind] = (await sql`SELECT status, attempt_count, enqueued_at < now() - interval '2 hours' AS first FROM thought_work_claims WHERE thought_id = ${front[0]}::uuid AND work_type = ${KEY}`) as { status: string; attempt_count: number; first: boolean }[];
+        await dateRest("1 hour", "2 hours");
+        await claimFront("3 hours");
+        const backAhead = await setFront(sql, KEY, "front-row", front[0]);
+        const [ahead] = (await sql`SELECT enqueued_at <= now() AS capped, enqueued_at > now() - interval '1 minute' AS recent FROM thought_work_claims WHERE thought_id = ${front[0]}::uuid AND work_type = ${KEY}`) as { capped: boolean; recent: boolean }[];
+        for (const id of front) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+        assert(backBehind && behind?.status === "pending" && behind.attempt_count === 0 && behind.first && backAhead && ahead?.capped && ahead.recent,
+          `setFront hands a claim back pending, its attempt refunded, just before the oldest row pending — and, the pool dated ahead, at now(), not past it (${JSON.stringify(behind)}; ${JSON.stringify(ahead)})`);
+      }
+      inFlightMs = 1000;
+      crashProbes = 1;
+      crashMarker = "crash-poison";
+      for (const poisonFirst of [true, false]) {
+        crashedBy.length = 0;
+        callOrder.length = 0;
+        const poisonText = `Wren's crash-poison note, ${poisonFirst ? "first" : "second"} in the pool, takes the runner down.`;
+        // An answer the stub knows ("migrated"), so its extraction writes mentions.
+        const innocentText = `Xavi migrated the grafana board, ${poisonFirst ? "second" : "first"} in the pool.`;
+        const r = await followOver(poisonFirst ? [poisonText, innocentText] : [innocentText, poisonText], 90_000);
+        const [poisonClaim, innocentClaim] = poisonFirst ? r.claims : [r.claims[1], r.claims[0]];
+        const innocentId = poisonFirst ? r.ids[1] : r.ids[0];
+        const alone = aloneCounts(r.lines) === "1,2" ? 2 : -1;
+        const isolatedSaid = r.lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the pass goes back to 2; one that errs again alone is blamed only on a one-token call made at once$/.test(l));
+        // The innocent still unretried when the poison is failed — its answered call after the last crash; which suspect
+        // the pool hands out first is whichever went back last — is a suspect still, the outage after the failure keeping
+        // it: retried alone.
+        const failedAt = r.lines.findIndex((l) => /provider error again with this thought alone in flight at 3 outages/.test(l));
+        const innocentLast = Math.max(...callOrder.map((t, i) => (t.includes("Xavi migrated") ? i : -1)), -1) > callOrder.lastIndexOf("crash");
+        const innocentAlone = !innocentLast || (failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}retrying the last outage's 1 suspect thought\(s\) one at a time/.test(l)));
+        // Failed at its third outage alone, the provider still down: the follower waits for it, not on into it (review pass 3, mutant).
+        const waitsAfter = failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}the provider is not answering \(/.test(l));
+        // Each hand-back refunds the attempt its claim took: one each at the end (review pass 3, mutant).
+        const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array(r.ids, "TEXT")}::uuid[]) AND work_type = ${KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
+        assert(innocentAlone && waitsAfter && attempts.join(",") === "1,1" && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: Extraction request to [^ ]+ failed: 500/.test(poisonClaim.last_error ?? "")
+            && innocentClaim?.status === "succeeded" && (await extractedNow(innocentId)) && alone === 2 && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid && r.code === 0,
+          `two extract workers, a poison thought crashing the provider beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent extracted, alone after it when it was retried last (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${crashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried last ${innocentLast}, alone ${innocentAlone}; waits after the failure ${waitsAfter}; attempts ${attempts.join(",")}; exit ${r.code})`);
+      }
+      crashMarker = null;
+      crashedBy.length = 0;
+      crashCycles = 3;
+      peakAfterCrashes = 0;
+      // Four more behind the two, which the pass after the isolated one takes with both workers.
+      const r = await followOver(["Yara's timer note names the pager.", "Zane's timer note names the runbook.", ...[1, 2, 3, 4].map((i) => `Abel's timer note ${i} names the dashboard.`)], 90_000);
+      const alone = r.lines.filter((l) => aloneLine.test(l)).length;
+      assert(r.claims.every((c) => c?.status === "succeeded") && crashCycles === 0 && crashedBy.length === 3 && alone === 2 && r.code === 0,
+        `a provider crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six extracted (SMD-2641; ${r.claims.map((c) => c?.status).join(", ")}; ${crashedBy.length} crash(es), ${crashCycles} left; ${alone} alone line(s); exit ${r.code})`);
+      assert(peakAfterCrashes === 2,
+        `…and once its suspects have settled the isolated pass ends, the next taking the four behind them with both workers at once (${peakAfterCrashes} call(s) in flight at most)`);
+
+      // A suspect edited while the follower waits goes behind the backlog (requeued): the suspects go back at the pool's
+      // front, so the first thought no suspect the isolated pass claims ends the isolation, and the rest go with both
+      // workers — not the backlog one thought at a time to reach it, for the window (review pass 1, cold read and run-it:
+      // the sleep scheduler's abortInHand sets a suspect back so too).
+      crashedBy.length = 0;
+      crashCycles = 1;
+      peakAfterCrashes = 0;
+      const editTexts = ["Bea's edit note names the pager.", "Cy's edit note names the runbook.", ...[1, 2, 3, 4, 5, 6].map((i) => `Dov's edit note ${i} names the dashboard.`)];
+      const editIds: string[] = [];
+      for (const text of editTexts) editIds.push(await seed(text));
+      created.push(...editIds);
+      const editLines: string[] = [];
+      const acEdit = new AbortController();
+      let editCode = -1;
+      // Polled every 30 s: the pass after the wait, and the one after the isolated pass, run at once (pollNow; review pass 1, mutant).
+      const editAt = Date.now();
+      const editRun = runExtract({ url: URL_!, env, workers: 2, follow: 30, timeout: 5, signal: acEdit.signal, writer: { out: (l) => editLines.push(l), err: (l) => editLines.push(l) } })
+        .then((c) => { editCode = c; }, (e) => { editCode = -2; editLines.push(`rejected: ${(e as Error).message}`); });
+      let edited = false;
+      let editMs = -1;
+      try {
+        // The follower's wait, both in-flight thoughts its suspects: the second edited now.
+        edited = await pollUntil(async () => editLines.some((l) => /^ {2}the provider is not answering \(/.test(l)), 20_000);
+        if (edited) await sql`SELECT update_thought(${editIds[1]}::uuid, ${"Cy's edit note names the runbook, edited in the wait."})`;
+        if (await pollUntil(async () => (await Promise.all(editIds.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), 90_000)) editMs = Date.now() - editAt;
+      } finally {
+        acEdit.abort();
+        await editRun;
+      }
+      const editClaims = await Promise.all(editIds.map(claimOf));
+      const editIsolated = editLines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time/.test(l));
+      assert(edited && editIsolated && editClaims.every((c) => c?.status === "succeeded") && crashedBy.length === 1 && peakAfterCrashes === 2 && editCode === 0,
+        `a suspect edited in the outage's wait, behind the backlog: the isolation ends at the first thought no suspect, the rest taken with both workers at once, all eight extracted (edited ${edited}; isolated ${editIsolated}; ${editClaims.map((c) => c?.status).join(", ")}; ${peakAfterCrashes} call(s) in flight at most; exit ${editCode})`);
+      assert(editMs >= 0 && editMs < 25_000,
+        `…polled every 30 s, the passes after the wait and after the isolated pass run at once: all eight within 25 s (${editMs} ms)`);
+
+      // A suspect retried alone whose streak is the provider holding calls back alone — 429s past the pauses — is not
+      // blamed (SMD-3311's rule): the outage waited out, its isolation goes on, and it is extracted (review pass 1, mutant).
+      inFlightMs = 0;
+      crashMarker = null;
+      crashCycles = 0;
+      callScript.splice(0, callScript.length, 500, 500, 500, 500, 429, 429, 429, 429);
+      const held = await followOver(["Gil's held note names the pager."], 45_000, { workers: 1 });
+      assert(held.claims[0]?.status === "succeeded" && callScript.length === 0 && !held.lines.some((l) => l.includes(held.ids[0]) && /alone in flight/.test(l))
+          && held.lines.filter((l) => /^ {2}retrying the last outage's 1 suspect thought\(s\) one at a time; one that errs again alone/.test(l)).length === 2 && held.code === 0,
+        `a suspect retried alone meeting 429s past the pauses is not blamed: waited out, retried alone again, extracted (${held.claims[0]?.status}; ${callScript.length} scripted left; exit ${held.code})`);
+
+      // The blame probe finding the model missing is no answer, an outage alone; refused, the request's: exit 2, nothing
+      // failed (review pass 1, mutants: missing read as answered, a refusal read as no answer).
+      // Its first retry alone's four calls spent (4 left), the blame probe finds the model missing; its second's (none left), refused.
+      callScript.splice(0, callScript.length, ...Array<number>(12).fill(500));
+      probeAtScriptLeft.set(4, "missing").set(0, 401);
+      const refusedRun = await followOver(["Hal's refused note names the pager."], 45_000, { workers: 1 });
+      assert(refusedRun.code === 2 && refusedRun.claims[0]?.status === "pending" && aloneCounts(refusedRun.lines) === "1"
+          && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && probeAtScriptLeft.size === 0,
+        `a suspect alone whose blame probe finds the model missing is in an outage alone, (1 of 3); one whose blame probe is refused stops the follower, exit 2, nothing failed (exit ${refusedRun.code}; ${refusedRun.claims[0]?.status}; alone ${aloneCounts(refusedRun.lines)})`);
+      callScript.length = 0;
+      probeAtScriptLeft.clear();
+      // Left pending by its exit 2: out of the pool, so the next row's follower claims its own thought.
+      await sql`SELECT delete_thought(${refusedRun.ids[0]}::uuid, NULL::jsonb)`;
+      created.splice(created.indexOf(refusedRun.ids[0]), 1);
+
+      // A follower of --limit 1 whose thought crashed the provider: handed back at the front, it leaves the limit's count, is
+      // retried alone and extracted — not the follower ended at its limit, the thought pending (review pass 2, cold read).
+      callScript.splice(0, callScript.length, 500, 500, 500, 500);
+      const limited = await followOver(["Kai's limit note names the pager."], 30_000, { workers: 1, limit: 1 });
+      assert(limited.claims[0]?.status === "succeeded" && callScript.length === 0,
+        `a follower of --limit 1 whose thought crashed the provider retries it alone after the outage and extracts it, not ending at its limit with it pending (${limited.claims[0]?.status}; exit ${limited.code})`);
+      callScript.length = 0;
+
+      // A poison thought that hangs the provider: its deadline's probe, unanswered, begins the outage at once — no pauses
+      // — while the innocent beside it pauses on the 500 it met: halted mid-pause, it joins as a suspect; retried alone,
+      // the poison's own probe is the blame's, not a second (review pass 1, mutants: the after-pause join dropped; a
+      // second probe, which would answer, failing it as answered).
+      // The innocent's call in flight 600 ms, so the poison's arrives within it; its 500 then at ~0.6 s, pauses of 2.5 s, so
+      // the poison's 4 s deadline lands in its second pause with a second's margin each side (review pass 2).
+      const restoreLongPauses = shortenPauses(2500);
+      try {
+        inFlightMs = 600;
+        crashHangs = true;
+        crashProbes = 1;
+        crashMarker = "crash-hang";
+        crashedBy.length = 0;
+        const hang = await followOver(["Ida's crash-hang note takes the runner down.", "Jon migrated the pager rota."], 120_000, { timeout: 4 });
+        const [hangClaim, besideClaim] = hang.claims;
+        const hangIsolated = hang.lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time/.test(l));
+        assert(hangClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: .*timed out/.test(hangClaim.last_error ?? "")
+            && besideClaim?.status === "succeeded" && hangIsolated && aloneCounts(hang.lines) === "1,2" && crashedBy.length === 4 && hang.code === 0,
+          `a poison thought hanging the provider beside an innocent one pausing: the innocent, halted mid-pause, a suspect too; the poison failed at its third outage alone on its own deadline's probes, the innocent extracted (${hangClaim?.status}: ${hangClaim?.last_error?.slice(0, 100)}; ${besideClaim?.status}; isolated ${hangIsolated}; alone ${aloneCounts(hang.lines)}; ${crashedBy.length} crash(es); exit ${hang.code})`);
+      } finally {
+        restoreLongPauses();
+        crashHangs = false;
+      }
+    } finally {
+      crashMarker = null;
+      crashCycles = 0;
+      inFlightMs = 0;
+      crashProbes = 1;
+      crashHangs = false;
+      probeScript.length = 0;
+      probeAtScriptLeft.clear();
+      callScript.length = 0;
+      down = "503";
+      outage.clear();
+      restoreOutage();
+      restorePauses();
+      for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+  })();
 
   // SMD-2636 PR 2: a wait whose probe the provider answers with a refusal — a key revoked while it was away — ends
   // the follower, exit 2, nothing recorded failed: the request's, not the provider back (re-embed's rule). Before,
@@ -7914,7 +8474,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 113's close or 111's door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111 and 113, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 130's set close or set door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111, 113 and 130, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
   // The garbage-judge alarm's window is the pool's, kept across runs (PR 5b): the many empty answers of the cases
@@ -8437,7 +8997,7 @@ if (want("10h")) {
 
     // Version 1's subjects found again (SMD-3306 PR 3): a version's change is a pool's, so the sweep pools every thought
     // with no current subject again, their finished claims reopened, and the door replaces each under the current key.
-    // An out-of-date one the model now names nothing for is closed through close_thought_subject, being the one read at
+    // An out-of-date one the model now names nothing for is closed through close_thought_subjects, being the set read at
     // the text read (PR 5).
     const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
     const asV1 = async (id: string, key: string, by: string, judge: string) =>
@@ -8692,22 +9252,22 @@ if (want("10h")) {
         && claimedAts.length === 4 && new Set(claimedAts).size === 4 && claimedAts.every((at, i) => i === 0 || at > claimedAts[i - 1]),
       `a server error puts its thought back in the pool, first, its attempt not counted, and is paused for three times, each call on a fresh claim of its own, then ends the sweep, exit 1, the thought it ended at sent to the end of the pool (exit ${down.code}, ${ownCalls - asked} call(s), asked ${downAsked.map(downNamed).join(",")}, ${freshLeases} on a fresh lease, downAttempts ${downAttempts}, last ${last === none ? "none" : last === garbled ? "garbled" : last === utf ? "utf" : "another"})`);
 
-    // A brain without 113's close, or 111's door: the sweep refuses by name; without the door the pass extracts, and
-    // says once that it records no subject.
-    await sql`ALTER FUNCTION close_thought_subject(uuid, uuid, text) RENAME TO close_thought_subject_away`;
+    // A brain without 130's set close, or its set door: the sweep refuses by name; without the door the pass extracts,
+    // and says once that it records no subject (SMD-3306 PR 7a-3b-1: the sweep and the pass write and close sets).
+    await sql`ALTER FUNCTION close_thought_subjects(uuid, uuid[], text) RENAME TO close_thought_subjects_away`;
     try {
       const noCloseHeard: StartResult[] = [];
       const noClose = await sweep({ onStart: (r) => { noCloseHeard.push(r); } });
       // Heard as the tables' (PR 6b-1's review pass 2, mutant: heard as usage, it lived).
-      assert(noClose.code === 2 && /close_thought_subject is missing: the subject pool is migration 113's/.test(noClose.stderr) && JSON.stringify(noCloseHeard) === JSON.stringify([{ ok: false, refused: "tables" }]),
-        `--subjects without 113's close refuses, naming the migration, heard as the tables' (exit ${noClose.code}; heard ${JSON.stringify(noCloseHeard)})`);
+      assert(noClose.code === 2 && /close_thought_subjects is missing: a thought's subjects as a set are migration 130's/.test(noClose.stderr) && JSON.stringify(noCloseHeard) === JSON.stringify([{ ok: false, refused: "tables" }]),
+        `--subjects without 130's set close refuses, naming the migration, heard as the tables' (exit ${noClose.code}; heard ${JSON.stringify(noCloseHeard)})`);
     } finally {
-      await sql`ALTER FUNCTION close_thought_subject_away(uuid, uuid, text) RENAME TO close_thought_subject`;
+      await sql`ALTER FUNCTION close_thought_subjects_away(uuid, uuid[], text) RENAME TO close_thought_subjects`;
     }
-    await sql`ALTER FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject_away`;
+    await sql`ALTER FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) RENAME TO record_thought_subjects_away`;
     try {
       const noDoor = await sweep();
-      assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 111's/.test(noDoor.stderr), `--subjects without 111's door refuses, naming the migration (exit ${noDoor.code})`);
+      assert(noDoor.code === 2 && /record_thought_subjects is missing: a thought's subjects as a set are migration 130's/.test(noDoor.stderr), `--subjects without 130's set door refuses, naming the migration (exit ${noDoor.code})`);
       await sql`SELECT update_thought(${filed}::uuid, ${"The ticket row's own text, edited."})`;
       await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-9", "edited again: start smd-9")})`;
       const noDoorPass = await extractRun();
@@ -8716,10 +9276,10 @@ if (want("10h")) {
       // above. Read off the run's own line: its "before:" line counts the three extracted before it (PR 5: the count
       // matched that line, whatever the run did).
       const extracted = noDoorPass.stdout.split("\n").find((l) => /^ {2}\d+ extracted, \d+ failed, /.test(l));
-      assert(noDoorPass.code === 0 && /^ {2}4 extracted, 0 failed, /.test(extracted ?? "") && said.length === 1 && /needs migration 111/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
+      assert(noDoorPass.code === 0 && /^ {2}4 extracted, 0 failed, /.test(extracted ?? "") && said.length === 1 && /needs migration 130's record_thought_subjects/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
         `the pass without it extracts the four edited, their entities standing, and says once that it records no subject (exit ${noDoorPass.code}, ${said.length} line(s): ${extracted?.trim().slice(0, 60)})`);
     } finally {
-      await sql`ALTER FUNCTION record_thought_subject_away(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject`;
+      await sql`ALTER FUNCTION record_thought_subjects_away(uuid, text[], text, text, uuid, text, jsonb) RENAME TO record_thought_subjects`;
     }
     // A dry run counts as a run would: the two whose text moved under the same ticket, each pooled by its edit, are
     // kept, not recorded (review pass 2). The pool's own pages, each thought once: the limit is over the pool's five,
@@ -8768,7 +9328,7 @@ if (want("10h")) {
         asked = ownCalls;
         const roleHeard: StartResult[] = [];
         const roleSweep = await sweep({ onStart: (r) => roleHeard.push(r) }, sEnv, sUrl);
-        assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subject needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
+        assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subjects needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
           `a role without the structure group: the sweep refused before any question, exit 2 (exit ${roleSweep.code}, ${ownCalls - asked} asked: ${roleSweep.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         assert(JSON.stringify(roleHeard) === JSON.stringify([{ ok: false, refused: "tables" }]), `…heard by its kind, tables (PR 6b-1): ${JSON.stringify(roleHeard)}`);
         const roleDry = await sweep({ dryRun: true }, sEnv, sUrl);
@@ -8813,24 +9373,24 @@ if (want("10h")) {
           `…and one that cannot read ob1_config is refused, naming it, even dry (exit ${noConfigRead.code})`);
         assert(noConfigStatus.code === 0 && noConfigStatus.out.includes("    subjects:r0  →  (--subjects, if ob1_config.subject_pool_key names it: this role cannot read which it names)\n"),
           `…and rebuild.ts --status as it says a subject pool's drainer is unknown to it, exit 0 (exit ${noConfigStatus.code}: ${(noConfigStatus.stdout + noConfigStatus.stderr).split("\n").filter((l) => /subjects:r0|error|denied/i.test(l)).map((l) => l.trim().slice(0, 100)).join(" | ")})`);
-        await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) FROM PUBLIC");
+        await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) FROM PUBLIC");
         try {
           // A rejection read as the run's result, so an error escaping the sweep fails this case rather than the suite.
           const refusedWrite = await sweep({ model: false, switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
-          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subject\)/.test(refusedWrite.stderr),
+          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subjects\): record_thought_subjects needs INSERT and UPDATE on thought_facets/.test(refusedWrite.stderr),
             `a write the role is refused ends the sweep, exit 2, naming the grants (exit ${refusedWrite.code}: ${refusedWrite.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         } finally {
-          await sql.unsafe("GRANT EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) TO PUBLIC");
+          await sql.unsafe("GRANT EXECUTE ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) TO PUBLIC");
         }
         // A close the role is refused — the session summary's out-of-date subject, the model naming nothing for it —
         // ends the sweep, exit 2, naming what the close needs (review pass 1: no case reached it).
-        await sql.unsafe("REVOKE EXECUTE ON FUNCTION close_thought_subject(uuid, uuid, text) FROM PUBLIC");
+        await sql.unsafe("REVOKE EXECUTE ON FUNCTION close_thought_subjects(uuid, uuid[], text) FROM PUBLIC");
         try {
           const refusedClose = await sweep({ switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
-          assert(refusedClose.code === 2 && /This role cannot close a thought's subject \(permission denied for function close_thought_subject\)/.test(refusedClose.stderr),
+          assert(refusedClose.code === 2 && /This role cannot close a thought's subject \(permission denied for function close_thought_subjects\): close_thought_subjects needs UPDATE on thought_facets/.test(refusedClose.stderr),
             `a close the role is refused ends the sweep, exit 2 (exit ${refusedClose.code}: ${refusedClose.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         } finally {
-          await sql.unsafe("GRANT EXECUTE ON FUNCTION close_thought_subject(uuid, uuid, text) TO PUBLIC");
+          await sql.unsafe("GRANT EXECUTE ON FUNCTION close_thought_subjects(uuid, uuid[], text) TO PUBLIC");
         }
         // A naming's write that fails otherwise — the role's statement_timeout, past which the server cancels it — ends
         // the run in words, exit 1, the pool as it was, not read as a stop (review pass 9: it escaped as a trace; a
@@ -8987,8 +9547,8 @@ if (want("10h")) {
     await sql`SELECT requeue_thought_work(${POOL}, ${pr}::uuid)`;
     asked = ownCalls;
     const refusedKey = await sweep({}, { ...env, OB1_JUDGE_MODEL: `stub-judge-${"l".repeat(200)}` });
-    assert(refusedKey.code === 1 && /record_thought_subject refused the key/.test(refusedKey.stderr)
-        && tally(refusedKey) === "0 subject(s) recorded; 1 keys refused — among them, 1 with an out-of-date subject still standing" && ownCalls === asked + 1 && (await claimOf(pr))?.status === "failed",
+    assert(refusedKey.code === 1 && /record_thought_subjects refused the key/.test(refusedKey.stderr)
+        && tally(refusedKey) === "0 subject(s) recorded; 1 keys refused — among them, 1 with an out-of-date subject still standing" && ownCalls === asked + 1 && (await claimOf(pr))?.status === "failed" && (await claimOf(pr))?.last_error?.startsWith("record_thought_subjects refused the key: ") === true,
       `a key the door refuses fails the claim, said, exit 1, the out-of-date subject counted standing (exit ${refusedKey.code}: ${tally(refusedKey)})`);
     // An answer naming nothing about a text that moved while the model answered closes nothing: the close reads the
     // fingerprint the sweep read (a close reading the text now closed the out-of-date subject on an answer about a text
@@ -9032,6 +9592,134 @@ if (want("10h")) {
     const unfiled = await sweep();
     assert(unfiled.code === 0 && tally(unfiled) === "0 subject(s) recorded; 1 the model named nothing for (1 out-of-date subject(s) closed)" && (await standingOf(fresh)) === undefined && ownCalls === asked + 1,
       `a ticket taken away: the model is asked, and naming nothing, the rule's subject is closed (exit ${unfiled.code}: ${tally(unfiled)})`);
+    // A thought holding a set (130), out of date, the model naming nothing for it: the sweep closes the whole set and
+    // finishes the claim, the thought asked once, and a dry run counts it once (SMD-3306 PR 7a-3b-1: the close of one
+    // facet answered moved, closing none, and the thought went back to the pool to be asked again within the run, until
+    // the garbage-judge alarm tripped; a dry run counted it once a subject).
+    await sql`SELECT record_thought_subjects(${fresh}::uuid, ARRAY['phrase:an old set', 'pr:7310'], 'model', 'subject:stub-judge@p1', NULL, ${await fpOf(fresh)}, NULL)`;
+    await sql`SELECT requeue_thought_work(${POOL}, ${fresh}::uuid)`;
+    const setDry = await sweep({ dryRun: true });
+    asked = ownCalls;
+    // Bounded, so a sweep that asks the thought again stops at three, not at the alarm, which this section runs off.
+    const setSwept = await sweep({ limit: 3 });
+    assert(/would: of 1 thought\(s\), record none by the rules; ask stub-judge about 1 \(1 with an out-of-date subject\)\./.test(setDry.stdout)
+        && setSwept.code === 0 && tally(setSwept) === "0 subject(s) recorded; 1 the model named nothing for (2 out-of-date subject(s) closed)"
+        && (await standingOf(fresh)) === undefined && ownCalls === asked + 1 && (await claimOf(fresh))?.status === "succeeded",
+      `a thought holding an out-of-date set the model names nothing for: counted once by a dry run, asked once, its whole set closed and its claim finished (exit ${setSwept.code}, ${ownCalls - asked} asked: ${tally(setSwept)}; dry: ${setDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 120)})`);
+    // The thought left as a passing run leaves it, whatever this run did: a set still standing, or its claim pending,
+    // would loop a later unbounded sweep of this section, the alarm off.
+    await sql`SELECT record_thought_subjects(${fresh}::uuid, NULL, NULL, 'subject:stub-judge@p1', NULL, NULL, NULL)`;
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
+                WHERE thought_id = ${fresh}::uuid AND work_type = ${POOL} AND status <> 'succeeded'`;
+    // A set narrowed: a model's set {pr:727, a phrase} under the current question, at a text since edited; asked again,
+    // the model names PR 727 alone, so the door keeps pr:727 and closes the phrase (`closed`), counted a replacement and
+    // no new key (review pass 1: no case reached the arm, and a narrowed set was counted with a new key).
+    const narrow = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${"[10h] a merged pull request 727, reviewed before its notes"}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
+    await sql`SELECT record_thought_subjects(${narrow}::uuid, ARRAY['pr:727', 'phrase:a review before its notes'], 'model', 'subject:stub-judge@p2r', NULL,
+      (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${narrow}::uuid), NULL)`;
+    await sql`SELECT update_thought(${narrow}::uuid, ${"[10h] a merged pull request 727, reviewed, its notes since"})`;
+    asked = ownCalls;
+    const narrowed = await sweep({ limit: 3 });
+    const narrowLeft = (await subjects()).filter((x) => x.thought === narrow && x.standing).map((x) => x.key).join(",");
+    assert(narrowed.code === 0 && tally(narrowed) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (0 with a new key)"
+        && narrowLeft === "pr:727" && ownCalls === asked + 1,
+      `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
+    await sql`DELETE FROM thoughts WHERE id = ${narrow}::uuid`;
+    // In a function of its own: test-live's module body is past the size TypeScript's control flow analysis takes
+    // (TS2563).
+    await (async () => {
+      // A set's close, or its write, the server rolls back to break a deadlock (40P01; 130's NOT HERE: a move across two
+      // keys can still deadlock at its commit) at each of its three tries: each thought failed for --retry-failed, asked
+      // once, its set standing, said once and counted, and the run goes on (review pass 3, cold read: rethrown, it ended
+      // the run; pass 4, cold read and run-it: failed at the first, a one-off left it failed under a scheduler). Two
+      // out-of-date sets under an older question, one the model names nothing for (the close), one it names PR 727 for
+      // (the door); a trigger refuses each update of their facets as the server's deadlock check would, counting.
+      // A thought of `text` holding a model's set of `keys` under an older question, out of date, pooled.
+      const seedSet = async (text: string, keys: string[]) => {
+        const id = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${text}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
+        await sql`SELECT record_thought_subjects(${id}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:stub-judge@p1', NULL,
+          (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL)`;
+        await sql`SELECT requeue_thought_work(${POOL}, ${id}::uuid)`;
+        return id;
+      };
+      /**
+       * A sweep of at most `limit` beside the case's trigger on thought_facets (`trigger`, its CREATE) and its function
+       * (`body`), which counts in a sequence: all three named `name`, made before the run and dropped after. The run,
+       * and the sequence's count.
+       */
+      const sweepBeside = async (name: string, body: string, trigger: string, limit: number) => {
+        await sql.unsafe(`CREATE SEQUENCE ${name}; CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} END $$; ${trigger}`);
+        try {
+          const run = await sweep({ limit });
+          return { run, count: Number(((await sql.unsafe(`SELECT last_value FROM ${name}`)) as { last_value: string }[])[0].last_value) };
+        } finally {
+          await sql.unsafe(`DROP TRIGGER ${name} ON thought_facets; DROP FUNCTION ${name}(); DROP SEQUENCE ${name}`);
+        }
+      };
+      const deadSets = [await seedSet("[10h] a deadlocked set, nothing in it to name", ["phrase:a deadlocked set", "pr:7311"]),
+        await seedSet("[10h] a merged pull request 727, its set deadlocked", ["phrase:a deadlocked write", "pr:7312"])];
+      // …and a thought no subject stands on, its first write rolled back so: failed and counted, not as out of date
+      // (review pass 4, mutant: the "among them" count was unheld for a thought holding no subject).
+      deadSets.push((await sql`INSERT INTO thoughts (content, metadata) VALUES ('[10h] a merged pull request 727, never keyed, its write deadlocked', '{}'::jsonb) RETURNING id::text AS id`)[0].id as string);
+      await sql`SELECT requeue_thought_work(${POOL}, ${deadSets[2]}::uuid)`;
+      asked = ownCalls;
+      const { run: deadRun, count: deadTries } = await sweepBeside("zz_set_deadlock",
+        "PERFORM nextval('zz_set_deadlock'); RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01';",
+        `CREATE TRIGGER zz_set_deadlock BEFORE INSERT OR UPDATE ON thought_facets FOR EACH ROW WHEN (NEW.thought_id IN ('${deadSets[0]}'::uuid, '${deadSets[1]}'::uuid, '${deadSets[2]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock()`, 4);
+      const deadClaims = await Promise.all(deadSets.map((id) => claimOf(id)));
+      const deadStanding = (await subjects()).filter((x) => deadSets.includes(x.thought) && x.standing).length;
+      assert(deadRun.code === 1 && ownCalls === asked + 3 && deadStanding === 4 && deadTries === 9
+          && deadClaims.every((c) => c?.status === "failed" && c.last_error?.startsWith("the server rolled its write's transaction back to break a deadlock, 3 times (deadlock detected (the suite's))") === true)
+          && (deadRun.stderr.match(/: the server rolled its write's transaction back to break a deadlock, 3 times/g) ?? []).length === 1
+          && tally(deadRun) === "0 subject(s) recorded; 3 failed on a write the server rolled back to break a deadlock — among them, 2 with an out-of-date subject still standing",
+        `a set's close or write rolled back to break a deadlock at each of its three tries fails its thought, asked once, its set standing, said once, and the run goes on (exit ${deadRun.code}, ${ownCalls - asked} asked, ${deadTries} tries, ${deadStanding} standing, claims ${JSON.stringify(deadClaims)}: ${tally(deadRun)}; ${deadRun.stderr.trim().slice(0, 300)})`);
+      for (const id of deadSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+      // A deadlock as the server's come, at the commit (120's re-link is a deferred trigger), once: the transaction run
+      // again lands, the close's set closed and the door's subject written, each asked once, nothing failed (pass 4).
+      const onceSets = [await seedSet("[10h] a set deadlocked once, nothing in it to name", ["phrase:a set deadlocked once", "pr:7313"]),
+        await seedSet("[10h] a merged pull request 727, its set deadlocked once", ["phrase:a write deadlocked once", "pr:7314"])];
+      asked = ownCalls;
+      const { run: onceRun, count: onceFired } = await sweepBeside("zz_set_deadlock_once",
+        "IF nextval('zz_set_deadlock_once') = 1 THEN RAISE EXCEPTION 'deadlock detected (the suite''s, at the commit)' USING ERRCODE = '40P01'; END IF; RETURN NULL;",
+        `CREATE CONSTRAINT TRIGGER zz_set_deadlock_once AFTER UPDATE ON thought_facets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+          WHEN (OLD.thought_id IN ('${onceSets[0]}'::uuid, '${onceSets[1]}'::uuid)) EXECUTE FUNCTION zz_set_deadlock_once()`, 3);
+      const onceClaims = await Promise.all(onceSets.map((id) => claimOf(id)));
+      const onceLeft = (await subjects()).filter((x) => onceSets.includes(x.thought) && x.standing).map((x) => `${x.thought === onceSets[0] ? "close" : "door"}:${x.key}`).join(",");
+      assert(onceRun.code === 0 && ownCalls === asked + 2 && onceFired > 1 && onceClaims.every((c) => c?.status === "succeeded") && onceLeft === "door:pr:727"
+          && !/deadlock/.test(onceRun.stderr)
+          && tally(onceRun) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (1 with a new key); 1 the model named nothing for (2 out-of-date subject(s) closed)",
+        `a set's close or write rolled back at its commit to break a deadlock once is run again and lands, each asked once, nothing failed (exit ${onceRun.code}, ${ownCalls - asked} asked, the trigger ran ${onceFired} time(s), claims ${JSON.stringify(onceClaims)}, standing ${onceLeft}: ${tally(onceRun)}; ${onceRun.stderr.trim().slice(0, 300)})`);
+      for (const id of onceSets) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+    })();
+    // The pass's rule narrowing a set its rule found: counted recorded (review pass 1, mutant: a `closed` answer went
+    // uncounted). The pass's backlog drained first.
+    await extractRun();
+    const passSet = await seed(summary("SMD-91", "start smd-91"));
+    const [{ pf }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS pf FROM thoughts WHERE id = ${passSet}::uuid`) as { pf: string }[];
+    await sql`SELECT record_thought_subjects(${passSet}::uuid, ARRAY['ticket:SMD-91', 'phrase:a second subject'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${pf}, NULL)`;
+    const passNarrow = await extractRun();
+    const passLeft = (await subjects()).filter((x) => x.thought === passSet && x.standing).map((x) => x.key);
+    assert(passNarrow.code === 0 && /; recorded 1 thought\(s\)' own subject by its ticket\n/.test(passNarrow.stdout) && JSON.stringify(passLeft) === JSON.stringify(["ticket:SMD-91"]),
+      `the pass's rule narrowing a set is counted recorded (exit ${passNarrow.code}; ${/; recorded[^\n]*/.exec(passNarrow.stdout)?.[0] ?? "no recorded line"}; left ${passLeft.join(",")})`);
+    await sql`DELETE FROM thoughts WHERE id = ${passSet}::uuid`;
+    // A rule's set at the text read, holding the rule's key between two others: the rules agree only with their one key,
+    // so it is narrowed to it, a replacement and no new key, a dry run counting alike (review pass 1, mutants: a set
+    // compared as a subset, or its first key alone, was taken as current; pass 2, mutant: the dry run's new key read the
+    // set's first key alone, which the rule's key first hid).
+    const ruleSet = await seed(summary("SMD-92", "start smd-92"));
+    const [{ rf }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS rf FROM thoughts WHERE id = ${ruleSet}::uuid`) as { rf: string }[];
+    await sql`SELECT record_thought_subjects(${ruleSet}::uuid, ARRAY['pr:92', 'ticket:SMD-92', 'version:v9.9.9'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${rf}, NULL)`;
+    await sql`SELECT requeue_thought_work(${POOL}, ${ruleSet}::uuid)`;
+    const ruleSetDry = await sweep({ dryRun: true });
+    asked = ownCalls;
+    const ruleSetSwept = await sweep({ limit: 3 });
+    const ruleSetLeft = (await subjects()).filter((x) => x.thought === ruleSet && x.standing).map((x) => x.key);
+    const ruleSetWould = ruleSetDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
+    assert(/^would: of 1 thought\(s\), record 1 by its session header's ticket \(1 in place of a standing subject, 0 with a new key\)/.test(ruleSetWould)
+        && ruleSetSwept.code === 0 && tally(ruleSetSwept) === "1 subject(s) recorded (1 by the session header's ticket), 1 in place of a standing one (0 with a new key)"
+        && JSON.stringify(ruleSetLeft) === JSON.stringify(["ticket:SMD-92"]) && ownCalls === asked,
+      `a rule's set holding the rule's key and another is narrowed to the rule's key, a replacement and no new key, a dry run alike (exit ${ruleSetSwept.code}: ${tally(ruleSetSwept)}; left ${ruleSetLeft.join(",")}; dry: ${ruleSetWould.slice(0, 160)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${ruleSet}::uuid`;
     // An unread answer about a text edited while the model answered: its failed claim is no longer this run's when
     // released — the edit pooled it again — so it is said, and the run, taking it again and finishing it, exits 0
     // (review pass 2: it counted as this run's failure, for --retry-failed).
@@ -9123,7 +9811,7 @@ if (want("10h")) {
     // …and the pass's write of the rule's subject at a ticket it read before a move is refused alike (the pass beside a
     // sweep, review pass 5, run-it).
     const [{ racedFp }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS "racedFp" FROM thoughts WHERE id = ${raced}::uuid`) as { racedFp: string }[];
-    const passWrite = await recordSubject(sql, { id: raced, fingerprint: racedFp }, "ticket:SMD-80", "metadata", subjectRuleKey("metadata"), subjectRecipe({ by: "metadata" }), null);
+    const passWrite = await recordSubject(sql, { id: raced, fingerprint: racedFp }, ["ticket:SMD-80"], "metadata", subjectRuleKey("metadata"), subjectRecipe({ by: "metadata" }), null);
     assert(passWrite.action === "none" && passWrite.stale === true && (await standingOf(raced))?.key === "ticket:SMD-81",
       `a rule's subject at a ticket the thought is no longer filed under is refused at the door (${JSON.stringify(passWrite)})`);
     // A key's switch away and back while a run holds a claim under it: the naming pools the thoughts with no current
@@ -9150,7 +9838,7 @@ if (want("10h")) {
     const meanOld = await seed("Meanwhile, older: a note whose older subject a run under another key replaced while it was asked.");
     const fpNow = async (id: string) => ((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0] as { f: string }).f;
     const asOther = async (id: string, key: string, judge: string) =>
-      recordSubject(sql, { id, fingerprint: await fpNow(id) }, key, "model", judge, subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+      recordSubject(sql, { id, fingerprint: await fpNow(id) }, [key], "model", judge, subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
     await asOther(meanOld, "phrase:the oldest question", "subject:stub-judge@p1");
     const meanAsks = { none: 0, older: 0 };
     onOwn = async (t) => {
@@ -9899,7 +10587,7 @@ if (want("10h")) {
       const nothingOther = await otherStatus(nothingIds);
       assert(naming.code === 0 && older === "added" && nothingRun.code === 3 && ownCalls - asked === 2 && nothingClaims.every((c) => c === "pending") && nothingDue === 2 && nothingStanding === 0 && nothingOther === "succeeded,succeeded"
         && /\n {2}2 of the judge model's last 2 answers, across runs, gave no subject \(2 naming nothing a key holds\), more than 20% of the 5 the alarm reads \(db\/subject-sweep\.ts, JUDGE_ALARM\): the model, not the thoughts, is likely at fault, so the sweep stops here\./.test(nothingRun.stderr)
-        && /\n {4}Check OB1_JUDGE_MODEL \(stub-judge\), the chat endpoint and OB1_SUBJECT_REASONING\. The 2 thought\(s\) it named nothing for are back in the pool, and the out-of-date subject it closed on 1 of them stays closed until each is asked again\. Once the model is right, run it again\. The trip holds the pool's following runs, a scheduler's, of stub-judge: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold \(a run of another judge model is not held, and lifts nothing\)\. If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit 2 asks the 2 handed back, first in the pool, with the alarm off, lifting its hold too\.\n/.test(nothingRun.stderr),
+        && /\n {4}Check OB1_JUDGE_MODEL \(stub-judge\), the chat endpoint and OB1_SUBJECT_REASONING\. The 2 thought\(s\) it named nothing for are back in the pool, and the out-of-date subject\(s\) it closed on 1 of them stay closed until each is asked again\. Once the model is right, run it again\. The trip holds the pool's following runs, a scheduler's, of stub-judge: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold \(a run of another judge model is not held, and lifts nothing\)\. If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit 2 asks the 2 handed back, first in the pool, with the alarm off, lifting its hold too\.\n/.test(nothingRun.stderr),
         `a judge naming nothing, empty or a ticket the thought does not name, stops the run at its second answer of five, exit 3: the two claims it finished back in the pool, the four it never took still there, the two no later than now, the out-of-date subject it closed said, another work's claims as they were (the naming's exit ${naming.code}, the older subject ${older}; exit ${nothingRun.code}, ${ownCalls - asked} asked, claims ${nothingClaims.join(",")}, ${nothingDue} of 2 due, ${nothingStanding} standing, the other work's ${nothingOther}): ${nothingRun.stderr.trim().slice(0, 500)}`);
 
       // …and --judge-checked --limit 2, as the line offers, asks the two handed back, first in the pool, and no other
@@ -10140,6 +10828,25 @@ if (want("10h")) {
         && JSON.stringify(besideWindow.back) === JSON.stringify([besideIds[2], besideIds[1]])
         && /\n {2}Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, on answers from stub-judge, after this run began \(db\/subject-sweep\.ts, JUDGE_ALARM\), so this run, whose judge model is likely the same, stops here too, the claim in hand, which it named nothing for, back in the pool with that run's\.\n/.test(besideRun.stderr),
         `another run's trip since this run began, its stamp older than the run, stops it at the claim in hand, exit 3, that claim back in the pool uncounted, in that trip's hand-back (review pass 3 of PR 6a, run-it) (exit ${besideRun.code}, ${ownCalls - asked} asked, claims ${besideClaims.join(",")}, window ${besideWindow?.answers.length} answer(s), back ${JSON.stringify(besideWindow?.back)}): ${besideRun.stderr.trim().slice(0, 400)}`);
+
+      // …and the claim in hand holding an out-of-date subject it closed: the line says the subject(s) it closed stay
+      // closed, and they do (review pass 3 of PR 7a-3b-1, mutant: the wording pass 2 changed here was unheld).
+      await drop(besideIds);
+      await alarmAt(5);
+      const heldCloseIds = await seedAll(["Alarm note 157: alarm-good work.", "Alarm note 158: named nothing as the trip lands, its subject out of date.", "Alarm note 159: alarm-good work."]);
+      await sql`SELECT record_thought_subject(${heldCloseIds[1]}::uuid, 'phrase:an older subject', 'model', 'subject:stub-judge@p1', NULL, (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${heldCloseIds[1]}::uuid), NULL)`;
+      onOwn = async (thought) => {
+        if (!thought.includes("Alarm note 158")) return;
+        onOwn = null;
+        await sql`UPDATE ob1_config SET value = jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00', 'by', '["stub-judge"]'::jsonb, 'back', jsonb_build_array(${heldCloseIds[2]}::text))::text WHERE key = ${JUDGE_WINDOW_KEY}`;
+      };
+      asked = ownCalls;
+      const heldCloseRun = await alarmRun().finally(() => { onOwn = null; });
+      const heldCloseStanding = await standingOf(heldCloseIds[1]);
+      assert(heldCloseRun.code === 3 && ownCalls - asked === 2 && heldCloseStanding === undefined
+        && /, the claim in hand, which it named nothing for, back in the pool with that run's \(the out-of-date subject\(s\) it closed stay closed until it is asked again\)\.\n/.test(heldCloseRun.stderr),
+        `another run's trip stops the run at a claim in hand whose out-of-date subject it closed: the line says the subject(s) it closed stay closed, and they do (exit ${heldCloseRun.code}, ${ownCalls - asked} asked, standing ${heldCloseStanding?.key ?? "none"}): ${heldCloseRun.stderr.trim().slice(0, 400)}`);
+      await drop(heldCloseIds);
 
       // …and, with no answer in hand, at its next claim, read once that claim is taken, which goes back unasked: here
       // the stamp lands during a call past the limit, no answer to judge, and the line names the claim the run failed.
@@ -11178,7 +11885,7 @@ if (want("10h")) {
       const [finishT] = await seedAll(["Budget note 9: nothing to name here either, its finish's window held past the budget."]);
       // A model's subject under an older question's key: standing, out of date under this pool's.
       const [{ f: finishF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${finishT}::uuid`) as { f: string }[];
-      await recordSubject(sql, { id: finishT, fingerprint: finishF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+      await recordSubject(sql, { id: finishT, fingerprint: finishF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
       const finishHolder = new SQL({ url: URL_!, max: 1 });
       const fc = await finishHolder.reserve();
       let finishHeld: Promise<void> | null = null;
@@ -11206,6 +11913,39 @@ if (want("10h")) {
           && tally(finishRun) === "0 subject(s) recorded; 1 failed on a write past the statement_timeout — among them, 1 with an out-of-date subject still standing",
         `a finish past a scheduler's budget at the window's lock fails the thought, its out-of-date subject standing and counted, its answer judged after it neither finished nor closed (exit ${finishRun?.code ?? "still running at 30 s"}, its answer ${JSON.stringify(finishAnswer)}, ${finishStanding} standing): ${finishRun?.stdout.trim().slice(-200)} | ${finishRun?.stderr.trim().slice(0, 300)}`);
       await drop([finishT]);
+
+      await (async () => {
+        // …and a finish rolled back at its window's write to break a deadlock, beside a door's write past the budget in the
+        // same run: the answer, judged after its claim failed, neither finished nor closed, and each failure's line said,
+        // neither silencing the other (SMD-3306 PR 7a-3b-1's review pass 4, mutants: answer.f/c's reset on the deadlock
+        // and its own said flag were unheld).
+        const [deadFinT, deadDoorT] = await seedAll(["Budget note 20: nothing to name here, its finish's window write deadlocked.", "Budget note 21: sweep-pass-good work, its door held past the budget beside a deadlock."]);
+        const [{ f: deadFinF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${deadFinT}::uuid`) as { f: string }[];
+        await recordSubject(sql, { id: deadFinT, fingerprint: deadFinF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+        const dropDeadWindow = await caseTrigger("zz_window_deadlock", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value ~ '"t":"${deadFinT}","m":"[^"]*","f":true'`,
+          "RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01';");
+        const deadDoorHolder = new SQL({ url: URL_!, max: 1 });
+        const ddh = await deadDoorHolder.reserve();
+        let deadFinRun: SweepRun | null = null;
+        try {
+          await ddh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${deadDoorT}::uuid::text, 0))`;
+          deadFinRun = await orHung(settled(sweep({ session: BUDGET_SESSION, signal: backstop() })));
+        } finally {
+          await ddh`SELECT pg_advisory_unlock_all()`.catch(() => {});
+          ddh.release();
+          await deadDoorHolder.close({ timeout: 5 });
+          await dropDeadWindow();
+        }
+        const deadFinAnswer = (await windowOf())?.answers.find((a) => a.t === deadFinT);
+        const [{ standing: deadFinStanding }] = (await sql`SELECT count(*)::int AS standing FROM thought_facets WHERE thought_id = ${deadFinT}::uuid AND kind = 'subject' AND valid_until IS NULL`) as { standing: number }[];
+        const deadFinClaims = (await Promise.all([deadFinT, deadDoorT].map((id) => claimOf(id)))).map((c) => c?.status).join(",");
+        assert(deadFinRun?.code === 1 && deadFinClaims === "failed,failed" && deadFinAnswer?.g === "n" && deadFinAnswer.f === false && deadFinAnswer.c === false && deadFinStanding === 1
+            && (deadFinRun.stderr.match(/: the server rolled its write's transaction back to break a deadlock, 3 times/g) ?? []).length === 1
+            && (deadFinRun.stderr.match(/: its write passed the scheduler's statement_timeout/g) ?? []).length === 1
+            && tally(deadFinRun) === "0 subject(s) recorded; 1 failed on a write past the statement_timeout, 1 failed on a write the server rolled back to break a deadlock — among them, 1 with an out-of-date subject still standing",
+          `a finish rolled back at its window's write to break a deadlock fails the thought, its answer judged after neither finished nor closed, its line said beside a write past the budget's (exit ${deadFinRun?.code ?? "still running at 30 s"}, claims ${deadFinClaims}, its answer ${JSON.stringify(deadFinAnswer)}, ${deadFinStanding} standing): ${deadFinRun?.stdout.trim().slice(-200)} | ${deadFinRun?.stderr.trim().slice(0, 300)}`);
+        await drop([deadFinT, deadDoorT]);
+      })();
 
       // …and one elsewhere over a thought costs the run its poll, not its end, what it held back in the pool, said once:
       // its claim, the case holding the claims' table against writes from the claim's gate on, after which a following
@@ -11481,7 +12221,7 @@ if (want("10h")) {
         const hardRunning = settled(sweep({ session: WATCHED_SESSION, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
         // Both stops once the door's write is seen waiting on the case's lock (review pass 7, cold read: on a timer, a
         // slow answer let the stops land before the write, which the case then never met).
-        doorWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        doorWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
         (hardStopOf as PassStop | null)?.();
         (hardStopOf as PassStop | null)?.();
         hardRun = await orHung(hardRunning);
@@ -11494,6 +12234,38 @@ if (want("10h")) {
         `a hard stop while a thought's own write waits past a scheduler's budget leaves the thought to the stop's hand-back, not failed, counted or said (waited ${doorWaited}, exit ${hardRun?.code ?? "still running at 30 s"}): ${hardRun?.stdout.trim().slice(-200)} | ${hardRun?.stderr.trim().slice(0, 300)}`);
       await drop([hardT]);
 
+      await (async () => {
+        // …and a hard stop while a thought's own write waits, the write then rolled back to break a deadlock: the thought
+        // the stop's to hand back, neither failed nor counted nor said (SMD-3306 PR 7a-3b-1's review pass 4, mutant: the
+        // deadlock's hard-stop check was unheld).
+        const [hardDeadT] = await seedAll(["Budget note 19: sweep-pass-good work, its door held as the run stops twice, then deadlocked."]);
+        const dropHardDead = await caseTrigger("zz_hard_deadlock", "BEFORE INSERT OR UPDATE", "thought_facets", `NEW.thought_id = '${hardDeadT}'::uuid`,
+          "RAISE EXCEPTION 'deadlock detected (the suite''s)' USING ERRCODE = '40P01';");
+        const hardDeadHolder = new SQL({ url: URL_!, max: 1 });
+        const hdh = await hardDeadHolder.reserve();
+        let hardDeadStopOf: PassStop | null = null;
+        let hardDeadRun: SweepRun | null = null;
+        let hardDeadWaited = false;
+        try {
+          await hdh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardDeadT}::uuid::text, 0))`;
+          const hardDeadRunning = settled(sweep({ onPass: (st) => { hardDeadStopOf = st; }, signal: backstop() }));
+          hardDeadWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
+          (hardDeadStopOf as PassStop | null)?.();
+          await (hardDeadStopOf as PassStop | null)?.();
+          await hdh`SELECT pg_advisory_unlock_all()`;
+          hardDeadRun = await orHung(hardDeadRunning);
+        } finally {
+          await hdh`SELECT pg_advisory_unlock_all()`.catch(() => {});
+          hdh.release();
+          await hardDeadHolder.close({ timeout: 5 });
+          await dropHardDead();
+        }
+        assert(hardDeadWaited && hardDeadRun?.code === 130 && (await claimOf(hardDeadT))?.status === "pending" && !/break a deadlock/.test(hardDeadRun.stderr)
+            && tally(hardDeadRun) === "0 subject(s) recorded",
+          `a hard stop while a thought's own write waits, the write then rolled back to break a deadlock, leaves the thought to the stop's hand-back, not failed, counted or said (waited ${hardDeadWaited}, exit ${hardDeadRun?.code ?? "still running at 30 s"}): ${hardDeadRun?.stdout.trim().slice(-200)} | ${hardDeadRun?.stderr.trim().slice(0, 300)}`);
+        await drop([hardDeadT]);
+      })();
+
       // A first stop there lets the thought in hand finish: failed, said and counted, the run then stopped, 0 (review
       // pass 7, run-it: no case held which a first stop gets).
       const [onceT] = await seedAll(["Budget note 13: sweep-pass-good work, its door held as the run stops once."]);
@@ -11505,7 +12277,7 @@ if (want("10h")) {
       try {
         await oc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${onceT}::uuid::text, 0))`;
         const onceRunning = settled(sweep({ follow: 1, session: WATCHED_SESSION, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
-        onceWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        onceWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
         onceStop.abort();
         onceRun = await orHung(onceRunning, 20_000);
       } finally {
@@ -11602,8 +12374,8 @@ if (want("10h")) {
       try {
         await cnc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${cancelT}::uuid::text, 0))`;
         const cancelRunning = settled(sweep({ follow: 1, session: { statement_timeout: "30000" }, signal: AbortSignal.any([cancelStop.signal, backstop()]) }));
-        cancelWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
-        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND query LIKE ${"%record_thought_subject(%"}`;
+        cancelWaited = await pollUntil(() => waitingOnLock("record_thought_subjects(", "advisory"), 20_000);
+        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND query LIKE ${"%record_thought_subjects(%"}`;
         cancelRun = await orHung(cancelRunning, 20_000);
       } finally {
         cancelStop.abort();
@@ -12753,7 +13525,7 @@ if (want("10h")) {
         // A's own failure counted with an out-of-date subject still standing on it (PR 6b-1's review pass 2, mutant: left out
         // of that count, it lived): a model's under an older question's key.
         const [{ f: tieF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${tied[0]}::uuid`) as { f: string }[];
-        await recordSubject(sql, { id: tied[0], fingerprint: tieF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+        await recordSubject(sql, { id: tied[0], fingerprint: tieF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
         // Queued at one instant, as a pooling queues its claims.
         await sql`SELECT requeue_thought_work(${POOL}, id) FROM unnest(${sql.array(tied, "TEXT")}::uuid[]) AS id`;
         [{ n: tieInstants }] = (await sql`SELECT count(DISTINCT enqueued_at)::int AS n FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id = ANY(${sql.array(tied, "TEXT")}::uuid[])`) as { n: number }[];
@@ -12793,7 +13565,7 @@ if (want("10h")) {
         judgeScript.splice(0, judgeScript.length, "500", "500", "500", "500");
         [closeT] = await seedAll(["Close note: nothing to name here, its out-of-date subject closed after an outage, then edited."]);
         const [{ f: closeF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${closeT}::uuid`) as { f: string }[];
-        await recordSubject(sql, { id: closeT, fingerprint: closeF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+        await recordSubject(sql, { id: closeT, fingerprint: closeF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
         let closeEditedAt = "";
         closeRun = await followUntil({}, async () => {
           const c = (await sql`SELECT status, finished_at::text AS at FROM thought_work_claims WHERE thought_id = ${closeT}::uuid AND work_type = ${POOL}`)[0] as { status: string; at: string | null } | undefined;
@@ -14912,7 +15684,7 @@ if (want("10h")) {
           // (review pass 8, mutant: hangAborted's failure kept the claim's finished_at, and counted none).
           const [abortOldT] = await seedAll(["Abort old subject alone: sweep-pass-good work, an older question's subject standing, its calls aborted in hand."]);
           const [{ f: abortOldF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${abortOldT}::uuid`) as { f: string }[];
-          await recordSubject(sql, { id: abortOldT, fingerprint: abortOldF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+          await recordSubject(sql, { id: abortOldT, fingerprint: abortOldF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
           await sql`SELECT requeue_thought_work(${POOL}, ${abortOldT}::uuid)`;
           let abortOldIn: InHandAbort = () => -1;
           const abortOldAborts: number[] = [];
@@ -14940,7 +15712,7 @@ if (want("10h")) {
           // counted only when the provider erred on it).
           const [hangOldT] = await seedAll(["Hang old subject alone: sweep-pass-good work, an older question's subject standing, hanging the provider each time it is asked."]);
           const [{ f: hangOldF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${hangOldT}::uuid`) as { f: string }[];
-          await recordSubject(sql, { id: hangOldT, fingerprint: hangOldF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+          await recordSubject(sql, { id: hangOldT, fingerprint: hangOldF }, ["phrase:the oldest question"], "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
           await sql`SELECT requeue_thought_work(${POOL}, ${hangOldT}::uuid)`;
           judgeScript.splice(0, judgeScript.length, "slow", "slow");
           probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow", "up");
@@ -15576,7 +16348,7 @@ if (want("16")) {
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let judgeUnavailableMs = 0;
   /** What the judge, and a follower's probe, answer in an outage: a 503, a 408 (SMD-3311), or nothing at all (SMD-2599). */
-  let judgeDown: "503" | "408" | "hang" = "503";
+  let judgeDown: "503" | "408" | "500" | "hang" = "503";
   /** While set, a judge call that arrives while another is in flight answers 429, as a provider's concurrency limit does; the one in flight takes 600 ms (SMD-3311). Probes are exempt. */
   let judgeLimitConcurrent = false;
   let judgeCallsInFlight = 0;
@@ -15603,6 +16375,24 @@ if (want("16")) {
   const judgeProbeScript: number[] = [];
   /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
   const judgeOutage = probePacedOutage();
+  /**
+   * The judge crashing, as [10]'s stub (SMD-2641): a pair whose newer thought holds `judgeCrashMarker`, or, while
+   * `judgeCrashCycles` is above zero, the next call whatever its pair, crashes it — every request after answering 500
+   * until `judgeCrashProbes` probes have found it down — and while `judgeInFlightMs` is set every other call it is up
+   * for takes that long. `judgeCrashedBy` names whose call crashed it, in order.
+   */
+  let judgeCrashMarker: string | null = null;
+  let judgeCrashCycles = 0;
+  let judgeCrashProbes = 1;
+  let judgeInFlightMs = 0;
+  const judgeCrashedBy: string[] = [];
+  /** Judge calls it is up for in flight now, and the most at once once the crashes are spent (review pass 1, as [10]'s). */
+  let judgeUpCallsNow = 0;
+  let judgePeakAfterCrashes = 0;
+  /** "crash" for each crash and each call it was up for's prompt, in order, as [10]'s callOrder (review pass 1). */
+  const judgeCallOrder: string[] = [];
+  /** A probe answered with this status when `judgeCallScript` has this many left, as [10]'s probeAtScriptLeft (review pass 2). */
+  const judgeProbeAtScriptLeft = new Map<number, number>();
   /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
   let judgeProbes = 0;
   /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
@@ -15621,10 +16411,33 @@ if (want("16")) {
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
       // The wait's probe hanging, for a stop to end (SMD-2636 PR 2, review pass 4).
       if (isProbe && judgeProbeHangs) return neverAnswers();
+      // The judge crashing on a poison pair, or on a timer, whatever is in flight (SMD-2641).
+      if (!isProbe && (judgeCrashMarker !== null || judgeCrashCycles > 0 || judgeInFlightMs > 0)) {
+        const asked = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        if (!judgeOutage.down(false) && ((judgeCrashMarker !== null && asked.includes(judgeCrashMarker)) || judgeCrashCycles > 0)) {
+          if (judgeCrashCycles > 0) judgeCrashCycles--;
+          judgeCrashedBy.push(asked);
+          judgeCallOrder.push("crash");
+          judgeDown = "500";
+          judgeOutage.arm(judgeCrashProbes);
+          // Its own answer a beat late, so the other worker's call is made by then.
+          await Bun.sleep(400);
+          return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
+        }
+        // Only a call the judge is up for is in flight that long: one it is down for answers at once.
+        if (judgeInFlightMs > 0 && !judgeOutage.down(false)) {
+          judgeCallOrder.push(asked);
+          judgeUpCallsNow++;
+          if (judgeCrashCycles === 0 && judgeCrashMarker === null) judgePeakAfterCrashes = Math.max(judgePeakAfterCrashes, judgeUpCallsNow);
+          await Bun.sleep(judgeInFlightMs);
+          judgeUpCallsNow--;
+        }
+      }
       // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599); a call's thoughts are kept, whose call met it (SMD-2636 PR 2, review pass 3).
       if (judgeOutage.down(isProbe)) {
         if (!isProbe) judgeDownPrompts.push((body.messages ?? []).map((m) => m.content).join("\n"));
         if (judgeDown === "hang") return neverAnswers();
+        if (judgeDown === "500") return new Response(JSON.stringify({ error: { message: "the runner crashed" } }), { status: 500 });
         return judgeDown === "408" ? new Response(JSON.stringify({ error: { message: "litellm.Timeout: Request timed out." } }), { status: 408 }) : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
       // A follower's one-token probe, answered apart: no judge call counted.
@@ -15633,6 +16446,11 @@ if (want("16")) {
         // The statuses the next probes answer, in order (SMD-2636 PR 3a, review pass 4).
         const probeStatus = judgeProbeScript.shift();
         if (probeStatus !== undefined) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: probeStatus });
+        const plannedStatus = judgeProbeAtScriptLeft.get(judgeCallScript.length);
+        if (plannedStatus !== undefined) {
+          judgeProbeAtScriptLeft.delete(judgeCallScript.length);
+          return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: plannedStatus });
+        }
         // A key revoked while the judge was away: the wait's probe refused (SMD-2636 PR 2).
         if (judgeProbeRefuses) return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -17161,8 +17979,8 @@ if (want("16")) {
       created.push(crasher);
       await pollUntil(async () => ["succeeded", "failed"].includes((await statusOf(crasher)) ?? ""), 45_000);
       const crasherRow = (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${crasher}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
-      assert(crasherRow?.status === "failed" && /^provider error again right after the provider answered a probe, so this thought's: /.test(crasherRow.last_error ?? ""),
-             `a pair's thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again right after the probe answered, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${judgeCallScript.length} scripted left)`);
+      assert(crasherRow?.status === "failed" && /^provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: /.test(crasherRow.last_error ?? ""),
+             `a pair's thought whose streak began with a 500 and ended on a gateway's 503 is the suspect: crashing again, retried alone, a probe made at once answering, it is recorded its own (${crasherRow?.status}: ${crasherRow?.last_error?.slice(0, 100)}; ${judgeCallScript.length} scripted left)`);
     } finally {
       judgeCallScript.length = 0;
       judge429 = 0;
@@ -17178,6 +17996,114 @@ if (want("16")) {
     }
     assert(followCode === 0, `…and the consolidate follower exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
   }
+
+  // SMD-2641: [10]'s twins for consolidate — two workers, a poison pair crashing the judge beside an innocent one, in
+  // both orders: both thoughts suspects, retried one at a time, the poison failed at its third outage alone, the
+  // innocent judged; a crash at the next call after each recovery, whatever is in flight, three times: nothing failed.
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage(1000, 2000);
+    const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+    const created: string[] = [];
+    let axis = 80;
+    /**
+     * One follower (two workers, unless `o` says) over pairs, each an older thought and a newer one sharing a subject,
+     * the olders seeded first and then the newers in order, before it starts; until each newer is finished, the follower
+     * ends, or `ms` pass; then stopped.
+     */
+    const followOver = async (pairs: [string, string][], ms: number, o: { workers?: number; follow?: number } = {}) => {
+      const tags = pairs.map(() => `isolate-${axis}`);
+      const axes = pairs.map(() => axis++);
+      for (let i = 0; i < pairs.length; i++) created.push(await seed(pairs[i][0], axes[i], 3, [tags[i] + `-${i}`]));
+      const ids: string[] = [];
+      for (let i = 0; i < pairs.length; i++) ids.push(await seed(pairs[i][1], axes[i], 0, [tags[i] + `-${i}`]));
+      created.push(...ids);
+      const lines: string[] = [];
+      const ac = new AbortController();
+      let code = -1;
+      const startedAt = Date.now();
+      const running = runConsolidate({ url: URL_!, env, workers: o.workers ?? 2, follow: o.follow ?? 1, timeout: 5, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      let tookMs = -1;
+      try {
+        if (await pollUntil(async () => code !== -1 || (await Promise.all(ids.map(claimOf))).every((c) => c?.status === "succeeded" || c?.status === "failed"), ms)) tookMs = Date.now() - startedAt;
+      } finally {
+        ac.abort();
+        await running;
+      }
+      return { ids, lines, code, tookMs, claims: await Promise.all(ids.map(claimOf)) };
+    };
+    const aloneLine = /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \([12] of 3 before it is recorded failed\), and the follower waits/;
+    /** The alone lines' counts, in order (review pass 1, as [10]'s). */
+    const aloneCounts = (lines: string[]) => lines.map((l) => /goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \((\d) of 3 before it is recorded failed\)/.exec(l)?.[1]).filter((n) => n !== undefined).join(",");
+    try {
+      judgeInFlightMs = 1000;
+      judgeCrashProbes = 1;
+      judgeCrashMarker = "crash-poison";
+      for (const poisonFirst of [true, false]) {
+        judgeCrashedBy.length = 0;
+        judgeCallOrder.length = 0;
+        // Words of their own each order: the same text again is the same thought, failed or judged already.
+        const order = poisonFirst ? "first" : "second";
+        const poison: [string, string] = [`The paging roster names the crash-free owner, ${order}.`, `The paging roster names the crash-poison owner now, ${order}.`];
+        const innocent: [string, string] = [`The backup roster names the weekly owner, ${order}.`, `The backup roster names the daily owner now, ${order}.`];
+        const r = await followOver(poisonFirst ? [poison, innocent] : [innocent, poison], 90_000);
+        const [poisonClaim, innocentClaim] = poisonFirst ? r.claims : [r.claims[1], r.claims[0]];
+        const alone = aloneCounts(r.lines) === "1,2" ? 2 : -1;
+        const isolatedSaid = r.lines.some((l) => /^ {2}retrying the last outage's 2 suspect thought\(s\) one at a time, one worker, before the pass goes back to 2; one that errs again alone is blamed only on a one-token call made at once$/.test(l));
+        // The innocent still unretried when the poison is failed is retried alone after it (review pass 1, as [10]'s).
+        const failedAt = r.lines.findIndex((l) => /provider error again with this thought alone in flight at 3 outages/.test(l));
+        const innocentLast = Math.max(...judgeCallOrder.map((t, i) => (t.includes("The backup roster names the daily owner now") ? i : -1)), -1) > judgeCallOrder.lastIndexOf("crash");
+        const innocentAlone = !innocentLast || (failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}retrying the last outage's 1 suspect thought\(s\) one at a time/.test(l)));
+        // The follower waits for the judge after the failure, and each hand-back refunds the claim's attempt (review pass 3, as [10]'s).
+        const waitsAfter = failedAt >= 0 && r.lines.slice(failedAt).some((l) => /^ {2}the provider is not answering \(/.test(l));
+        const attempts = ((await sql`SELECT attempt_count FROM thought_work_claims WHERE thought_id = ANY(${sql.array(r.ids, "TEXT")}::uuid[]) AND work_type = ${KEY}`) as { attempt_count: number }[]).map((a) => a.attempt_count);
+        assert(innocentAlone && waitsAfter && attempts.join(",") === "1,1" && poisonClaim?.status === "failed" && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered, so this thought's: .*500/.test(poisonClaim.last_error ?? "")
+            && innocentClaim?.status === "succeeded" && alone === 2 && judgeCrashedBy.length === 4 && judgeCrashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid && r.code === 0,
+          `two consolidate workers, a poison pair crashing the judge beside an innocent one, the ${poisonFirst ? "poison" : "innocent"} first in the pool: both suspects, retried one at a time — the poison failed as its own at its third outage alone, the innocent judged, alone after it when it was retried last (SMD-2641; poison ${poisonClaim?.status}: ${poisonClaim?.last_error?.slice(0, 90)}; innocent ${innocentClaim?.status}; ${alone} alone line(s); ${judgeCrashedBy.length} crash(es); isolation said ${isolatedSaid}; innocent retried last ${innocentLast}, alone ${innocentAlone}; waits after the failure ${waitsAfter}; attempts ${attempts.join(",")}; exit ${r.code})`);
+      }
+      judgeCrashMarker = null;
+      judgeCrashedBy.length = 0;
+      judgeCrashCycles = 3;
+      judgePeakAfterCrashes = 0;
+      // Four more pairs behind the two, which the pass after the isolated one takes with both workers (review pass 1, as [10]'s).
+      const behind: [string, string][] = [1, 2, 3, 4].map((i) => [`The rota table ${i} names the weekly lead.`, `The rota table ${i} names the daily lead now.`]);
+      // Polled every 30 s: the passes after each wait and after the isolated pass run at once (pollNow; review pass 3, mutant).
+      const r = await followOver([["The pager table names the weekly lead.", "The pager table names the daily lead now."], ["The runbook table names the weekly lead.", "The runbook table names the daily lead now."], ...behind], 90_000, { follow: 30 });
+      const alone = r.lines.filter((l) => aloneLine.test(l)).length;
+      assert(r.claims.every((c) => c?.status === "succeeded") && judgeCrashCycles === 0 && judgeCrashedBy.length === 3 && alone === 2 && judgePeakAfterCrashes === 2 && r.tookMs >= 0 && r.tookMs < 40_000 && r.code === 0,
+        `a judge crashing at the next call after each recovery, whatever is in flight, three times — twice on a suspect retried alone — fails no thought: all six judged, the pass after the isolated one with both workers at once (SMD-2641; ${r.claims.map((c) => c?.status).join(", ")}; ${judgeCrashedBy.length} crash(es), ${judgeCrashCycles} left; ${alone} alone line(s); ${judgePeakAfterCrashes} call(s) in flight at most; polled every 30 s, all six within ${r.tookMs} ms; exit ${r.code})`);
+
+      // A suspect retried alone meeting the judge's 429s past the pauses is not blamed; one whose blame probe is refused
+      // stops the follower, exit 2, nothing failed (review pass 1, as [10]'s).
+      judgeInFlightMs = 0;
+      judgeCrashCycles = 0;
+      judgeCallScript.splice(0, judgeCallScript.length, 500, 500, 500, 500, 429, 429, 429, 429);
+      const held = await followOver([["The held table names the weekly lead.", "The held table names the daily lead now."]], 45_000, { workers: 1 });
+      assert(held.claims[0]?.status === "succeeded" && judgeCallScript.length === 0 && !held.lines.some((l) => l.includes(held.ids[0]) && /alone in flight/.test(l)) && held.code === 0,
+        `a consolidate suspect retried alone meeting 429s past the pauses is not blamed: waited out, judged (${held.claims[0]?.status}; ${judgeCallScript.length} scripted left; exit ${held.code})`);
+      // Its retry alone's four calls spent (none left), the blame probe is refused.
+      judgeCallScript.splice(0, judgeCallScript.length, ...Array<number>(8).fill(500));
+      judgeProbeAtScriptLeft.set(0, 401);
+      const refusedRun = await followOver([["The key table names the weekly lead.", "The key table names the daily lead now."]], 45_000, { workers: 1 });
+      assert(refusedRun.code === 2 && refusedRun.claims[0]?.status === "pending" && aloneCounts(refusedRun.lines) === "" && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && judgeProbeAtScriptLeft.size === 0,
+        `a consolidate suspect alone whose blame probe is refused stops the follower, exit 2, nothing failed (exit ${refusedRun.code}; ${refusedRun.claims[0]?.status}; alone ${aloneCounts(refusedRun.lines)})`);
+    } finally {
+      judgeCrashMarker = null;
+      judgeCrashCycles = 0;
+      judgeInFlightMs = 0;
+      judgeCrashProbes = 1;
+      judgeCallScript.length = 0;
+      judgeProbeScript.length = 0;
+      judgeProbeAtScriptLeft.clear();
+      judgeDown = "503";
+      judgeOutage.clear();
+      restoreOutage();
+      restorePauses();
+      for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+    }
+  })();
 
   // SMD-2636 PR 2: as [10]'s — a wait whose probe the judge answers with a refusal ends the follower, exit 2, its
   // pair's thought not failed. Stopped at 30 s if it runs on.
@@ -18074,8 +19000,9 @@ if (want("16")) {
     // the shipped ones restored — 111's, with 113's door after it, which 111's re-apply replaces, and 120's validator
     // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
-    // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) });
+    // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
+    // carries 120's with the deliverable kind (SMD-1715).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -18826,7 +19753,7 @@ if (want("18")) {
   const schemaFiles = communitySchemaFiles();
   // The recipe schemas (SMD-1810; the extensions' went with SMD-2311), after the community files —
   // ops-views.sql reads enhanced-thoughts' columns and its guarded views need
-  // smart-ingest's and entity-extraction's tables. Same drop in the finally.
+  // entity-extraction's tables. Same drop in the finally.
   const contribFiles = CONTRIB_SCHEMA_FILES;
   const ALL_GROUPS = ["community", "recipes"] as const;
   const [{ c: supabaseRoles }] = (await sql`SELECT count(*)::int AS c FROM pg_roles WHERE rolname IN ('authenticated', 'anon', 'service_role')`) as { c: number }[];
@@ -18861,18 +19788,23 @@ if (want("18")) {
       // The one function a migration holds from PUBLIC, 118's release, is the closedclaims group's (SMD-3600).
       const notSkipped = dry.out.replace(skippedLine, "");
       const fnGrants = notSkipped.match(/ON FUNCTION [^(\s]+/g) ?? [];
-      assert(!/ON SEQUENCE|openbrain_agents/.test(notSkipped) && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             `…grants nothing of the community group, and grants the migrations' tables and 118's release (${fnGrants.join(", ") || "no function"})`);
+      // A migration's own sequence is granted (134's deliverable_events seq, which its trigger draws by nextval: the
+      // deliverables group, SMD-1715 review pass 2); no community sequence is.
+      const seqGrants: string[] = notSkipped.match(/ON SEQUENCE [^\s]+/g) ?? [];
+      assert(!/openbrain_agents/.test(notSkipped) && !grantedSequences(["community"]).some((s) => seqGrants.includes(`ON SEQUENCE ${s}`))
+             && JSON.stringify(seqGrants) === JSON.stringify(["ON SEQUENCE deliverable_events_seq_seq"])
+             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
 
       const failed: string[] = [];
-      // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges,
-      // smart-ingest) and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
+      // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges)
+      // and fails leaves it aborted on this pool's one connection: rolled back, as [40] and [50] do, or every
       // statement after it answers "current transaction is aborted" (SMD-2128, review pass 3).
       for (const f of schemaFiles) {
         try { await sql.unsafe(readFileSync(join(SCHEMAS, f), "utf8")); }
         catch (e) { failed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(schemaFiles.length >= 12 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core, 12 since SMD-2690 made agent-memory a plugin; failed: ${failed.join(" | ") || "none"})`);
+      assert(schemaFiles.length >= 11 && failed.length === 0, `every schemas/*.sql applies over TCP with no Supabase role (${schemaFiles.length} files — 13 since SMD-1812 moved wiki-pages into core, 12 since SMD-2690 made agent-memory a plugin, 11 since it made smart-ingest one; failed: ${failed.join(" | ") || "none"})`);
       const contribFailed: string[] = [];
       for (const f of contribFiles) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
@@ -18886,7 +19818,7 @@ if (want("18")) {
       const grant = await migrate("--grant", ROLE);
       assert(grant.code === 0 && !/not yet present/.test(grant.out) && /over \d+ object\(s\)/.test(grant.out),
              `--grant issues everything, nothing skipped (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
-      assert(/GRANT USAGE, SELECT ON SEQUENCE ingestion_jobs_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
+      assert(/GRANT USAGE, SELECT ON SEQUENCE entities_id_seq TO "ob1_live_community";/.test(grant.out) && /GRANT EXECUTE ON FUNCTION lookup_agent_memory_key\(text\) TO "ob1_live_community";/.test(grant.out) && /GRANT SELECT, INSERT ON thought_audit TO "ob1_live_community";/.test(grant.out),
              "…a sequence, a function with its argument types, and thought_audit's merged capture + community privileges among them");
 
       // The role, connecting as itself. An INSERT of DEFAULT VALUES asks for
@@ -18904,7 +19836,7 @@ if (want("18")) {
       for (const v of grantedViews([...ALL_GROUPS])) {
         try { await asRole.unsafe(`SELECT 1 FROM ${v} LIMIT 0`); } catch (e) { viewDenied += `${v}: ${(e as Error).message.split("\n")[0]}; `; }
       }
-      assert(viewDenied === "", `…and reads the community view, the eight ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
+      assert(viewDenied === "", `…and reads the community view, the seven ops views and lint-sweep's seven through its own SELECT grants (${grantedViews([...ALL_GROUPS]).length} views; denied: ${viewDenied || "none"})`);
       const seqDenied: string[] = [];
       for (const s of grantedSequences(["community"])) {
         try { await asRole.unsafe(`SELECT nextval('${s}')`); } catch (e) { seqDenied.push(s); }
@@ -21215,7 +22147,7 @@ if (want("26")) {
     }
 
     // The export: every thought, past the first page; the optional tables it
-    // finds; the two smart-ingest tables this database lacks, skipped by name.
+    // finds; the retired smart-ingest schema's two tables, which this database lacks, skipped by name.
     const dates = new Set([new Date().toISOString().slice(0, 10)]);
     const exported = await backup({ SUPABASE_URL: URL_ });
     dates.add(new Date().toISOString().slice(0, 10));
@@ -21230,7 +22162,7 @@ if (want("26")) {
     // The progress line is the one trace of `count: "exact"`: without the count the run writes the same files and
     // summary (review pass 1, cold read — the mutant that dropped it survived every other assertion).
     assert(exported.code === 0 && /thoughts: 1000\/1050 rows/.test(exported.out) && /thoughts: 1050 rows \(/.test(exported.out) && /ingestion_jobs: skipped \(table not present\)/.test(exported.out) && /ingestion_items: skipped \(table not present\)/.test(exported.out) && /Done\. 6\/6 tables exported successfully/.test(exported.out),
-      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages with the exact count on the progress line, the three entity-extraction tables, the two smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
+      `backup-brain.mjs on the shim, SUPABASE_URL alone: 1,050 thoughts over two pages with the exact count on the progress line, the three entity-extraction tables, the old smart-ingest tables skipped as not present, 6/6 (exit ${exported.code}: ${firstLine(exported.out.split("--- Backup Summary ---")[1] ?? exported.out).slice(0, 160)})`);
     assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && ascending(thoughtsOut, (r) => String(r.id)) && ascending(entitiesOut ?? [], (r) => Number(r.id)) && thoughtsOut.every((r) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(String(r.created_at)) && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
       `…the thoughts file holds exactly the table's ${N} ids once each and in id order (a page query without its ORDER BY survived every other assertion on a fresh heap — review pass 3, mutant), timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
     const bkNoUrl = await backup({});
@@ -23251,6 +24183,32 @@ if (want("36")) {
   assert(flooded === 101, `the burst and its writer's older row are planted under one actor_name (${flooded} of 101)`);
   const planted = [...rows, ...earlier];
 
+  // What matters first (SMD-4112): two days ago, an Urgent ticket's own row (a linear row reads as its ticket) and a
+  // Medium item overdue since yesterday; a day ago, two Low ones, newer than both. Stated by a key classified operator.
+  const prio = {
+    urgent: { id: recordId("fork", "digest-urgent"), content: "zqprio urgent — the ticket's own row, Urgent on the board", days: 2 },
+    overdue: { id: recordId("fork", "digest-overdue"), content: "zqprio overdue — the medium item due yesterday", days: 2 },
+    low1: { id: recordId("fork", "digest-low-1"), content: "zqprio low one — newer, and Low", days: 1 },
+    low2: { id: recordId("fork", "digest-low-2"), content: "zqprio low two — newer, and Low", days: 1 },
+  };
+  for (const [k, r] of Object.entries(prio)) {
+    const meta = k === "urgent" ? { source: "linear", issue: "SMD-90361" } : { source: "fork" };
+    await wsql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
+      VALUES (${r.id}::uuid, ${r.content}, ${meta}::jsonb, content_fingerprint_of(${r.content}), now() - make_interval(days => ${r.days}::int))`;
+  }
+  const op = { name: "live-36-op", scope: "write" };
+  await wsql`SELECT set_agent_kind('live-36-op', 'operator')`;
+  await wsql`SELECT assert_priority('ticket', 'SMD-90361', 4, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'Urgent on the board', false, ${op}::jsonb)`;
+  await wsql`SELECT assert_priority('thought', ${prio.overdue.id}, 2, now() - interval '1 day', NULL::timestamptz, NULL::text, NULL::text, 'due yesterday', false, ${op}::jsonb)`;
+  for (const r of [prio.low1, prio.low2]) await wsql`SELECT assert_priority('thought', ${r.id}, 1, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'can wait', false, ${op}::jsonb)`;
+  // SMD-2653's shape with priority: Urgent stated on every row of the burst. Taken a turn at a time, what matters most
+  // first within each day and writer's share (the maintainer, 2026-11-11), it still holds one row per turn, so every
+  // planted row stays in the prompt; ranked over the shares (the first build's order) it took 79 of the 80 and left out
+  // all six planted rows.
+  const burstIds = (await wsql`SELECT id::text AS id FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' AND content LIKE 'zqflood %— one key''s burst before the run'`).map((r: { id: string }) => r.id);
+  for (const id of burstIds) await wsql`SELECT assert_priority('thought', ${id}, 4, NULL::timestamptz, NULL::timestamptz, NULL::text, NULL::text, 'everything is urgent', false, ${op}::jsonb)`;
+  assert(burstIds.length === 100, `Urgent is stated on the burst's 100 rows (${burstIds.length})`);
+
   // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
   // /bot<token>/sendMessage counts the Telegram sends (tgReqs) and keeps the
   // last one's Authorization (tgAuth). The last synthesis prompt is chatPrompt.
@@ -23306,7 +24264,20 @@ if (want("36")) {
       `under the default deny the digest is synthesized but not sent — the stub gets zero Telegram requests and the refusal names the rule (${tgReqs} send(s), ${chatReqs} synthesis; ${denied.err.trim().split("\n").pop()})`);
     const burst = (chatPrompt.match(/zqflood \d+/g) ?? []).length;
     assert(planted.every((r) => chatPrompt.includes(r.content)) && chatPrompt.includes(floodEarlier) && burst > 0 && !/"importance"\s*:/.test(chatPrompt),
-      `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
+      `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, each stated Urgent (SMD-4112), that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
+    // SMD-4112: the Urgent ticket's row, then the overdue item, lead; every unknown row after them, and the newer Low ones after
+    // those, or left out; each of the two says why it matters. Both are planted two days ago under one writer, so they are
+    // that share's first two turns, what matters most first in it (the maintainer, 2026-11-11); the rows of the run's
+    // other groups at turns 1 and 2 are far fewer than 80.
+    const place = (s: string) => chatPrompt.indexOf(s);
+    const [u, o] = [place(prio.urgent.content), place(prio.overdue.content)];
+    const unknownAt = [...planted.map((r) => r.content), floodEarlier].map(place);
+    const lowAt = [prio.low1, prio.low2].map((r) => place(r.content));
+    assert(u >= 0 && o > u && unknownAt.every((i) => i > o) && lowAt.every((i) => i === -1 || unknownAt.every((j) => i > j))
+      && chatPrompt.includes(`"priority":"ticket SMD-90361's own row; urgent, stated"`) && /"priority":"medium, stated; overdue, due \d{4}-/.test(chatPrompt)
+      // Earlier sections' statements may rank rows of theirs in the window too: at least these two are known.
+      && Number((denied.out.match(/what matters most first in each \((\d+) with a known priority\)/) ?? [])[1]) >= 2,
+      `the picks lead with the Urgent ticket's row and the overdue item, before newer unknown rows and the newer Low ones (${lowAt.filter((i) => i >= 0).length} of 2 Low in the prompt), each saying why: urgent at ${u}, overdue at ${o}, the first unknown at ${Math.min(...unknownAt)}; ${(denied.out.match(/picked .*/) ?? [""])[0]}; ${(chatPrompt.match(/"priority":"[^"]*"/g) ?? []).join(", ")}`);
 
     tgReqs = 0; chatReqs = 0;
     const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
@@ -23342,7 +24313,10 @@ if (want("36")) {
     }
   } finally {
     stub.stop(true);
-    await wsql`DELETE FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' OR id = ANY(${wsql.array(earlier.map((r) => r.id), "UUID")})`;
+    // The statements cleared before their thoughts go, so no later section reads them open (review pass 1).
+    await wsql`SELECT clear_priority('ticket', 'SMD-90361', ${op}::jsonb)`;
+    for (const id of [prio.overdue.id, prio.low1.id, prio.low2.id, ...burstIds]) await wsql`SELECT clear_priority('thought', ${id}, ${op}::jsonb)`;
+    await wsql`DELETE FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' OR id = ANY(${wsql.array([...earlier, ...Object.values(prio)].map((r) => r.id), "UUID")})`;
     await wsql.close();
   }
 }
@@ -23508,7 +24482,7 @@ if (want("37")) {
     try {
       tCode = await triggerPasses({
         once: async () => { if (i === 0) { await Bun.sleep(300); midPass = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
-        next: async () => { triggers++; }, stopped: () => i >= codes.length, stamper: tStamper,
+        next: async () => { triggers++; }, stopped: () => i >= codes.length, stamper: tStamper, intervalS: 10,
       });
     } finally {
       console.log = log;
@@ -23549,8 +24523,64 @@ if (want("37")) {
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
     let j = 0;
     console.log = () => {};
-    try { await triggerPasses({ once: async () => (j++, 0), next: async () => {}, stopped: () => j >= 1, stamper: null }); } finally { console.log = log; }
+    try { await triggerPasses({ once: async () => (j++, 0), next: async () => {}, stopped: () => j >= 1, stamper: null, intervalS: 10 }); } finally { console.log = log; }
     assert((await row("heartbeat:board-sync")) === null, "passes with no stamper (a dry run, an audit) write no heartbeat");
+
+    // Linear's rate limit (SMD-4133), on the row: the trigger's real stamper writes the hold beside the failed
+    // pass, brain_info says it in words, a held trigger keeps the row fresh, and the pass after clears it.
+    {
+      const limStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 });
+      const t0 = Date.now();
+      let clock = t0;
+      let n = 0;
+      let passes = 0;
+      let heldRow: Record<string, unknown> | null = null;
+      let heldWords = "";
+      let clearedRow: Record<string, unknown> | null = null;
+      console.log = () => {};
+      console.error = () => {};
+      try {
+        await triggerPasses({
+          once: async () => { passes++; if (passes === 1) throw new LinearRateLimited("Linear returned HTTP 429, rate-limited", t0 + 600_000); return 0; },
+          next: async () => {
+            n++;
+            if (n === 1) {
+              heldRow = await row("heartbeat:board-sync");
+              const beat = (await readHeartbeats(hsql as never)).heartbeats.find((h) => h.worker === "board-sync");
+              heldWords = beat ? heartbeatState(beat) : "no row read";
+            }
+            // After the pass past the reset, before the end: the row that pass stamped (review pass 1 read it only after
+            // the end, which clears the hold whatever the pass did).
+            if (n === 3) clearedRow = await row("heartbeat:board-sync");
+            clock += 300_000;
+          },
+          stopped: () => n >= 3, stamper: limStamper, intervalS: 300, now: () => clock,
+        });
+      } finally {
+        console.log = log;
+        console.error = error;
+      }
+      const after = await row("heartbeat:board-sync");
+      const lim = (heldRow as { limited?: { until?: string; by?: string }; outcome?: string } | null);
+      assert(lim?.outcome === "failed" && lim.limited?.by === "linear" && lim.limited.until === new Date(t0 + 600_000).toISOString() && passes === 2,
+        `a rate-limited pass stamps failed with the hold: until Linear's reset, by its word; the trigger before the reset runs no pass (${JSON.stringify(heldRow)}; ${passes} passes)`);
+      assert(/^alive, its last pass rate-limited by Linear: no pass, and no request, until \S+ \(in \d+ min; the reset time Linear sent\)/.test(heldWords),
+        `brain_info says the hold, not just "failed" (${heldWords})`);
+      const cleared = clearedRow as Record<string, unknown> | null;
+      assert(cleared !== null && !("limited" in cleared) && cleared.outcome === "ok" && cleared.ended === undefined,
+        `the pass after the reset clears the hold on the row it stamps, the process still running (${JSON.stringify(clearedRow)})`);
+      assert(after !== null && !("limited" in after) && after.outcome === "stopped", `…and the end keeps none (${JSON.stringify(after)})`);
+      // A row its supervisor ends (SMD-3214) holds nothing: an ended process sends no request to hold.
+      const ender = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 300 });
+      ender.limited?.({ until: new Date(Date.now() + 600_000).toISOString(), by: "backoff" });
+      await ender.stamp("failed");
+      const before = await row("heartbeat:board-sync");
+      await endRow(hsql as never, { worker: "board-sync", key: "heartbeat:board-sync", since: new Date(Date.now() - 60_000), restart: { in_s: 60, code: 1, tries: 1 } });
+      const ended = await row("heartbeat:board-sync");
+      assert((before as { limited?: { by?: string } } | null)?.limited?.by === "backoff" && ended !== null && !("limited" in ended) && ended.ended === true,
+        `a supervisor's end drops the hold with the waits (${JSON.stringify(before)} → ${JSON.stringify(ended)})`);
+      await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    }
 
     // A tier refresh copies ob1_config whole: its settle step deletes the
     // source's heartbeats, so a canary never reports stable's workers (review pass 1).
@@ -28678,11 +29708,11 @@ if (want("38s")) {
     assert(paceCode === 1 && paceDownAt > 0 && paceSpan >= 1500 && paceReads <= 12 && paceSaid && paceOwn >= 1,
       `the sweep set down mid-period leaves the polls at their pace while consolidation judges, its calls their own limit from then on (exit ${paceCode}; ${paceReads} live read(s) in the 1.5 s after the set-down; the period read ${paceSpan} ms past it; said ${paceSaid}; ${paceOwn} of 3 pairs timed out at 1 s)`);
 
-    // A thought whose judge call hangs the provider — the probe after it hanging too — is its own once it does so again
-    // right after the provider answered a probe, beside a sweep asking the judge model as alone: the window that says so
-    // grows with what the longer limit adds (the definitions reviewer's: at the 15 minutes against 1,020 s, scaled here
-    // to 3 s against 3 s, hang after hang was read as an outage each, the thought never failed, the period never
-    // ending; mutant: the window not grown).
+    // A thought whose judge call hangs the provider — the probe after it hanging too — is its own once it has done so
+    // alone at three outages after the first (SMD-2641: retried alone, its probe unanswered each time), beside a sweep
+    // asking the judge model as alone: the window that keeps it a suspect grows with what the longer limit adds (the
+    // definitions reviewer's: at the 15 minutes against 1,020 s, scaled here to 3 s against 3 s, hang after hang was
+    // read as an outage each, the thought never failed, the period never ending; mutant: the window not grown).
     const restoreOutageW = shortenOutage(200);
     const windowWas = SUSPECT_WINDOW.ms;
     await sql`DELETE FROM thoughts`;
@@ -28719,8 +29749,8 @@ if (want("38s")) {
     }
     const hangCode = await bounded(hangRun, acHang);
     const hangError = (await coClaim(hanging))?.last_error ?? "";
-    assert(hangFailed && sw.hangs === 2 && /right after the provider answered a probe/.test(hangError) && hangCode === 0,
-      `a thought hanging the provider beside a sweep asking the judge model is failed as its own at its second hang, the window grown with the limit (failed ${hangFailed}; hangs ${sw.hangs}; ${hangError.slice(0, 120)}; exit ${hangCode})`);
+    assert(hangFailed && sw.hangs === 4 && /^provider error again with this thought alone in flight at 3 outages, the one-token call after each unanswered/.test(hangError) && hangCode === 0,
+      `a thought hanging the provider beside a sweep asking the judge model is failed as its own at its fourth hang, its third alone, the window grown with the limit (failed ${hangFailed}; hangs ${sw.hangs}; ${hangError.slice(0, 120)}; exit ${hangCode})`);
 
     // A key refusal at a period's start that the hold read after it does not bear out — another pool named as the sweep
     // starts, this stack's named again before the scheduler reads the hold — sets the sweep down `failed`, not `key`,
@@ -31060,6 +32090,116 @@ if (want("48")) {
     await owner`DELETE FROM thoughts WHERE content LIKE '[48]%'`;
     await owner.unsafe(`DROP OWNED BY ${SERVER}`);
     await owner.unsafe(`DROP ROLE IF EXISTS ${SERVER}`);
+    await owner.close();
+  }
+}
+
+if (want("49")) {
+  console.log("\n[49] Migration 134 on a real Postgres, beside other transactions: a second verification of one deliverable waits for the first and reads its status; a raw event that waited on the deliverable's lock while another was written is numbered after it, not sorted under it; the rebuild beside a delete of the thought waits it out, repairs the rest and counts only what it wrote; two rebuilds at once count one facet once (SMD-1715 review passes 1 to 3)");
+  const owner = new SQL({ url: URL_!, max: 1 });
+  const A = new SQL({ url: URL_!, max: 1 }), B = new SQL({ url: URL_!, max: 1 });
+  const W = (name: string) => JSON.stringify({ name, scope: "write" });
+  const thought = async (label: string) =>
+    ((await owner`INSERT INTO thoughts (content, metadata) VALUES (${`[49] ${label}`}, '{}'::jsonb) RETURNING id::text AS id`)[0] as { id: string }).id;
+  const pidOf = async (c: SQL) => Number(((await c`SELECT pg_backend_pid() AS p`)[0] as { p: number }).p);
+  /** Whether backend `pid` waits on a lock (of wait event `event`, or any). */
+  const waits = async (pid: number, event: string | null) =>
+    Number(((await owner`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ${pid} AND wait_event_type = 'Lock'
+      AND (${event}::text IS NULL OR wait_event = ${event})`)[0] as { n: number }).n) > 0;
+  const statuses = async (d: string) =>
+    ((await owner`SELECT status FROM deliverable_events WHERE thought_id = ${d}::uuid ORDER BY seq`) as { status: string }[]).map((r) => r.status).join(" ");
+  /** Hold a transaction on `c` open after `first`, until `release` is called; resolves with how it ended. */
+  const holding = (c: SQL, first: (tx: SQL) => Promise<unknown>) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let started!: () => void;
+    const begun = new Promise<void>((r) => { started = r; });
+    const ended = c.begin(async (tx) => { await first(tx as unknown as SQL); started(); await gate; }).then(() => "committed", (e: Error) => `failed: ${e.message.split("\n")[0]}`);
+    return { begun, release, ended };
+  };
+  try {
+    const spec = await thought("the spec"), d = await thought("the output");
+    await owner`SELECT record_deliverable(${d}, ${spec}, 'c0ffee', (${W("[49] maker")}::text)::jsonb)`;
+    const bPid = await pidOf(B);
+
+    // Two verifications at once: the second waits on the deliverable's lock, then reads the first's status.
+    const first = holding(A, (tx) => tx`SELECT verify_deliverable(${d}, 'verified', 'review', 'it meets the spec', (${W("[49] checker")}::text)::jsonb)`);
+    await first.begun;
+    const second = B`SELECT verify_deliverable(${d}, 'verified', 'review', 'it meets the spec too', (${W("[49] second checker")}::text)::jsonb) AS r`
+      .then((rows) => (rows[0] as { r: { outcome: string; code?: string; from?: string } }).r,
+        (e: { errno?: string; message: string }) => ({ outcome: `raised ${e.errno} ${e.message.split("\n")[0]}`, code: undefined, from: undefined }));
+    const secondWaited = await pollUntil(() => waits(bPid, "advisory"), 5000);
+    first.release();
+    const [firstEnd, secondR] = [await first.ended, await second];
+    assert(secondWaited && firstEnd === "committed" && secondR.code === "ILLEGAL_TRANSITION" && secondR.from === "verified" && await statuses(d) === "unverified verified",
+      `a second verification waits on the first's lock, then reads its status and is refused verified -> verified (waited ${secondWaited}; ${firstEnd}; ${JSON.stringify(secondR)}; ${await statuses(d)})`);
+
+    // A raw event that waited on the lock while a writer's event was written: its identity seq, drawn before it waited,
+    // was below the writer's and sorted it under the move it follows (review pass 1). The trigger draws its seq under
+    // the lock (review pass 2), so it is numbered after the writer's and read as the last move, and its trigger projects
+    // it as it lands, so the rebuild after it finds nothing to write (review pass 3).
+    let txA!: SQL;
+    const writer = holding(A, async (tx) => { txA = tx; await tx`SELECT ob1_deliverable_lock(${d}::uuid)`; });
+    await writer.begun;
+    const raw = B`INSERT INTO deliverable_events (thought_id, event, status, spec_ref, checkpoint, method, outcome, actor_name, actor_proved, at)
+      VALUES (${d}::uuid, 'verification', 'verified', ${spec}::uuid, 'c0ffee', 'raw', 'a raw verification', '[49] raw', false, now())`
+      .then(() => "inserted", (e: { errno?: string; code?: string; message: string }) => `${e.errno ?? e.code} ${e.message.split("\n")[0]}`);
+    const rawWaited = await pollUntil(() => waits(bPid, "advisory"), 5000);
+    // The holder writes its own event under the lock it holds, while the raw insert waits, then commits.
+    const viaWriter = ((await txA`SELECT verify_deliverable(${d}, 'corrected', 'rerun', 'a failing case', (${W("[49] checker")}::text)::jsonb) AS r`)[0] as { r: { outcome: string } }).r;
+    writer.release();
+    const [writerEnd, rawEnd] = [await writer.ended, await raw];
+    const rawOrder = await statuses(d);
+    const mended = Number(((await owner`SELECT ob1_rebuild_deliverable_projection() AS n`)[0] as { n: number }).n);
+    const dStatus = ((await owner`SELECT payload->>'status' AS s FROM thought_facets WHERE thought_id = ${d}::uuid AND kind = 'deliverable'`)[0] as { s: string }).s;
+    assert(rawWaited && viaWriter.outcome === "changed" && writerEnd === "committed" && rawEnd === "inserted"
+           && rawOrder === "unverified verified corrected verified" && mended === 0 && dStatus === "verified",
+      `a raw event that waited on the lock while a writer wrote is numbered after it, the events read in the order written, and it is projected as it lands, the rebuild writing nothing (waited ${rawWaited}; ${viaWriter.outcome}, ${writerEnd}; ${rawEnd.slice(0, 120)}; ${rawOrder}; rebuilt ${mended}, ${dStatus})`);
+
+    // The rebuild beside a delete of a drifted deliverable's thought: it waits the delete out, writes nothing for that
+    // thought, and repairs the other in the same call (review pass 1: it saw the thought, its facet went by the cascade
+    // under it, and its INSERT failed the foreign key, taking every repair with it).
+    const gone = await thought("an output being deleted"), kept = await thought("an output whose facet drifted");
+    for (const t of [gone, kept]) await owner`SELECT record_deliverable(${t}, ${spec}, 'f00d', (${W("[49] maker")}::text)::jsonb)`;
+    await owner`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`;
+    await owner`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"verified"') WHERE thought_id IN (${gone}::uuid, ${kept}::uuid) AND kind = 'deliverable'`;
+    await owner`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`;
+    const drifted = ((await owner`SELECT thought_id::text AS t FROM ob1_deliverable_projection_drift()`) as { t: string }[]).map((r) => r.t).sort().join(" ");
+    const deleter = holding(A, (tx) => tx`DELETE FROM thoughts WHERE id = ${gone}::uuid`);
+    await deleter.begun;
+    const rebuild = B`SELECT ob1_rebuild_deliverable_projection() AS n`
+      .then((rows) => `rebuilt ${(rows[0] as { n: number }).n}`, (e: { errno?: string; message: string }) => `${e.errno} ${e.message.split("\n")[0]}`);
+    const rebuildWaited = await pollUntil(() => waits(bPid, null), 5000);
+    deleter.release();
+    const [deleteEnd, rebuildEnd] = [await deleter.ended, await rebuild];
+    const after = await owner`SELECT * FROM ob1_deliverable_projection_drift()`;
+    const keptStatus = ((await owner`SELECT payload->>'status' AS s FROM thought_facets WHERE thought_id = ${kept}::uuid AND kind = 'deliverable'`)[0] as { s: string }).s;
+    assert(drifted === [gone, kept].sort().join(" ") && rebuildWaited && deleteEnd === "committed" && rebuildEnd === "rebuilt 1"
+           && after.length === 0 && keptStatus === "unverified",
+      `the rebuild beside a delete of one drifted thought waits it out, writes nothing for it, repairs the other and counts one (waited ${rebuildWaited}; ${deleteEnd}; ${rebuildEnd}; drift after ${after.length}; ${keptStatus})`);
+
+    // Two rebuilds at once over one drifted facet: the second waits on the first's lock, reads the facet again under it,
+    // finds it current and counts nothing (review pass 3: both counted one, though one wrote).
+    const twice = await thought("an output two rebuilds find drifted");
+    await owner`SELECT record_deliverable(${twice}, ${spec}, 'beef', (${W("[49] maker")}::text)::jsonb)`;
+    await owner`ALTER TABLE thought_facets DISABLE TRIGGER thought_facets_validate`;
+    await owner`UPDATE thought_facets SET payload = jsonb_set(payload, '{status}', '"verified"') WHERE thought_id = ${twice}::uuid AND kind = 'deliverable'`;
+    await owner`ALTER TABLE thought_facets ENABLE TRIGGER thought_facets_validate`;
+    let firstCount = -1;
+    const firstRebuild = holding(A, async (tx) => { firstCount = Number(((await tx`SELECT ob1_rebuild_deliverable_projection() AS n`)[0] as { n: number }).n); });
+    await firstRebuild.begun;
+    const secondRebuild = B`SELECT ob1_rebuild_deliverable_projection() AS n`
+      .then((rows) => Number((rows[0] as { n: number }).n), (e: { errno?: string; message: string }) => `${e.errno} ${e.message.split("\n")[0]}`);
+    const secondWaitedRebuild = await pollUntil(() => waits(bPid, "advisory"), 5000);
+    firstRebuild.release();
+    const [firstRebuildEnd, secondCount] = [await firstRebuild.ended, await secondRebuild];
+    assert(firstRebuildEnd === "committed" && firstCount === 1 && secondWaitedRebuild && secondCount === 0
+           && (await owner`SELECT * FROM ob1_deliverable_projection_drift()`).length === 0,
+      `two rebuilds at once: the first writes and counts one, the second waits, finds the facet current and counts none (${firstRebuildEnd} ${firstCount}; waited ${secondWaitedRebuild}; ${secondCount})`);
+  } finally {
+    await owner`DELETE FROM thoughts WHERE content LIKE '[49]%'`;
+    await A.close();
+    await B.close();
     await owner.close();
   }
 }

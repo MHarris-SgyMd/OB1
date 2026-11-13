@@ -1336,6 +1336,23 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const waits = [["extract"], ["extract", "consolidate"], [], ["extract", "extract"], ["board-sync"], "extract", ["extract", "consolidate", "extract"]].map((w) => markOf("heartbeat:sleep", { waiting: w })?.waiting ?? null);
   assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
     `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
+  // board-sync's hold on Linear's rate limit (SMD-4133): carried on its own live row when of the shape, else left off.
+  {
+    const until = "2026-10-05T12:10:00.000Z";
+    const limits = [
+      { until, by: "linear" }, { until, by: "backoff" }, { until, by: "guess" }, { until: "soon", by: "linear" }, { by: "linear" }, "x",
+    ].map((l) => markOf("heartbeat:board-sync", { outcome: "failed", limited: l })?.limited ?? null);
+    const offRows = [markOf("heartbeat:sleep", { limited: { until, by: "linear" } })?.limited, markOf("heartbeat:board-sync", { outcome: "stopped", limited: { until, by: "linear" } })?.limited,
+      markOf("heartbeat:board-sync", { ended: true, limited: { until, by: "linear" } })?.limited];
+    assert(JSON.stringify(limits) === JSON.stringify([{ until, by: "linear" }, { until, by: "backoff" }, null, null, null, null]) && offRows.every((x) => x === undefined),
+      `board-sync's rate-limit hold is carried when of the shape, on its own live row alone (${JSON.stringify(limits)}; ${JSON.stringify(offRows)})`);
+    // In words: the hold and how long it has left by the row's own clock, or that it has passed; never "its last pass failed" alone.
+    const words = (age: number) => heartbeatState(parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify({ ...good, outcome: "failed", limited: { until, by: "linear" } }), at, age_s: age }]).heartbeats[0]!);
+    const ahead = words(60), past = words(700);
+    assert(ahead.startsWith("alive, its last pass rate-limited by Linear: no pass, and no request, until 2026-10-05T12:10:00.000Z (in 9 min; the reset time Linear sent)")
+        && past.startsWith("alive, its last pass rate-limited by Linear until 2026-10-05T12:10:00.000Z (the reset time Linear sent), which has passed: the next trigger passes"),
+      `a held board-sync says the hold and its time left, or that it passed (${ahead} / ${past})`);
+  }
   // Re-embed's among them since the scheduler runs it (SMD-2679 PR 4b), at its start and mid-pass.
   const reWaits = [markOf("heartbeat:sleep", { waiting: ["reembed", "extract"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["reembed"] })?.waitingMidPass];
   assert(JSON.stringify(reWaits) === JSON.stringify([["reembed", "extract"], ["reembed"]]),
@@ -7073,6 +7090,16 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   assert(/^thought 3333\S+ \(no longer in this brain; its statements are kept\): urgent \(4\), the winner urgent/.test(text(history)) && /\n- medium \(2\)[^\n]*; replaced at 2026-11-03T10:00:00\.000Z by assertion 1111\S+\n- urgent \(4\)[^\n]*; open$/.test(text(history))
       && text(unknown) === "ticket SMD-3664: no statement stands — its priority is unknown.\nNobody has stated a priority on it.",
     `priority_history: the winner, then every statement oldest first with how its window ended; an item nobody stated one on, unknown (${text(unknown)})`);
+  // A ticket and its own rows are one item (SMD-4127, migration 133): a statement on the row answers for the ticket and
+  // is said where it stands; one on the item asked is said as before.
+  const TICKET = { kind: "ticket", key: "SMD-4127" }, ROW = { kind: "thought", key: T };
+  const pooled = say.renderPriorityHistory({ ok: true, value: { item: TICKET, exists: true, level: 3, winner: stmt({ id: B, item: ROW, level: 3, tier: 3, tierName: "agent" }),
+    history: [stmt({ item: ROW, level: 5, closedAt: "2026-11-03T10:00:00.000Z", closeReason: "replaced", closedBy: B }), stmt({ id: B, item: ROW, level: 3, tier: 3, tierName: "agent" }), stmt({ item: TICKET, level: 1, dueAt: null })] } } as never);
+  const moved = say.renderSetPriority({ ok: true, value: { outcome: "asserted", assertion: stmt({ item: TICKET, level: 1, dueAt: null }), replaced: stmt({ id: B, item: ROW, level: 5 }), winner: stmt({ id: B, item: ROW, level: 3, tier: 3, tierName: "agent" }), winnerShown: true } } as never);
+  assert(/^ticket SMD-4127: high \(3\), the winner high \(3\)[^\n]* on thought 3333\S+\.\n/.test(text(pooled))
+      && /\n- critical \(5\)[^\n]* on thought 3333\S+; replaced at [^\n]*\n- high \(3\)[^\n]* on thought 3333\S+; open\n- low \(1\) by laptop[^\n]*\); open$/.test(text(pooled))
+      && /It replaces your earlier statement on thought 3333\S+, critical \(5\) \(assertion 2222\S+\)/.test(text(moved)) && /The item's winner is high \(3\)[^\n]* on thought 3333\S+\.$/.test(text(moved)),
+    `a ticket's history and a write on it say where each statement on its row stands; a statement on the ticket itself is said as before (${text(pooled).split("\n").slice(-1)[0]} | ${text(moved).slice(-70)})`);
   // Each refusal by its rule; the item, a uuid or a ticket key, kept in the value; the database's words in the text alone.
   const refusals: [string, ReturnType<typeof say.renderSetPriority>, RegExp][] = [
     ["ITEM_NOT_FOUND", say.renderSetPriority({ ok: false, refusal: { code: "ITEM_NOT_FOUND", retryable: false, which: "item", item: { kind: "ticket", key: "SMD-9401" } } } as never), /^Refused: the brain holds no ticket SMD-9401\.$/],
@@ -7236,6 +7263,14 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && thrown(() => normalisePriorityAssertion({ ...json, due_ref: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read"
       && thrown(() => normalisePriorityAssertion({ ...json, tier_name: "boss" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
     "116's assertion read into the value's names; an outcome, code, tier or item kind 116 does not give is a fault");
+  // 136 (SMD-3711): a statement closed when its item was deleted is read, and said so in a history; a close reason no
+  // migration writes is still a fault.
+  const deletedRead = normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "deleted" }, "priority_history");
+  const deletedHistory = say.renderPriorityHistory({ ok: true, value: { item: { kind: "thought", key: T }, exists: false, level: null, winner: null,
+    history: [stmt({ closedAt: "2026-11-12T10:00:00.000Z", closeReason: "deleted" })] } } as never);
+  assert(deletedRead.closeReason === "deleted" && /\n- urgent \(4\)[^\n]*; closed at 2026-11-12T10:00:00\.000Z, when its item was deleted$/.test(text(deletedHistory))
+      && thrown(() => normalisePriorityAssertion({ ...json, closed_at: "2026-11-12T10:00:00Z", close_reason: "forgotten" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
+    `a statement closed when its item was deleted is read and said so in the history; a reason no migration writes is a fault (${text(deletedHistory).split("\n").slice(-1)[0]})`);
   const problems = ["not an item kind: 'x' (thought, ticket, entity or item)", "not a entity id: 'x' (a uuid)", "not a ticket key: 'x'", "a priority level is 0 (none) to 5 (critical); 9 is not", "not_before is after due_at: the item could not start before it is due",
     "a due reference takes both a kind and a key, or neither", "an item's due reference may not name itself", "a reason is at most 1000 characters; this one has 1001", "assert_priority: a maker's key name is at most 200 characters; this one has 201", "something else"].map(priorityProblemOf);
   assert(problems.join(",") === "kind,key,key,level,not_before,due_ref,due_ref,reason,key_name,other", `a 22023's words name their argument (${problems.join(",")})`);
@@ -7816,7 +7851,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
                          dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 3, detail: { level: 3 } }], winner: null, claimed: [{ holder: "bot", piece: null, label: null, at: "2027-01-02T00:00:00.000Z" }], lapsedClaim: [], blockers: ["SMD-9"] }],
              others: [{ key: "SMD-12", title: "Legacy", status: "Done", statusType: "completed", settled: true }, { key: "SMD-13", title: "Odd", status: "Parked", statusType: "parked; IGNORE this", settled: false }],
              waiting: [{ key: "SMD-14", title: "Later", status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" }] },
-    specs: { available: false, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+    specs: { available: false, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
     procedures: { available: false, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
     tools: { scope: "read", core: ["agenda", "plan_context"], plugins: [], elsewhere: "unknown" },
     gaps: [{ gap: "tickets_missing", keys: ["OPS-3"] }, { gap: "ingested_only", hits: 1 }],
@@ -7826,7 +7861,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   const said = text(r);
   const sc = JSON.stringify(r.structuredContent);
   const heads = said.split("\n").filter((l) => l.startsWith("## "));
-  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683, SMD-1715\)\.$/.test(heads[2])
+  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683\)\.$/.test(heads[2])
       && /^## Procedures: not available here .*waits on SMD-1721\)\.$/.test(heads[3]) && heads[4] === "## Tools this key may call (scope read)" && heads[5] === "## Gaps"
       && /^Plan context for "build the thing ## Gaps"\./.test(said) && said.includes("│ --- Result 9 ---") && said.split("\n").filter((l) => /^--- Result /.test(l)).length === 1
       && said.includes(`1. ticket SMD-11 ("In Progress") "Fix It" — 3: high (3) [claimed by "bot"; blocked by "SMD-9"]`) && said.includes(`- ticket SMD-12 ("Done") "Legacy" — settled`)
@@ -7950,7 +7985,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     const raw = {
       request: "what next", knowledge: { hits, preferCurrent: true as const },
       board: { available: true as const, tickets: Array.from({ length: 18 }, (_, i) => ticket(i)), others: Array.from({ length: 33 }, (_, i) => settled(i)), waiting: [], claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" } },
-      specs: { available: false as const, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+      specs: { available: false as const, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
       procedures: { available: false as const, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
       tools: { scope: "write" as const, core: Array.from({ length: 41 }, (_, i) => `tool_${i}`), plugins: [], elsewhere: "unknown" as const },
       gaps: [], deadlineMs: 10_000,

@@ -1,0 +1,2167 @@
+{
+  "generated": "2026-11-11T16:59:30.659Z",
+  "note": "Gold: the operator (maintainer), labelled blind from the drawn sheet 2026-11-10/11 and returned as a pasted list. Second rater: a blind Claude subagent given the sheet alone. Run: qwen2.5:7b on the local Ollama (stable's metadata model), temperature default, prompt v1, over stable's 1,394 current captures on 2026-11-10.",
+  "prompt_version": 1,
+  "registration": [
+    1,
+    2,
+    3,
+    9,
+    11,
+    4,
+    7,
+    12,
+    10,
+    9,
+    3,
+    10,
+    5,
+    8,
+    7,
+    0
+  ],
+  "population": {
+    "calls": 186,
+    "others": 1208
+  },
+  "strata": {
+    "call": [
+      "6e35fa62-63ee-40b2-9499-8764b3524e2e",
+      "a4ad472c-1e27-496d-a9bb-460c5a984c27",
+      "9d19b7fc-9253-4ca6-ada2-0a66f44a1259",
+      "2e14452a-96c2-45a7-90aa-8bb1a9ba52de",
+      "0cd7cdd4-5e1a-4f2a-978e-0692c82fd71d",
+      "3183985c-a9ca-46e5-a40c-ff770cb81670",
+      "c0f003f2-4c10-4c47-bef1-df91679c26d4",
+      "077b96f1-4b95-43c1-af98-3082ca48988b",
+      "94b5109e-eb7a-4ced-8d85-3a685f3f77d4",
+      "d5e609fe-18bf-4db5-98d8-78c240d2c0df",
+      "e3c5134f-aa89-4bca-9295-df3a3ae1e62b",
+      "4b1e0b24-a742-4351-a1cb-a0eacceb9b8b",
+      "877ee374-9f71-4e26-a9fd-321d58c038f2",
+      "a924bbc4-d405-4e43-b3df-65c966129e20",
+      "63ca1263-2319-4a0e-b3de-f8fef44e3c22",
+      "b7090e13-a1dc-4321-a6cd-24b7326d07e0",
+      "500aacc2-8cb7-42fa-bbd0-524cbddad6e6",
+      "4bd3a684-104d-4ad8-b468-79c4d4a52e95",
+      "8f511d57-f509-4a7d-b884-c3de83d807c6",
+      "38ef9766-a569-4073-b4e6-9889d7eb32d9",
+      "24b9050a-745d-4301-bba3-093b0a5aaacd",
+      "0c959c19-0000-4000-8000-ff9c197dbe16",
+      "fab47c58-4a13-472d-9865-8e561116eb0b",
+      "4bda1038-811e-413e-8ef7-7c0bd3be41b6",
+      "a093383c-53e2-48f2-9250-9e02cd18b8b5",
+      "8818165c-140a-41c9-838b-56b1f040a972",
+      "27eb94c7-25f9-4aa8-bdf4-a9920722b39e",
+      "1d96964e-2b03-47f7-a250-3906f38c2818",
+      "1b485205-7a92-48f0-86d2-df4b337298d3",
+      "767b8a57-477a-4e50-aae0-e76bbfb8c6d4",
+      "6eea70f9-f837-4d8c-814c-243fd5ef4fba",
+      "3aaccac4-77dc-4d97-a0e5-c778c6caa613",
+      "03bbac6f-f38f-4b4f-9f84-f355a88441fe",
+      "67052e57-6c28-4899-ae55-6be18faa5efe",
+      "4a0eb129-4c00-47de-9ebc-2627e8db143f",
+      "dcf32bb0-0174-41f5-88ba-65aacce67cae",
+      "66e65701-3fd2-4095-9e64-3d1d3f4c4e5a",
+      "d2617ca2-5163-43e6-9d23-233546f25956",
+      "e755d280-daec-4abc-b199-cf7de9af0041",
+      "d7222418-324f-4e78-a116-68a242180f2e",
+      "b10c6bab-83ff-4620-b327-11b7d1dc4bac",
+      "07a13bb4-f93f-43eb-840b-604a97bcfa8d",
+      "baa73fde-bf9a-468b-952a-55efdcadd487",
+      "c6a328b7-9e47-422f-a74d-65ad356013af",
+      "8cb14e9e-086d-4c23-8097-0f06add037f9",
+      "c35708ff-6bc2-4a73-85b6-536aa2118ac3",
+      "19c03301-9771-4cc2-a75f-3286b56ff1bf",
+      "a9cf5e53-0ab8-4659-84f9-3bbd7b333099",
+      "950d567f-e92e-4164-9e28-5c849eecb553",
+      "1cd019b0-30d2-469b-8c54-5eb17ec876f8",
+      "4b31794d-53bd-4b03-9cca-f8337612ff64",
+      "bfb5152a-3d5d-4a2d-b450-846f57119990",
+      "fe0c1f16-e362-40e4-81dc-a58935a15413",
+      "20c43c7d-1930-450e-ac55-73287cb21a7e",
+      "27f2dac3-3d6c-4f4c-9223-c8d2eff5075e",
+      "ebd5526d-8b0d-4673-9f2f-2e3ae88ea49e",
+      "18819ce0-b0f1-4d20-868a-fe0f2e7daad1",
+      "0d71853f-ebd5-4414-8617-9e4d3cfe8996",
+      "99cb20e7-4dd2-4032-b362-2961ac218871",
+      "f38c96a9-ab64-424d-adef-6d904bb0a8b1"
+    ],
+    "other": [
+      "117667b5-2b35-4b3f-aa53-90b1d426e16c",
+      "39f940d2-2941-4a59-a9b4-430a3d9105ae",
+      "9187184b-0000-4000-8000-79b61dd7a537",
+      "b145c313-b1ba-4234-ad83-22e415badb74",
+      "d1c8f78a-31ab-4d3b-94da-7999f76df97e",
+      "616326fd-9de8-4582-b806-c38c093fbad4",
+      "b57237c6-2736-4b9d-b4dd-85164371537e",
+      "f45c4e0d-d71b-42d5-8c71-677b67959d62",
+      "e8934859-5e26-40a2-86eb-a61076573f9a",
+      "9a39835f-35e0-4f74-885b-03ee50c8c033",
+      "ae550ab3-b0b3-4c27-9c59-25614e0d6e9d",
+      "d32dc22d-c197-43a3-b56c-3fdaca5504a9",
+      "38b94f22-6335-4bb6-be68-d9ebf9cd27bc",
+      "e69c4612-3845-44a1-bd50-c46865146873",
+      "58463e5e-e870-4b93-9904-77e339021bbf",
+      "0290ab5a-8e2e-48aa-b2da-00d19e30dd0d",
+      "d6f51baf-67fe-49d4-866f-f4d94fbc84fb",
+      "0f30a6cd-22b0-468b-a13a-f6b2f2d7db24",
+      "4752f08f-a6c9-4b6d-bee5-3836417f5f75",
+      "a1038d91-33c6-45b7-a115-2235f20af3ed",
+      "07f11f34-8670-45f1-bc63-657cdf4fb5fc",
+      "e0f94860-df5e-449f-8df5-7b478c7bf71d",
+      "3aecd34e-1824-427f-aa2b-ce03ce7d6c98",
+      "170d4301-ec6d-4511-8cbb-d2d9f03a41ed",
+      "6c9f8056-4b2e-4ee9-8a88-bd7ed1deefec",
+      "09316a1c-df5d-47ac-987a-e841d39ea15e",
+      "b0529b4b-0732-4e8e-ade3-213906bc1641",
+      "cd750b01-3f59-4bda-ad63-993a3fbade06",
+      "a7c4cfe8-1ebb-43f4-a9d3-b2beb405c35f",
+      "63588a39-0bc7-4b69-aafa-b3517f331150",
+      "e045b6ac-d217-421b-b3c2-5f64b2bcdea6",
+      "09aecc80-a6ca-4692-92df-48dccb1e32d0",
+      "a0387b74-c55a-4afd-a5a9-2c4702e6400b",
+      "ea671c30-44fd-485a-a0af-4bdbd8edb4c3",
+      "67489220-ffd2-42e4-ab5a-9e2033f59a11",
+      "965ba755-0439-4549-a3a3-78726a6e8c7f",
+      "c78a35eb-e25d-4b67-bcb4-11646d05e4a2",
+      "b86f1a6d-14cc-4896-b9e9-184931abbef7",
+      "872f2583-c366-43c8-bb5f-cd0e994424f8",
+      "73a25013-86f8-495a-8af2-95507859b7c9",
+      "5effb611-8d2e-4c9f-b497-4674f3870d7e",
+      "24ef95c2-d641-4d66-864f-93d0e345f3cf",
+      "b2472d61-66c2-44f9-a55a-7b22dab88bb7",
+      "bcebae76-685d-48c7-8339-af2ec393ceaf",
+      "8f553608-7ce3-4bb0-82cf-a2170f73d2be",
+      "df1795bb-5cc9-431b-9354-64dad8c9e8d7",
+      "d2a278cc-7962-402f-9415-46c8ab2d9903",
+      "4112f211-66a1-4e01-b799-c36d2dd2d439",
+      "11c739bf-97b3-4178-a01b-5f6b29029c17",
+      "55760e1d-c370-444d-bd7b-0ef47817d3b6",
+      "e5dd6ef2-e40b-4f35-b224-75b4397f55a9",
+      "fcc64741-38d6-4812-ab46-c01d6b7f86a6",
+      "12fd4fef-ff4f-4285-b380-a20cefe9687b",
+      "72a0d047-2d6a-44fb-9eb2-1d5b241badc1",
+      "83712549-4b7a-423a-b3e5-b747ba59a462",
+      "625f905d-83b7-499b-9b6e-f650bd1cca55",
+      "8b389fb0-1049-41f2-a213-53baf5ebf131",
+      "60eae395-c165-4a14-9821-c6df0d990cc6",
+      "69f48efb-b9bd-4029-917e-7f8ce5f7a73d",
+      "16bd97b3-e75c-4012-96c3-9d56ab4e5771"
+    ]
+  },
+  "writers": {
+    "claude_code": [
+      "6e35fa62-63ee-40b2-9499-8764b3524e2e",
+      "39f940d2-2941-4a59-a9b4-430a3d9105ae",
+      "077b96f1-4b95-43c1-af98-3082ca48988b",
+      "e8934859-5e26-40a2-86eb-a61076573f9a",
+      "07f11f34-8670-45f1-bc63-657cdf4fb5fc",
+      "e0f94860-df5e-449f-8df5-7b478c7bf71d",
+      "fab47c58-4a13-472d-9865-8e561116eb0b",
+      "4bda1038-811e-413e-8ef7-7c0bd3be41b6",
+      "03bbac6f-f38f-4b4f-9f84-f355a88441fe",
+      "e755d280-daec-4abc-b199-cf7de9af0041",
+      "8cb14e9e-086d-4c23-8097-0f06add037f9",
+      "20c43c7d-1930-450e-ac55-73287cb21a7e",
+      "8b389fb0-1049-41f2-a213-53baf5ebf131",
+      "18819ce0-b0f1-4d20-868a-fe0f2e7daad1"
+    ],
+    "session_hook": [
+      "a4ad472c-1e27-496d-a9bb-460c5a984c27",
+      "9d19b7fc-9253-4ca6-ada2-0a66f44a1259",
+      "117667b5-2b35-4b3f-aa53-90b1d426e16c",
+      "2e14452a-96c2-45a7-90aa-8bb1a9ba52de",
+      "b145c313-b1ba-4234-ad83-22e415badb74",
+      "d1c8f78a-31ab-4d3b-94da-7999f76df97e",
+      "0cd7cdd4-5e1a-4f2a-978e-0692c82fd71d",
+      "3183985c-a9ca-46e5-a40c-ff770cb81670",
+      "c0f003f2-4c10-4c47-bef1-df91679c26d4",
+      "616326fd-9de8-4582-b806-c38c093fbad4",
+      "b57237c6-2736-4b9d-b4dd-85164371537e",
+      "f45c4e0d-d71b-42d5-8c71-677b67959d62",
+      "94b5109e-eb7a-4ced-8d85-3a685f3f77d4",
+      "d5e609fe-18bf-4db5-98d8-78c240d2c0df",
+      "e3c5134f-aa89-4bca-9295-df3a3ae1e62b",
+      "4b1e0b24-a742-4351-a1cb-a0eacceb9b8b",
+      "9a39835f-35e0-4f74-885b-03ee50c8c033",
+      "ae550ab3-b0b3-4c27-9c59-25614e0d6e9d",
+      "877ee374-9f71-4e26-a9fd-321d58c038f2",
+      "d32dc22d-c197-43a3-b56c-3fdaca5504a9",
+      "38b94f22-6335-4bb6-be68-d9ebf9cd27bc",
+      "a924bbc4-d405-4e43-b3df-65c966129e20",
+      "63ca1263-2319-4a0e-b3de-f8fef44e3c22",
+      "b7090e13-a1dc-4321-a6cd-24b7326d07e0",
+      "500aacc2-8cb7-42fa-bbd0-524cbddad6e6",
+      "4bd3a684-104d-4ad8-b468-79c4d4a52e95",
+      "e69c4612-3845-44a1-bd50-c46865146873",
+      "58463e5e-e870-4b93-9904-77e339021bbf",
+      "8f511d57-f509-4a7d-b884-c3de83d807c6",
+      "0290ab5a-8e2e-48aa-b2da-00d19e30dd0d",
+      "d6f51baf-67fe-49d4-866f-f4d94fbc84fb",
+      "0f30a6cd-22b0-468b-a13a-f6b2f2d7db24",
+      "4752f08f-a6c9-4b6d-bee5-3836417f5f75",
+      "a1038d91-33c6-45b7-a115-2235f20af3ed",
+      "38ef9766-a569-4073-b4e6-9889d7eb32d9",
+      "24b9050a-745d-4301-bba3-093b0a5aaacd",
+      "3aecd34e-1824-427f-aa2b-ce03ce7d6c98",
+      "a093383c-53e2-48f2-9250-9e02cd18b8b5",
+      "8818165c-140a-41c9-838b-56b1f040a972",
+      "170d4301-ec6d-4511-8cbb-d2d9f03a41ed",
+      "27eb94c7-25f9-4aa8-bdf4-a9920722b39e",
+      "6c9f8056-4b2e-4ee9-8a88-bd7ed1deefec",
+      "09316a1c-df5d-47ac-987a-e841d39ea15e",
+      "b0529b4b-0732-4e8e-ade3-213906bc1641",
+      "1d96964e-2b03-47f7-a250-3906f38c2818",
+      "cd750b01-3f59-4bda-ad63-993a3fbade06",
+      "1b485205-7a92-48f0-86d2-df4b337298d3",
+      "a7c4cfe8-1ebb-43f4-a9d3-b2beb405c35f",
+      "63588a39-0bc7-4b69-aafa-b3517f331150",
+      "e045b6ac-d217-421b-b3c2-5f64b2bcdea6",
+      "767b8a57-477a-4e50-aae0-e76bbfb8c6d4",
+      "09aecc80-a6ca-4692-92df-48dccb1e32d0",
+      "6eea70f9-f837-4d8c-814c-243fd5ef4fba",
+      "a0387b74-c55a-4afd-a5a9-2c4702e6400b",
+      "ea671c30-44fd-485a-a0af-4bdbd8edb4c3",
+      "67489220-ffd2-42e4-ab5a-9e2033f59a11",
+      "3aaccac4-77dc-4d97-a0e5-c778c6caa613",
+      "965ba755-0439-4549-a3a3-78726a6e8c7f",
+      "c78a35eb-e25d-4b67-bcb4-11646d05e4a2",
+      "67052e57-6c28-4899-ae55-6be18faa5efe",
+      "4a0eb129-4c00-47de-9ebc-2627e8db143f",
+      "b86f1a6d-14cc-4896-b9e9-184931abbef7",
+      "dcf32bb0-0174-41f5-88ba-65aacce67cae",
+      "66e65701-3fd2-4095-9e64-3d1d3f4c4e5a",
+      "d2617ca2-5163-43e6-9d23-233546f25956",
+      "872f2583-c366-43c8-bb5f-cd0e994424f8",
+      "73a25013-86f8-495a-8af2-95507859b7c9",
+      "5effb611-8d2e-4c9f-b497-4674f3870d7e",
+      "d7222418-324f-4e78-a116-68a242180f2e",
+      "b10c6bab-83ff-4620-b327-11b7d1dc4bac",
+      "24ef95c2-d641-4d66-864f-93d0e345f3cf",
+      "07a13bb4-f93f-43eb-840b-604a97bcfa8d",
+      "baa73fde-bf9a-468b-952a-55efdcadd487",
+      "b2472d61-66c2-44f9-a55a-7b22dab88bb7",
+      "bcebae76-685d-48c7-8339-af2ec393ceaf",
+      "8f553608-7ce3-4bb0-82cf-a2170f73d2be",
+      "df1795bb-5cc9-431b-9354-64dad8c9e8d7",
+      "c6a328b7-9e47-422f-a74d-65ad356013af",
+      "d2a278cc-7962-402f-9415-46c8ab2d9903",
+      "c35708ff-6bc2-4a73-85b6-536aa2118ac3",
+      "4112f211-66a1-4e01-b799-c36d2dd2d439",
+      "11c739bf-97b3-4178-a01b-5f6b29029c17",
+      "19c03301-9771-4cc2-a75f-3286b56ff1bf",
+      "a9cf5e53-0ab8-4659-84f9-3bbd7b333099",
+      "55760e1d-c370-444d-bd7b-0ef47817d3b6",
+      "e5dd6ef2-e40b-4f35-b224-75b4397f55a9",
+      "fcc64741-38d6-4812-ab46-c01d6b7f86a6",
+      "950d567f-e92e-4164-9e28-5c849eecb553",
+      "1cd019b0-30d2-469b-8c54-5eb17ec876f8",
+      "12fd4fef-ff4f-4285-b380-a20cefe9687b",
+      "72a0d047-2d6a-44fb-9eb2-1d5b241badc1",
+      "4b31794d-53bd-4b03-9cca-f8337612ff64",
+      "83712549-4b7a-423a-b3e5-b747ba59a462",
+      "625f905d-83b7-499b-9b6e-f650bd1cca55",
+      "bfb5152a-3d5d-4a2d-b450-846f57119990",
+      "fe0c1f16-e362-40e4-81dc-a58935a15413",
+      "27f2dac3-3d6c-4f4c-9223-c8d2eff5075e",
+      "ebd5526d-8b0d-4673-9f2f-2e3ae88ea49e",
+      "0d71853f-ebd5-4414-8617-9e4d3cfe8996",
+      "99cb20e7-4dd2-4032-b362-2961ac218871",
+      "f38c96a9-ab64-424d-adef-6d904bb0a8b1",
+      "60eae395-c165-4a14-9821-c6df0d990cc6",
+      "69f48efb-b9bd-4029-917e-7f8ce5f7a73d",
+      "16bd97b3-e75c-4012-96c3-9d56ab4e5771"
+    ],
+    "ingest_records": [
+      "9187184b-0000-4000-8000-79b61dd7a537",
+      "0c959c19-0000-4000-8000-ff9c197dbe16"
+    ]
+  },
+  "items": {
+    "6e35fa62-63ee-40b2-9499-8764b3524e2e": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          3
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [
+          3
+        ],
+        "dues": []
+      }
+    },
+    "a4ad472c-1e27-496d-a9bb-460c5a984c27": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "9d19b7fc-9253-4ca6-ada2-0a66f44a1259": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "117667b5-2b35-4b3f-aa53-90b1d426e16c": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "2e14452a-96c2-45a7-90aa-8bb1a9ba52de": {
+      "call": {
+        "level": null,
+        "due": 9,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          9
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          9
+        ]
+      }
+    },
+    "39f940d2-2941-4a59-a9b4-430a3d9105ae": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "9187184b-0000-4000-8000-79b61dd7a537": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "b145c313-b1ba-4234-ad83-22e415badb74": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d1c8f78a-31ab-4d3b-94da-7999f76df97e": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "0cd7cdd4-5e1a-4f2a-978e-0692c82fd71d": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "3183985c-a9ca-46e5-a40c-ff770cb81670": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "c0f003f2-4c10-4c47-bef1-df91679c26d4": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "616326fd-9de8-4582-b806-c38c093fbad4": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "b57237c6-2736-4b9d-b4dd-85164371537e": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "077b96f1-4b95-43c1-af98-3082ca48988b": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          1
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "f45c4e0d-d71b-42d5-8c71-677b67959d62": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "94b5109e-eb7a-4ced-8d85-3a685f3f77d4": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d5e609fe-18bf-4db5-98d8-78c240d2c0df": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "e3c5134f-aa89-4bca-9295-df3a3ae1e62b": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "e8934859-5e26-40a2-86eb-a61076573f9a": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4b1e0b24-a742-4351-a1cb-a0eacceb9b8b": {
+      "call": {
+        "level": 3,
+        "due": 1,
+        "by_rule": true
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          1,
+          2,
+          3,
+          4,
+          6,
+          7,
+          8,
+          9,
+          10,
+          13,
+          20
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "9a39835f-35e0-4f74-885b-03ee50c8c033": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "ae550ab3-b0b3-4c27-9c59-25614e0d6e9d": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "877ee374-9f71-4e26-a9fd-321d58c038f2": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d32dc22d-c197-43a3-b56c-3fdaca5504a9": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "38b94f22-6335-4bb6-be68-d9ebf9cd27bc": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "a924bbc4-d405-4e43-b3df-65c966129e20": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "63ca1263-2319-4a0e-b3de-f8fef44e3c22": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "b7090e13-a1dc-4321-a6cd-24b7326d07e0": {
+      "call": {
+        "level": null,
+        "due": 0,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          0,
+          1,
+          3,
+          6
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "500aacc2-8cb7-42fa-bbd0-524cbddad6e6": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4bd3a684-104d-4ad8-b468-79c4d4a52e95": {
+      "call": {
+        "level": null,
+        "due": 8,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          8
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          8
+        ]
+      }
+    },
+    "e69c4612-3845-44a1-bd50-c46865146873": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "58463e5e-e870-4b93-9904-77e339021bbf": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "8f511d57-f509-4a7d-b884-c3de83d807c6": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "0290ab5a-8e2e-48aa-b2da-00d19e30dd0d": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d6f51baf-67fe-49d4-866f-f4d94fbc84fb": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "0f30a6cd-22b0-468b-a13a-f6b2f2d7db24": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4752f08f-a6c9-4b6d-bee5-3836417f5f75": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "a1038d91-33c6-45b7-a115-2235f20af3ed": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "38ef9766-a569-4073-b4e6-9889d7eb32d9": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          6
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          6
+        ]
+      }
+    },
+    "24b9050a-745d-4301-bba3-093b0a5aaacd": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "07f11f34-8670-45f1-bc63-657cdf4fb5fc": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "0c959c19-0000-4000-8000-ff9c197dbe16": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "e0f94860-df5e-449f-8df5-7b478c7bf71d": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "3aecd34e-1824-427f-aa2b-ce03ce7d6c98": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "fab47c58-4a13-472d-9865-8e561116eb0b": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          2
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4bda1038-811e-413e-8ef7-7c0bd3be41b6": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          1
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "a093383c-53e2-48f2-9250-9e02cd18b8b5": {
+      "call": {
+        "level": null,
+        "due": 7,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "8818165c-140a-41c9-838b-56b1f040a972": {
+      "call": {
+        "level": null,
+        "due": 1,
+        "by_rule": true
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "170d4301-ec6d-4511-8cbb-d2d9f03a41ed": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "27eb94c7-25f9-4aa8-bdf4-a9920722b39e": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "6c9f8056-4b2e-4ee9-8a88-bd7ed1deefec": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "09316a1c-df5d-47ac-987a-e841d39ea15e": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "b0529b4b-0732-4e8e-ade3-213906bc1641": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          -3
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          -3
+        ]
+      }
+    },
+    "1d96964e-2b03-47f7-a250-3906f38c2818": {
+      "call": {
+        "level": null,
+        "due": 2,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "cd750b01-3f59-4bda-ad63-993a3fbade06": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "1b485205-7a92-48f0-86d2-df4b337298d3": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "a7c4cfe8-1ebb-43f4-a9d3-b2beb405c35f": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "63588a39-0bc7-4b69-aafa-b3517f331150": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "e045b6ac-d217-421b-b3c2-5f64b2bcdea6": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "767b8a57-477a-4e50-aae0-e76bbfb8c6d4": {
+      "call": {
+        "level": 2,
+        "due": 11,
+        "by_rule": true
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "09aecc80-a6ca-4692-92df-48dccb1e32d0": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "6eea70f9-f837-4d8c-814c-243fd5ef4fba": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "a0387b74-c55a-4afd-a5a9-2c4702e6400b": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "ea671c30-44fd-485a-a0af-4bdbd8edb4c3": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "67489220-ffd2-42e4-ab5a-9e2033f59a11": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "3aaccac4-77dc-4d97-a0e5-c778c6caa613": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "965ba755-0439-4549-a3a3-78726a6e8c7f": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "c78a35eb-e25d-4b67-bcb4-11646d05e4a2": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "03bbac6f-f38f-4b4f-9f84-f355a88441fe": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          3
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "67052e57-6c28-4899-ae55-6be18faa5efe": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4a0eb129-4c00-47de-9ebc-2627e8db143f": {
+      "call": {
+        "level": null,
+        "due": 7,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "b86f1a6d-14cc-4896-b9e9-184931abbef7": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "dcf32bb0-0174-41f5-88ba-65aacce67cae": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "66e65701-3fd2-4095-9e64-3d1d3f4c4e5a": {
+      "call": {
+        "level": 1,
+        "due": 0,
+        "by_rule": true
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d2617ca2-5163-43e6-9d23-233546f25956": {
+      "call": {
+        "level": null,
+        "due": 7,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "e755d280-daec-4abc-b199-cf7de9af0041": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          1
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "872f2583-c366-43c8-bb5f-cd0e994424f8": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "73a25013-86f8-495a-8af2-95507859b7c9": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "5effb611-8d2e-4c9f-b497-4674f3870d7e": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d7222418-324f-4e78-a116-68a242180f2e": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "b10c6bab-83ff-4620-b327-11b7d1dc4bac": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "24ef95c2-d641-4d66-864f-93d0e345f3cf": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "07a13bb4-f93f-43eb-840b-604a97bcfa8d": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "baa73fde-bf9a-468b-952a-55efdcadd487": {
+      "call": {
+        "level": 3,
+        "due": 1,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          1,
+          6,
+          8,
+          13,
+          15
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          6
+        ]
+      }
+    },
+    "b2472d61-66c2-44f9-a55a-7b22dab88bb7": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "bcebae76-685d-48c7-8339-af2ec393ceaf": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "8f553608-7ce3-4bb0-82cf-a2170f73d2be": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "df1795bb-5cc9-431b-9354-64dad8c9e8d7": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "c6a328b7-9e47-422f-a74d-65ad356013af": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "d2a278cc-7962-402f-9415-46c8ab2d9903": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "8cb14e9e-086d-4c23-8097-0f06add037f9": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          3
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "c35708ff-6bc2-4a73-85b6-536aa2118ac3": {
+      "call": {
+        "level": null,
+        "due": 1,
+        "by_rule": true
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          6
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4112f211-66a1-4e01-b799-c36d2dd2d439": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "11c739bf-97b3-4178-a01b-5f6b29029c17": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "19c03301-9771-4cc2-a75f-3286b56ff1bf": {
+      "call": {
+        "level": null,
+        "due": 0,
+        "by_rule": true
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          -12,
+          0
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          0
+        ]
+      }
+    },
+    "a9cf5e53-0ab8-4659-84f9-3bbd7b333099": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "55760e1d-c370-444d-bd7b-0ef47817d3b6": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "e5dd6ef2-e40b-4f35-b224-75b4397f55a9": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "fcc64741-38d6-4812-ab46-c01d6b7f86a6": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "950d567f-e92e-4164-9e28-5c849eecb553": {
+      "call": {
+        "level": null,
+        "due": 0,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          0
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          0
+        ]
+      }
+    },
+    "1cd019b0-30d2-469b-8c54-5eb17ec876f8": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "12fd4fef-ff4f-4285-b380-a20cefe9687b": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "72a0d047-2d6a-44fb-9eb2-1d5b241badc1": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "4b31794d-53bd-4b03-9cca-f8337612ff64": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "83712549-4b7a-423a-b3e5-b747ba59a462": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "625f905d-83b7-499b-9b6e-f650bd1cca55": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "bfb5152a-3d5d-4a2d-b450-846f57119990": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "fe0c1f16-e362-40e4-81dc-a58935a15413": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "20c43c7d-1930-450e-ac55-73287cb21a7e": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          1
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "27f2dac3-3d6c-4f4c-9223-c8d2eff5075e": {
+      "call": {
+        "level": 3,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "8b389fb0-1049-41f2-a213-53baf5ebf131": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          3
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "ebd5526d-8b0d-4673-9f2f-2e3ae88ea49e": {
+      "call": {
+        "level": 2,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "18819ce0-b0f1-4d20-868a-fe0f2e7daad1": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [
+          1
+        ],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "0d71853f-ebd5-4414-8617-9e4d3cfe8996": {
+      "call": {
+        "level": null,
+        "due": 1,
+        "by_rule": false
+      },
+      "gold": {
+        "levels": [],
+        "dues": [
+          1,
+          3,
+          6,
+          7,
+          10,
+          13
+        ]
+      },
+      "second": {
+        "levels": [],
+        "dues": [
+          1,
+          7
+        ]
+      }
+    },
+    "99cb20e7-4dd2-4032-b362-2961ac218871": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "f38c96a9-ab64-424d-adef-6d904bb0a8b1": {
+      "call": {
+        "level": 1,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "60eae395-c165-4a14-9821-c6df0d990cc6": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "69f48efb-b9bd-4029-917e-7f8ce5f7a73d": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    },
+    "16bd97b3-e75c-4012-96c3-9d56ab4e5771": {
+      "call": {
+        "level": null,
+        "due": null,
+        "by_rule": null
+      },
+      "gold": {
+        "levels": [],
+        "dues": []
+      },
+      "second": {
+        "levels": [],
+        "dues": []
+      }
+    }
+  }
+}

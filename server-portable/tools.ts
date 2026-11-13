@@ -49,6 +49,8 @@ export const TOOLS = [
   { name: "priority_history", scope: "read" },
   { name: "item_history", scope: "read" },
   { name: "list_items", scope: "read" },
+  // Deliverables (SMD-1715 PR 2, migration 134): the read is any key's; the writers below a write key's alone, as 134 refuses any other.
+  { name: "deliverable_history", scope: "read" },
   // The agenda (SMD-3669, migration 123): a read over every kind of open item, ranked by effective priority.
   { name: "agenda", scope: "read" },
   // plan_context (SMD-2684): what the brain holds for a request, in one read — knowledge, board, tools and gaps.
@@ -74,6 +76,8 @@ export const TOOLS = [
   { name: "append_thought_evidence", scope: "write" },
   // SMD-4193 PR 2 (migration 132): the operator's weights; past the scope, the database admits an operator key alone.
   { name: "set_priority_weights", scope: "write" },
+  { name: "capture_deliverable", scope: "write" },
+  { name: "verify_deliverable", scope: "write" },
   { name: "review_supersession_proposal", scope: "write" },
   { name: "retry_failed", scope: "write" },
   { name: "release_stale_leases", scope: "write" },

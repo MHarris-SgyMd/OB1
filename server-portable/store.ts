@@ -23,6 +23,7 @@ import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
 import { PRIORITY_KINDS, type PriorityKind } from "./priority-kinds.ts";
 import type { ItemAnswer, ItemListRow, ItemRecord, ItemStatus } from "./open-items.ts";
+import type { DeliverableAnswer, DeliverableRecord, VerifyStatus } from "./deliverables.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -1419,6 +1420,7 @@ export { PRIORITY_KINDS };
 // Types alone: open-items.ts reads isoTimestamp from here, so its values are imported from it directly (review pass 1:
 // a value re-exported both ways was an import cycle).
 export type { ItemAnswer, ItemListRow, ItemProposal, ItemRecord, ItemStatus, OpenItem, OpenItemEvent } from "./open-items.ts";
+export type { Deliverable, DeliverableAnswer, DeliverableEvent, DeliverableRecord, DeliverableStatus, DeliverableVerification, VerifyStatus } from "./deliverables.ts";
 /**
  * One priority assertion as 116's ob1_priority_json answers it (SMD-3664): the
  * item, the level and times, the reason (the maker's free text, data), the
@@ -1439,7 +1441,7 @@ export type PriorityAssertion = {
   tierName: "operator" | "source" | "agent" | "inferred";
   assertedAt: string;
   closedAt: string | null;
-  closeReason: "replaced" | "cleared" | null;
+  closeReason: "replaced" | "cleared" | "deleted" | null;
   closedBy: string | null;
 };
 /** The refusal codes 116's writers answer with. */
@@ -1578,7 +1580,7 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
   // with a null in its place (review pass 3). The tier's name is 116's own (tier_name), held to the four.
   if (!o || !m || typeof o.id !== "string" || !item || typeof o.level !== "number" || typeof m.name !== "string" || ![1, 2, 3, 4].includes(tier)
       || !TIER_NAMES.has(o.tier_name as string) || o.asserted_at === null || o.asserted_at === undefined || (refGiven && !dueRef)
-      || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared")) {
+      || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared" && o.close_reason !== "deleted")) {
     throw new Error(`${what} answered an assertion this server cannot read`);
   }
   return {
@@ -2585,6 +2587,18 @@ export interface ThoughtStore {
    */
   listItems(opts: { statuses: ItemStatus[]; overdue: boolean; originThought?: string; plugin?: string; limit: number }): Promise<{ items: ItemListRow[]; truncated: boolean }>;
   /**
+   * Deliverables (SMD-1715 PR 2, migration 134): record_deliverable and verify_deliverable, one statement each, the
+   * actor as the maker's envelope with `scope` stated (134 refuses any scope but write, WRITE_SCOPE_REQUIRED). The
+   * database decides every rule and answers refusals as values; any raise is the store's fault, the operations
+   * having held every argument to 134's bounds first. A database before 134 throws.
+   */
+  recordDeliverable(opts: { thought: string; spec: string; checkpoint: string; actor?: Actor }): Promise<DeliverableAnswer>;
+  verifyDeliverable(opts: { thought: string; status: VerifyStatus; method: string; finding: string; actor?: Actor }): Promise<DeliverableAnswer>;
+  /** One deliverable's record (134's deliverable_history), in one statement. */
+  deliverableHistory(thought: string): Promise<DeliverableRecord>;
+  /** A thought's derived_from (025), lower-cased, or null when it names none or the thought is not there: whether a thought capture_deliverable left is its own (SMD-1715 PR 2). */
+  derivedFromOf(id: string): Promise<string[] | null>;
+  /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
    * lapse cleared (082) and the reviewer the row records (114), in one
@@ -2794,6 +2808,17 @@ export interface ThoughtStore {
    */
   pluginTx?<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T>;
 
+  /**
+   * The trust a thought this writer captures, declaring `declared`, is
+   * stamped with (SMD-2690 PR 4): the database's own rule, 046's
+   * ob1_trust_ceiling over ob1_registry_kind — the declaration capped at the
+   * key's kind (the agent id's, else the name's), the kind itself when none
+   * is declared, null for an unclassified key that declares none. What a
+   * plugin weighs before it supersedes another's thought. Optional for a
+   * test's fake.
+   */
+  trustCeiling?(agentId: string | null, name: string, declared: string | null): Promise<string | null>;
+
   close(): Promise<void>;
 }
 
@@ -2891,9 +2916,9 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   prioritySpan: true, setPriorityWeights: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
-  pluginTx: true, jobSink: false, close: false,
+  pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 
 /**
