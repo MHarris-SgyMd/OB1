@@ -3644,6 +3644,12 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     assert(logged.some((l) => l.startsWith("update_thought: the embedding provider at https://stub.invalid/v1 refused the edit's embedding:") && l.includes("stub answers 401")), `the edit's 401 logged as refused, with the provider's words (${logged.join(" | ").slice(0, 200)})`);
     assert(edit401.isError && edit401.sc?.code === "EMBEDDING_PROVIDER_ERROR" && edit401.sc?.retryable === false && edit401.sc?.status === 401 && /^Refused: the edit/.test(edit401.text),
       `an edit while the provider answers 401: coded, final (${edit401.text.slice(0, 160)})`);
+    // A 429, the ticket's own Verify: retryable, providerDown's verdict, said as an Error (review pass 6: unheld end to end).
+    stubDown = 429;
+    const edit429 = await result("update_thought", { id: target, content: "[20] the edit made while the provider answers 429" });
+    assert(edit429.isError && edit429.sc?.code === "EMBEDDING_PROVIDER_ERROR" && edit429.sc?.retryable === true && edit429.sc?.reason === "provider_429" && edit429.sc?.status === 429
+      && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable: it answered 429\./.test(edit429.text),
+      `an edit while the provider answers 429: coded, retryable, said as an Error (${edit429.text.slice(0, 200)})`);
     const [kept] = await sql`SELECT content FROM thoughts WHERE id = ${target}::uuid`;
     assert(kept.content === "[20] a thought an edit will try to change", `…and neither edit was made (${kept.content})`);
 
@@ -4059,8 +4065,8 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     assert(!busy.isError && /failed: it answered 503\. So/.test(busy.text) && busy.sc?.vectorFailed === "provider_503", `a 503: answered by the literals, the word provider_503 (${busy.text.slice(0, 160)})`);
     stubDown = 400;
     const wrong = await result("search_thoughts", { query: q + " wrong" });
-    assert(wrong.isError && !/Semantic search is unavailable/.test(wrong.text) && (await lastArm("search_thoughts", q + " wrong")) === undefined,
-      `a 400: the search fails, unmarked and unlogged, as before (${wrong.text.slice(0, 160)})`);
+    assert(wrong.isError && wrong.sc?.code === "EMBEDDING_PROVIDER_ERROR" && wrong.sc?.retryable === false && !/Semantic search is unavailable/.test(wrong.text) && (await lastArm("search_thoughts", q + " wrong")) === undefined,
+      `a 400: the search refused coded, not answered by the literals, and not in the query log (${wrong.text.slice(0, 160)})`);
     // …refused coded since SMD-2892 — in each search tool — where it was a raw FAILED carrying the provider's body.
     stubDown = 401;
     for (const [tool, args] of [["search_thoughts", { query: q + " keyless" }], ["search", { query: q + " keyless" }], ["plan_context", { request: q + " keyless" }]] as const) {

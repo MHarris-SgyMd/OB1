@@ -64,10 +64,13 @@ const INVISIBLE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|
  * Authorization back, and a reader key must never read it; invisible characters dropped; one line, so a provider
  * forges no log line or reply line of its own; capped.
  */
-export function providerSaid(words: string, at: Pick<ProviderEndpoint, "key">, cap = 500): string {
+export function providerSaid(words: string, at: Pick<ProviderEndpoint, "key"> & { headers?: Record<string, string> }, cap = 500): string {
   let s = words;
-  // A key of eight characters or more, as any real one is: a shorter placeholder (a stub's "stub") would blank words.
-  if (at.key && at.key.length >= 8) s = s.split(at.key).join("[redacted]");
+  // The brain's own credential by value — the key, and the Authorization the endpoint sends, Bearer or the Basic of a
+  // base's userinfo (review pass 6: a base64 with no digit or `=` passed the shape rule below) — eight characters or
+  // more, as any real one is: a shorter placeholder (a stub's "stub") would blank words.
+  const sent = (at.headers?.Authorization ?? at.headers?.authorization ?? "").replace(/^\S+\s+/, "");
+  for (const secret of [at.key, sent]) if (secret && secret.length >= 8) s = s.split(secret).join("[redacted]");
   s = s.replace(/\b(Bearer|Basic|Token)\s+(?=[A-Za-z0-9._~+/=-]*[0-9=])[A-Za-z0-9._~+/=-]{8,}/gi, "$1 [redacted]").replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]");
   return oneLine(s.replace(INVISIBLE, "")).slice(0, cap);
 }
@@ -77,7 +80,7 @@ export function providerSaid(words: string, at: Pick<ProviderEndpoint, "key">, c
  * page) the words it answered, which the message leaves out (review pass 3: the operator's log said less than a
  * reader's reply) — cleaned as a reply's are (review pass 4: raw, they forged log lines and carried terminal escapes).
  */
-export function providerLogWords(e: unknown, at: Pick<ProviderEndpoint, "key">): string {
+export function providerLogWords(e: unknown, at: Pick<ProviderEndpoint, "key"> & { headers?: Record<string, string> }): string {
   const message = (e as Error)?.message ?? String(e);
   return providerSaid(e instanceof ProviderError && e.kind === "body" && e.body ? `${message} — it said: ${e.body}` : message, at, 800);
 }
@@ -89,7 +92,7 @@ export function providerLogWords(e: unknown, at: Pick<ProviderEndpoint, "key">):
  * is and what it said — a capture-only key is told neither (SMD-2284's rule
  * for a capture's provider, render.ts's and the REST core's capturedFor).
  */
-export function embeddingProviderError(e: unknown, at: Pick<ProviderEndpoint, "base" | "userinfo" | "key">, reader: boolean): EmbeddingProviderError | null {
+export function embeddingProviderError(e: unknown, at: Pick<ProviderEndpoint, "base" | "userinfo" | "key"> & { headers?: Record<string, string> }, reader: boolean): EmbeddingProviderError | null {
   const f = providerFault(e);
   if (!f) return null;
   return {

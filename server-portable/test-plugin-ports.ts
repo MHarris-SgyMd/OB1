@@ -3662,6 +3662,12 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const refusedWrite = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back while the provider refuses its key."] } });
     assert(refusedWrite.status === 422 && refusedWrite.body.code === "CORE_REFUSED" && refusedWrite.body.refused === "EMBEDDING_PROVIDER_ERROR",
       `writeback while the provider refuses its key: 422 CORE_REFUSED naming EMBEDDING_PROVIDER_ERROR (${refusedWrite.status} ${JSON.stringify(refusedWrite.body)})`);
+    assert(/an operator's to mend/.test(String(refusedRecall.body.message)), `…its message naming the provider's refusal an operator mends (${refusedRecall.body.message})`);
+    // A 400 may be the query's own (an over-long one): its message says a shorter one may land (review pass 6).
+    embedStatus = 400;
+    const longQuery = await am("recall", rq({ query: "am_ledger with a query the provider refuses" }), { as: KEYS.reader });
+    assert(longQuery.status === 422 && longQuery.body.refused === "EMBEDDING_PROVIDER_ERROR" && /a shorter one may land/.test(String(longQuery.body.message)),
+      `recall under a 400: 422, its message saying the query may be the cause (${JSON.stringify(longQuery.body)})`);
   } finally {
     embedStatus = null;
   }

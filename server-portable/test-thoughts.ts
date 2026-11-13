@@ -1000,6 +1000,14 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   ];
   const misclassed = table.filter(([status, reason, check, advice]) => JSON.stringify(checksFor(status, reason)) !== JSON.stringify(check) || !advice.test(adviceFor({ status, reason, setting: "OB1_LLM_BASE_URL" })));
   assert(misclassed.length === 0, `checksFor and adviceFor read one class per status (wrong: ${JSON.stringify(misclassed.map((t) => t[0]))})`);
+  // The Authorization the endpoint sends, by value: a base's userinfo goes as Basic, and a base64 with no digit or `=`
+  // passed the shape rule (review pass 6: `x:abcdefghij` is `eDphYmNkZWZnaGlq`).
+  const basicEcho = providerSaid('{"headers":{"authorization":"Basic eDphYmNkZWZnaGlq"}} and again eDphYmNkZWZnaGlq', { key: undefined, headers: { Authorization: "Basic eDphYmNkZWZnaGlq" } });
+  assert(!basicEcho.includes("eDphYmNkZWZnaGlq"), `the endpoint's own Basic credential redacted by value (${basicEcho})`);
+  // The refusal's base masked when the base carried userinfo (review pass 6: unheld here).
+  const { embeddingProviderError } = await import("./core/provider-refusal.ts");
+  const masked = embeddingProviderError(http(401), { base: "https://provider.example/v1", userinfo: true, key: undefined, headers: {} }, true);
+  assert(masked?.base === "https://***@provider.example/v1", `a refusal names the base with its userinfo masked (${masked?.base})`);
   // A credential's shape, not a word: a provider's "Basic authentication failed" is kept (review pass 5: it was redacted).
   const plainWords = providerSaid("Basic authentication failed; Bearer token missing", { key: KEY });
   assert(plainWords === "Basic authentication failed; Bearer token missing", `words that name no credential are kept (${plainWords})`);
@@ -2492,7 +2500,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   }
   // What a real call says (review pass 4: one rule on every path): a vector,
   // answering; a 4xx, a broken body or an answer the call could not use,
-  // answering with a fault — the provider is there, a capture fails outright;
+  // answering with a fault — the provider is there, a capture, a search or an edit is refused (SMD-2892);
   // an outage; an egress refusal nothing.
   {
     const lines: string[] = [];

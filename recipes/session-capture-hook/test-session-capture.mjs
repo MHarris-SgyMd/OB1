@@ -2813,6 +2813,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     if (slowMs) await sleep(slowMs);
     if (/\[\[fault\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "update_thought failed: the REST core did not answer" }], structuredContent: { code: "FAILED", message: "the REST core did not answer" } } }));
     if (/\[\[meta\]\]/.test(String(args.content ?? "")) && args.metadata) return err("Refused: `metadata.reserved_x` is set by the server, not the caller.", { code: "REFUSED_METADATA_SHAPE", problem: "reserved_key" });
+    if (/\[\[embed-down\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Error: the edit (its new text needs its vector) was not done — the brain's embedding provider is unavailable: the connection was refused. The same call can land once it answers." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL", check: [] } } }));
     if (/\[\[embed-401\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" } } }));
     if (/\[\[embed-400\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 400 (it refused the request: this text, or a setting sent with it such as the model)." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_400", status: 400, setting: "OB1_LLM_BASE_URL" } } }));
     if (/\[\[invalid\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool capture_thought" }] } }));
@@ -3035,6 +3036,13 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const textRefused = await post("capture_thought", { content: "[[embed-400]] a copy the canary's provider refuses with a 400" }, captured(S(38)));
   assert(textRefused.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 400/.test(textRefused.err),
     `a copy refused with a 400 holds the queue too (${textRefused.err.trim().slice(0, 140)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  // A copied edit the canary refuses retryable (its provider away): kept by the code as by `retryable` (review pass 6:
+  // only final refusals were held).
+  const editAway = await post("update_thought", { id: S(73), content: "[[embed-down]] an edit copied while the canary's provider is away" }, [{ type: "text", text: `Updated ${S(73)} (content re-embedded).` }]);
+  assert(editAway.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: update_thought .* is unavailable/.test(editAway.err),
+    `a copied edit refused EMBEDDING_PROVIDER_ERROR, retryable, holds the queue (${editAway.err.trim().slice(0, 160)})`);
   rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
   rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
 

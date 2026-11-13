@@ -186,7 +186,7 @@ mender tick's — and by its own probes:
   answered: reachable, nothing yet said of the calls). With a `fault`, a call
   the provider answered and refused or answered unusably — a 4xx (a model not
   pulled, a key refused), a body that is not JSON, a vector of the wrong
-  width: the provider is there, and a capture fails outright until it is fixed.
+  width: the provider is there, and a capture, a search or an edit of a thought's text is refused (`EMBEDDING_PROVIDER_ERROR`) until it is fixed.
 - `unreachable` since `since` (the first outage of the run), `at` the latest,
   the `reason` word and its `detail` for the latest, and `clears`: `probe`
   for an outage a `GET /models` can see (the probe's own, a call's failed
