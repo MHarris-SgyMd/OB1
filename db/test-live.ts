@@ -4759,9 +4759,12 @@ if (want("9f")) {
         // `inFlightMs`, so at a crash with both in flight the innocent's error is read first, whichever call was made first
         // (at 400 ms, only when the innocent's call came after the crash). Retried one at a time, the poison is alone at
         // each crash: failed at its third, the innocent re-embedded. With both workers the innocent's error, read first,
-        // was blamed alone, and the innocent failed at its third.
+        // was blamed alone, and the innocent failed at its third. The crash's answer at 1250 ms, halfway between the
+        // 500 ms a call in flight takes and the 2 s deadline (OB1_LLM_TIMEOUT): at 1600 ms, 400 ms of lag on a loaded
+        // runner would time the poison's call out, a deadline, not its 500 (review pass 1).
         crashedBy.length = 0;
-        crashAnswerMs = 1600;
+        inFlightMs = 500;
+        crashAnswerMs = 1250;
         const late = liveFollower({ workers: 2 });
         await late.idle();
         const [{ id: lateInnocent }, { id: latePoison }] = (await sql`INSERT INTO thoughts (content) VALUES ('an innocent thought pooled first'), ('a crash-poison thought pooled second, its crash answered late') RETURNING id::text AS id`) as { id: string }[];
@@ -4773,6 +4776,7 @@ if (want("9f")) {
         const latePoisonClaim = await claimOf(latePoison);
         const lateInnocentClaim = await claimOf(lateInnocent);
         const lateExit = await late.stop();
+        inFlightMs = 1000;
         crashAnswerMs = 400;
         assert(lateBack && firstBack === lateInnocent && latePoisonFailed && /^provider error again with this thought alone in flight at 3 outages, the probe after each unanswered, so this thought's: Embeddings request .* 500/.test(latePoisonClaim?.last_error ?? "")
             && lateInnocentDone && lateInnocentClaim?.status !== "failed" && aloneOf(late.lines) === "1,2" && crashedBy.length === 4 && crashedBy.every((t) => t.includes("crash-poison")) && isolatedSaid(late.lines) && lateExit === "exit 0",
