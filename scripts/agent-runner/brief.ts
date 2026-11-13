@@ -38,9 +38,15 @@ export type BriefInput = {
   bundlePath: string;
 };
 
-/** The first hidden code point in a text as `<U+XXXX>`, or null if it has none. */
+/**
+ * The first hidden code point in a text as `<U+XXXX>`, or null if it has none. Tab, newline and carriage return show —
+ * as spacing and line breaks — and are expected in a multi-line description, so they are not hidden; only a genuinely
+ * invisible character (zero-width, bidi, a line or paragraph separator, unassigned) can smuggle an instruction past the
+ * fence, and those stay caught.
+ */
 function hiddenIn(text: string): string | null {
   for (const ch of text) {
+    if (ch === "\t" || ch === "\n" || ch === "\r") continue;
     if (HIDDEN_TEXT.test(ch)) return `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>`;
   }
   return null;
