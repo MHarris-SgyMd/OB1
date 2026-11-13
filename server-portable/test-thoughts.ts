@@ -36,7 +36,7 @@ import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, norma
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
 import { classifyGenre, presignalGenre, type ChooseFn } from "./genre.ts";
 import { extractMetadata } from "./metadata.ts";
-import { DUE_ONLY_LEVEL, INFER_PROMPT, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
+import { citedIn, DUE_ONLY_LEVEL, flooredIn, forWriter, INFER_PROMPT, INFER_PROMPT_VERSION, inferPriority, inferredStatement, INFERRED_CEILING, modelDay, negatedIn, quotedIn, readAnswer, resolveDue } from "./priority-infer.ts";
 
 const { assert, report } = createAssert();
 
@@ -2964,6 +2964,208 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
       && readAnswer({ level: "urgent", level_phrase: "not urgent" }, notUrgent, TUE).level === null && readAnswer({ level: "high", level_phrase: "no rush" }, "no rush on this", TUE).level === null
       && readAnswer({ level: "low", level_phrase: "no rush" }, "no rush on this", TUE).level?.value === 1 && readAnswer({ level: "high", level_phrase: "no time to lose" }, "no time to lose here", TUE).level?.value === 3,
     "a negating word up to two words before, or non-, drops the level; a High read off a phrase negating its own cue is dropped, a Low kept; a negation with no cue after it stands, and emphasis (\"never been more urgent\") is no negation");
+  // SMD-4226: a label cited for another item is no level of the text's own (v1 read 10 of its 38 summary levels so),
+  // read only in a shape that cites: review pass 1 found nearness alone dropping the writer's own level.
+  const export944 = "SMD-944 — Add keyword search — vector-only retrieval cannot find an exact token\nProject: Retrieval & Ranking · Status: Done (completed) · Priority: High · Parent: none";
+  const citedCases: [string, string, boolean][] = [
+    ["Medium", "Filed SMD-1768 (Medium) for the drift.", true],
+    ["SMD-2627 (Medium):", "Next: SMD-2627 (Medium): the gate.", true],
+    ["Medium, Release Engineering", "Filed SMD-2742 — Medium, Release Engineering.", true],
+    ["Medium", "Filed SMD-2742 — Medium, Release Engineering.", true],
+    ["High", "SMD-2368, `platform`, High, in Welcome Agent Turn Reliability.", true],
+    ["Backlog, Low", "SMD-2719 is Backlog, Low now.", true],
+    ["Low", "Tickets: Backlog, Low", false],
+    ["High-priority", "It is the only High-priority open child in the project.", true],
+    ["Medium-priority", "It's the only Medium-priority ticket left in the line", true],
+    ["High-priority", "It is one of two High-priority children still open", true],
+    ["highest-priority", "It is the highest-priority open child in the project", true],
+    ["highest value open issue", "the highest value open issue for the project", true],
+    ["Medium", "| SMD-1 | one thought per episode | Medium |", true],
+    ["urgent", "İstanbul trip: SMD-1 (urgent)", true],
+    ["High", "SMD-3333 is the gate. It is yours, High, Todo in cycle 21, due 11-05.", true],
+    ["Urgent", "Owner, Urgent priority and cycle unchanged.", true],
+    ["Owner, Urgent priority and cycle unchanged.", "Started. Owner, Urgent priority and cycle unchanged.", true],
+    ["High-priority", "the only child left, under the High-priority SMD-1350", true],
+    ["Urgent", "Urgent, due Friday: rent", false],
+    ["Urgent", "Urgent, todo: call the bank", false],
+    ["High", "Next ticket: SMD-4300 · Priority: High", true],
+    ["Priority: High", "Next ticket: SMD-4300 · Priority: High", true],
+    ["High", "Picked SMD-4300 | Status: Todo | Priority: High", true],
+    ["High", "Board now:\nSMD-12 · Status: Todo · Priority: High\nSMD-13 · Status: Todo · Priority: Low", true],
+    ["High", "SMD-944 — Fix login (Priority: High)", false],
+    ["High", "SMD-944 Fix login, Priority: High", false],
+    ["High", "SMD-12 · Priority: High · blocks SMD-13", true],
+    ["High", "SMD-4300 was set to High priority", true],
+    ["High", "SMD-4300 was bumped to High", true],
+    ["High", "SMD-4300 now High", true],
+    ["High", "SMD-4300 has High priority", true],
+    ["High", "Filed SMD-4300 with priority High", true],
+    ["High", "SMD-12 → High", true],
+    ["High", "SMD-12 -> High", true],
+    ["High", "Q4-2026 High priority: launch the shop", false],
+    ["High", "Filed SMD-4300 (Priority: High) for the follow-up.", true],
+    ["Priority: High", "Filed SMD-4300 (Priority: High) for the follow-up.", true],
+    ["High", "Filed SMD-4300, Priority: High, in Retrieval.", true],
+    ["High", "SMD-12 is High priority now", true],
+    ["High", "Moved SMD-12 to High", true],
+    ["Medium", "SMD-3670's priority is Medium", true],
+    ["High", "SMD-12 High", true],
+    ["urgent", "SMD-12 moved along nicely this week after the long review, and so it went done, urgent: call mom", false],
+    ["Medium", "Filed SMD-12, Medium is the garden's level", false],
+    ["it’s Medium", "SMD-12 (it’s Medium) stays", true],
+    ["urgent", "Done, urgent: call mom", false],
+    ["high", "Todo, high: dentist", false],
+    ["urgent", "Things to do, urgent: renew passport", false],
+    ["Urgent", "Urgent, Todo: call the bank", false],
+    ["Q4-2026 high priority", "Q4-2026 high priority: launch the shop", false],
+    ["mid-2025 high", "Project mid-2025 high priority", false],
+    ["Phase-2: high priority", "Phase-2: high priority for the garden", false],
+    ["Urgent", "Urgent COVID-19 booster", false],
+    ["COVID-19 (urgent)", "COVID-19 (urgent) booster", false],
+    ["Med", "Filed SMD-1768 (Medium) for the drift.", false],
+    ["Medium", "Filed SMD-1768 [Medium]", true],
+    ["Medium", "Filed SMD-1768: Medium, follow-up", true],
+    ["High", "SMD-12 · High · Backlog", true],
+    ["it's Medium", "SMD-12 (it’s Medium) stays", true],
+    ["Medium", "SMD-12 is filed. Medium is the garden's level", false],
+    ["urgent", "Filed SMD-12. Rent (urgent)", false],
+    ["urgent", "SMD-12 is something the team will get to after the long holiday weekend ends, the rent (urgent)", false],
+    ["urgent", "the only High-priority open child is done, and this one is urgent", false],
+    ["urgent", "Filed SMD-12\nRent (urgent)", false],
+    ["urgent", "urgent: fix SMD-12 today", false],
+    // The writer's own level stands, in every shape review pass 1 found dropped.
+    ["Urgent", "Urgent: the landlord wants an answer by Friday", false],
+    ["Priority: High", export944, false],
+    ["Priority: High", "SMD-944 — Fix login\nPriority: High", false],
+    ["Priority: High", "SMD-944 · Status: Todo · Priority: High", false],
+    ["Priority: Urgent", "ABC-12 Renew passport\nStatus: Todo\nPriority: Urgent", false],
+    ["urgent", "So, urgent: the landlord wants an answer by Friday", false],
+    ["Urgent", "Mom, Urgent: call the bank", false],
+    ["high priority", "Tuesday, high priority: send the report", false],
+    ["Urgent", "Urgent, Friday: renew the lease", false],
+    ["Low priority", "Low priority, Saturday job: clean the garage", false],
+    ["this is urgent, please call", "this is urgent, please call", false],
+    ["urgent", "COVID-19 booster is urgent this week", false],
+    ["high priority", "Read ISO-8601 spec, high priority", false],
+    ["urgent", "Ask GPT-4 to draft it, urgent", false],
+    ["important", "My flight UA-123 is important to catch", false],
+    ["urgent", "SMD-12 is urgent: the demo is Friday", false],
+    ["urgent", "I need to fix SMD-12 today, it's urgent", false],
+    ["Urgent: fix SMD-12 before the demo", "Urgent: fix SMD-12 before the demo", false],
+    ["Urgent", "SMD-12 done.\nUrgent: call the landlord by Friday", false],
+    ["Urgent", "SMD-3410 stays first. Urgent and the date stand.", false],
+    ["urgent", "The only task left is urgent", false],
+    ["most urgent", "the most urgent item on my list is the rent", false],
+    ["Top priority", "Top priority: fix the bug", false],
+    ["highest priority", "my highest priority item is the visa", false],
+    ["urgent", "Call the plumber (urgent) about the leak", false],
+    ["Urgent", "Rent payment (Urgent)", false],
+    ["urgent", "Finish the deck (urgent, by Friday)", false],
+    ["Urgent", "| Pay rent | Urgent |", false],
+    ["urgent", "İstanbul trip: book it, urgent", false],
+    ["Medium", "SMD-12 (Medium) is done, and the release notes went out. Medium is how much the garden matters now", false],
+  ];
+  const citedWrong = citedCases.filter(([p, t, want]) => citedIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
+  assert(citedWrong.length === 0, `a label cited for another item is read only in a shape that cites: a key's clause ending in "(", "[", ",", ":", "·" or a dash, a board move from a key to a capitalised level, a key beside the level, a table row with a key, a board status or field, a level just before a key, a rank among items, another ticket's "Priority:" field; the writer's own level stands, a ticket's own export, a name, a flight or a standard's number beside it included (wrong: ${citedWrong.join("; ")})`);
+  const citedRead = readAnswer({ level: "medium", level_phrase: "SMD-2627 (Medium):" }, "Next: SMD-2627 (Medium): the gate.", TUE);
+  const citedDue = readAnswer({ level: "low", level_phrase: "Backlog, Low", due_phrase: "by Friday" }, "SMD-2719 is Backlog, Low now; I'll file it by Friday", TUE);
+  assert(citedRead.level?.cited === true && citedRead.level.value === 2
+      && readAnswer({ level: "high", level_phrase: "Priority: High" }, export944, TUE).level?.cited === undefined
+      && readAnswer({ level: "urgent", level_phrase: "urgent", due_phrase: "by Friday" }, "So, urgent: the landlord wants an answer by Friday", TUE).level?.cited === undefined,
+    "readAnswer marks a cited label's level and leaves it standing; a ticket's own export and the writer's own urgency are unmarked");
+  // SMD-4226, the maintainer's choice after review pass 2: only an agent-kind writer's cited level is dropped.
+  assert(forWriter(citedRead, "agent")?.level === null && forWriter(citedDue, "agent")?.due?.day === "2026-11-06" && forWriter(citedDue, "agent")?.level === null
+      && JSON.stringify(forWriter(citedRead, "operator")?.level) === JSON.stringify({ value: 2, word: "medium", phrase: "SMD-2627 (Medium):" })
+      && forWriter(citedRead, null)?.level?.value === 2 && forWriter(null, "agent") === null
+      && JSON.stringify(forWriter(readAnswer({ level: "urgent", level_phrase: "Urgent" }, "Urgent: the landlord wants an answer by Friday", TUE), "agent")?.level) === JSON.stringify({ value: 3, word: "urgent", phrase: "Urgent" }),
+    "forWriter drops a cited level for an agent-kind writer and keeps the due day beside it; anyone else's cited level stands, unmarked; an uncited level stands for every writer");
+  // SMD-4226: the earliest something can happen is no deadline (v1 read "can't happen before 11-03" as one), read only
+  // in the floor's own construction: review pass 1 found a negation alone dropping "not later than" deadlines.
+  const flooredCases: [string, string, boolean][] = [
+    ["before 11-03", "the cut, which can't happen before 11-03.", true],
+    ["can't happen before 11-03", "the cut, which can't happen before 11-03.", true],
+    ["11-03", "the cut, which can't happen before 11-03.", true],
+    ["until Friday", "not until Friday", true],
+    ["Friday", "not until Friday", true],
+    ["before the 12th", "it cannot start before the 12th", true],
+    ["Friday", "no sooner than Friday, then", true],
+    ["tomorrow", "ship it tomorrow at the earliest", true],
+    ["tomorrow", "tomorrow, or later", true],
+    ["by Friday", "the landlord wants an answer by Friday", false],
+    ["before the 12th", "pay the deposit before the 12th", false],
+    ["15 November", "Urgent: tax payment due not later than 15 November", false],
+    ["later than 15 November", "Urgent: tax payment due not later than 15 November", false],
+    ["past Friday", "The landlord can't wait past Friday", false],
+    ["can't wait past Friday", "The landlord can't wait past Friday", false],
+    ["past Friday", "It must not slip past Friday", false],
+    ["Friday", "This won't wait beyond Friday", false],
+    ["Friday", "It cannot be later than Friday", false],
+    ["by Friday", "Do not forget rent by Friday", false],
+    ["by Friday", "if not by Friday, then by Monday", false],
+    ["the deadline by Friday", "do not miss the deadline by Friday", false],
+    ["by Friday", "I can't stress enough that it is due by Friday", false],
+    ["by Friday", "PR 2 starts by Friday at the latest", false],
+    ["by Monday", "The migration starts by Monday", false],
+    ["by Monday", "Starting by Monday, file the weekly report", false],
+    ["before Friday", "Fieldwork begins before Friday", false],
+    ["Friday", "due a week from Friday", false],
+    ["tomorrow", "the day after tomorrow", false],
+    ["can't happen before 11-03", "if it can't happen before 11-03, escalate", false],
+    ["by Friday, or later if blocked", "finish the draft by Friday, or later if blocked", false],
+    ["Friday", "after Friday the office reopens", true],
+    ["before Friday", "if it doesn't ship before Friday, we lose the slot", false],
+    ["after Friday", "only after Friday", true],
+    ["starting Monday", "starting Monday, the pool hours change", true],
+    ["until Friday", "The report isn't due until Friday", false],
+    ["until the 1st", "rent isn't due until the 1st", false],
+    ["until Friday", "I don't need it until Friday", false],
+    ["Monday", "not needed until Monday", false],
+    ["until the 15th", "the payment isn't required until the 15th", false],
+    ["until Friday", "You don't have long until Friday", false],
+    ["Friday", "Only 3 days. Not long until Friday", false],
+    ["until the 30th", "It's not too late until the 30th: register", false],
+    ["until Friday", "can't rest until Friday", false],
+    ["by Monday", "start by Monday on the taxes", false],
+    ["by Friday", "finish the draft by Friday, or later if blocked", false],
+    ["Friday", "Friday, earliest possible", false],
+    ["after the meeting but before Friday", "after the meeting but before Friday", false],
+    ["from now until Friday", "from now until Friday", false],
+    ["Friday", "if it doesn't ship before Friday, we lose the slot", false],
+    ["until Friday", "this can't slip; nothing ships until Friday", true],
+    ["Friday", "it won't be ready before Friday", true],
+    ["Friday", "Not urgent but before Friday please", false],
+    ["the 15th", "If it's not paid before the 15th, there's a late fee", false],
+    ["before the 15th", "If it's not paid before the 15th, there's a late fee", false],
+    ["before Friday", "Not urgent but before Friday please: return library books", false],
+    ["before Friday", "do not forget before Friday: the rent", false],
+    ["until Friday", "Do not wait until Friday to pay rent", false],
+    ["before Friday", "it can't happen before Friday; or pay before Friday", false],
+    ["Monday", "doesn't open until Monday", true],
+    ["until Monday", "Don't start until Monday", true],
+    ["Monday", "isn't ready until Monday", true],
+    ["Monday", "starting Monday", true],
+    ["the 12th", "from the 12th onwards", true],
+    ["Monday", "Monday earliest", true],
+    ["Friday", "Friday at earliest", true],
+    ["Friday", "only after Friday", true],
+    ["Friday", "Friday at the soonest", true],
+  ];
+  const flooredWrong = flooredCases.filter(([p, t, want]) => flooredIn(p, t) !== want).map(([p, t]) => `${p} in ${t.slice(0, 40)}`);
+  assert(flooredWrong.length === 0, `a floor is read in its own construction — a negated start ("can't happen before", "doesn't open until"), a bare "not until", "no sooner than", "starting" or "after" before it, "at the earliest" or "onwards" after it — and a negated deadline stands ("isn't due until", "not later than", "can't wait past", "start by", "a week from", "if it can't happen before …") (wrong: ${flooredWrong.join("; ")})`);
+  const flooredRead = readAnswer({ level: "high", level_phrase: "urgent", due_phrase: "before 11-03", due_date: "2026-11-03" }, "urgent: the cut, which can't happen before 11-03", TUE);
+  const notLater = readAnswer({ level: "urgent", level_phrase: "Urgent", due_phrase: "15 November", due_date: "2026-11-15" }, "Urgent: tax payment due not later than 15 November", TUE);
+  assert(flooredRead.due?.floored === true && flooredRead.level?.value === 3 && notLater.due?.day === "2026-11-15" && notLater.due.floored === undefined,
+    "readAnswer marks a floor's due day and leaves the level beside it; a \"not later than\" deadline is unmarked");
+  // SMD-4226, the maintainer's choice after review pass 3: a floor is dropped for an agent-kind writer alone, and a writer
+  // of no kind (null: never classified, an importer, an unread stamp) keeps both marks' halves.
+  assert(forWriter(flooredRead, "agent")?.due === null && forWriter(flooredRead, "agent")?.level?.value === 3
+      && JSON.stringify(forWriter(flooredRead, "operator")?.due) === JSON.stringify({ day: "2026-11-03", phrase: "before 11-03", by: "model" })
+      && forWriter(flooredRead, null)?.due?.day === "2026-11-03" && forWriter(flooredRead, "ingested")?.due?.day === "2026-11-03"
+      && forWriter(citedRead, null)?.level?.value === 2 && forWriter(citedRead, "ingested")?.level?.value === 2,
+    "forWriter drops a floored due day for an agent-kind writer and keeps the level beside it; an operator, an importer or a writer of no kind keeps both, unmarked");
+  assert(INFER_PROMPT_VERSION === 2 && INFER_PROMPT.includes("carries its own priority field") && INFER_PROMPT.includes("Not a level:") && INFER_PROMPT.includes("Not a deadline:")
+      && INFER_PROMPT.includes("where one item ranks among others") && INFER_PROMPT.includes("the earliest something can happen"),
+    "the prompt is v2 (SMD-4226): a ticket's own field, what is no level, what is no deadline; a prompt edited without its version bumped shows here");
   // Review pass 2: the deadline quoted as the level (the local 7B read "I need the slides by Friday" as High).
   const slides = "Before the meeting, I need the slides by Friday.";
   const asLevel = readAnswer({ level: "high", level_phrase: "I need the slides by Friday", due_phrase: "by Friday" }, slides, TUE);
@@ -2993,10 +3195,10 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
   assert([null, "x", [1], 3].every((a) => { const r = readAnswer(a, verify, TUE); return r.level === null && r.due === null; }), "an answer that is not an object reads as nothing");
 
   const st = inferredStatement(read);
-  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === 'inferred from the text (v1): urgent from "Urgent"; due 2026-11-06 from "by Friday"',
+  assert(st?.level === 3 && st.dueAt === "2026-11-07T00:00:00.000Z" && st.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): urgent from "Urgent"; due 2026-11-06 from "by Friday"`,
     `the statement: High, due by the end of 2026-11-06 (UTC), its reason quoting both phrases (${JSON.stringify(st)})`);
   const dueOnly = inferredStatement({ level: null, due: { day: "2026-11-13", phrase: "next Friday", by: "model" } });
-  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v1): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
+  assert(dueOnly?.level === DUE_ONLY_LEVEL && DUE_ONLY_LEVEL === 2 && dueOnly.reason === `inferred from the text (v${INFER_PROMPT_VERSION}): no level read (medium, the default); due 2026-11-13 from "next Friday" (the model's date)`
       && inferredStatement({ level: { value: 1, word: "low", phrase: "no rush" }, due: null })?.dueAt === undefined
       && inferredStatement({ level: null, due: null }) === null && inferredStatement(null) === null,
     `a due phrase alone states Medium, saying so and whose date it is; a level alone no due time; nothing read, nothing stated (${JSON.stringify(dueOnly)})`);
@@ -3037,13 +3239,16 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     const b = await req.json() as { messages: { content: string }[] };
     const isInfer = b.messages[0].content === INFER_PROMPT;
     calls[isInfer ? "infer" : "tags"]++;
-    const answer = isInfer ? { level: "high", level_phrase: "matters", due_phrase: "tomorrow" } : { topics: ["t"], type: "idea" };
+    const cited = b.messages[1]?.content.includes("SMD-12 (Medium)");
+    const answer = !isInfer ? { topics: ["t"], type: "idea" } : cited ? { level: "medium", level_phrase: "Medium", due_phrase: null } : { level: "high", level_phrase: "matters", due_phrase: "tomorrow" };
     return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
   } });
   try {
     const stated: Record<string, unknown>[] = [];
     let existed = false, assertFails = false;
+    let stamp: "throws" | string | null = null, stampReads = 0;
     const stubStore = {
+      getThought: async () => { stampReads++; if (stamp === "throws") throw new Error("the row is away"); return { id: "00000000-0000-4000-8000-0000000000c1", content: "", metadata: stamp === null ? {} : { actor_kind: stamp }, created_at: null }; },
       captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000c1", existed }),
       keyAtText: async () => (existed ? { id: "00000000-0000-4000-8000-0000000000c1", clientKey: null } : null),
       assertPriority: async (o: Record<string, unknown>) => { if (assertFails) throw new Error("the store is away"); stated.push(o); return { outcome: "asserted" }; },
@@ -3077,14 +3282,41 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     try { faulted = await capture(ctxWith(true), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
     assert(faulted.ok && stated.length === 1 && errs.some((e) => /the inferred priority of thought \S+ was not stated: the store is away/.test(e)),
       `a store fault stating it is logged, and the capture stands (${errs.filter((e) => /inferred/.test(e)).join(" | ")})`);
+    // SMD-4226: a level cited for another ticket reads the row's stamp; an agent's is dropped, an operator's stands, and
+    // a stamp that can't be read leaves it standing (the maintainer's choice after review pass 3), logged.
+    assertFails = false;
+    const citedText = "Filed SMD-12 (Medium) for review";
+    const statedBefore = stated.length, readsBefore = stampReads;
+    stamp = "agent";
+    const byAgent = await capture(ctxWith(true), writer, { content: citedText } as never);
+    const afterAgent = stated.length;
+    stamp = "operator";
+    const byOperator = await capture(ctxWith(true), writer, { content: citedText } as never);
+    const operatorStated = stated.at(-1);
+    stamp = "throws";
+    const stampErrs: string[] = [];
+    console.error = (...a: unknown[]) => { stampErrs.push(a.join(" ")); };
+    let byUnread;
+    try { byUnread = await capture(ctxWith(true), writer, { content: citedText } as never); } finally { console.error = realErr; }
+    assert(byAgent.ok && afterAgent === statedBefore && byOperator.ok && stated.length === statedBefore + 2 && operatorStated?.level === 2
+        && byUnread?.ok && stated.at(-1)?.level === 2 && stampReads === readsBefore + 3 && stampErrs.some((e) => /the writer of thought \S+ was not read, so its marked halves stand: the row is away/.test(e)),
+      `a cited level: the stamp read; an agent's dropped, an operator's stated, and one whose stamp can't be read stated and logged (${afterAgent - statedBefore} | ${stated.length - statedBefore} | ${stampReads - readsBefore})`);
+    stamp = null;
+    const statedBeforeNoKind = stated.length;
+    await capture(ctxWith(true), writer, { content: citedText } as never);
+    assert(stated.length === statedBeforeNoKind + 1 && stated.at(-1)?.level === 2, "a cited level whose row carries no kind is stated: only an agent stamp drops it");
+    const readsBeforePlain = stampReads;
+    await capture(ctxWith(true), writer, { content: "this matters, due tomorrow, a plain one" } as never);
+    assert(stampReads === readsBeforePlain, "a reading with nothing marked reads no stamp");
     // The chat endpoint refusing the connection: the runtime's error the inference throws is caught by the capture,
     // which lands with the tags' outage marker and states nothing (review pass 1: no test held that catch).
     assertFails = false;
+    const statedBeforeRefused = stated.length;
     const refusedErrs: string[] = [];
     console.error = (...a: unknown[]) => { refusedErrs.push(a.join(" ")); };
     let refused;
     try { refused = await capture(ctxWith(true, closedPort), writer, { content: "this matters, due tomorrow" } as never); } finally { console.error = realErr; }
-    assert(refused.ok && stated.length === 1 && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
+    assert(refused.ok && stated.length === statedBeforeRefused && refusedErrs.some((e) => /capture: the priority was not inferred/.test(e)),
       `a chat endpoint that refuses the connection: the capture lands, nothing stated (${refusedErrs.filter((e) => /inferred/.test(e)).join(" | ")})`);
   } finally {
     chat.stop(true);
