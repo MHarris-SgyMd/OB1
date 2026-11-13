@@ -73,6 +73,7 @@ db/*.ts
 # holds this list to it.
 !db/coordinator.ts
 !db/supervise.ts
+!db/slot-relay.ts
 !db/sleep.ts
 !db/extract-entities.ts
 !db/consolidate.ts

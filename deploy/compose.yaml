@@ -1498,6 +1498,13 @@ services:
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
       OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
+      # The host's slot broker (SMD-3379 PR 3b-1, deploy/federated/): its
+      # WebSocket URL, e.g. ws://host.containers.internal:8095/v1/slots, and
+      # this brain's key to it (federated.ts key). The coordinator's alone: no
+      # pass is handed them, each asks through it. Unset, the passes keep their
+      # own shares (OB1_BACKGROUND_SLOTS), as before.
+      OB1_SLOT_BROKER_URL: ${OB1_SLOT_BROKER_URL:-}
+      OB1_SLOT_BROKER_KEY: ${OB1_SLOT_BROKER_KEY:-}
     # The server's host alias (SMD-1875): the passes dial OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias

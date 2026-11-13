@@ -1031,6 +1031,14 @@ jobs:
         working-directory: db
         run: bun test-coordinator.ts
 
+      # SMD-3379 PR 3b-1: the coordinator's slot relay end to end — the host's
+      # broker in the process, the relay, and passes started with a channel as
+      # supervise.ts starts them, each through server-portable/slots.ts's hook.
+      # No database: a call on its own share runs at once, its semaphore failing open.
+      - name: The coordinator's slot relay (no database)
+        working-directory: db
+        run: bun test-slot-relay.ts
+
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
       # to main alone, the one run that publishes them, and after a failed
       # step too, so the page shows what ran.
@@ -1957,8 +1965,10 @@ jobs:
           # SMD-3476: the planted check, in the coordinator's own container as
           # root with its confinement — each child its own user, one unable to
           # read another's /proc/<pid>/environ, which it reads with the users
-          # dropped. The suite is no file of the image's: mounted for this run alone.
-          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" coordinator db/test-coordinator.ts --require-root
+          # dropped. The suite is no file of the image's: mounted for this run alone,
+          # with the slot broker its relay row starts (SMD-3379 PR 3b-1), a file
+          # of the federated project's, self-contained.
+          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" -v "$PWD/federated/broker.ts:/app/deploy/federated/broker.ts:ro" coordinator db/test-coordinator.ts --require-root
 
       # SMD-2678, SMD-3214, SMD-3476: the coordinator with OB1_PASSES=sleep,
       # the same way. Its supervisor holds the scheduler without a worker key

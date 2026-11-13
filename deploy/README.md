@@ -391,8 +391,24 @@ free:
   never cut short, so a brain of minute-long calls has a little more (0.54
   of the time for 71 s calls beside 50 ms ones).
 
-**No brain asks it yet.** SMD-3379 PR 3b has each brain's coordinator ask it,
-and fall back to the brain's own share while it is down.
+**A brain asks it through its coordinator** (SMD-3379 PR 3b-1), with
+`OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
+coordinator holds the brain's one connection, and its passes ask through it.
+While the broker is away, a call waits a few seconds for it, then runs on the
+brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
+back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
+
+- **One coordinator per key.** A second coordinator on the same key — one run
+  by hand from a checkout with the brain's environment, say — makes the
+  broker log "two relays speak on its key at once", and each reconnect may
+  count a call twice for a moment.
+- **Where to look.** The coordinator's `slot relay:` lines say when the broker
+  answers, is lost, or refused the key (a 401, naming `OB1_SLOT_BROKER_KEY`);
+  the broker's log says each brain's connections, a socket ended for not
+  answering, and a server over its slots.
+- **What 3b-1 does not cover.** The api's calls, live and background, are not
+  yet the broker's (SMD-3379 PR 3b-2): until then only each server's
+  `reserve` keeps room for live calls.
 
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
@@ -401,7 +417,7 @@ its port is published on the host's loopback alone.
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
-bun deploy/federated/federated.ts key --brain stable    # a key, shown once (for stable's deploy/.env as OB1_SLOT_BROKER_KEY, read from 3b), and its registry line
+bun deploy/federated/federated.ts key --brain stable    # a key, shown once (stable's deploy/.env: OB1_SLOT_BROKER_KEY), and its registry line
 # deploy/federated/federation.local.yaml: the shared servers (their bases, slots, reserve), each brain's key hash
 bun --no-env-file deploy/federated/federated.ts check   # the registry, the runtime, the port; starts nothing
 bun --no-env-file deploy/federated/federated.ts up
