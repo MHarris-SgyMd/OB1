@@ -23,18 +23,24 @@
 --     the item referenced lives on as the survivor.
 --
 -- WHAT (the maintainer's choices, 2026-11-13)
---   * AN ENTITY WITH AN OPEN PRIORITY STATEMENT IS NO ORPHAN. The three
---     prunes skip it: record_thought_entities (061's body, carried),
---     rebuild_derived (067's body, carried; both of its prunes, where its
---     input thought is gone) and prune_orphan_entities (016's). It stays in
---     the graph with no mention until its statements are cleared; the next
---     prune touching it, or prune_orphan_entities, then takes it. A
---     deliberate delete still closes them as `deleted` (136): a merge, the
---     gate's refusal of a name, an operator's DELETE. The test is
+--   * AN ENTITY WITH AN OPEN PRIORITY STATEMENT IS NO ORPHAN, nor one an
+--     open statement takes its due time from (the maintainer, review pass
+--     1: pruned, the reference named a deleted id and read no due time).
+--     The three prunes skip it: record_thought_entities (061's body,
+--     carried), rebuild_derived (067's body, carried; both of its prunes,
+--     where its input thought is gone) and prune_orphan_entities (016's).
+--     It stays in the graph with no mention until those statements are
+--     cleared; the next prune touching it, or prune_orphan_entities, then
+--     takes it. A deliberate delete still closes them as `deleted` (136): a
+--     merge, the gate's refusal of a name, an operator's DELETE. So does a
+--     forgetting: rebuild_derived called with the reason 'forget' (SMD-1723's
+--     forget_thought) spares nothing, since erasing the thought's text wins
+--     (the maintainer, review pass 1). The test is
 --     ob1_entity_has_open_priority(id); a role without SELECT on
 --     priority_assertions is answered false and prunes as before, leaving
 --     the statements to 136's sweep (a query naming the table would fail
---     the role's whole extraction).
+--     the role's whole extraction). A partial index on the open statements'
+--     due references serves it and the merge's reference lookup.
 --   * ob1_priority_merge_entity(survivor, loser), shared by merge_entities
 --     and the gate's merge, does what 136's merge_entities did inline: the
 --     loser's open statements restated on the survivor, the maker's later
@@ -45,8 +51,10 @@
 --     would then name its own item (a statement on the survivor, or a
 --     loser's restated there) is dropped, as 136 drops one. Every item it
 --     touches is locked first, in the order of its pool's key (133's
---     ob1_priority_lock_key, the order the rebuild takes), and re-projected
---     after. A restatement is the newest written within its tier on its
+--     ob1_priority_lock_key, the order the rebuild takes); the references
+--     are read again under the locks, by pool, so a statement written on
+--     another row of a locked ticket's pool meanwhile is restated too
+--     (review pass 1); every item touched is re-projected after. A restatement is the newest written within its tier on its
 --     item, so it may outrank another maker's statement written there after
 --     the original: 136 kept that for the survivor (merges being an
 --     operator's step), and it holds for an item whose due reference moved.
@@ -62,13 +70,23 @@
 --   references, keeps naming the loser: the read finds no due time through
 --   it, as 136 left a reference to a deleted item. A writer stating a
 --   priority on an entity a prune is deleting at that instant writes on a
---   deleted entity, for 136's sweep. The carried bodies are verbatim but for
---   the lines marked `139`.
+--   deleted entity, for 136's sweep. A merge restates a reference on a
+--   thought a role without the close grants already deleted, or one a
+--   delete is closing at that instant (136's trigger takes no priority
+--   lock): the restatement is left open on the deleted item, for the sweep
+--   too (review pass 1, said). A merge holding the loser's row and waiting on
+--   a referencing thought's priority lock can meet a capture-scope writer
+--   there (holding that lock, waiting on the thought's row) and a forgetting
+--   or rebuild of that thought (holding its row, waiting on the loser's):
+--   Postgres aborts one of the three (review pass 1, said; delete_thought
+--   takes no entity row). The carried bodies are verbatim but for the lines
+--   marked `139`.
 --
 -- SAFETY
---   Two new functions; five replaced with their signatures and return types
---   (record_thought_entities, rebuild_derived, prune_orphan_entities,
---   merge_entities, apply_entity_type_gate). No table or grant changes. The
+--   Two new functions and one partial index; five functions replaced with
+--   their signatures and return types (record_thought_entities,
+--   rebuild_derived, prune_orphan_entities, merge_entities,
+--   apply_entity_type_gate). No table or grant changes. The
 --   prunes delete fewer rows; a merge writes rows only by restating.
 --   MINOR under FORK.md's version rules. test-schema [126],
 --   test-upgrade [20cd].
@@ -137,8 +155,19 @@ END
 $qc$;
 
 -- ---------------------------------------------------------------------------
+-- The open statements' due references, indexed
+-- ---------------------------------------------------------------------------
+-- What the spare test and a merge look up by: which open statements take
+-- their due time from an item. Few statements carry one, so the index is
+-- small.
+CREATE INDEX IF NOT EXISTS priority_assertions_open_due_ref_idx
+  ON priority_assertions (due_ref_kind, due_ref_key)
+  WHERE closed_at IS NULL AND due_ref_key IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
 -- ob1_entity_has_open_priority — the prunes' spare test
 -- ---------------------------------------------------------------------------
+-- An open statement on the entity, or one taking its due time from it.
 -- plpgsql, the table read only in the branch a role that may read it takes:
 -- a SQL function's query, or the prune's own, is checked for privilege
 -- whole at every call, and a role without SELECT on priority_assertions
@@ -154,11 +183,14 @@ BEGIN
     RETURN false;
   END IF;
   RETURN EXISTS (SELECT 1 FROM priority_assertions a
-                  WHERE a.closed_at IS NULL AND a.item_kind = 'entity' AND a.item_key = p_id::text);
+                  WHERE a.closed_at IS NULL AND a.item_kind = 'entity' AND a.item_key = p_id::text)
+      -- Review pass 1: a reference to a pruned entity read no due time.
+      OR EXISTS (SELECT 1 FROM priority_assertions a
+                  WHERE a.closed_at IS NULL AND a.due_ref_kind = 'entity' AND a.due_ref_key = p_id::text);
 END;
 $$;
 COMMENT ON FUNCTION ob1_entity_has_open_priority(uuid) IS
-  'Whether an entity has an open priority statement, which spares it from the prunes of unreferenced entities (record_thought_entities, rebuild_derived, prune_orphan_entities): an entity someone stated a priority on is no orphan. False for a role without SELECT on priority_assertions, which prunes as before; 136''s ob1_close_orphan_priorities closes what that leaves. Migration 139 / SMD-4241.';
+  'Whether an entity has an open priority statement, or is the due reference of one, which spares it from the prunes of unreferenced entities (record_thought_entities, rebuild_derived, prune_orphan_entities): an entity someone stated a priority on is no orphan. False for a role without SELECT on priority_assertions, which prunes as before; 136''s ob1_close_orphan_priorities closes what that leaves. Migration 139 / SMD-4241.';
 
 -- ---------------------------------------------------------------------------
 -- prune_orphan_entities — 016's, an entity with an open statement spared
@@ -190,7 +222,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION prune_orphan_entities() IS
-  'Delete entities with no mention and no edge — what a deleted thought leaves behind. Returns the count. Since 139 an entity with an open priority statement is spared (ob1_entity_has_open_priority). Migration 016; migration 139 / SMD-4241.';
+  'Delete entities with no mention and no edge — what a deleted thought leaves behind. Returns the count. Since 139 an entity with an open priority statement, or one an open statement takes its due time from, is spared (ob1_entity_has_open_priority). Migration 016; migration 139 / SMD-4241.';
 
 
 -- ---------------------------------------------------------------------------
@@ -491,7 +523,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb) IS
-  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule and 056''s name gate. An extraction''s entities are written under entity_type_gate()''s type: a number or a type-vocabulary word is refused (not written, and a relation naming it dropped and counted), an identifier-shaped person or place retyped to project or tool; a structured pass is not gated. An extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Since 061 the pass''s lineage row is written with its rows in `derivations` (artifact_kind entities, the thought''s id, produced_by the key): the input''s fingerprint as checked, p_recipe (the model, prompt version and hash, the windows — or the key alone, marked undeclared, when NULL), replaced under the pass''s own rule; no rows standing under the key, no lineage row. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities, refused_entities, retyped_entities}. Migrations 016, 053, 056, 061 / SMD-947, SMD-1867, SMD-1935, SMD-1731. Since 139 an entity with an open priority statement is not pruned (ob1_entity_has_open_priority). Migration 139 / SMD-4241.';
+  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule and 056''s name gate. An extraction''s entities are written under entity_type_gate()''s type: a number or a type-vocabulary word is refused (not written, and a relation naming it dropped and counted), an identifier-shaped person or place retyped to project or tool; a structured pass is not gated. An extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Since 061 the pass''s lineage row is written with its rows in `derivations` (artifact_kind entities, the thought''s id, produced_by the key): the input''s fingerprint as checked, p_recipe (the model, prompt version and hash, the windows — or the key alone, marked undeclared, when NULL), replaced under the pass''s own rule; no rows standing under the key, no lineage row. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities, refused_entities, retyped_entities}. Migrations 016, 053, 056, 061 / SMD-947, SMD-1867, SMD-1935, SMD-1731. Since 139 an entity with an open priority statement, or one an open statement takes its due time from, is not pruned (ob1_entity_has_open_priority). Migration 139 / SMD-4241.';
 
 
 -- ---------------------------------------------------------------------------
@@ -695,8 +727,9 @@ BEGIN
                WHERE e.id = ANY(v_touched)
                  AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = e.id)
                  AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id OR g.to_entity_id = e.id)
-                 -- 139: an entity with an open priority statement is no orphan.
-                 AND NOT ob1_entity_has_open_priority(e.id);
+                 -- 139: an entity with an open priority statement is no orphan, but a
+                 -- forgetting takes it: erasing the text wins.
+                 AND (p_reason = 'forget' OR NOT ob1_entity_has_open_priority(e.id));
             END IF;
             v_graph_done := true;
           END IF;
@@ -929,8 +962,9 @@ BEGIN
        WHERE e.id = ANY(v_touched)
          AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = e.id)
          AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id OR g.to_entity_id = e.id)
-         -- 139: an entity with an open priority statement is no orphan.
-         AND NOT ob1_entity_has_open_priority(e.id);
+         -- 139: an entity with an open priority statement is no orphan, but a
+         -- forgetting takes it: erasing the text wins.
+         AND (p_reason = 'forget' OR NOT ob1_entity_has_open_priority(e.id));
     END IF;
     v_graph_done := true;
   END IF;
@@ -959,7 +993,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067 / SMD-1732, SMD-2297. Since 139 an entity with an open priority statement is not pruned (ob1_entity_has_open_priority). Migration 139 / SMD-4241.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067 / SMD-1732, SMD-2297. Since 139 an entity with an open priority statement, or one an open statement takes its due time from, is not pruned (ob1_entity_has_open_priority). A forgetting (the reason ''forget'') spares none. Migration 139 / SMD-4241.';
 
 -- ---------------------------------------------------------------------------
 -- ob1_priority_merge_entity — a merge's priority statements, moved
@@ -980,6 +1014,7 @@ DECLARE
   v_repointed uuid[] := '{}';
   v_kinds text[];
   v_keys  text[];
+  v_pools text[];
   v_now timestamptz;
   v_id uuid;
   v_maker uuid;
@@ -1019,14 +1054,16 @@ BEGIN
   FOR i IN 1 .. cardinality(v_kinds) LOOP
     PERFORM ob1_priority_lock(v_kinds[i], v_keys[i]);
   END LOOP;
+  v_pools := ARRAY(SELECT DISTINCT ob1_priority_lock_key(k, y) FROM unnest(v_kinds, v_keys) AS u(k, y));
   v_now := clock_timestamp();
 
-  -- The due references naming the loser, on the items locked, in the order
-  -- written (139). None is on the loser: 116's CHECK refuses a reference to
+  -- The due references naming the loser, on the pools locked, in the order
+  -- written (139): by pool, not by the items read, so one written meanwhile
+  -- on another row of a locked ticket's pool is restated too (review pass 1). None is on the loser: 116's CHECK refuses a reference to
   -- the item itself, as it would the survivor's restated, which is dropped.
   FOR v_ref IN SELECT x.* FROM priority_assertions x
                 WHERE x.closed_at IS NULL AND x.due_ref_kind = 'entity' AND x.due_ref_key = p_loser::text
-                  AND (x.item_kind, x.item_key) IN (SELECT * FROM unnest(v_kinds, v_keys))
+                  AND ob1_priority_lock_key(x.item_kind, x.item_key) = ANY(v_pools)
                 ORDER BY x.seq LOOP
     v_id := gen_random_uuid();
     UPDATE priority_assertions SET closed_at = v_now, close_reason = 'replaced', closed_by = v_id
@@ -1096,9 +1133,14 @@ BEGIN
   -- just restated.
   moved := (SELECT count(*)::int FROM priority_assertions WHERE id = ANY(v_restated) AND closed_at IS NULL);
   refs_moved := (SELECT count(*)::int FROM priority_assertions WHERE id = ANY(v_repointed) AND closed_at IS NULL);
+  -- Every item locked, and any other row of a locked pool a reference was
+  -- restated on.
   FOR i IN 1 .. cardinality(v_kinds) LOOP
     PERFORM ob1_priority_project(v_kinds[i], v_keys[i]);
   END LOOP;
+  PERFORM ob1_priority_project(a.item_kind, a.item_key)
+     FROM (SELECT DISTINCT item_kind, item_key FROM priority_assertions WHERE id = ANY(v_repointed)) a
+    WHERE NOT (a.item_kind, a.item_key) IN (SELECT * FROM unnest(v_kinds, v_keys));
   RETURN NEXT;
 END;
 $$;

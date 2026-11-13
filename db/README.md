@@ -2510,17 +2510,20 @@ re-extraction naming the same entity keeps its id, but extraction prunes an enti
 nothing mentions any more (the thought's next extraction drops the name, or its
 thought is deleted), and 136's trigger then closed its statements as `deleted`. The
 three prunes (`record_thought_entities`, `rebuild_derived` with its input gone, and
-`prune_orphan_entities`) now spare an entity with an open statement
-(`ob1_entity_has_open_priority`): it stays in the graph without mentions until its
-statements are cleared, and a later capture of the name writes onto it. A
-deliberate delete still closes them as `deleted`: a merge, the gate's refusal of a
-name, an operator's DELETE. A role without SELECT on `priority_assertions` prunes
+`prune_orphan_entities`) now spare an entity with an open statement, or one an
+open statement takes its due time from (`ob1_entity_has_open_priority`, served by a
+new partial index on the open statements' due references): it stays in the graph
+without mentions until those statements are cleared, and a later capture of the
+name writes onto it. A deliberate delete still closes them as `deleted`: a merge,
+the gate's refusal of a name, an operator's DELETE, and a forgetting
+(`rebuild_derived` with the reason `forget`, SMD-1723's, spares nothing). A role without SELECT on `priority_assertions` prunes
 as before, for 136's sweep. `ob1_priority_merge_entity`, shared by `merge_entities`
 and `apply_entity_type_gate`'s retype merge, moves the loser's statements as 136's
 `merge_entities` did, and restates each open statement whose due reference names
 the loser to name the survivor (the same maker, level, reason, tier and
 `asserted_at`; a reference that would name its own item dropped), locking every
-item it touches in its pool key's order (the maintainer's choices, 2026-11-13).
+item it touches in its pool key's order and reading the references again by pool
+under those locks (the maintainer's choices, 2026-11-13).
 `merge_entities` answers `priority_refs_moved` too; the gate answers
 `priorities_moved` and `priority_refs_moved`. Like 136's restatement, one on another
 item is the newest within its tier there, and may outrank another maker's written

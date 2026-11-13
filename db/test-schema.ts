@@ -20611,7 +20611,7 @@ console.log("\n[125] Migration 138: a priority write names every statement it cl
     `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
-console.log("\n[126] Migration 139: an entity's priority statements follow it â€” the prunes (record_thought_entities, rebuild_derived's two, prune_orphan_entities) spare an entity with an open statement, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE still closes it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references; the shape; a re-apply a no-op (SMD-4241)");
+console.log("\n[126] Migration 139: an entity's priority statements follow it â€” the prunes (record_thought_entities, rebuild_derived's two, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references; the shape; a re-apply a no-op (SMD-4241)");
 {
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; reason: string | null; due_ref: { kind: string; key: string } | null; asserted_at: string;
     maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
@@ -20657,6 +20657,9 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   assert(JSON.stringify(named) === JSON.stringify(["apply_entity_type_gate", "merge_entities", "ob1_entity_has_open_priority", "ob1_priority_merge_entity",
                                                    "prune_orphan_entities", "rebuild_derived", "record_thought_entities"]),
     `seven functions name 139: two new, five carried (${named.join(", ")})`);
+  const dueIdx = (await db.query<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'priority_assertions_open_due_ref_idx'`)).rows[0]?.d ?? "";
+  assert(/\(due_ref_kind, due_ref_key\) WHERE \(\(closed_at IS NULL\) AND \(due_ref_key IS NOT NULL\)\)/.test(dueIdx),
+    `a partial index on the open statements' due references serves the spare test and the merge (${dueIdx})`);
 
   // The ticket's Verify: an entity with a statement, re-extracted under the same name, keeps its id and its statement.
   const t1 = await thought("[126] Atlas and Borealis ship on Friday");
@@ -20715,6 +20718,31 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   await clear("entity", wKept, OP); await clear("entity", fKept, OP);
   await db.query(`SELECT prune_orphan_entities()`);
   assert(!(await exists(wKept)) && !(await exists(fKept)), `cleared, the spared entities go with the next prune_orphan_entities`);
+
+  // An entity with no statement of its own that another item's open statement takes its due time from is spared too
+  // (review pass 1: pruned, the reference named a deleted id and read no due time); once that statement is cleared, the
+  // next prune takes it.
+  const tE = await thought("[126] Keel is named here");
+  await rte(tE, [E("[126] Keel")]);
+  const keel = (await idOf("tool", "[126] Keel"))!;
+  const dueOnKeel = await thought("[126] due when Keel is");
+  await put("thought", dueOnKeel, 3, OP, { ref: ["entity", keel] });
+  const keelPrune = await rte(tE, []);
+  const keelSpared = await exists(keel);
+  await clear("thought", dueOnKeel, OP);
+  await db.query(`SELECT prune_orphan_entities()`);
+  assert(keelPrune.pruned_entities === 0 && keelSpared && !(await exists(keel)),
+    `an entity an open statement takes its due time from is spared, and pruned once that statement is cleared (${JSON.stringify(keelPrune)})`);
+
+  // A forgetting spares nothing (the maintainer, review pass 1: erasing the thought's text wins): rebuild_derived with the
+  // reason 'forget' prunes the entity only that thought named, statement and all, and 136's trigger closes it as deleted.
+  const forgotten = await thought("[126] Rudder, a name to forget");
+  await rte(forgotten, [E("[126] Rudder")]);
+  const rudder = (await idOf("tool", "[126] Rudder"))!;
+  const onRudder = await put("entity", rudder, 4, OP);
+  await db.query(`SELECT rebuild_derived($1::uuid, 'forget', true, NULL, false, false)`, [forgotten]);
+  assert(!(await exists(rudder)) && (await row(onRudder.id)).close_reason === "deleted" && await drift() === 0,
+    `rebuild_derived forgetting a thought prunes the entity only it named though it has a statement, closed as deleted`);
 
   // A role without SELECT on the assertions prunes as before (no 42501 from the spare test): the entity goes, its statement
   // left open, and 136's sweep closes it.

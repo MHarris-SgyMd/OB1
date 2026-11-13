@@ -6561,7 +6561,7 @@ console.log("\n[20cc] Migration 138: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 136's ob1_priority_can_close, nothing made; then applied: an extraction's prune spares an entity with an open statement (at 138 the same prune closed one as deleted); a merge waits on the lock of an item whose due reference names the loser while another session writes there, then restates both statements to name the survivor; a re-apply a no-op (SMD-4241)");
+console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 136's ob1_priority_can_close, nothing made; then applied: an extraction's prune spares an entity with an open statement (at 138 the same prune closed one as deleted); a merge waits on the lock of an item whose due reference names the loser while another session writes there, then restates both statements to name the survivor, and on a ticket's pool restates one written on its other row; a re-apply a no-op (SMD-4241)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_entity_priorities_follow\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6638,6 +6638,45 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   assert(answer.ok === true && answer.priority_refs_moved === 2 && await reasonOf(onDue) === "replaced" && await reasonOf(botId) === "replaced"
          && openOnDue.length === 2 && openOnDue.every((r) => r.due_ref_key === S),
     `a merge waits on the lock of an item whose due reference names the loser, then restates both statements there, the one written under the lock too, to name the survivor (${JSON.stringify(answer)})`);
+
+  // The same race on a ticket's pool (review pass 1): one row of the ticket holds a statement naming the loser, so the
+  // merge locks the pool; another session, holding that pool's lock, writes a statement naming the loser on the ticket's
+  // other row, which the merge's first read never saw. Read again by pool under the lock, it is restated too.
+  const ticketRow = async (issue: string, n: number) => {
+    const content = `upgrade 139: ${issue} row ${n}`;
+    const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })}::text)::jsonb) RETURNING id`)[0].id);
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    return id;
+  };
+  const S2 = String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Upgrade Survivor two', 'upgrade survivor two') RETURNING id`)[0].id);
+  const L2 = String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Upgrade Loser two', 'upgrade loser two') RETURNING id`)[0].id);
+  const row1 = await ticketRow("SMD-9995", 1);
+  await put("thought", row1, 3, OP, L2);
+  const row2 = await ticketRow("SMD-9995", 2);
+  const pools = (await sql`SELECT ob1_priority_lock_key('thought', ${row1}) AS a, ob1_priority_lock_key('thought', ${row2}) AS b`)[0] as { a: string; b: string };
+  const other2 = new SQL({ url: URL_, max: 1 });
+  let merged2: Promise<{ priority_refs_moved?: number; ok?: boolean; raised?: string }> = Promise.resolve({ raised: "never ran" });
+  try {
+    await other2.begin(async (tx) => {
+      await tx`SELECT assert_priority('thought', ${row2}, 2, NULL, NULL, 'entity', ${L2}, NULL, false, (${BOT}::text)::jsonb)`;
+      merged2 = sql`SELECT merge_entities(${S2}::uuid, ${L2}::uuid) AS r`.then((r) => (r[0] as { r: { priority_refs_moved: number; ok: boolean } }).r,
+        (e: Error) => ({ raised: e.message.split("\n")[0] }));
+      let waiting = false;
+      for (let i = 0; i < 200 && !waiting; i++) {
+        waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${mergePid} AND locktype = 'advisory'`)[0].n) > 0;
+        if (!waiting) await Bun.sleep(50);
+      }
+      if (!waiting) throw new Error("[20cd] the merge never waited on the ticket pool's priority lock within 10 s");
+    });
+  } finally {
+    await other2.close();
+  }
+  const answer2 = await merged2;
+  const onRow2 = (await sql`SELECT due_ref_key FROM priority_assertions WHERE item_kind = 'thought' AND item_key = ${row2} AND closed_at IS NULL`) as { due_ref_key: string }[];
+  const row2Current = (await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n as number;
+  assert(pools.a === "ticket:SMD-9995" && pools.b === pools.a && answer2.ok === true && answer2.priority_refs_moved === 2
+         && onRow2.length === 1 && onRow2[0].due_ref_key === S2 && row2Current === 0,
+    `a statement written on another row of a locked ticket's pool while the merge waits is restated too, read again by pool, and its item re-projected (${pools.a}; ${JSON.stringify(answer2)})`);
 
   // A re-apply is a no-op: the prune still spares the entity.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
