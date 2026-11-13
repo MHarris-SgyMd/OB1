@@ -247,10 +247,18 @@ BEGIN
   -- lock waited on rechecks closed_at and drops what the delete closed; once
   -- held, nothing else closes them. So the `unchanged` test reads what is
   -- open, `closed` is exactly these, and `replaced` (the newest) is among
-  -- them. 133 locked the newest it had read alone.
+  -- them. 133 locked the newest it had read alone. Locked in the items'
+  -- order, as 136's trigger closes a delete's (review pass 4): a set and a
+  -- delete of one key's statements on two rows of one ticket, in one
+  -- transaction, could otherwise each hold one the other waits on. A
+  -- transaction deleting those rows in the other order can still meet a set
+  -- that way, and Postgres then ends one of them (a deadlock, 40P01): a
+  -- ticket with two rows deleted together is rare, and 136 left a delete
+  -- unlocked by the priority lock on purpose.
   SELECT COALESCE(array_agg(l.id ORDER BY l.seq DESC), '{}') INTO v_closed
     FROM (SELECT a.id, a.seq FROM priority_assertions a
            WHERE a.id = ANY(v_own) AND a.closed_at IS NULL
+           ORDER BY a.item_kind, a.item_key, a.id
              FOR UPDATE) l;
   SELECT * INTO v_old FROM priority_assertions a WHERE a.id = v_closed[1];
 

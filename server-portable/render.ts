@@ -2372,9 +2372,9 @@ const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean 
   : ` The item's winner is ${statementText(v.winner)}${onOther(v.winner, asked)}.`;
 /**
  * The statements a write closed, newest first: each its level, where it stood if not on the item named (a ticket and
- * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238). Two or more are
- * set between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read as one
- * more item).
+ * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238). Its callers set
+ * two or more between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read
+ * as one more item).
  */
 const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
   closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");

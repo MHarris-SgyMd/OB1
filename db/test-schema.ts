@@ -20489,6 +20489,13 @@ console.log("\n[124] Migration 137: a priority write names every statement it cl
   const roSet = await put("ticket", "smd-9991", 2, READER);
   const roClear = await clear("ticket", "smd-9991", READER);
   const missing = await put("ticket", "SMD-9993", 2, OP);
+  // Every other refusal site too (review pass 4): a capture key on a ticket (ITEM_NOT_YOURS), and a due reference to
+  // a thought the brain does not hold (ITEM_NOT_FOUND after the item's own check).
+  const notYours = await put("ticket", "SMD-9991", 2, { name: "[124] op", scope: "capture" });
+  const noRef = (await db.query<{ r: Answer }>(`SELECT assert_priority('ticket', 'SMD-9991', 2, NULL, NULL, 'thought', '11111111-2222-4333-8444-555555555124', NULL, false, $1::jsonb) AS r`,
+    [JSON.stringify(OP)])).rows[0].r;
+  assert(notYours.code === "ITEM_NOT_YOURS" && noRef.code === "ITEM_NOT_FOUND" && [notYours, noRef].every((a) => JSON.stringify(a.closed) === "[]" && named(a, "ticket", "SMD-9991")),
+    `a capture key's refusal and a missing due reference's name the item and close none (${notYours.code}, ${noRef.code})`);
   assert(roSet.code === "READ_ONLY_KEY" && roClear.code === "READ_ONLY_KEY" && missing.code === "ITEM_NOT_FOUND"
          && [roSet, roClear, missing].every((a) => JSON.stringify(a.closed) === "[]")
          && named(roSet, "ticket", "SMD-9991") && named(roClear, "ticket", "SMD-9991")
