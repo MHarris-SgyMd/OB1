@@ -292,6 +292,12 @@ jobs:
       # secrets is the maintainer's, on the brain host.
       - name: The agent runner's identity setup
         run: bun scripts/agent-runner/setup.ts --self-check
+      # SMD-4087 cut 2c-3: the real-deps executor's offline logic — the Verify and
+      # named-id parsers, the brief-ticket builder on a stub Linear client, the
+      # bare-repo provisioning, the commitlint parser, and the session-path layout
+      # (record and config in subdirs so pathsProblem passes). No session, no model, no spend.
+      - name: The agent runner's executor
+        run: bun scripts/agent-runner/live-run.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.
