@@ -14,11 +14,16 @@
  *
  *   thoughts, ob1_entities, thought_entities, ob1_entity_edges   always (migrations 001 and 016)
  *   entities, edges                                               when present (schemas/entity-extraction)
- *   ingestion_jobs, ingestion_items                               when present (the retired smart-ingest schema)
+ *   ingestion_jobs, ingestion_items                               when present (the retired smart-ingest schema's, in public)
  *
- * A core table missing is a brain not migrated, and the run refuses. The
- * recipe read `entities` and `edges` in place of 016's tables, which it did
- * not know; it skipped any table that was not there.
+ * A core table missing is a brain not migrated, and the run refuses. A
+ * companion is exported only when a table of its name is there with the key
+ * its schema gives it; anything else of that name — a view, a sequence,
+ * another tool's table — is named and passed over. The smart-ingest plugin's
+ * tables (schema plugin_smart_ingest) are a plugin's, not exported. The recipe
+ * read `entities` and `edges` in place of `ob1_entities` and
+ * `ob1_entity_edges`, which it did not know; it skipped any table that was not
+ * there.
  *
  * ── What a run guarantees ───────────────────────────────────────────────────
  * The database the URL names. The run refuses (exit 2) when the connection
@@ -44,14 +49,19 @@
  * same snapshot; a difference fails the run.
  *
  * Nothing in place until the reads are done. Each table is written to a file
- * of this run's own (`<file>.<pid>.tmp`, created new: an existing path there,
- * a symlink included, fails the run rather than being written through), and
- * renamed into place only once every table is written and counted. A run that
- * fails before that point leaves the directory as it found it — an earlier
- * backup of the same date included, and the directory itself removed if the
- * run made it — and exits 1 naming the table and the database's reason. A
- * rename that fails after it is said, naming the files already replaced; the
- * rest of the run's files are removed. SIGINT and SIGTERM remove them too.
+ * of this run's own (`<file>.<run id>.tmp`, the id the pid and a random part,
+ * created new: an existing path there, a symlink included, fails the run
+ * rather than being written through), and renamed into place only once every
+ * table is written and counted. A run that fails before that point renames
+ * nothing and removes its own files, so an earlier backup of the same date
+ * stands; it exits 1 with the reason (the table it was reading, when it was
+ * reading one). The directory is made, when absent, only once the connection
+ * is up, and is left made. A rename that fails after that point is said,
+ * naming the files already replaced; the rest of the run's files are removed.
+ * SIGINT, SIGTERM and SIGHUP remove them too (exit 130, 143, 129); a run
+ * killed outright (SIGKILL, the OOM killer) leaves them, each a whole table, to
+ * be removed by hand. A signal that lands after the renames exits with its
+ * code over a backup in place.
  *
  * ── What it is not ──────────────────────────────────────────────────────────
  * Not the whole brain: thought_audit, the sources, facets, claims, relations,
@@ -62,11 +72,14 @@
  * statement_timeout is 60 s a statement by default (--statement-timeout; the
  * recipe's FETCH_TIMEOUT_MS was its per-page bound): a page past it fails the
  * run, and the server cancels the query. The count(*)s run unbounded — on a
- * large brain a count is longer than a page. A page is held in memory whole:
- * 1,000 rows, so about a gigabyte for 1 MB thoughts.
+ * large brain a count is longer than a page — and client_connection_check_interval
+ * (10 s, set where the server's platform has it) has the server cancel a statement whose client has gone, so a stopped
+ * run's count does not hold its snapshot to the end. A page is held in memory
+ * whole: 1,000 rows, so about a gigabyte for 1 MB thoughts.
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { SQL } from "bun";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
@@ -115,17 +128,45 @@ export interface BackupOptions {
   afterTable?: (t: TableResult) => Promise<void>;
 }
 
-/** One table's outcome: written (rows, bytes, the page queries it took), or not on this brain. */
+/** One table's outcome: written (rows, bytes, the page queries it took), or a companion not exported and why. */
 export interface TableResult {
   table: string;
   rows: number;
   bytes: number;
   pages: number;
   file: string;
-  absent?: true;
+  /** A companion passed over: "absent", or what stands under its name instead. */
+  skipped?: string;
 }
 
-/** This process's files not yet renamed into place: removed on a failed run and on SIGINT/SIGTERM. */
+/**
+ * Why a companion `t` is not exported, or null when it is: absent, or a
+ * relation of its name that is not a table with exactly `t.key` as its
+ * primary key. Resolved as the page query's unqualified name is.
+ */
+export async function companionProblem(tx: SQL, t: BackupTable): Promise<string | null> {
+  const [row] = (await tx.unsafe(
+    `SELECT c.relkind::text AS kind, n.nspname AS schema,
+            (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_index i
+               CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+              WHERE i.indrelid = c.oid AND i.indisprimary) AS pk
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.oid = to_regclass($1)`, [t.name])) as { kind: string; schema: string; pk: string[] | null }[];
+  if (!row) return "absent";
+  const kinds: Record<string, string> = { v: "a view", m: "a materialized view", S: "a sequence", i: "an index", f: "a foreign table", c: "a composite type" };
+  if (row.kind !== "r" && row.kind !== "p") return `${kinds[row.kind] ?? `a relation of kind ${row.kind}`} (${row.schema}.${t.name})`;
+  if ((row.pk ?? []).join(",") !== t.key.join(",")) return `a table of another shape (${row.schema}.${t.name}, primary key ${row.pk ? `(${row.pk.join(", ")})` : "none"}, not (${t.key.join(", ")}))`;
+  return null;
+}
+
+/** This run's part of its files' names: the pid alone repeats (pid 1 in every container), so a random part beside it. */
+export const RUN_ID = `${process.pid}.${randomBytes(4).toString("hex")}`;
+
+/** The client_connection_check_interval a run sets on its session first, where the server's platform has it. */
+export const CONNECTION_CHECK = "10s";
+
+/** This process's files not yet renamed into place: removed on a failed run and on SIGINT, SIGTERM and SIGHUP. */
 export const pendingFiles = new Set<string>();
 
 /** Remove every pending file; what cannot be removed is left. */
@@ -204,8 +245,10 @@ export async function run(opts: BackupOptions): Promise<number> {
   const timeout = opts.statementTimeoutS ?? STATEMENT_TIMEOUT_S;
   const out = resolve(opts.out);
   const results: TableResult[] = [];
-  let made = false;
   try {
+    // A server whose platform cannot watch the socket refuses the setting (and would refuse it in a startup packet,
+    // the connection with it): set here, best effort, before the snapshot. The one connection a CLI run holds keeps it.
+    await opts.sql.unsafe(`SET client_connection_check_interval = '${CONNECTION_CHECK}'`).catch(() => {});
     await opts.sql.begin("ISOLATION LEVEL REPEATABLE READ READ ONLY", async (txn) => {
       const tx = txn as unknown as SQL;
       const [{ db }] = (await tx.unsafe("SELECT pg_catalog.current_database() AS db")) as { db: string }[];
@@ -213,23 +256,20 @@ export async function run(opts: BackupOptions): Promise<number> {
         const refusal = await reachedDatabaseRefusal(tx, opts.url);
         if (refusal !== null) throw Object.assign(new Error(refusal), { refused: true });
       }
-      if (!existsSync(out)) {
-        mkdirSync(out, { recursive: true, mode: 0o700 });
-        made = true;
-      }
+      if (!existsSync(out)) mkdirSync(out, { recursive: true, mode: 0o700 });
       w.out(`Brain backup — ${date}, database ${db}, to ${out}`);
       for (const t of BACKUP_TABLES) {
         const file = join(out, `${t.name}-${date}.json`);
         try {
           if (t.optional) {
-            const [{ here }] = (await tx.unsafe("SELECT to_regclass($1) IS NOT NULL AS here", [t.name])) as { here: boolean }[];
-            if (!here) {
-              results.push({ table: t.name, rows: 0, bytes: 0, pages: 0, file, absent: true });
-              w.out(`  ${t.name}: not on this brain`);
+            const problem = await companionProblem(tx, t);
+            if (problem !== null) {
+              results.push({ table: t.name, rows: 0, bytes: 0, pages: 0, file, skipped: problem });
+              w.out(`  ${t.name}: ${problem === "absent" ? "not on this brain" : `not exported — ${problem} stands under the name`}`);
               continue;
             }
           }
-          const tmp = `${file}.${process.pid}.tmp`;
+          const tmp = `${file}.${RUN_ID}.tmp`;
           const { rows, pages } = await writeTable(tx, t, tmp, pageSize);
           // The count reads the whole table: unbounded, then the page bound back.
           await tx.unsafe("SET LOCAL statement_timeout = 0");
@@ -247,18 +287,17 @@ export async function run(opts: BackupOptions): Promise<number> {
     });
   } catch (e) {
     removePending();
-    if (made && readdirSync(out).length === 0) rmdirSync(out);
     if ((e as { refused?: boolean }).refused) {
       w.err(`backup refused — ${(e as Error).message}.`);
       return 2;
     }
-    w.err(`backup FAILED — ${reasonOf(e)}. Nothing was written: ${made ? `${out}, which this run made, is removed` : `${out} is as it was`}.`);
+    w.err(`backup FAILED — ${reasonOf(e)}. No file was renamed into place, and this run's own files are removed.`);
     return 1;
   }
-  const written = results.filter((r) => !r.absent);
+  const written = results.filter((r) => r.skipped === undefined);
   const replaced: string[] = [];
   for (const r of written) {
-    const tmp = `${r.file}.${process.pid}.tmp`;
+    const tmp = `${r.file}.${RUN_ID}.tmp`;
     try {
       renameSync(tmp, r.file);
       pendingFiles.delete(tmp);
@@ -274,8 +313,9 @@ export async function run(opts: BackupOptions): Promise<number> {
   w.out(`${"Table".padEnd(width)}${"Rows".padStart(10)}${"Size".padStart(11)}`);
   for (const r of written) w.out(`${r.table.padEnd(width)}${String(r.rows).padStart(10)}${humanSize(r.bytes).padStart(11)}`);
   w.out(`${"Total".padEnd(width)}${String(written.reduce((s, r) => s + r.rows, 0)).padStart(10)}${humanSize(written.reduce((s, r) => s + r.bytes, 0)).padStart(11)}`);
-  const absent = results.filter((r) => r.absent).map((r) => r.table);
-  w.out(`Done: ${written.length} table(s) from one snapshot, in ${out}.${absent.length ? ` Not on this brain: ${absent.join(", ")}.` : ""}`);
+  const absent = results.filter((r) => r.skipped === "absent").map((r) => r.table);
+  const passed = results.filter((r) => r.skipped !== undefined && r.skipped !== "absent").map((r) => r.table);
+  w.out(`Done: ${written.length} table(s) from one snapshot, in ${out}.${absent.length ? ` Not on this brain: ${absent.join(", ")}.` : ""}${passed.length ? ` Passed over, another relation under the name: ${passed.join(", ")}.` : ""}`);
   return 0;
 }
 
@@ -291,7 +331,7 @@ if (import.meta.main) {
   const timeout = cli.int("statement-timeout", { absent: STATEMENT_TIMEOUT_S, min: 0, max: 2147483 });
   const out = cli.value("out") ?? "backup";
   // A stop mid-run takes this run's unfinished files with it.
-  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
     process.on(sig, () => {
       removePending();
       process.exit(code);

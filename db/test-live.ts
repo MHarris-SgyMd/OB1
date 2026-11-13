@@ -32346,7 +32346,7 @@ if (want("49")) {
 }
 
 if (want("50")) {
-  console.log("\n[50] db/backup.ts on a real Postgres: the core's four tables and a companion table present, from one snapshot, every row once past a page, each read back unchanged; a table the role may not read, a planted .tmp or a failed connection writes nothing and leaves an earlier backup of the date as it was; a rename that fails says what it replaced; another database than the URL's is refused (SMD-3318)");
+  console.log("\n[50] db/backup.ts on a real Postgres: the core's four tables and a companion table present, a view under a companion's name passed over, from one snapshot, every row once past a page, each read back unchanged; a table the role may not read or a planted .tmp renames nothing, an earlier backup of the date kept; a page past --statement-timeout fails, a SIGTERM removes the run's files and its query ends on the server; a rename that fails says what it replaced; another database than the URL's is refused (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
     // The retired recipe's export (recipes/brain-backup, [26] until SMD-3318) as the db/ script: driven as deployed — `bun
@@ -32356,7 +32356,7 @@ if (want("50")) {
     // a row of the table, none twice, as many as the table has, and each reads back through jsonb_populate_record into
     // the same JSON — a timestamp's microseconds and a vector included.
     const sql = new SQL({ url: URL_, max: 2 });
-    const { run: runBackup, BACKUP_TABLES } = await import("./backup.ts");
+    const { run: runBackup, BACKUP_TABLES, RUN_ID } = await import("./backup.ts");
     const scratch = mkdtempSync(join(tmpdir(), "ob1-live-3318-"));
     const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
     const backup = (dir: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(HERE, "backup.ts"), "--out", dir, ...flags], { cwd: scratch, env: env(extra) });
@@ -32382,7 +32382,7 @@ if (want("50")) {
     const PROBE_ROLE = "ob1_live_backup_probe";
     const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
     // A companion table this run makes, and so drops; one the database already has is left alone.
-    let madeEntities = false;
+    let madeEntities = false, madeEdgesView = false, madeJobs = false;
     try {
       await sql`DELETE FROM thoughts`;
       await sql`DELETE FROM ob1_entities`;
@@ -32397,6 +32397,12 @@ if (want("50")) {
       const PRESENT = BACKUP_TABLES.filter((t) => !t.optional || t.name === "entities");
       const absent = await sql`SELECT count(*)::int AS n FROM unnest(ARRAY['edges', 'ingestion_jobs', 'ingestion_items']) t WHERE to_regclass(t) IS NOT NULL`;
       assert((absent[0] as { n: number }).n === 0, `the other companion tables are not on this database (${(absent[0] as { n: number }).n} are)`);
+      // A view under a companion's name — another tool's — is passed over, named, not read.
+      await sql`CREATE VIEW edges AS SELECT 1 AS x`;
+      madeEdgesView = true;
+      // …and so is a table of another shape under one: no `id` primary key.
+      await sql`CREATE TABLE ingestion_jobs (job text)`;
+      madeJobs = true;
       // 1,001 thoughts, one past the CLI's page; one at a microsecond with a vector. Three entities; two thoughts'
       // mentions and edges, so a page of two splits rows that share a thought.
       await sql.unsafe(`INSERT INTO thoughts (content, metadata) SELECT '[50] row ' || i, jsonb_build_object('i', i) FROM generate_series(1, 1000) i`);
@@ -32418,10 +32424,14 @@ if (want("50")) {
       const date = [...dates].find((d) => existsSync(join(cliDir, `thoughts-${d}.json`))) ?? today();
       const cliFiles = await Promise.all(PRESENT.map((t) => held(cliDir, t.name, date)));
       const listed = existsSync(cliDir) ? readdirSync(cliDir).sort().join(" ") : "no directory";
+      const password = decodeURIComponent(new URL(URL_).password);
       assert(cli.code === 0 && /^Brain backup — \d{4}-\d\d-\d\d, database [^,]+, to /m.test(cli.stdout) && /thoughts: 1001 row\(s\)/.test(cli.stdout) && /ob1_entity_edges: 12 row\(s\)/.test(cli.stdout) && /entities: 3 row\(s\)/.test(cli.stdout)
-             && /Done: 5 table\(s\) from one snapshot, in .*\. Not on this brain: edges, ingestion_jobs, ingestion_items\./.test(cli.stdout) && cliFiles.every(exact)
+             && /^  edges: not exported — a view \(public\.edges\) stands under the name$/m.test(cli.stdout)
+             && /^  ingestion_jobs: not exported — a table of another shape \(public\.ingestion_jobs, primary key none, not \(id\)\) stands under the name$/m.test(cli.stdout)
+             && /Done: 5 table\(s\) from one snapshot, in .*\. Not on this brain: ingestion_items\. Passed over, another relation under the name: edges, ingestion_jobs\./.test(cli.stdout) && cliFiles.every(exact)
+             && !cli.out.includes(URL_) && (password === "" || !cli.out.includes(`:${password}@`))
              && listed === PRESENT.map((t) => `${t.name}-${date}.json`).sort().join(" ") && modeOf(cliDir) === "700" && PRESENT.every((t) => modeOf(join(cliDir, `${t.name}-${date}.json`)) === "600"),
-        `bun db/backup.ts, DATABASE_URL alone: exit 0, the core's four files and the companion's, each the table's rows once and read back unchanged, 1,001 thoughts past the 1,000-row page, the absent companions named, the directory 0700 and the files 0600 (exit ${cli.code}: ${cliFiles.map(brief).join("; ")}; ${listed}; ${cli.stderr.split("\n")[0]})`);
+        `bun db/backup.ts, DATABASE_URL alone: exit 0, the core's four files and the companion's, each the table's rows once and read back unchanged, 1,001 thoughts past the 1,000-row page, the absent companion named, the view under edges' name and the keyless table under ingestion_jobs' passed over, the directory 0700 and the files 0600, the URL never printed (exit ${cli.code}: ${cliFiles.map(brief).join("; ")}; ${listed}; ${cli.stderr.split("\n")[0]})`);
       assert(/"created_at": "2026-01-0[12]T\d\d:\d4:05\.123456[+-]\d\d:\d\d"/.test(cliFiles[0]?.text ?? "") && cliFiles[0]?.text.includes('"n": 1.10') === true && /"embedding": "\[0\.12345679,/.test(cliFiles[0]?.text ?? ""),
         `…the rows are Postgres's JSON: the timestamp keeps its microseconds, the numeric its trailing zero, the vector its text (${/"created_at": "2026-01-02[^"]*"/.exec(cliFiles[0]?.text ?? "")?.[0] ?? "no precise row"})`);
 
@@ -32462,7 +32472,7 @@ if (want("50")) {
       if (probeUrl === URL_ || !mayCreate) {
         const why = probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE";
         skip("…a role with SELECT on thoughts alone: exit 1, nothing written", why);
-        skip("…the same refusal into a directory the run made: removed again", why);
+        skip("…the same refusal into a directory the run made: left made and empty", why);
         skip("…SELECT on the tables is enough", why);
       } else {
         await dropProbe();
@@ -32472,14 +32482,14 @@ if (want("50")) {
         const earlier = join(deniedDir, `thoughts-${date}.json`);
         writeFileSync(earlier, "[\"an earlier backup\"]\n");
         const denied = await backup(deniedDir, { DATABASE_URL: probeUrl });
-        assert(denied.code === 1 && /backup FAILED — ob1_entities: 42501 permission denied for table ob1_entities\. Nothing was written: .* is as it was/.test(denied.stderr)
+        assert(denied.code === 1 && /backup FAILED — ob1_entities: 42501 permission denied for table ob1_entities\. No file was renamed into place, and this run's own files are removed\./.test(denied.stderr)
                && existsSync(earlier) && readFileSync(earlier, "utf8") === "[\"an earlier backup\"]\n" && readdirSync(deniedDir).join(" ") === `thoughts-${date}.json`,
           `…a role with SELECT on thoughts alone: exit 1 naming 42501 on ob1_entities, no file and no .tmp left, the date's earlier thoughts file as it was (exit ${denied.code}: ${denied.stderr.split("\n")[0]}; ${readdirSync(deniedDir).join(" ")})`);
-        // Into a directory the run makes: removed again, so a failed run leaves no trace.
+        // Into a directory the run makes once connected: left made, and empty.
         const freshDir = join(scratch, "denied-fresh");
         const deniedFresh = await backup(freshDir, { DATABASE_URL: probeUrl });
-        assert(deniedFresh.code === 1 && /Nothing was written: .*denied-fresh, which this run made, is removed\./.test(deniedFresh.stderr) && !existsSync(freshDir),
-          `…the same refusal into a directory the run made: the directory removed again (exit ${deniedFresh.code}: ${deniedFresh.stderr.split("\n")[0].slice(-80)}; ${existsSync(freshDir) ? "still there" : "gone"})`);
+        assert(deniedFresh.code === 1 && existsSync(freshDir) && readdirSync(freshDir).length === 0,
+          `…the same refusal into a directory the run made: the directory left made and empty (exit ${deniedFresh.code}: ${existsSync(freshDir) ? readdirSync(freshDir).join(" ") || "empty" : "not made"})`);
         await sql.unsafe(`GRANT SELECT ON ob1_entities, thought_entities, ob1_entity_edges, entities TO ${PROBE_ROLE}`);
         const granted = await backup(deniedDir, { DATABASE_URL: probeUrl });
         const grantedFiles = await Promise.all(PRESENT.map((t) => held(deniedDir, t.name, date)));
@@ -32501,10 +32511,10 @@ if (want("50")) {
       mkdirSync(plantDir);
       const victim = join(scratch, "victim.txt");
       writeFileSync(victim, "not a backup\n");
-      symlinkSync(victim, join(plantDir, `thoughts-2026-01-04.json.${process.pid}.tmp`));
+      symlinkSync(victim, join(plantDir, `thoughts-2026-01-04.json.${RUN_ID}.tmp`));
       const plantLines: string[] = [];
       const planted2 = await runBackup({ sql, out: plantDir, date: "2026-01-04", writer: { out: () => {}, err: (l) => plantLines.push(l) } });
-      assert(planted2 === 1 && readFileSync(victim, "utf8") === "not a backup\n" && /backup FAILED — thoughts: .*EEXIST/.test(plantLines.join(" ")) && readdirSync(plantDir).join(" ") === `thoughts-2026-01-04.json.${process.pid}.tmp`,
+      assert(planted2 === 1 && readFileSync(victim, "utf8") === "not a backup\n" && /backup FAILED — thoughts: .*EEXIST/.test(plantLines.join(" ")) && readdirSync(plantDir).join(" ") === `thoughts-2026-01-04.json.${RUN_ID}.tmp`,
         `…a symlink planted at the run's own file: exit 1 naming thoughts, the target unwritten, nothing else left (exit ${planted2}: ${plantLines[0]?.slice(0, 120)}; ${readdirSync(plantDir).join(" ")})`);
 
       // A rename that fails — a directory where thought_entities' file goes — is said, naming the files it already
@@ -32516,6 +32526,56 @@ if (want("50")) {
       const leftTmp = readdirSync(renameDir).filter((f) => f.endsWith(".tmp"));
       assert(renamed === 1 && /backup FAILED renaming .*thought_entities-2026-01-05\.json into place: .*Already replaced: .*thoughts-2026-01-05\.json, .*ob1_entities-2026-01-05\.json; this run's other files are removed/.test(renameLines.join(" ")) && leftTmp.length === 0,
         `…a rename that fails: exit 1 naming the file and the two already replaced, no .tmp left (exit ${renamed}: ${renameLines[0]?.slice(0, 160)}; ${leftTmp.join(" ")})`);
+
+      // --statement-timeout bounds a page: one waiting on a lock past it fails the run with 57014. On thoughts the CLI's
+      // session bound applies; on ob1_entities the bound put back after thoughts' unbounded count does. Each lock is
+      // let go after 15 s whatever happens, so a run left unbounded ends, exit 0, and fails the row.
+      const locker = new SQL({ url: URL_, max: 1 });
+      const lockedRun = async (table: string, run: () => Promise<{ code: number; out: string; stderr: string }>) => {
+        let release = () => {};
+        const held = new Promise<void>((r) => (release = r));
+        let locked = () => {};
+        const taken = new Promise<void>((r) => (locked = r));
+        const safety = setTimeout(() => release(), 15_000);
+        const holding = locker.begin(async (tx) => { await tx.unsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`); locked(); await held; });
+        await taken;
+        const t0 = performance.now();
+        try {
+          return { ...(await run()), ms: Math.round(performance.now() - t0) };
+        } finally {
+          clearTimeout(safety);
+          release();
+          await holding;
+        }
+      };
+      try {
+        const boundDir = join(scratch, "bound");
+        for (const table of ["thoughts", "ob1_entities"]) {
+          const r = await lockedRun(table, () => backup(boundDir, { DATABASE_URL: URL_ }, "--statement-timeout", "1"));
+          assert(r.code === 1 && new RegExp(`backup FAILED — ${table}: 57014 canceling statement due to statement timeout`).test(r.stderr) && r.ms < 10_000,
+            `…--statement-timeout 1 with ${table} locked: exit 1 with 57014 on ${table} in ${r.ms} ms, not the lock's 15 s (exit ${r.code}: ${r.stderr.split("\n")[0]})`);
+        }
+
+        // A SIGTERM while a page waits: exit 143, the run's files removed, and its query ended on the server — the
+        // connection check (10 s) cancels a statement whose client has gone.
+        const termDir = join(scratch, "term");
+        const term = await lockedRun("ob1_entities", async () => {
+          const child = Bun.spawn(["bun", "--no-env-file", join(HERE, "backup.ts"), "--out", termDir], { cwd: scratch, env: env({ DATABASE_URL: URL_ }), stdout: "pipe", stderr: "pipe" });
+          const waiting = await pollUntil(async () => existsSync(termDir) && readdirSync(termDir).some((f) => f.startsWith("ob1_entities-") && f.endsWith(".tmp")), 8000);
+          // The run's own name: the pid and a random part, so a container's pid 1 never meets a killed run's leftovers.
+          const tmpName = existsSync(termDir) ? readdirSync(termDir).find((f) => f.startsWith("ob1_entities-")) ?? "" : "";
+          child.kill("SIGTERM");
+          const code = await child.exited;
+          const left = readdirSync(termDir);
+          const ended = await pollUntil(async () => ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE query LIKE 'SELECT to_jsonb(r)::text%FROM ob1_entities r%' AND pid <> pg_backend_pid()`)[0] as { n: number }).n === 0, 14_000);
+          const named = /^ob1_entities-\d{4}-\d\d-\d\d\.json\.\d+\.[0-9a-f]{8}\.tmp$/.test(tmpName);
+          return { code, out: "", stderr: `${waiting ? "waited" : "never waited"}; ${named ? "named by pid and random part" : `named ${tmpName}`}; left [${left.join(" ")}]; ${ended ? "query ended" : "query still on the server"}` };
+        });
+        assert(term.code === 143 && /^waited; named by pid and random part; left \[\]; query ended$/.test(term.stderr),
+          `…a SIGTERM while a page waits on a lock: exit 143, the run's file named by its pid and a random part and removed, the query ended on the server before the lock let go (exit ${term.code}: ${term.stderr})`);
+      } finally {
+        await locker.close();
+      }
 
       // Another database than the URL's — PGDATABASE beats it in Bun's client — is refused before any directory is made.
       const otherDir = join(scratch, "other");
@@ -32535,6 +32595,8 @@ if (want("50")) {
       await sql`DELETE FROM thoughts`;
       await sql`DELETE FROM ob1_entities`;
       if (madeEntities) await sql`DROP TABLE IF EXISTS entities`;
+      if (madeEdgesView) await sql`DROP VIEW IF EXISTS edges`;
+      if (madeJobs) await sql`DROP TABLE IF EXISTS ingestion_jobs`;
       await dropProbe();
       await sql.close();
     }

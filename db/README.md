@@ -5640,32 +5640,38 @@ on a stub of its own (SMD-3392).
 bun backup.ts --url postgres://… --out /srv/brain-backups   # <out>/<table>-YYYY-MM-DD.json
 bun backup.ts --url …                                       # ./backup under the working directory (ignored by git here and at the root)
 #   --statement-timeout SECONDS (60; 0: none) — per page; the count(*)s run unbounded
-#   exits 0 written · 1 not written (the table and the reason; nothing renamed into place), or a rename failed (the files it replaced named) · 2 usage, the URL, or the connection reached another database than the URL names (PGDATABASE)
+#   exits 0 written · 1 nothing renamed into place (the reason, and the table it was reading), or a rename failed (the files it replaced named) · 2 usage, the URL, or the connection reached another database than the URL names (PGDATABASE) · 130/143/129 SIGINT/SIGTERM/SIGHUP, the run's files removed
 ```
 
 The brain's `thoughts` and its entity graph (`ob1_entities`,
 `thought_entities`, `ob1_entity_edges`) as one JSON array per table, and the
 companion tables `entities`, `edges`, `ingestion_jobs` and `ingestion_items`
-when the brain has them, read in one REPEATABLE READ, READ ONLY transaction,
-so the files agree. Each row is Postgres's own `to_jsonb(row)`: timestamps keep
-their microseconds and the vector its text, and `jsonb_populate_record` reads a
-row back into the same values. Pages of 1,000 follow each table's primary key,
-and each table's rows are compared with its `count(*)` in the same snapshot.
-Every file is written new to a `.<pid>.tmp` of its own (never through an
-existing path) and renamed only once all are, so a failed run leaves the
-directory as it was, and removes it again if it made it; SIGINT and SIGTERM
-remove the run's files too. SELECT on the tables is enough. A page is held in
-memory whole, and the snapshot holds back vacuum's horizon for the run's
-length, as pg_dump's does.
+when the brain has them as tables with their schema's key (another relation
+under the name is named and passed over), read in one REPEATABLE READ, READ
+ONLY transaction, so the files agree. Each row is Postgres's own
+`to_jsonb(row)`: timestamps keep their microseconds and the vector its text,
+and `jsonb_populate_record` reads a row back into the same values. Pages of
+1,000 follow each table's primary key, and each table's rows are compared with
+its `count(*)` in the same snapshot. Every file is written new to a
+`.<run id>.tmp` of its own (the pid and a random part; never through an
+existing path) and renamed only once all are, so a run that fails first renames
+nothing and removes its files; a directory it made once connected stays.
+SIGINT, SIGTERM and SIGHUP remove the run's files too; a run killed outright
+leaves them. The session's `client_connection_check_interval` (10 s, where the
+server's platform has it) ends a stopped run's statement on the server. SELECT
+on the tables is enough. A page is held in memory whole, and the snapshot holds
+back vacuum's horizon for the run's length, as pg_dump's does.
 
 It is the `db/` home of `recipes/brain-backup`'s export (SMD-2144), which
 leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
 `pg_dump` is (`deploy/README.md`, the `postgres` service row). test-live
-[50] holds the round trip, a companion table present and the others named
-absent, a page of three across composite keys, an empty table, the one
-snapshot under a write between tables, the refusals of a role that may not
-read a table, of a planted path and of another database, a failed rename, and
-the directory a failed run made removed.
+[50] holds the round trip, a companion table present, the others named absent
+and a view under one's name passed over, a page of three across composite
+keys, an empty table, the one snapshot under a write between tables, the
+refusals of a role that may not read a table, of a planted path and of
+another database, the page bound on the session and after a count, a SIGTERM
+mid-page (the files removed, the statement ended on the server), and a failed
+rename.
 
 ## Extensions
 

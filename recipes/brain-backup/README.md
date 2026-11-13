@@ -17,35 +17,49 @@ dated JSON export it introduced is kept in the `db/` script.
 
 ## Where it went
 
-Run the export from a checkout of this repository, with the brain's
-connection string:
+Run the export from a checkout of this repository. Keep the connection string
+in a 0600 `.env` in the directory the run starts from (Bun reads `.env` and
+`.env.local` from the working directory, not from the script's), so the
+password is not on a command line:
 
 ```bash
-bun db/backup.ts --url "$DATABASE_URL" --out ~/brain-backups
+# ~/brain-backup/.env (chmod 600):  DATABASE_URL=postgres://brain_backup:…@127.0.0.1:5432/openbrain
+cd ~/brain-backup && bun /path/to/checkout/db/backup.ts --out ~/brain-backups
 ```
+
+(`--url <postgres://…>` works too, at the cost of the password in `ps`.)
 
 - **The connection.** On the stack, Postgres is reached from a checkout only
   when the stack came up with `-f deploy/compose.host-ports.yaml`, which
   publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` (`deploy/README.md`, the
   `postgres` service row). The URL is then
-  `postgres://postgres:<POSTGRES_PASSWORD from deploy/.env>@127.0.0.1:5432/openbrain`. Without
-  that file the run says `backup FAILED — Failed to connect`.
-- **Where the files go.** `--out`, or `./backup` under the directory you run
-  from. One JSON array per table, named `<table>-<UTC date>.json`, as the recipe
-  named them; a second run the same day replaces them. Give `--out` a directory
-  outside the checkout: the files hold every thought's text. (The checkout's
-  `.gitignore` covers `backup/` at its root and in `db/`, the default's two
-  likely places.)
-- **Scheduling.** The old script read `SUPABASE_URL` from a `.env.local` in the
-  directory it ran from. Bun reads `.env` and `.env.local` from the working
-  directory too, so a cron job can keep `DATABASE_URL=…` in a 0600 `.env` there
-  and run `bun /path/to/checkout/db/backup.ts --out …`, with no password on
-  the command line. Rename the old file's `SUPABASE_URL` to `DATABASE_URL`.
-- **A read-only role.** SELECT on every table it exports:
-  `GRANT SELECT ON thoughts, ob1_entities, thought_entities, ob1_entity_edges TO <role>`,
-  and the companion tables below that the brain has. The old README's grant
-  named neither `ob1_entities` nor `ob1_entity_edges`, and this export is all or
-  nothing: under that grant the run fails with `42501` and writes no file at all.
+  `postgres://<role>:<password>@127.0.0.1:<that port>/openbrain`, the password
+  percent-encoded if it holds `@ / # ? % :`. Without that file the run says
+  `backup FAILED — Failed to connect`.
+- **Where the files go.** `--out`, or `./backup` under the directory the run
+  starts from. One JSON array per table, named `<table>-<UTC date>.json`, as the
+  recipe named them; a second run the same day replaces them. Give `--out` a
+  directory outside the checkout: the files hold every thought's text. (The
+  checkout's `.gitignore` covers `backup/` at its root, in `db/` and in
+  `recipes/brain-backup/`, where the old script's cron job ran.)
+- **Upgrading a cron job.** The old script read `SUPABASE_URL` from a
+  `.env.local` in the directory it ran from: rename it `DATABASE_URL` there, and
+  call `bun ../../db/backup.ts` (or the absolute path) where it called
+  `bun backup-brain.mjs`.
+- **A read-only role.** A login role with SELECT on every table the run
+  exports, made as the superuser — `compose exec postgres psql -U postgres
+  openbrain` (`deploy/README.md`, the `postgres` service row):
+
+  ```sql
+  CREATE ROLE brain_backup LOGIN PASSWORD '…';
+  GRANT SELECT ON thoughts, ob1_entities, thought_entities, ob1_entity_edges TO brain_backup;
+  -- and each companion table below that this brain has, e.g.:
+  GRANT SELECT ON entities, edges TO brain_backup;
+  ```
+
+  The URL then names that role. The old README's grant named neither
+  `ob1_entities` nor `ob1_entity_edges`, and a run renames nothing unless it read
+  every table: under that grant it fails with `42501` and no file is replaced.
 
 ## What changed
 
@@ -53,8 +67,11 @@ bun db/backup.ts --url "$DATABASE_URL" --out ~/brain-backups
   `thought_entities` and `ob1_entity_edges` (migrations 001 and 016). The
   companion tables the recipe exported — `entities` and `edges`
   (`schemas/entity-extraction`) and `ingestion_jobs` and `ingestion_items` (the
-  retired smart-ingest schema) — are exported when the brain has them, and named
-  as not on this brain when it does not.
+  retired smart-ingest schema's, in `public`) — are exported when the brain has
+  them as tables with their schema's key, and named as not on this brain when
+  it does not. Anything else under one of those names (a view, another tool's
+  table) is named and passed over. The smart-ingest plugin's tables, in its own
+  schema `plugin_smart_ingest`, are not exported: `pg_dump` has them.
 - **One snapshot.** Every table is read in one read-only transaction, so the
   files agree with each other.
 - **The JSON is Postgres's.** Each row is `to_jsonb(row)`. Downstream tooling
@@ -64,12 +81,17 @@ bun db/backup.ts --url "$DATABASE_URL" --out ~/brain-backups
   - the `embedding` stays its vector text, as before.
 
   `jsonb_populate_record` reads each row back into the same values.
-- **All or nothing.** The files are renamed into place only once every table is
-  read and counted. A failed run writes no file and leaves an earlier backup of
-  the same date as it was; exit 1 names the table and the reason. Ctrl-C and
-  SIGTERM remove the run's unfinished files too.
-- **The timeout.** `--statement-timeout SECONDS` (60; 0 for none) replaces
-  `FETCH_TIMEOUT_MS`.
+- **Nothing in place until every table is read.** The files are renamed into
+  place only once every table is read and counted. A run that fails first
+  renames nothing, removes its own files and leaves an earlier backup of the
+  same date as it was; exit 1 names the reason. A rename that fails after that
+  point (a disk full, a directory where a file should be) is said, naming the
+  files it already replaced. Ctrl-C, SIGTERM and SIGHUP remove the run's
+  unfinished files too (exit 130, 143, 129). A run killed outright (SIGKILL, the
+  OOM killer) leaves them: `<table>-<date>.json.<run id>.tmp`, each a whole
+  table's text, to be removed by hand.
+- **The timeout.** `--statement-timeout SECONDS` (60; 0 for none) bounds each
+  page, as `FETCH_TIMEOUT_MS` did. The counts run unbounded.
 - **The wrong database.** With `PGDATABASE` exported, Bun's client connects to
   that database rather than the URL's. The run refuses with exit 2, and its
   first line names the database it reads.
