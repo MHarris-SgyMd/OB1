@@ -11,7 +11,11 @@
  *   words (case-folded, white space collapsed). A phrase the model made up
  *   drops its half of the answer, and so does a level word the text negates
  *   ("not very urgent" read as urgent), a High read off a phrase negating its
- *   own cue ("no rush"), and a level phrase that is only the deadline's words.
+ *   own cue ("no rush"), and a level phrase that is only the deadline's
+ *   words. A label cited for another item ("SMD-2627 (Medium)") is marked,
+ *   and dropped only for an agent-kind writer (forWriter, SMD-4226). A due
+ *   phrase that is the earliest something can happen ("can't happen before
+ *   11-03") is marked and dropped the same way (SMD-4226).
  * - An inferred level is at most High (3): "urgent" costs nothing to write in
  *   a note, and the maintainer's own example reads "Urgent: …" as High
  *   (confirmed by the maintainer, 2026-11-09, with the two rules below and in
@@ -35,13 +39,21 @@ import type { EgressSubject } from "./egress.ts";
 import { endOfDay, type PriorityLevel } from "./priority-scale.ts";
 
 /** The prompt's version, bumped by hand when its meaning moves; the reason a statement carries names it. */
-export const INFER_PROMPT_VERSION = 1;
-export const INFER_PROMPT = `Read the user's captured note for how much it matters and when it is due. The first line gives the day it was captured. Return JSON with:
-- "level": one of "none", "low", "medium", "high", "urgent", or null when the note says nothing about how much it matters
-- "level_phrase": the exact words of the note that show that level, or null
-- "due_phrase": the exact words of the note that set a deadline, such as "by Friday" or "before the 12th", or null when it sets none
+export const INFER_PROMPT_VERSION = 2;
+/**
+ * Version 2 (SMD-4226): v1 read a label quoted beside a ticket, priority discussed as a subject and an expiry as the
+ * note's own level and deadline, and agreed with the operator on 0.188 of its level reads (SMD-3670 PR 2). v2 says
+ * whose work a level and a deadline must be about, and names what is neither.
+ */
+export const INFER_PROMPT = `Read the user's captured note for how much its writer says their own work matters, and for a deadline it sets for that work. The first line gives the day it was captured. Return JSON with:
+- "level": one of "none", "low", "medium", "high", "urgent", only when the writer says how much the work they mean matters ("urgent", "important", "no rush", "low priority"); else null
+- "level_phrase": the exact words of the note that say it, or null
+- "due_phrase": the exact words that set a deadline for work the note asks to be done, such as "by Friday" or "before the 12th", or null
 - "due_date": that deadline as YYYY-MM-DD, counted from the capture day, or null
-Copy phrases exactly as the note writes them. Only read what the note says.`;
+A note that is itself a ticket or task record carries its own priority field ("Priority: High") as its level.
+Not a level: a priority or label quoted beside another ticket, task or item ("ABC-12 (High)", "Medium, Design team", "Backlog, Low"); where one item ranks among others ("the highest-priority open issue", "one of two High-priority tickets"); text about priorities, scales or rankings; how severe a bug or finding is; a deadline on its own.
+Not a deadline: when a lease, claim, token or cache expires; the earliest something can happen ("not before 11-03", "can't happen before Friday", "can go on tomorrow at the earliest"); a time to watch or measure something; a date already past or one something happened on; dates in quoted material.
+Most notes say neither: then every field is null. Copy phrases exactly as the note writes them.`;
 
 /** The highest level an inferred statement takes: High (the maintainer, 2026-11-09). */
 export const INFERRED_CEILING: PriorityLevel = 3;
@@ -53,8 +65,10 @@ const LEVEL_WORDS: Readonly<Record<string, PriorityLevel>> = { none: 0, low: 1, 
 
 /** What a text was read to state: a level and a due day, each with the phrase that says it. Null halves were not read. */
 export type Inferred = {
-  level: { value: PriorityLevel; word: string; phrase: string } | null;
-  due: { day: string; phrase: string; by: "rule" | "model" } | null;
+  /** `cited`: the phrase is a label cited for another item (citedIn); forWriter drops it for an agent-kind writer. */
+  level: { value: PriorityLevel; word: string; phrase: string; cited?: boolean } | null;
+  /** `floored`: the phrase is the earliest something can happen (flooredIn); forWriter drops it for an agent-kind writer. */
+  due: { day: string; phrase: string; by: "rule" | "model"; floored?: boolean } | null;
 };
 
 // ── Phrases ──────────────────────────────────────────────────────────────────
@@ -91,6 +105,206 @@ const NEGATED_BEFORE = new RegExp(`(\\b(${NEGATORS})(\\s+(?!(?:${EMPHASIS})\\b)[
 const LEVEL_CUES = /\b(urgent|urgently|urgency|asap|important|importance|unimportant|critical|crucial|priority|emergency|immediately|pressing|vital|essential|rush|hurry|whenever|someday|trivial|minor|optional|idea|low|medium|high|top)\b/;
 /** A phrase that negates its own cue ("not urgent", "no rush", "non-critical"), not across an emphasis word: it never says a level of High or more. */
 const SELF_NEGATED = new RegExp(`\\b(${NEGATORS}|non)\\b-?(\\s*(?!(?:${EMPHASIS})\\b)[\\p{L}']+){0,2}?\\s*\\b(urgent|urgently|important|critical|crucial|priority|pressing|vital|essential|rush|hurry|emergency)\\b`, "u");
+
+/** A ticket's key: two to ten capitals and digits from a capital, a hyphen, digits ("SMD-2627", "ABC-12"). */
+const TICKET_KEY = /\b([A-Z][A-Z0-9]{1,9})-\d{1,6}\b/g;
+/** Prefixes of that shape that name no ticket: a disease, a standard, an encoding, a model, a flight, a fiscal year (review pass 1). */
+const NOT_TICKETS = new Set(["COVID", "ISO", "UTF", "GPT", "SHA", "MD5", "RFC", "CVE", "IPV4", "IPV6", "HTTP", "TLS", "SSL", "USB", "PCI", "ECMA", "FY", "UA", "AA", "DL", "BA", "LH", "AF", "WN", "B6", "US", "EU", "UK", "SA", "PM", "AM", "Q1", "Q2", "Q3", "Q4", "H1", "H2"]);
+/** Where the last ticket key in a stretch of text ends, or -1: a token of a key's shape that names no ticket is passed over. */
+function lastKeyEnd(s: string): number {
+  let end = -1;
+  for (const m of s.matchAll(TICKET_KEY)) if (!NOT_TICKETS.has(m[1])) end = m.index! + m[0].length;
+  return end;
+}
+/** A level word as a label carries it, in its three cases: the key beside it stays case-sensitive (review pass 2: "mid-2025 high"). */
+const LEVEL = "[Nn]one|NONE|[Ll]ow|LOW|[Mm]edium|MEDIUM|[Hh]igh|HIGH|[Uu]rgent|URGENT|[Cc]ritical|CRITICAL";
+/** A board's statuses, capitalised as a board shows them. */
+const STATUS = "Backlog|Todo|To Do|In Progress|In Review|Done|Canceled|Cancelled|Triage|Started|Unstarted";
+/** A ticket key directly beside a level word in the quoted phrase ("SMD-2627 (Medium)", "ABC-12: High", "SMD-12 [Low]"). */
+const KEY_BESIDE_LEVEL = new RegExp(`\\b([A-Z][A-Z0-9]{1,9})-\\d{1,6}\\s*[(\\[:,·—–-]?\\s*[(\\[]?\\s*(?:${LEVEL})\\b`);
+/** A board status, then a level ("Backlog, Low", "In Progress, High"). */
+const STATUS_THEN_LEVEL = new RegExp(`\\b(?:${STATUS}),\\s*(?:${LEVEL})\\b`);
+/** A level, then a board status ("High, Todo in cycle 21"). */
+const LEVEL_THEN_STATUS = new RegExp(`^(?:[- ]priority)?,\\s*(?:${STATUS})\\b`);
+/** A board's field name, capitalised, just before the level ("Owner, Urgent priority and cycle unchanged"). */
+const BOARD_FIELD = /\b(Owner|Assignee|Status|Cycle|Estimate|Labels?),\s*$/;
+/** An item ranked among others by its level: "the only High-priority open child", "one of two High-priority tickets". */
+const RANKED_BY_LEVEL = new RegExp(`\\b(the only|one of (?:two|three|four|five|six|\\d+))\\s+(?:open\\s+)?(?:${LEVEL})[- ]priority\\s+(?:open\\s+)?(tickets?|issues?|child|children|items?|bugs?|tasks?)\\b`, "i");
+/** An item ranked among others by priority or value: "the highest-priority open child", "the top-priority ticket". */
+const RANKED_TOP = /\bthe (highest|lowest|top)[- ](priority|value)\s+(?:open\s+)?(tickets?|issues?|child|children|items?|bugs?|tasks?)\b/i;
+/** How far back citedIn reads a clause, and how far forward a line: bounded, so a long capture costs its length, not its square (review pass 2: 12.8 s on 389 KB). */
+const CLAUSE_SPAN = 240;
+const ROW_SPAN = 400;
+
+/** A character lower-cased only when that keeps its length ("İ" grows under toLowerCase and is kept), so places index both copies alike. */
+const lowerKeep = (s: string) => [...s].map((c) => { const l = c.toLowerCase(); return l.length === c.length ? l : c; }).join("");
+/** Curly quotes made straight, in a text and in a phrase alike (review pass 2: a phrase's curly quote found no place). */
+const straight = (s: string) => s.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"');
+
+/**
+ * A text as citedIn reads it: quotes made straight, each run of white space one space (a run holding a line break,
+ * U+2028 or U+2029 recorded as a break), trimmed; its case kept, beside a copy lower-cased place for place.
+ */
+function linesOf(text: string): { kept: string; lower: string; breaks: number[] } {
+  let kept = "";
+  const breaks: number[] = [];
+  for (const m of straight(text).matchAll(/(\s+)|(\S+)/gu)) {
+    if (m[2] !== undefined) { kept += m[2]; continue; }
+    if (kept === "") continue;
+    if (/[\n\r\u2028\u2029]/.test(m[1])) breaks.push(kept.length);
+    kept += " ";
+  }
+  if (kept.endsWith(" ")) kept = kept.slice(0, -1);
+  return { kept, lower: lowerKeep(kept), breaks };
+}
+
+/** The last of sorted breaks at or before i, or 0; and the first at or after j, or the end. */
+function lineAround(breaks: readonly number[], i: number, j: number, end: number): [number, number] {
+  let lo = 0, hi = breaks.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (breaks[mid] <= i) lo = mid + 1; else hi = mid; }
+  const start = lo > 0 ? breaks[lo - 1] : 0;
+  let k = lo;
+  while (k < breaks.length && breaks[k] < j) k++;
+  return [start, k < breaks.length ? breaks[k] : end];
+}
+
+/**
+ * Whether every place the text holds the level phrase is a label cited for another item (SMD-4226), in a shape that
+ * cites, never by nearness alone:
+ * - a ticket key earlier in the same clause, within 60 characters, its words ending in "(", "[", ",", ":", "·" or a
+ *   dash just before the phrase ("SMD-1768 (Medium)", "SMD-2742 — Medium, Release Engineering", "SMD-2368, `platform`, High");
+ * - a key, then up to four words of a board move or none, before a capitalised level ("SMD-12 is High", "SMD-4300 was
+ *   set to High", "SMD-12 → High");
+ * - a key beside the level inside the phrase ("SMD-2627 (Medium):");
+ * - a table's cell on a row that holds a key ("| SMD-1 | … | Medium |");
+ * - on a line that holds a key, a board status before or after the level ("Backlog, Low", "High, Todo in cycle 21");
+ * - a board field's name before it ("Owner, Urgent priority");
+ * - a level directly before a ticket key ("the High-priority SMD-1350");
+ * - an item ranked among others by its level or by priority ("the only High-priority open child", "the
+ *   highest-priority open issue").
+ * The model read a tag, not what the writer says of their own work: v1 did so on 10 of the 38 level reads it made on
+ * session summaries. readAnswer marks such a level, and only an agent-kind writer's is dropped (forWriter, the
+ * maintainer's choice after review pass 2): syntax cannot tell another ticket's label from a person's own "Fix SMD-12
+ * (urgent)" or "Done, urgent: call mom". A ticket's own export ("SMD-944 · Status: Todo · Priority: High": a text that
+ * opens with a key and names no other) keeps its "Priority:" field; in any other text such a field cites.
+ */
+export function citedIn(phrase: string, text: string): boolean {
+  const { kept, lower, breaks } = linesOf(text);
+  const p = lowerKeep(straight(phrase).replace(/\s+/gu, " ").trim());
+  if (p === "") return false;
+  const edge = (c: string | undefined) => c === undefined || !/[\p{L}\p{N}]/u.test(c);
+  const at: number[] = [];
+  for (let i = lower.indexOf(p); i !== -1; i = lower.indexOf(p, i + 1)) if (edge(lower[i - 1]) && edge(lower[i + p.length])) at.push(i);
+  // One ticket's own record: the text opens with a key and names no other (review pass 4: an agent quoting board lines
+  // "SMD-12 · Priority: High" cites, where a ticket's own export keeps its field).
+  const keys = new Set([...kept.matchAll(TICKET_KEY)].filter((m) => !NOT_TICKETS.has(m[1])).map((m) => m[0]));
+  const ownRecord = keys.size === 1 && /^\W{0,3}[A-Z][A-Z0-9]{1,9}-\d{1,6}\b/.test(kept);
+  return at.length > 0 && at.every((i) => {
+    const [lineStart, nextBreak] = lineAround(breaks, i, i + p.length, kept.length);
+    const said = kept.slice(i, i + p.length);
+    const lineBefore = kept.slice(Math.max(lineStart, i - CLAUSE_SPAN), i), lineAfter = kept.slice(i + p.length, Math.min(nextBreak, i + p.length + 120));
+    const row = kept.slice(Math.max(lineStart, i - ROW_SPAN), Math.min(nextBreak, i + p.length + ROW_SPAN));
+    // The clause before the phrase: from the line's start, or from the last sentence's end in it.
+    let cut = 0;
+    for (const m of lineBefore.matchAll(/[.!?;]\s/g)) cut = m.index! + m[0].length;
+    const clauseBefore = lineBefore.slice(cut);
+    // A ticket's own "Priority:" field is the text's own when the text is that ticket's record ("SMD-944 · Status: Todo ·
+    // Priority: High", "SMD-944 — Fix login (Priority: High)"); in any other text it cites (review passes 3 and 4).
+    if (ownRecord && (/^priority\b/i.test(said) || /\bpriority\s*:?\s*$/i.test(clauseBefore))) return false;
+    // A ticket's key, then up to four words of a board move or none, and a capitalised level: "SMD-12 is High", "Moved
+    // SMD-12 to High", "SMD-4300 was set to High", "SMD-12 → High", "Filed SMD-4300 with priority High", "SMD-12 High"
+    // (review passes 3 and 4); "SMD-12 is urgent" stays the writer's own.
+    const keyThen = /\b([A-Z][A-Z0-9]{1,9})-\d{1,6}(?:'s)?(?:\s+(?:priority|is|was|been|stays|now|to|at|as|has|with|set|bumped|raised|lowered|moved|marked|changed|updated|→|->)){0,4}\s+$/.exec(clauseBefore);
+    if (keyThen && !NOT_TICKETS.has(keyThen[1]) && /^(None|Low|Medium|High|Urgent|Critical)\b/.test(said)) return true;
+    const keyEnd = lastKeyEnd(clauseBefore);
+    if (keyEnd >= 0 && clauseBefore.length - keyEnd <= 60 && /[(\[,:·—–-]\s*$/.test(clauseBefore)) return true;
+    const besideLevel = KEY_BESIDE_LEVEL.exec(said);
+    if (besideLevel && !NOT_TICKETS.has(besideLevel[1])) return true;
+    const rowKey = lastKeyEnd(row) >= 0;
+    if (rowKey && /\|\s*$/.test(lineBefore) && /^\s*\|/.test(lineAfter)) return true;
+    if (rowKey && (STATUS_THEN_LEVEL.test(`${clauseBefore.slice(-30)}${said}`) || LEVEL_THEN_STATUS.test(lineAfter))) return true;
+    if (BOARD_FIELD.test(clauseBefore) || /^(Owner|Assignee|Status|Cycle|Estimate|Labels?),\s*/.test(said)) return true;
+    // A level directly before a ticket key labels that ticket ("under the High-priority SMD-1350").
+    const keyNext = /^(?:[- ]priority)?\s+([A-Z][A-Z0-9]{1,9})-\d/.exec(lineAfter);
+    if (keyNext && !NOT_TICKETS.has(keyNext[1])) return true;
+    const window = `${clauseBefore.slice(-60)}${said}${lineAfter.slice(0, 60)}`, from = Math.min(60, clauseBefore.length);
+    return [RANKED_BY_LEVEL, RANKED_TOP].some((re) => {
+      const m = re.exec(window);
+      return m !== null && m.index <= from + said.length && m.index + m[0].length >= from;
+    });
+  });
+}
+
+/** A negation that can open a floor: the contractions ("doesn't open until Monday") and "nothing"/"no one" ("nothing ships until Friday"). */
+const FLOOR_NEG = "not|never|nothing|no one|nobody|can't|cannot|can not|won't|don't|doesn't|isn't|aren't|wasn't|weren't|shouldn't|mustn't|hasn't|haven't|hadn't|wouldn't|couldn't|didn't";
+/** A verb of something starting: only a negated start makes a floor (review pass 3: "isn't due until Friday" is a deadline). */
+const START_VERB = "open|opens|start|starts|begin|begins|happen|happens|ship|ships|land|lands|launch|launches|release|releases|go live|goes live|go out|goes out|run|runs|arrive|arrives|come|comes|be ready|ready|be available|available|be out|out|deploy|deploys|merge|merges";
+/** A negation then a start verb (a word between allowed), then "before", "until" or "till"; or "not before" / "not until" with nothing between. */
+const FLOOR_LEAD = new RegExp(`\\b(?:(?:${FLOOR_NEG})\\s+(?:[\\p{L}']+\\s+)?(?:${START_VERB})\\s+(?:[\\p{L}']+\\s+)?|(?:not|never)\\s+)(before|until|till)\\b`, "gu");
+/** The same lead with its floor word left to the quoted phrase ("which can't happen" + "before 11-03"). */
+const FLOOR_LEAD_OPEN = new RegExp(`\\b(?:(?:${FLOOR_NEG})\\s+(?:[\\p{L}']+\\s+)?(?:${START_VERB})(?:\\s+[\\p{L}']+)?|not|never)\\s+$`, "u");
+/** A condition ahead of the lead makes a deadline of it ("if it doesn't ship before Friday, we lose the slot"). */
+const CONDITION_BEFORE = /\b(if|unless|when|whether|in case)\s+(?:[\p{L}']+\s+){0,4}$/u;
+/** "no sooner than", "no earlier than", "not earlier than", just before a time. */
+const FLOOR_THAN = /\b(no sooner|no earlier|not earlier|not sooner) than\s*$/;
+/** Words just before a time that make it the start of something ("starting Monday", "only after Friday", "from the 12th"); not "start", since "start by Monday" is a deadline. */
+const FLOOR_FROM = /\b(starting|starts|beginning|begins|from|only after|after)\s+$/;
+/** The words that make a time a floor when they follow it ("tomorrow at the earliest", "the 12th onwards"); not "or later if …" or "earliest possible", which keep the deadline. */
+const FLOOR_AFTER = /^[\s,)]*(at the earliest|at earliest|earliest(?!\s+possible)|or later(?!\s+(?:if|when|should|depending))|at the soonest|onwards|onward)\b/;
+/** The floor's words inside a quoted phrase ("at the earliest", "no sooner than", "or later" but not "or later if …"). */
+const FLOOR_SAID = /\b(at the earliest|at earliest|at the soonest|(no sooner|no earlier|not earlier|not sooner) than)\b|\bor later\b(?!\s+(?:if|when|should|depending))/;
+/** A quoted phrase that opens with the start of something ("starting Monday", "after Friday"): a floor unless it names a deadline word of its own ("from now until Friday"). */
+const FLOOR_OPENS = /^(starting|starts|beginning|from|only after|after)\b/;
+/** A deadline word anywhere in a quoted phrase. */
+const DEADLINE_WORD = /\b(by|before|until|till|due|no later than)\b/;
+/** A phrase that opens with its own deadline word stays a deadline after "starts" or "from" ("the migration starts by Monday"; review pass 4). */
+const DEADLINE_OPENS = /^(by|before|until|till|no later than)\b/;
+/** "a week from", "the day after", "three days from": a count from the time, a deadline's anchor rather than a start (review pass 4). */
+const COUNTED_FROM = /\b(day|days|week|weeks|month|months|year|years|fortnight)\s+(from|after)\s+$/;
+
+/** Whether a floor lead in a stretch holds: no condition ahead of it; `atEnd` when it must end the stretch. */
+function floorLead(s: string, atEnd: boolean): boolean {
+  for (const m of s.matchAll(FLOOR_LEAD)) {
+    if (atEnd && s.slice(m.index! + m[0].length).trim() !== "") continue;
+    if (CONDITION_BEFORE.test(s.slice(0, m.index!))) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether every place the text holds the due phrase is the earliest something can happen, not a deadline (SMD-4226),
+ * read in the floor's own construction:
+ * - a negation, then a verb of something starting, then "before", "until" or "till" ("can't happen before 11-03",
+ *   "doesn't open until Monday", "isn't ready until Monday", "nothing ships until Friday"), or "not until" / "not
+ *   before" with nothing between — before the phrase, inside it, or split across them;
+ * - "no sooner than" or "no earlier than" before it;
+ * - "starting", "from" or "(only) after" just before it, unless the phrase opens with "by", "before" or "until" ("the
+ *   migration starts by Monday") or the word counts from the time ("a week from Friday", "the day after tomorrow");
+ *   or opening it with no deadline word of its own;
+ * - "at the earliest", "earliest", "or later", "at the soonest" or "onwards" after it, or those inside it.
+ * No condition may come just ahead of it ("if it can't happen before 11-03, escalate"), however much the model quoted.
+ * A negated deadline stays one ("isn't due until Friday", "don't need it until Friday", "not later than 15 November",
+ * "if it's not paid before the 15th"), as do "start by Monday", "by Friday, or later if blocked" and "earliest
+ * possible". readAnswer marks the due day, and only an agent-kind writer's is dropped (forWriter, the maintainer's
+ * choice after review pass 3). The model quoted the time and left the floor's words out: v1 read "before 11-03" in
+ * "can't happen before 11-03" as a deadline.
+ */
+export function flooredIn(phrase: string, text: string): boolean {
+  const t = folded(text), p = folded(phrase);
+  const at = wholeWordAt(phrase, text);
+  if (at.length === 0) return false;
+  const saidFloor = floorLead(p, false) || FLOOR_SAID.test(p) || (FLOOR_OPENS.test(p) && !DEADLINE_WORD.test(p));
+  return at.every((i) => {
+    const before = t.slice(Math.max(0, i - 60), i), after = t.slice(i + p.length, i + p.length + 30);
+    // A floor the phrase states itself, unless a condition comes just ahead of it ("if it can't happen before 11-03, escalate").
+    if (saidFloor) return !CONDITION_BEFORE.test(before);
+    const open = FLOOR_LEAD_OPEN.exec(before);
+    return floorLead(before, true)
+      || (open !== null && /^(before|until|till)\b/.test(p) && !CONDITION_BEFORE.test(before.slice(0, open.index)))
+      || FLOOR_THAN.test(before) || (FLOOR_FROM.test(before) && !DEADLINE_OPENS.test(p) && !COUNTED_FROM.test(before)) || FLOOR_AFTER.test(after);
+  });
+}
 
 /**
  * Whether every place the text holds the phrase follows a negating word, up to two words before it ("urgent" in
@@ -284,6 +498,7 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
   const negatedHigh = levelPhrase !== null && (LEVEL_WORDS[word] ?? 0) >= 3 && SELF_NEGATED.test(folded(levelPhrase));
   if (Object.hasOwn(LEVEL_WORDS, word) && levelPhrase !== null && !negatedIn(levelPhrase, text) && !deadlineAsLevel && !negatedHigh) {
     level = { value: Math.min(LEVEL_WORDS[word], INFERRED_CEILING) as PriorityLevel, word, phrase: levelPhrase };
+    if (citedIn(levelPhrase, text)) level.cited = true;
   }
   let due: Inferred["due"] = null;
   if (duePhrase !== null) {
@@ -291,7 +506,23 @@ export function readAnswer(answer: unknown, text: string, captureDay: string): I
     const modelled = ruled === null ? modelDay(a.due_date, captureDay, duePhrase) : null;
     if (ruled !== null) due = { day: ruled, phrase: duePhrase, by: "rule" };
     else if (modelled !== null) due = { day: modelled, phrase: duePhrase, by: "model" };
+    if (due !== null && flooredIn(duePhrase, text)) due.floored = true;
   }
+  return { level, due };
+}
+
+/**
+ * What a reading states for its writer (SMD-4226, the maintainer's choices after review passes 2 and 3): when the
+ * writer is agent-kind, a level cited for another item and a due day that is a floor are dropped, since a session
+ * summary's "SMD-2627 (Medium)" is a tag and its "can't happen before 11-03" no deadline. Any other writer, a key never
+ * classified, an importer or an unread stamp (kind null) included, keeps both: a person's own "Fix SMD-12 (urgent)" or
+ * "rent isn't due until the 1st" reads too much like them to the guards. The marks are not carried on.
+ */
+export function forWriter(inf: Inferred | null, kind: string | null): Inferred | null {
+  if (inf === null) return null;
+  const agent = kind === "agent";
+  const level = inf.level === null || (inf.level.cited && agent) ? null : { value: inf.level.value, word: inf.level.word, phrase: inf.level.phrase };
+  const due = inf.due === null || (inf.due.floored && agent) ? null : { day: inf.due.day, phrase: inf.due.phrase, by: inf.due.by };
   return { level, due };
 }
 

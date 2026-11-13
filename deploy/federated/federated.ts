@@ -108,7 +108,7 @@ async function main(cmd: string, args: string[]) {
   if (cmd === "key") {
     if (!o.brain || !isName(o.brain)) { console.error("key --brain NAME: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null (on, yes, null…)"); process.exit(2); }
     const { key, lines } = mintKey(o.brain);
-    console.log(`\n  The broker key for brain "${o.brain}" — shown once, not recoverable:\n\n    ${key}\n\n  For that brain's deploy/.env, as OB1_SLOT_BROKER_KEY (its coordinator reads it from SMD-3379 PR 3b; until then\n  nothing does, and a key minted again then serves as well).\n  Under brains: in the registry (its hash, never the key):\n\n${lines}`);
+    console.log(`\n  The broker key for brain "${o.brain}" — shown once, not recoverable:\n\n    ${key}\n\n  For that brain's deploy/.env, as OB1_SLOT_BROKER_KEY, beside OB1_SLOT_BROKER_URL=ws://host.containers.internal:<port>/v1/slots\n  (the registry's broker.port, 8095 unset); its coordinator reads both.\n  Under brains: in the registry (its hash, never the key):\n\n${lines}`);
     return;
   }
   const loaded = bunEnvProblem(process.execArgv);

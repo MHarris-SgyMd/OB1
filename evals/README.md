@@ -4974,6 +4974,8 @@ bun eval-inferred-priority.ts --run $D/run.jsonl --texts $D/texts.jsonl [--shard
 bun eval-inferred-priority.ts --draw $D/run.jsonl --sheet $D/sheet.md --texts $D/texts.jsonl   # the blind sheet, and a reply file beside it
 bun eval-inferred-priority.ts --freeze $D/run.jsonl <gold> <second> --note "…"   # each a filled sheet or reply file → fixtures/inferred-priority.json
 bun eval-inferred-priority.ts                  # the report and the verdict, from the fixture
+bun eval-inferred-priority.ts --run $D/dev.jsonl --only-fixture --texts $D/texts.jsonl   # a new prompt over the frozen texts
+bun eval-inferred-priority.ts --dev $D/dev.jsonl   # ...scored against the frozen labels: a development check, no verdict
 ```
 
 * **The population** is meant to be every current thought written through the capture path, and is read as
@@ -5006,6 +5008,10 @@ any git work tree; the fixture holds ids and numbers only.
   189,413 of them.
 
 ### Results, 2026-11-11: the bar fails, so `count_inferred` stays off
+
+This measured prompt v1. SMD-4226 ships v2, so the report now marks this verdict as gating nothing. A verdict on v2
+needs a new registration and a fresh draw. `--dev` only checks a new prompt against these labels, and since the
+items were drawn from v1's calls, they are no random sample for v2.
 
 The run read stable's 1,394 current captures with qwen2.5:7b (prompt v1). The model read something from 186 (13%).
 The operator labelled the 120 drawn texts blind.
