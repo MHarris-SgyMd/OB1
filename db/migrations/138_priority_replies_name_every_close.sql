@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 137: a priority write names every statement it closed, and the
+-- Migration 138: a priority write names every statement it closed, and the
 --                item it was asked about (SMD-4238)
 -- =============================================================================
 --
@@ -48,8 +48,8 @@
 --   Two functions replaced with their signatures and return types; one new
 --   STABLE SQL function. No table, grant or row changes. The answers gain
 --   keys, and assert_priority's lock and `unchanged` test change as above.
---   MINOR under FORK.md's version rules. test-schema [124],
---   test-upgrade [20cb].
+--   MINOR under FORK.md's version rules. test-schema [125],
+--   test-upgrade [20cc].
 --
 -- Prerequisites
 --   What the carried bodies call: 115 (ob1_work_claim_text), 116
@@ -87,7 +87,7 @@ BEGIN
   FOR i IN 1 .. array_length(v_need, 1) LOOP
     IF to_regprocedure(v_need[i][1]) IS NULL THEN
       RAISE EXCEPTION USING
-        MESSAGE = format('migration 137 needs %s; this schema lacks it', v_need[i][2]),
+        MESSAGE = format('migration 138 needs %s; this schema lacks it', v_need[i][2]),
         -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
         HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
         ERRCODE = 'invalid_schema_definition';
@@ -109,7 +109,7 @@ AS $$
    WHERE a.id = ANY(p_ids)
 $$;
 COMMENT ON FUNCTION ob1_priority_closed_json(uuid[]) IS
-  'The statements with these ids, each as ob1_priority_json renders it, newest first (by seq); [] for none. The `closed` list of assert_priority''s and clear_priority''s answers. Migration 137 / SMD-4238.';
+  'The statements with these ids, each as ob1_priority_json renders it, newest first (by seq); [] for none. The `closed` list of assert_priority''s and clear_priority''s answers. Migration 138 / SMD-4238.';
 
 
 -- ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION assert_priority(text, text, int, timestamptz, timestamptz, text, text, text, boolean, jsonb) IS
-  'States that an item (p_kind thought, ticket, entity or item; p_key) matters at p_level (0 none to 5 critical), optionally due at p_due_at, not startable before p_not_before (never after p_due_at), or taking the due time of another item (p_due_ref_kind, p_due_ref_key), with p_reason; p_inferred lowers the maker''s tier to 4. The maker is the key p_actor names, its kind, trust, scope and source declaration the registry''s at the write, never an argument''s; its tier follows decision 4. The maker''s open assertions on the item''s pool — a ticket and its own rows are one item (122) — close as replaced; the same statement again on the same item is unchanged, nothing written. Returns jsonb {outcome: asserted | unchanged | refused, code, message, assertion, replaced, winner, item, closed}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_NOT_YOURS (a capture-only key on anything but a thought its agent captured and nobody took or an open item it opened and nobody else changed, or a due reference to one — asked before existence, and answered alike for an item that is not there), or ITEM_NOT_FOUND (the item, or the due reference). `item` is the item named, as ob1_priority_item keys it; `closed` is every statement it closed, newest first ([] when it closed none), and `replaced` the newest of them; the winner, the pool''s (ob1_priority_winner), is shown to a write key alone. With both p_due_at and a due reference, p_due_at is the item''s due time (decision 5). Raises for no maker, a malformed argument, or a transaction above READ COMMITTED. Migration 116 / SMD-3663; open items, migration 117 / SMD-3665; across a ticket''s pool, migration 133 / SMD-4127; the item named and every statement closed, migration 137 / SMD-4238.';
+  'States that an item (p_kind thought, ticket, entity or item; p_key) matters at p_level (0 none to 5 critical), optionally due at p_due_at, not startable before p_not_before (never after p_due_at), or taking the due time of another item (p_due_ref_kind, p_due_ref_key), with p_reason; p_inferred lowers the maker''s tier to 4. The maker is the key p_actor names, its kind, trust, scope and source declaration the registry''s at the write, never an argument''s; its tier follows decision 4. The maker''s open assertions on the item''s pool — a ticket and its own rows are one item (122) — close as replaced; the same statement again on the same item is unchanged, nothing written. Returns jsonb {outcome: asserted | unchanged | refused, code, message, assertion, replaced, winner, item, closed}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_NOT_YOURS (a capture-only key on anything but a thought its agent captured and nobody took or an open item it opened and nobody else changed, or a due reference to one — asked before existence, and answered alike for an item that is not there), or ITEM_NOT_FOUND (the item, or the due reference). `item` is the item named, as ob1_priority_item keys it; `closed` is every statement it closed, newest first ([] when it closed none), and `replaced` the newest of them; the winner, the pool''s (ob1_priority_winner), is shown to a write key alone. With both p_due_at and a due reference, p_due_at is the item''s due time (decision 5). Raises for no maker, a malformed argument, or a transaction above READ COMMITTED. Migration 116 / SMD-3663; open items, migration 117 / SMD-3665; across a ticket''s pool, migration 133 / SMD-4127; the item named and every statement closed, migration 138 / SMD-4238.';
 
 -- ---------------------------------------------------------------------------
 -- clear_priority
@@ -370,5 +370,5 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION clear_priority(text, text, jsonb) IS
-  'Closes the caller''s own open assertions on an item''s pool — a ticket and its own rows are one item (122) — as cleared, with none after; another key''s are untouched. Returns jsonb {outcome: cleared | nothing_to_clear | refused, code, message, assertion, winner, item, closed}: refused READ_ONLY_KEY (an envelope stating no write or capture scope). `item` is the item named, as ob1_priority_item keys it; `closed` is every statement it closed, newest first ([] when it closed none), and `assertion` the newest of them; the winner, the pool''s, is shown to a write key alone, never to a capture key. The item need not exist (a statement on a thought since removed can still be cleared). Raises for no maker, a malformed item, or a transaction above READ COMMITTED. Migration 116 / SMD-3663; across a ticket''s pool, migration 133 / SMD-4127; the item named and every statement closed, migration 137 / SMD-4238.';
+  'Closes the caller''s own open assertions on an item''s pool — a ticket and its own rows are one item (122) — as cleared, with none after; another key''s are untouched. Returns jsonb {outcome: cleared | nothing_to_clear | refused, code, message, assertion, winner, item, closed}: refused READ_ONLY_KEY (an envelope stating no write or capture scope). `item` is the item named, as ob1_priority_item keys it; `closed` is every statement it closed, newest first ([] when it closed none), and `assertion` the newest of them; the winner, the pool''s, is shown to a write key alone, never to a capture key. The item need not exist (a statement on a thought since removed can still be cleared). Raises for no maker, a malformed item, or a transaction above READ COMMITTED. Migration 116 / SMD-3663; across a ticket''s pool, migration 133 / SMD-4127; the item named and every statement closed, migration 138 / SMD-4238.';
 

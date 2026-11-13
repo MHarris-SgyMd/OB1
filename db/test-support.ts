@@ -439,7 +439,7 @@ const FUNCTIONS = [
   "ob1_priority_close_items(text, text[])",
   "ob1_priority_close_deleted()",
   "ob1_close_orphan_priorities()",
-  // 137 (SMD-4238): the writers' closed lists.
+  // 138 (SMD-4238): the writers' closed lists.
   "ob1_priority_closed_json(uuid[])",
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row

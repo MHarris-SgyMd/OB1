@@ -68,6 +68,7 @@ export async function selfCheck(): Promise<number> {
       ok(ticketProblem(cleanTicket({ named: ["SMD-10", "junk"] }))?.includes("not a team key"), "a named id that isn't a team key is refused");
       ok(ticketProblem(cleanTicket({ named: ["SMD-10", "SMD-11"] })) === null, "clean named ids are allowed");
       ok(ticketProblem(cleanTicket({ description: "weird⠀blank" }))?.includes("description"), "U+2800 (braille blank) is treated as hidden");
+      ok(ticketProblem(cleanTicket({ description: "## Problem\nbroken\n\n## Verify\n- it works\n\ta tabbed line" })) === null, "a multi-line description (newlines and a tab) is briefable: they show, so they are not hidden");
     });
 
     section("fence wraps text as uninjectable data", () => {

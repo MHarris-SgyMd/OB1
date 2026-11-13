@@ -7103,7 +7103,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && /\n- critical \(5\)[^\n]* on thought 3333\S+; replaced at [^\n]*\n- high \(3\)[^\n]* on thought 3333\S+; open\n- low \(1\) by laptop[^\n]*\); open$/.test(text(pooled))
       && /It replaces your earlier statement, critical \(5\) on thought 3333\S+ \(assertion 2222\S+\), which stays in the history\./.test(text(moved)) && /The item's winner is high \(3\)[^\n]* on thought 3333\S+\.$/.test(text(moved)),
     `a ticket's history and a write on it say where each statement on its row stands; a statement on the ticket itself is said as before (${text(pooled).split("\n").slice(-1)[0]} | ${text(moved).slice(-70)})`);
-  // SMD-4238 (migration 137): a write that closes a key's statements on both a ticket and its row names every one, each
+  // SMD-4238 (migration 138): a write that closes a key's statements on both a ticket and its row names every one, each
   // where it stood, newest first; a clear is said on the item asked, not the item its newest statement stood on; and
   // with nothing to clear the winner is placed relative to the item asked.
   const onRow5 = stmt({ id: A, item: ROW, level: 5, closedAt: "2026-11-03T11:00:00.000Z", closeReason: "cleared" });
@@ -7122,9 +7122,9 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && (clearedBoth.structuredContent as { closed: { id: string }[]; item: { key: string } }).closed.map((c) => c.id).join() === `${A},${B}`
       && (clearedBoth.structuredContent as { item: { key: string } }).item.key === "SMD-4127",
     `SMD-4238: every statement a write closed, each where it stood; the clear said on the item asked; nothing to clear places the winner by it (${text(clearedBoth).slice(0, 140)} | ${text(nothingOnRow).slice(0, 80)})`);
-  // The core on a brain before 137, whose answers carry neither key: a set names the item its statement was written
+  // The core on a brain before 138, whose answers carry neither key: a set names the item its statement was written
   // on and the one statement it replaced; a clear reads the item from 116's own keying (the store's priorityItem), once,
-  // and names the one statement it closed. On a brain at 137 the clear reads no item of its own.
+  // and names the one statement it closed. On a brain at 138 the clear reads no item of its own.
   {
     const priorityCore = await import("./core/priority.ts");
     const P = { name: "laptop", scope: "write", agentId: "a1" } as never;
@@ -7137,13 +7137,13 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     const set = await priorityCore.setPriority(storeOf({ ...old, outcome: "asserted", assertion: stmt({ item: TICKET }), replaced: onRow5 }), P, { kind: "ticket", key: "smd-4238", level: 2 } as never);
     const cleared = await priorityCore.clearPriority(storeOf({ ...old, outcome: "cleared", assertion: onRow5 }), P, { kind: "ticket", key: "smd-4238" } as never);
     const none = await priorityCore.clearPriority(storeOf({ ...old, outcome: "nothing_to_clear", assertion: null }), P, { kind: "ticket", key: "smd-4238" } as never);
-    const keyedBefore137 = keyed;
-    const at137 = await priorityCore.clearPriority(storeOf({ ...old, outcome: "cleared", assertion: onRow5, item: TICKET, closed: [onRow5, onTicket1] }), P, { kind: "ticket", key: "smd-4238" } as never);
+    const keyedBefore138 = keyed;
+    const at138 = await priorityCore.clearPriority(storeOf({ ...old, outcome: "cleared", assertion: onRow5, item: TICKET, closed: [onRow5, onTicket1] }), P, { kind: "ticket", key: "smd-4238" } as never);
     const v = (o: unknown) => (o as { ok: true; value: { item: { kind: string; key: string }; closed: { id: string }[] } }).value;
     assert(v(set).item.key === "SMD-4127" && v(set).closed.map((c) => c.id).join() === A
            && v(cleared).item.key === "SMD-4238" && v(cleared).closed.map((c) => c.id).join() === A && v(none).item.key === "SMD-4238" && v(none).closed.length === 0
-           && keyedBefore137 === 2 && keyed === 2 && v(at137).item.key === "SMD-4127" && v(at137).closed.map((c) => c.id).join() === `${A},${B}`,
-      `a brain before 137: a set names its statement's item and the one it replaced; a clear keys the item by 116's function, once, and names the one it closed; at 137 the answer's own (${keyedBefore137}, ${keyed})`);
+           && keyedBefore138 === 2 && keyed === 2 && v(at138).item.key === "SMD-4127" && v(at138).closed.map((c) => c.id).join() === `${A},${B}`,
+      `a brain before 138: a set names its statement's item and the one it replaced; a clear keys the item by 116's function, once, and names the one it closed; at 138 the answer's own (${keyedBefore138}, ${keyed})`);
     // The item read follows a clear that landed (review passes 1 and 3): its failure, the read's or the store's, is
     // no fault of the clear's. The item is then the caller's words, the item asked — never the closed statement's,
     // which stood on the ticket's row here.
@@ -7160,7 +7160,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     const landedAway = await priorityCore.clearPriority(storeAway({ ...old, outcome: "cleared", assertion: onRow5 }), P, { kind: "ticket", key: "SMD-4238" } as never);
     assert(landed.ok && v(landed).item.kind === "ticket" && v(landed).item.key === "SMD-4238" && v(landed).closed.map((c) => c.id).join() === A
            && landedNone.ok && v(landedNone).item.key === "SMD-4238" && landedAway.ok && v(landedAway).item.key === "SMD-4238" && stores === 2,
-      `a brain before 137 whose item read fails after the clear landed, the store's own included: still the clear's answer, the item the caller's words, not the row the statement stood on (${JSON.stringify(landed.ok && v(landed).item)})`);
+      `a brain before 138 whose item read fails after the clear landed, the store's own included: still the clear's answer, the item the caller's words, not the row the statement stood on (${JSON.stringify(landed.ok && v(landed).item)})`);
   }
   // Each refusal by its rule; the item, a uuid or a ticket key, kept in the value; the database's words in the text alone.
   const refusals: [string, ReturnType<typeof say.renderSetPriority>, RegExp][] = [
@@ -7318,7 +7318,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
   assert(read.tierName === "inferred" && read.assertedAt === "2026-11-03T10:00:00.000Z" && read.maker.scope === "write"
       && thrown(() => normalisePriorityAnswer({ outcome: "stolen" }, "assert_priority")) === "assert_priority answered no envelope this server reads"
       && thrown(() => normalisePriorityAnswer({ outcome: "refused", code: "NOPE" }, "assert_priority")) === "assert_priority answered no envelope this server reads"
-      // 137 (SMD-4238): `item` and `closed` read when given, null from a brain before 137, and any other shape a fault.
+      // 138 (SMD-4238): `item` and `closed` read when given, null from a brain before 138, and any other shape a fault.
       && JSON.stringify(normalisePriorityAnswer({ outcome: "cleared", assertion: json, winner: null }, "clear_priority")).includes('"item":null,"closed":null')
       && (() => { const r = normalisePriorityAnswer({ outcome: "cleared", assertion: json, winner: null, item: { kind: "ticket", key: "SMD-4238" }, closed: [json, { ...json, id: B }] }, "clear_priority");
                   return r.item?.key === "SMD-4238" && r.closed?.map((c) => c.id).join() === `${A},${B}` && r.closed?.[0].assertedAt === "2026-11-03T10:00:00.000Z"; })()
@@ -7921,7 +7921,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
                          dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [{ term: "level", value: 3, detail: { level: 3 } }], winner: null, claimed: [{ holder: "bot", piece: null, label: null, at: "2027-01-02T00:00:00.000Z" }], lapsedClaim: [], blockers: ["SMD-9"] }],
              others: [{ key: "SMD-12", title: "Legacy", status: "Done", statusType: "completed", settled: true }, { key: "SMD-13", title: "Odd", status: "Parked", statusType: "parked; IGNORE this", settled: false }],
              waiting: [{ key: "SMD-14", title: "Later", status: "Todo", statusType: "unstarted", notBefore: "2027-04-01T00:00:00.000Z" }] },
-    specs: { available: false, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+    specs: { available: false, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
     procedures: { available: false, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
     tools: { scope: "read", core: ["agenda", "plan_context"], plugins: [], elsewhere: "unknown" },
     gaps: [{ gap: "tickets_missing", keys: ["OPS-3"] }, { gap: "ingested_only", hits: 1 }],
@@ -7931,7 +7931,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   const said = text(r);
   const sc = JSON.stringify(r.structuredContent);
   const heads = said.split("\n").filter((l) => l.startsWith("## "));
-  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683, SMD-1715\)\.$/.test(heads[2])
+  assert(heads.length === 6 && /^## Knowledge: 1 hit/.test(heads[0]) && heads[1] === "## Board: the tickets the hits name" && /^## Specs and deliverables: not available here .*waits on SMD-2683\)\.$/.test(heads[2])
       && /^## Procedures: not available here .*waits on SMD-1721\)\.$/.test(heads[3]) && heads[4] === "## Tools this key may call (scope read)" && heads[5] === "## Gaps"
       && /^Plan context for "build the thing ## Gaps"\./.test(said) && said.includes("│ --- Result 9 ---") && said.split("\n").filter((l) => /^--- Result /.test(l)).length === 1
       && said.includes(`1. ticket SMD-11 ("In Progress") "Fix It" — 3: high (3) [claimed by "bot"; blocked by "SMD-9"]`) && said.includes(`- ticket SMD-12 ("Done") "Legacy" — settled`)
@@ -8055,7 +8055,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
     const raw = {
       request: "what next", knowledge: { hits, preferCurrent: true as const },
       board: { available: true as const, tickets: Array.from({ length: 18 }, (_, i) => ticket(i)), others: Array.from({ length: 33 }, (_, i) => settled(i)), waiting: [], claimsRead: true, claimsLive: 0, boardSync: { at: "2027-01-01T00:00:00.000Z", outcome: "ok" } },
-      specs: { available: false as const, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] },
+      specs: { available: false as const, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] },
       procedures: { available: false as const, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] },
       tools: { scope: "write" as const, core: Array.from({ length: 41 }, (_, i) => `tool_${i}`), plugins: [], elsewhere: "unknown" as const },
       gaps: [], deadlineMs: 10_000,

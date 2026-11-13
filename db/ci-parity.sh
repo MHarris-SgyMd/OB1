@@ -302,6 +302,7 @@ free_rows() {
   nodb .                 scripts/agent-runner/board-check.ts --self-check
   nodb .                 scripts/agent-runner/live-check.ts --self-check
   nodb .                 scripts/agent-runner/setup.ts --self-check
+  nodb .                 scripts/agent-runner/live-run.ts --self-check
   nodb .                 .github/ci/test-counts-page.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts
@@ -354,6 +355,7 @@ free_rows() {
   nodb db                 test-board-findings.ts
   nodb db                 test-weekly-digest.ts
   nodb db                 test-coordinator.ts
+  nodb db                 test-slot-relay.ts
 
   typecheck scripts
   typecheck server-portable

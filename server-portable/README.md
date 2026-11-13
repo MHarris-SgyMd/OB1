@@ -1304,7 +1304,7 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   its own board-sync rows are one item (SMD-4127, migration 133): a statement on
   either replaces the caller's on the other, and the winner is the two's. The reply
   names the item asked (`item`) and every statement it replaced (`closed`, newest
-  first, each on its own item; SMD-4238, migration 137); `replaced` is the newest.
+  first, each on its own item; SMD-4238, migration 138); `replaced` is the newest.
 - **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
   the caller's own statement, never another key's, and names the winner after. On a
   ticket or one of its rows it closes the caller's statements on both, and the reply
@@ -1372,7 +1372,7 @@ it, each over REST and MCP alike:
 | `decide_item_close` | `POST /v1/item-proposals/{id}/decision` | capture | `{outcome: accepted\|rejected, proposal, item, event}` |
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
-| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, keyed, order, weights, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE`; `order=due` (migration 129, SMD-4192) lists the items with a due time first, soonest first, then the undated by priority (a stated None counts as undated), the answer's `order` saying which was applied; on a brain before 129 it is refused 503 `ORDER_UNAVAILABLE`; `weights[name]=value` (SMD-4193) overrides the default weights by name for this call, echoed as `weights` (null without), a bad one refused 400, naming it (`REFUSED_INPUT` for a name or a range, `REFUSED_WEIGHTS` for cap below `unblocks_many_at`) |
+| `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, keyed, order, weights, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), a tie by the sooner due time, then the more open items it unblocks (migration 137, SMD-4264), then kind and key, each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE`; `order=due` (migration 129, SMD-4192) lists the items with a due time first, soonest first, then the undated by priority (a stated None counts as undated), the answer's `order` saying which was applied; on a brain before 129 it is refused 503 `ORDER_UNAVAILABLE`; `weights[name]=value` (SMD-4193) overrides the default weights by name for this call, echoed as `weights` (null without), a bad one refused 400, naming it (`REFUSED_INPUT` for a name or a range, `REFUSED_WEIGHTS` for cap below `unblocks_many_at`) |
 | `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values, little on this among them (SMD-4212: the best similarity of the first 8 hits under 0.74, the bar measured on qwen3-embedding:4b@1024; on another embedding a `little_not_measured` note says so, a note and not a coverage gap). One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
@@ -1430,6 +1430,71 @@ it, each over REST and MCP alike:
 Each writer is one statement in its own READ COMMITTED transaction holding the item's
 lock (117's rule). A role without the `items` grant group has the item calls fail, naming
 the table, and nothing else. Preflight's `open items` row checks the functions and the
+grant.
+
+### Deliverables (SMD-1715)
+
+A deliverable is a piece of agent output tied to the spec it was meant to meet (a
+thought's id), with a checkpoint (a commit hash or a content fingerprint) and a status:
+`unverified`, `verified` or `corrected` (migration 134, SMD-1715 PR 1). Three tools reach
+it, each over REST and MCP alike:
+
+| Tool | REST | Group | Answers |
+| --- | --- | --- | --- |
+| `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}`; `capture` null when nothing was captured |
+| `verify_deliverable` | `POST /v1/deliverables/{id}/verifications` | write | `{outcome: changed, deliverable, event, from, to}` |
+| `deliverable_history` | `GET /v1/deliverables/{id}` | read | `{deliverable, events}`; `deliverable` null when its thought was deleted |
+
+- **The capture is a capture_thought.** The output is captured as any thought is (its
+  egress, embedding, chunks and tags), its `derived_from` the spec, its text closing
+  with a `Checkpoint: …` line. So a new checkpoint is a new thought, and reworked output
+  is a new deliverable (the maintainer's definition, 2026-11-12). `capture` says what the
+  capture did by capture_thought's safe fields alone (`id`, `existed`, `chunks`,
+  `contextFailures`, and `noVector`: `refused` or `provider_down`), or is null when
+  nothing was captured.
+- **Everything is asked before the capture.** The capture and the record are two
+  statements, not one transaction (one transaction is SMD-4248). So the key's scope and
+  the spec (an id, or a thought's `client_key`, resolved once for both) are asked first.
+  Text that is a thought already, found before the capture or landed on by it, is
+  answered by what that thought is:
+  - a deliverable: 134's answer, writing nothing (`unchanged` for its own key, spec and
+    checkpoint, else `ALREADY_A_DELIVERABLE`);
+  - a thought this key captured from this spec that no deliverable names (a record that
+    did not land after an earlier call): recorded now;
+  - any other thought: `OUTPUT_EXISTS` (the maintainer, 2026-11-12).
+
+  Nothing is deleted. A record refused after a fresh capture leaves the thought; a
+  `SPEC_NOT_FOUND` names it (`left`), and a failed record leaves it for the same call to
+  record again. A text is matched by the thought's fingerprint, which ignores letter case
+  and runs of white space: two checkpoints that differ only there name one deliverable.
+- **What remains for SMD-4248:**
+  - another key capturing the same text while this call's model calls run has its row
+    merged into by this call's capture, before this call is refused;
+  - a thought left as above keeps its capture's side effects (proposed open items, an
+    inferred priority).
+- **A verification vouches for the output at its checkpoint,** not for the thought's
+  text, which stays editable. `verified`: it meets the spec. `corrected`: the check found
+  it wanting; corrected → verified is a later check overturning that finding.
+- **The finding is `finding`.** 134 stores a verification's finding as `outcome`; the
+  server names it `finding`, so no answer holds two `outcome`s.
+
+Their refusals:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `SPEC_NOT_FOUND` | 422 | The spec names no thought. Nothing is captured, unless the spec was deleted between the capture and the record: `left` then names the thought, which stays. |
+| `SPEC_IS_SELF` | 409 | The output's text is the spec's own, and a thought cannot be its own spec. |
+| `ALREADY_A_DELIVERABLE` | 409 | The thought is a deliverable recorded by another key, or at another spec or checkpoint; it names the one that stands (`recordedBy`, `spec`, `checkpoint`). |
+| `OUTPUT_EXISTS` | 409 | The output's text, with its checkpoint line, is a thought already that is not a deliverable, and not this key's own leftover from this spec. Nothing is recorded. |
+| `NOT_A_DELIVERABLE` | 404 | No deliverable was recorded on the thought; `deleted` when its thought was deleted, its events kept. |
+| `ILLEGAL_TRANSITION` | 409 | The status does not move `from` → `to`. |
+| `VERIFY_NOT_YOURS` | 403 | A move to verified by the key that recorded the deliverable (`as: recorder`), or by a key the brain records as writing its thought (`as: author`). Either may mark it corrected. |
+| `WRITE_SCOPE_REQUIRED` | 403 | A principal without write scope reaching a writer through a caller of the core's own. |
+| `NOT_FOUND` | 404 | The thought was deleted between the capture and the record. |
+
+capture_thought's own refusals (a refused egress, a provider down) stand for a capture.
+A role without the `deliverables` grant group has the deliverable calls fail, naming the
+table, and nothing else. Preflight's `deliverables` row checks the functions and the
 grant.
 
 ## Where a tool's logic lives (SMD-2283)

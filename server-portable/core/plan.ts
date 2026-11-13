@@ -4,7 +4,8 @@
 //   board       the tickets those hits name, in one agenda call (migration 126's keys scope: the maintainer's choice,
 //               2026-11-09, so one ranking serves both reads), and the named ones it does not list — settled or of an
 //               unknown status type, not yet startable, or unknown to the brain — so each named ticket is said once;
-//   specs       not available: SMD-2683 (a spec record) and SMD-1715 (deliverables) have not landed;
+//   specs       not available: SMD-2683 (a spec record) has not landed; deliverables (SMD-1715) are recorded, and read
+//               through deliverable_history, not here;
 //   procedures  not available: SMD-1721 has not landed;
 //   tools       what this key's scope may call here, core and plugin, and that other servers' tools are unknown to it;
 //   gaps        what it could not find, as values: no hit at all, every hit superseded or ingested, a named ticket the
@@ -256,7 +257,7 @@ export type PlanContextResult = {
   deadlineMs: number;
 };
 
-const SPECS: NotAvailable = { available: false, reason: "this brain records no specs or deliverables yet", waitsOn: ["SMD-2683", "SMD-1715"] };
+const SPECS: NotAvailable = { available: false, reason: "this brain records no specs yet, and its deliverables are read through deliverable_history", waitsOn: ["SMD-2683"] };
 const PROCEDURES: NotAvailable = { available: false, reason: "this brain records no procedures yet", waitsOn: ["SMD-1721"] };
 
 /**

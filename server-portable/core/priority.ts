@@ -116,7 +116,7 @@ export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"
   }));
   if (a instanceof PriorityRefused) return argumentRefused(ctx, a, input);
   if ((a.outcome === "asserted" || a.outcome === "unchanged") && a.assertion) {
-    // A brain before 137 names neither: the statement is always written on the item named, and it named the newest
+    // A brain before 138 names neither: the statement is always written on the item named, and it named the newest
     // statement it closed alone.
     return ok({
       outcome: a.outcome, item: a.item ?? a.assertion.item, assertion: a.assertion, replaced: a.replaced,
@@ -138,7 +138,7 @@ export async function clearPriority(ctx: Ctx, principal: Principal, input: Input
   const away = a.outcome === "nothing_to_clear" ? unattributed(principal) : null;
   if (away) return away;
   if (a.outcome === "cleared" || a.outcome === "nothing_to_clear") {
-    // A brain before 137 names neither: the item is keyed by 116's own function, read for it alone, and the newest
+    // A brain before 138 names neither: the item is keyed by 116's own function, read for it alone, and the newest
     // statement closed was the only one named. That read follows a clear that has landed, so its failure, the
     // store's included, is no fault of the clear's (review passes 1 and 3): the item is then the caller's words as
     // given, the item asked, never the closed statement's, which may stand on the ticket's row.
