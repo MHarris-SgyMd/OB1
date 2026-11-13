@@ -3835,17 +3835,18 @@ will do before it claims anything.
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
 records its own subjects when a rule finds them: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), alone;
-else a session summary's header tickets, every one the capture hook's header
-lists, when one of the session's listed prompts names one of them, in any case
-(not its title, which may be the harness's own and name the branch's ticket).
-The hook's header lists the tickets a session's prompts named, from every
-prompt, and its branch's or directory's only when they named none: a session on
-a branch may have done other work, and a header a listed prompt confirms is the
-prompts' own, though the summary lists only 12 prompts, each cut at 200
-characters. Since the header rule's version 3 (SMD-3306 PR 7a-3b-2) a header
-listing several, its full three included, keys them all, a set of one rule's
-(migration 130); version 2 keyed a header listing one alone, and left several to
-the model. A ticket-shaped word counts unless
+else a session summary's header tickets that one of the session's listed
+prompts names, in any case (not its title, which may be the harness's own and
+name the branch's ticket). The hook's header lists the tickets a session's
+prompts named, from every prompt, and its branch's or directory's only when
+they named none: a session on a branch may have done other work. The summary
+lists only 12 prompts, each cut at 200 characters, so where it shows them in
+part (`- … and N more`, or a prompt clipped) every listed ticket is keyed once
+a listed prompt names one, unless the header's own branch or project names
+them all, a header the branch's words may have given. Since the header rule's
+version 3 (SMD-3306 PR 7a-3b-2) a header listing several, its full three
+included, keys a set of one rule's (migration 130); version 2 keyed a header
+listing one alone, and left several to the model. A ticket-shaped word counts unless
 its prefix is on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
@@ -3870,7 +3871,7 @@ example, and is dropped. Version 3's question (SMD-3306 PR 7a-3b-2) asks for
 each thing the thought's own work is mainly about, at most three, the
 most-worked first and usually one, never a thing it only mentions; a ticket by
 its id alone. Of its first eight answers, the keys are a set, each once and at
-most three, a phrase naming a ticket the answer also gives left out, written
+most three, a phrase whose tickets the answer also gives read as its first, written
 through 130's door; version 2 asked for one. 130 keeps a set by key, so the
 model's order is its recipe's alone. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160

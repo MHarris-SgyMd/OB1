@@ -398,7 +398,7 @@ class TimedOutDown extends ProviderDown {
  * What record_thought_subjects answers (130): `added` when it wrote and closed nothing, `closed` when it closed and
  * wrote nothing (a set narrowed), `replaced` when it did both, `kept` when it did neither.
  */
-export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; ids?: string[]; added?: number; stale?: boolean; gone?: boolean };
+export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; ids?: string[]; kept?: number; added?: number; closed?: number; stale?: boolean; gone?: boolean };
 
 /**
  * One thought's subjects through 130's door, one way's set (SMD-3306 PR 7a-3b-1: a set of one until PR 7a-3b-2's rules
@@ -1550,6 +1550,8 @@ async function sweep(
    * those whose failure's release a lost poll handed back, which the failure count leaves out.
    */
   const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, subjects: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, deadlocked: 0, pollsLost: 0, ownError: 0, hungOwn: 0 };
+  /** Whether each thought recorded wrote one subject, as every one-key set does: the summary's words of a thought each. */
+  let wroteOneEach = true;
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -2546,10 +2548,13 @@ async function sweep(
       // `closed`: a set narrowed to the keys found, the rest closed — a replacement, as a one-key door's answer said.
       // `added` beside a standing set is one widened, its keys kept and more written: a replacement too, as the dry run
       // counts one, and of the subjects only those written count (PR 7a-3b-2's review pass 1, cold read and run-it: a
-      // widened set read as new, and a set's kept keys as recorded).
+      // widened set read as new, and a set's kept keys as recorded). What stood is the door's to say, under its lock: a
+      // set closed or written by another writer since the read (review pass 2, cold read).
       n[by]++;
-      n.subjects += w.added ?? keys.length;
-      if (row.standing_keys !== null) {
+      // 130's door answers every write with `added`.
+      n.subjects += w.added ?? 0;
+      if (w.added !== 1) wroteOneEach = false;
+      if ((w.kept ?? 0) + (w.closed ?? 0) > 0) {
         n.replaced++;
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
         // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key).
@@ -2880,9 +2885,10 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's tickets"], [n.model, `by ${cfg.judgeModel}`]]);
-  // The thoughts recorded, and the subjects written on them where those differ, as a set's can (SMD-3306 PR 7a-3b-2):
-  // the words of one-key sets as before.
-  const recordedWords = n.subjects === recorded ? `${recorded} subject(s) recorded${by ? ` (${by})` : ""}`
+  // The thoughts recorded, and the subjects written on them unless each wrote one, as a set's may not (SMD-3306 PR
+  // 7a-3b-2; review pass 2, cold read: equal totals of a narrowed set and a set of two read as one each): the words of
+  // one-key sets as before.
+  const recordedWords = wroteOneEach ? `${recorded} subject(s) recorded${by ? ` (${by})` : ""}`
     : `${recorded} thought(s)' subjects recorded (${by ? `${by}; ` : ""}${n.subjects} subject(s) written)`;
   const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "keyed by no rule, no model asked (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.hungOwn, "failed on hanging the provider again"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.deadlocked, "failed on a write the server rolled back to break a deadlock"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";

@@ -144,7 +144,7 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
  * askOwnSubject and subjectKey, its guard reading the thought's text at the
  * fingerprint the lineage names), so a changed reading can be checked against
  * what the model said. Since question version 3 (SMD-3306 PR 7a-3b-2) they
- * are `answers`, a list in the model's order, those naming nothing left out;
+ * are `answers`, a list in the model's order, its null and empty ones left out;
  * version 2's one was `answer`. Each subject of a set has its own lineage row,
  * each with the whole recipe; 130 keeps a set by key, so the model's order,
  * most-worked first, is the recipe's alone.

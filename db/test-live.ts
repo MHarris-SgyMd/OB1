@@ -9407,6 +9407,32 @@ if (want("10h")) {
           && tally(upgradedRun) === "1 thought(s)' subjects recorded (1 by the session header's tickets; 2 subject(s) written), 1 in place of a standing one (1 with a new key)" && ownCalls === asked,
         `a model's one key replaced by the header rule's two: a new key, run and dry run alike (${tally(upgradedRun)}; dry: ${upgradedDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
       await sql`DELETE FROM thoughts WHERE id = ${upgraded}::uuid`;
+      // What stood is the door's to say (review pass 2, cold read, run-it): a set another writer closes while the model is
+      // asked is no replacement, and one it writes meanwhile is. Each its own run: in one, the claim-time read's two
+      // errors cancel.
+      const raceGone = await seed("[10h] a raced close, merged pull request 727");
+      await sql`SELECT record_thought_subjects(${raceGone}::uuid, ARRAY['phrase:raced old'], 'model', 'subject:stub-judge@p1', NULL, ${await fpOf(raceGone)}, NULL)`;
+      onOwn = (t) => (t.includes("a raced close") ? sql`UPDATE thought_facets SET valid_until = now() WHERE thought_id = ${raceGone}::uuid AND kind = 'subject' AND valid_until IS NULL` : undefined);
+      const goneRun = await sweep({ limit: 1 }).finally(() => { onOwn = null; });
+      const raceCame = await seed("[10h] a raced write, merged pull request 727");
+      onOwn = async (t) => {
+        if (t.includes("a raced write")) await sql`SELECT record_thought_subjects(${raceCame}::uuid, ARRAY['phrase:raced in'], 'model', 'subject:stub-judge@p1', NULL, ${await fpOf(raceCame)}, NULL)`;
+      };
+      const cameRun = await sweep({ limit: 1 }).finally(() => { onOwn = null; });
+      assert(tally(goneRun) === "1 subject(s) recorded (1 by stub-judge)" && tally(cameRun) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (1 with a new key)"
+          && (await standingKeys(raceGone)).map((x) => x.key).join() === "pr:727" && (await standingKeys(raceCame)).map((x) => x.key).join() === "pr:727",
+        `a set closed meanwhile is no replacement, one written meanwhile is (${tally(goneRun)} | ${tally(cameRun)})`);
+      await sql`DELETE FROM thoughts WHERE id IN (${raceGone}::uuid, ${raceCame}::uuid)`;
+      // A narrowed set, none written, beside a new set of two, two written: equal totals, but not one subject a thought
+      // (review pass 2, cold read, run-it: they read as one each).
+      const narrowed2 = await seed(twoTickets("SMD-82", "SMD-83").replace("\n- and SMD-83 after it", "\n- and more after it"));
+      await sql`SELECT record_thought_subjects(${narrowed2}::uuid, ARRAY['ticket:SMD-82', 'ticket:SMD-83'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${await fpOf(narrowed2)}, NULL)`;
+      const pair = await seed(twoTickets("SMD-84", "SMD-85"));
+      const mixRun = await sweep({ limit: 2 });
+      assert(tally(mixRun) === "2 thought(s)' subjects recorded (2 by the session header's tickets; 2 subject(s) written), 1 in place of a standing one (0 with a new key)"
+          && (await standingKeys(narrowed2)).map((x) => x.key).join() === "ticket:SMD-82" && (await standingKeys(pair)).length === 2,
+        `a narrowed set and a new set of two: the thoughts recorded, and the subjects written, though their totals agree (${tally(mixRun)})`);
+      await sql`DELETE FROM thoughts WHERE id IN (${narrowed2}::uuid, ${pair}::uuid)`;
     })();
     // In a function of its own: test-live's module body is past the size TypeScript's control flow analysis takes
     // (TS2563).
