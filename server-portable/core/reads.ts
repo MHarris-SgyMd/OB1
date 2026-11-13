@@ -14,8 +14,9 @@ import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions
 import { brainInfo as readBrain, taskStates, type BrainInfo, type ReadOptions, type ServerFacts, type TaskStatusResult } from "../brain-info.ts";
 import { BRAIN_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
 import { BRAIN_INFO_TOOL_DEADLINE_MS, HEALTH_DEADLINE_MS } from "../deadlines.ts";
-import type { Principal } from "../auth.ts";
+import { canRead, type Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
+import { embeddingProviderError, providerLogWords } from "./provider-refusal.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { listCursor, parseListCursor, parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "./list-cursor.ts";
@@ -105,7 +106,17 @@ export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts
     // by exact matches alone, and not said of the provider's health — the provider was not what stopped.
     const stopped = opts.signal?.aborted === true;
     const down = stopped ? { reason: "deadline", detail: "the read's deadline came before the provider answered" } : providerDown(e);
-    if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
+    if (!down) {
+      heardFrom(ctx.providerHealth, embedStarted, e);
+      // The provider's other answers — a credential refused, a model not there, a redirect, a 2xx that is not JSON or
+      // holds no embedding — refuse the search, coded and final, and the provider's words go to the log (SMD-2892);
+      // anything else is still a fault.
+      const at = ctx.embedConfig().embeddings;
+      const refused = embeddingProviderError(e, at, canRead(principal));
+      if (!refused) throw e;
+      console.error(`${opts.tool}: the embedding provider at ${shownBase(at)} refused the query's embedding: ${providerLogWords(e, at)}`);
+      return { refusal: refused, rows: [] };
+    }
     // As a row prints an endpoint: userinfo masked (SMD-2885).
     const base = shownBase(ctx.embedConfig().embeddings);
     console.error(stopped ? `${opts.tool}: the embedding provider at ${base} did not answer before the caller's deadline; answered by exact matches alone`

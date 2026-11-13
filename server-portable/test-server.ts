@@ -1852,8 +1852,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // What answered says what is known (review pass 4): a call embeds; GET /models only reaches; a call refused or unusable is a fault.
   assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", ...R }) === "answering (an embedding call answered 2026-10-22T00:00:00.000Z)", "answering by a call: it embeds");
   assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "probe", ...R }) === "reachable (GET /models answered 2026-10-22T00:00:00.000Z); no embedding call made since", "answering by the probe: reachable, nothing said of the calls");
-  assert(/^answering, but refusing its embedding calls \(it answered 404, 2026-10-22T00:00:00\.000Z\) — a capture fails outright until that is fixed: check the model is pulled and the key$/.test(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", fault: "it answered 404", ...R })),
-    "a fault: the provider there, a capture failing outright, what to check");
+  assert(/^answering, but refusing its embedding calls \(it answered 404, 2026-10-22T00:00:00\.000Z\) — a capture, a search or an edit of a thought's text is refused \(EMBEDDING_PROVIDER_ERROR\) until that is fixed: check the model is pulled and the key$/.test(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", fault: "it answered 404", ...R })),
+    "a fault: the provider there, a capture, search or edit refused, what to check");
   const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", clears: "probe" as const };
   assert(providerWords({ ...down, ...R }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s by GET /models",
     `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, ...R })})`);
@@ -2957,6 +2957,18 @@ console.log("\n[16g] The read side of trust: the By: line's trust, the ingested 
   const meta = (trust?: string) => ({ type: "note", actor_kind: "operator", actor_name: "op-key", ...(trust ? { trust } : {}) });
   const hybrid = (n: number, trust?: string) => ({ id: id(n), content: `body ${n}`, metadata: meta(trust), created_at: "2026-09-25T00:00:00.000Z", similarity: 0.9, matchedNeedles: [], score: 0.01, fused: 0.01, demoted: [], supersededBy: null });
   const facts = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false };
+  // The provider's own words in a refusal's text are cut to 200 characters (SMD-2892 review pass 2: the cap unheld); a
+  // provider's body may run to 500.
+  const longWords = `{"error":"${"x".repeat(480)}"}`;
+  const capped = renderSearchThoughts({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", base: "http://p/v1", provider: longWords } } as never, false);
+  const shownWords = /It said: (.*)$/.exec(capped.content[0].text)?.[1] ?? "";
+  // Quoted, so they read as the provider's and never as the server's own sentence (review pass 4).
+  const unquoted = (() => { try { return JSON.parse(shownWords) as string; } catch { return ""; } })();
+  assert(unquoted.length > 0 && unquoted.length <= 201 && unquoted.startsWith('{"error":"xxx'), `a refusal's provider words are quoted and cut to 200 characters (${unquoted.length})`);
+  // A refusal code a renderer's FACTS does not know is said as itself, not thrown (review pass 4: an older mcp beside a newer api).
+  const { refusalValue } = await import("./core/refusal.ts");
+  const unknown = (() => { try { return refusalValue({ code: "SOME_FUTURE_CODE", retryable: false } as never); } catch (e) { return String(e); } })();
+  assert(JSON.stringify(unknown) === JSON.stringify({ code: "SOME_FUTURE_CODE", retryable: false }), `refusalValue of a code it does not know: its code and verdict, no throw (${JSON.stringify(unknown)})`);
   const st = renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [hybrid(1, "ingested"), hybrid(2, "operator"), hybrid(3)], facts, window: null } } as never, false);
   const blocks = st.content[0].text.split("--- Result ").slice(1);
   assert(blocks.length === 3 && blocks[0].includes(`By: op-key (operator) · trust ingested\n${INGESTED_NOTICE}\n`) && blocks[0].indexOf(INGESTED_NOTICE) < blocks[0].indexOf("body 1"),
@@ -3935,7 +3947,9 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
 {
   const { outcomeOf, requestLine, useRequestLog } = await import("./telemetry.ts");
   const cells: [number, string | undefined, string][] = [[200, undefined, "ok"], [202, undefined, "ok"], [404, "NO_ROUTE", "refused"], [503, "BUSY", "refused"],
-    [501, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "refused"], [503, "STORE_UNAVAILABLE", "error"], [500, "FAILED", "error"], [500, undefined, "error"]];
+    [501, "RUN_WORKER_DRAIN_NOT_AVAILABLE", "refused"], [503, "STORE_UNAVAILABLE", "error"], [500, "FAILED", "error"], [500, undefined, "error"],
+    // The brain's own embedding provider failing (SMD-2892): coded as a refusal, counted as the brain's fault.
+    [503, "EMBEDDING_PROVIDER_ERROR", "error"]];
   const wrong = cells.filter(([s, c, want]) => outcomeOf(s, c) !== want);
   assert(wrong.length === 0, `an answer's outcome: a fault's 5xx (or a codeless one) \`error\`, any other 4xx or 5xx \`refused\`, else \`ok\` (wrong: ${JSON.stringify(wrong)})`);
   const at = new Date("2026-10-08T00:00:00.000Z");
