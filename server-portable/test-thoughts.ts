@@ -2818,6 +2818,28 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(HF(hook("SMD-2614, FY-2026", ["start smd-2614"]), "asks") === "SMD-2614" && HF(hook("SMD-1, SMD-2, SMD-3, SMD-4", ["smd-1"]), "asks") === ""
       && HF(hook("SMD-55, SMD-56", clippedAsk), "bogus") === "SMD-55,SMD-56" && HF(hook("SMD-55, SMD-56", clippedAsk), 1) === "SMD-55,SMD-56",
     "…under `asks` a denied prefix still no ticket and a header over three none; a word the hook does not send, its prompts shown in part, widened as with none (review pass 4, mutants)");
+  const onBranch = (branch: string, project = "ob1") => `Session summary — SMD-55 — claude-code — ${project} (${branch}) — 2026-10-01\n\nAsked (1 prompt):\n- work on SMD-55 please`;
+  assert(["hotfix-2026", "release-2", "v2-26", "dependabot/npm/vite-5", "feat/x"].every((b) => HF(onBranch(b), "asks") === "SMD-55") && HF(onBranch("feat/x", "ob1-2"), "asks") === "SMD-55"
+      && HF(onBranch("smd-610-bump-node-22").replace("SMD-55 —", "NODE-22 —").replace("SMD-55 please", "node-22 please"), "asks") === "",
+    "…the team the header's own parts name read as the hook reads a ticket, two to five letters and two to six digits: `hotfix-2026`, `release-2` or `ob1-2` no team (review pass 5, run-it); `node-22` beside `smd-610` still another team's");
+  assert(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen", tickets_from: "asks" } }) === null
+      && JSON.stringify(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen", issue: "SMD-9" } })) === JSON.stringify({ keys: ["ticket:SMD-9"], by: "metadata" })
+      && ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "" } }) !== null,
+    "…a summary the hook's model wrote keys no header, its prose never the hook's layout; a ticket it is filed under still keys it (review pass 5, run-it)");
+  // Review pass 5 (mutants): `asks` keys the header whose every ticket only an unlisted ask named; the Asked list, not a
+  // Title, is the hook's layout, its heading read whole; the recipe's word only the hook's two, `place` as itself, and
+  // none on the filed ticket's.
+  const hiddenSession = hookSession("main", [...Array.from({ length: 12 }, (_, i) => `step ${i + 1}`), "and SMD-2 too"], ["SMD-2"]);
+  const hidden = renderSummary(hiddenSession);
+  const titled = "Session summary — SMD-2125, SMD-2126 — claude-code — x — 2026-11-13\n\nTitle: start smd-2125";
+  const looseAsked = "Session summary — SMD-2125 — claude-code — x — 2026-11-13\n\nAsked the team:\n- smd-2125 is done";
+  const ruled = (metadata: Record<string, unknown>, content = hook("SMD-55, SMD-56", ["start smd-55"])) => JSON.stringify(ruleSubject({ content, metadata }));
+  assert(/^Session summary — SMD-2 — /.test(hidden) && !/SMD-2 too/.test(hidden) && headerTickets(hiddenSession).from === "asks" && HF(hidden, "asks") === "SMD-2" && H(hidden) === ""
+      && HF(titled, "asks") === "" && HF(looseAsked, "asks") === "" && H(looseAsked) === ""
+      && ruled({ tickets_from: "place" }) === JSON.stringify({ keys: ["ticket:SMD-55"], by: "first_line", from: "place" })
+      && ruled({ tickets_from: "bogus" }) === JSON.stringify({ keys: ["ticket:SMD-55"], by: "first_line" })
+      && ruled({ tickets_from: "asks", issue: "SMD-1" }) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" }),
+    `…\`asks\` keys a header only an unlisted ask named; a Title alone, or an \`Asked\` heading not the hook's, no Asked list; the recipe's word \`place\` as itself, a word the hook does not send none, the filed ticket's none (review pass 5, mutants: ${HF(hidden, "asks")} | ${ruled({ tickets_from: "place" })})`);
   // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
   const two = hook("SMD-7, SMD-8", ["start smd-8", "and smd-7"]);
   assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" })

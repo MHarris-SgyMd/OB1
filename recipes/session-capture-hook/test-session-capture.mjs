@@ -2459,6 +2459,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const dryEp = await run(["--dry-run", EPISODES_T]);
   assert(dryEp.code === 0 && /^--- 4 episodes — one thought each, on its own supersedes chain:\n    1\. SMD-1844 — \(michaelharris\/smd-1844-loopback\) — 2 prompt\(s\) — 2026-09-24 09:00 → 2026-09-24 09:40 — from the start — ended at a compaction\n    2\. SMD-1843, SMD-1844 — \(michaelharris\/smd-1843-env\) — 2 prompt\(s\) — 2026-09-24 10:00 → 2026-09-24 10:30 — begun after a compaction with SMD-1843 — ended when SMD-1917 was taken up\n    3\. SMD-1917 — [^\n]*— begun with SMD-1917 — ended at a compaction\n    4\. SMD-1917 — \(michaelharris\/smd-1917-fork-md\) — 2 prompt\(s\) — 2026-09-24 11:10 → 2026-09-24 11:31 — begun after a compaction — still open\n\n=== episode 1 ===\nSession summary — SMD-1844/.test(dryEp.out) && (dryEp.out.match(/^=== episode \d ===$/gm) ?? []).length === 4 && (dryEp.out.match(/^--- would send \(episode \d\): source=claude-code, derived_from=/gm) ?? []).length === 4 && (dryEp.out.match(/secret scan: clean/g) ?? []).length === 4,
     `--dry-run prints the segmentation — one line per episode with its tickets, branch, asks, span and bounds — then each episode's text and what it would send (${dryEp.out.split("\n")[1]})`);
+  // Review pass 5 (mutants: the line naming no word, or always `asks`, lived): each episode's would-send line names its
+  // word, as its payload carries it; one with no ticket in its header names none.
+  const sends = dryEp.out.split("\n").filter((l) => l.startsWith("--- would send"));
+  const sentWords = sends.map((l) => l.replace(/^.*derived_from=[0-9]+ id\(s\)(?: \[[^\]]*\])?/, ""));
+  assert(JSON.stringify(sentWords) === JSON.stringify([", metadata.tickets_from=place", ", metadata.tickets_from=asks", ", metadata.tickets_from=asks", ", metadata.tickets_from=place"]),
+    `--dry-run's would-send line names each episode's metadata.tickets_from (SMD-3306 review pass 5: ${JSON.stringify(sentWords)})`);
   const dryEpCp = await run(["--dry-run", EPISODES_T, "--event", "PreCompact", "--trigger", "manual"]);
   assert((dryEpCp.out.match(/Checkpoint: compacted/g) ?? []).length === 1 && /=== episode 4 ===[^]*Checkpoint: compacted at 2026-09-24 11:31 \(manual\)/.test(dryEpCp.out), "…with --event, the checkpoint line previews on the open episode alone");
   const dryEpSec = await spawnScript(["--dry-run", join(TMP, "episodes-secret.jsonl")], { env: { OB1_CAPTURE_ON_SECRET: "refuse" } });

@@ -9357,7 +9357,8 @@ if (want("10h")) {
       // Review pass 4 (mutant: the sweep reading no word lived): the sweep reads the hook's word off the metadata too.
       const sweptAsked = await seed(oneShown.replace("Both done.", "Both done, swept."), { tickets_from: "asks" });
       const sweptRun = await sweep({ limit: 5 });
-      assert(sweptRun.code === 0 && (await standingKeys(sweptAsked)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87",
+      assert(sweptRun.code === 0 && (await standingKeys(sweptAsked)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87"
+          && (await standingKeys(sweptAsked)).every((x) => x.recipe?.tickets_from === "asks"),
         `the sweep reads the hook's word off the thought's metadata too (exit ${sweptRun.code}: ${tally(sweptRun)})`);
       await sql`DELETE FROM thoughts WHERE id = ${sweptAsked}::uuid`;
       // The sweep: a header's two tickets by the rule; a header's ticket version 2 keyed, found again under version 3, the

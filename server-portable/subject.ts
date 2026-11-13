@@ -10,9 +10,10 @@
  *   2. `first_line`: a session summary's header tickets: every one when the capture hook says its asks named
  *      them (metadata.tickets_from), else those its listed prompts name — without the hook's word, every one when
  *      the summary shows its prompts in part and its own branch and project do not name them all — none when it
- *      lists another team's ticket than its branch's (sessionHeaderTickets). The capture hook's header lists the tickets a session's prompts
- *      named, and the branch's or directory's only when they named none: that one is the session's work only when it
- *      says so;
+ *      lists another team's ticket than the first its own project and branch name, or the hook's model wrote it
+ *      (sessionHeaderTickets, ruleSubject). The capture hook's header lists the tickets a session's prompts named,
+ *      and the branch's or directory's only when they named none: that one is the session's work only when it says
+ *      so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), each of its
  *      answers read into a key (subjectKey).
  * Version 1 of the rules and the question (SMD-3306 PR 2) read the first ticket on any thought's first line and asked
@@ -178,6 +179,8 @@ export function metadataTicket(metadata: Record<string, unknown> | null | undefi
 const HEADER_TICKETS = /^\s*Session summary — ([A-Z][A-Z0-9]*-[0-9]+(?:, [A-Z][A-Z0-9]*-[0-9]+)*) — /;
 /** The most tickets the hook's header lists (renderSummary's slice): a header listing more is not the hook's. */
 const HEADER_TICKETS_MAX = 3;
+/** A ticket-shaped word as the capture hook reads one in a branch or a directory (its TICKET_RE). */
+const HOOK_TICKETS = /\b([A-Za-z]{2,5})-([0-9]{2,6})\b/g;
 /** The hook's own line breaks: a character LINE_BREAK also reads as one stays inside the prompt the hook wrote it in (review pass 2: a pasted NEL ended the read). */
 const HOOK_LINE = /\r\n|\n|\r/;
 /**
@@ -202,15 +205,16 @@ const clipped = (line: string): boolean => line.endsWith("…") && line.length -
  * header's tickets came from, `asks` (those the episode's asks named) or `place` (its branch's or directory's), which
  * the text cannot say (SMD-3306 PR 7a-3b-2, after three review passes each found the rule's guesses at it wrong).
  * It is read when the text's subjects are found, and kept on the set's recipe: a word changed alone, with the text
- * as it was, finds nothing again (the fingerprint is the text's, and 113's trigger pools a thought for its text and its
- * filed ticket alone), and a text edited keeps the word it had (review pass 4, cold read and run-it: the hook never
+ * as it was, is not followed until the text moves or the extraction pass reads the thought again under a new key (the
+ * fingerprint is the text's, and 113's trigger pools a thought for its text and its filed ticket alone; review pass 5,
+ * run-it), and a text edited keeps the word it had (review pass 4, cold read and run-it: the hook never
  * changes a word it sent, nor edits a summary).
  */
 export const TICKETS_FROM = "tickets_from";
 
 /**
  * A session summary's header tickets. With the hook's word on where they came from (`from`, TICKETS_FROM): `asks`,
- * every listed ticket, each named by an ask, shown or not; `place`, those a listed prompt names, as a header shown
+ * every listed ticket, each named by an ask, shown or not, where the hook's Asked list is read (none else); `place`, those a listed prompt names, as a header shown
  * whole is read. Without it — a summary from a hook before 1.8.0, or a brain that refused the key — the rest of this reading:
  * those the header lists that one of the session's listed prompts names, in any
  * case, in the header's order, each once; and every one it lists when the summary shows its prompts in part — a
@@ -252,7 +256,10 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
   // The hook learns a team from every ticket-shaped word of the branch and the directory, so on `smd-610-bump-node-22`
   // a prompt's `node-22` is a ticket to it, listed as one (review pass 3, run-it: `NODE-22, NODE-24` keyed, SMD-610
   // lost): a header listing a ticket of a team other than the first ticket its own later parts name is the model's.
-  const home = [...rest.toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).find(isTicket);
+  // Read with the hook's own shape, two to five letters and two to six digits: the server's wider one took
+  // `hotfix-2026` or `release-2` for a team the hook never learned, sending its own sessions to the model (review pass
+  // 5, run-it).
+  const home = [...rest.matchAll(HOOK_TICKETS)].map((m) => `${m[1].toUpperCase()}-${m[2]}`).find(isTicket);
   const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
   if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
   const anchored = tickets.every((t) => nameOf(t).test(rest));
@@ -276,7 +283,8 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
 
 /**
  * The subjects the two rules find, in their order, or null for the model to find: the ticket the thought is filed
- * under, alone; else a session summary's header tickets (sessionHeaderTickets), one to three. Any
+ * under, alone; else a session summary's header tickets (sessionHeaderTickets), one to three, unless the capture hook's
+ * model wrote it (metadata.summary_model). Any
  * other note's first line is left to the model (version 2): on Verify item 1 a note's first-line ticket was often only
  * context, its own subject a digest, a process or a release, and the model, asked instead, agreed with the raters
  * 0.950 against the rule's 0.750.
@@ -284,6 +292,9 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
 export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; by: Exclude<SubjectBy, "model">; from?: "asks" | "place" } | null {
   const filed = metadataTicket(row.metadata);
   if (filed) return { keys: [`ticket:${filed}`], by: "metadata" };
+  // A model's summary (the hook's summary_model) is prose, never the hook's layout: a model echoing a header and an
+  // Asked line it was shown is no header (review pass 5, run-it: a ticket it invented was keyed).
+  if (typeof row.metadata?.summary_model === "string" && row.metadata.summary_model !== "") return null;
   const from = row.metadata?.[TICKETS_FROM];
   const header = sessionHeaderTickets(row.content, from);
   if (!header.length) return null;
