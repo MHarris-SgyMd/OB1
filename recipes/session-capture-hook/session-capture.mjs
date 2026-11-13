@@ -1647,7 +1647,7 @@ export function verdictOf(result, text) {
     const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
       : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
       : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
-        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2)
+        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2), and never on EMBEDDING_PROVIDER_ERROR, whose provider's words may say metadata (SMD-2892)
           : null;
     return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
   }

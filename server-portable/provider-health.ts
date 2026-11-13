@@ -45,8 +45,9 @@ export function reprobeIntervalFrom(raw: string | undefined): { intervalS: numbe
  *   which — a probe's GET /models answering says the provider is reachable,
  *   a call's that it embeds. `fault`, when set, is an answered call the
  *   provider refused or answered unusably (a 4xx — a model not pulled, a
- *   key refused —, a body that is not JSON, a vector of the wrong width):
- *   the provider is there, and a capture, a search or an edit is refused (EMBEDDING_PROVIDER_ERROR, SMD-2892), not degraded.
+ *   key refused —, a body that is not JSON or holds no embedding, a vector
+ *   of the wrong width): the provider is there, and a capture, a search or
+ *   an edit is refused (EMBEDDING_PROVIDER_ERROR, SMD-2892), not degraded.
  * - `unreachable`: an outage since `since` (the first of this run of them),
  *   `at` the latest, with providerDown's word and words for the latest —
  *   never the text, nor the base — and `clears`, what evidence may end it:

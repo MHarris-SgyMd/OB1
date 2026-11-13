@@ -135,7 +135,6 @@ const noteOf = (e: HighlightEvent) => (e.note?.trim() ? e.note : null);
 /** A highlight's thought text: the passage, and the reader's note after it as the old server wrote it. */
 const contentOf = (e: HighlightEvent) => (noteOf(e) ? `${e.text}\n\n— ${noteOf(e)}` : e.text);
 
-
 export default definePlugin({
   name: "readwise",
   title: "Readwise",

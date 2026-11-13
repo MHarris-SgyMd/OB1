@@ -78,7 +78,7 @@ export type RequestOutcome = "ok" | "refused" | "error" | "unrun" | "abandoned" 
 const FAULT_CODES: ReadonlySet<string> = new Set(["FAILED", "STORE_UNAVAILABLE", "EMBEDDING_PROVIDER_ERROR"]);
 
 /** Whether an answer's code is a fault's (FAULT_CODES): a tool reply carrying one ends as an error, not a refusal. */
-export const isFaultCode = (code: string | undefined): boolean => code !== undefined && FAULT_CODES.has(code);
+const isFaultCode = (code: string | undefined): boolean => code !== undefined && FAULT_CODES.has(code);
 
 /** How a tool call that answered ended: `ok`, else `refused` — or `error` when the refusal's code is a fault's (SMD-2892), on either door. */
 export const toolOutcome = (ok: boolean, code: string | undefined): "ok" | "refused" | "error" => (ok ? "ok" : isFaultCode(code) ? "error" : "refused");
@@ -338,13 +338,13 @@ const METRIC_KEYS = ["http.request.method", "http.route", "http.response.status_
 /**
  * The request-duration histogram's labels, from the span's attributes, each
  * from a set the server's own words bound (review pass 3): `error.type` a
- * fault's code (`FAILED`, `STORE_UNAVAILABLE`, `EMBEDDING_PROVIDER_ERROR`), else what the span would say
- * without a code (its outcome, or its status) — never a refusal's code, which
- * a plugin's webhook may take from its sender, minting a series per delivery
- * until the SDK's limit swallows every new one — and no `ob1.tool` for a
- * request refused at its key, on either door: that refusal is the key's, not
- * the tool's, and counted under the tool any caller could raise any tool's
- * refusal rate. The span keeps both.
+ * fault's code (`FAILED`, `STORE_UNAVAILABLE`, `EMBEDDING_PROVIDER_ERROR`),
+ * else what the span would say without a code (its outcome, or its status) —
+ * never a refusal's code, which a plugin's webhook may take from its sender,
+ * minting a series per delivery until the SDK's limit swallows every new one
+ * — and no `ob1.tool` for a request refused at its key, on either door: that
+ * refusal is the key's, not the tool's, and counted under the tool any
+ * caller could raise any tool's refusal rate. The span keeps both.
  */
 function labelsOf(attributes: otel.Attributes, fields: CheckedRecord, refusedAtKey: boolean): otel.Attributes {
   const labels: otel.Attributes = {};

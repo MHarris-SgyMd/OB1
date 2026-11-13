@@ -19,7 +19,6 @@ const TOLERANCE_S = 300;
  */
 const KEEP_S = 2 * TOLERANCE_S + 60;
 
-
 export default definePlugin({
   name: "example",
   title: "Example plugin",

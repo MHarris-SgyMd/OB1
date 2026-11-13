@@ -1096,12 +1096,12 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   // The embedding provider refusing the brain's key (SMD-2892): final for the call, but the summary is not at fault, so
   // the payload waits for an operator's mend as an outage's does — kept ("failed"), never dead on the first refusal.
   const rEmbed = await postCapture(cfg, { text: "[[embed-401]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed instanceof CaptureError && rEmbed.kind === "failed" && /capture failed: Refused: the capture was not done/.test(rEmbed.message),
+    `an EMBEDDING_PROVIDER_ERROR, final as it is, keeps the payload (${rEmbed?.kind ?? JSON.stringify(rEmbed)}: ${String(rEmbed?.message).slice(0, 80)})`);
   const rEmbed400 = await postCapture(cfg, { text: "[[embed-400]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   assert(rEmbed400 instanceof CaptureError && rEmbed400.kind === "failed", `…a 400 kept too, a setting the provider will not take for every call (the maintainer's call, 2026-11-12) (${rEmbed400?.kind})`);
   const rEmbed413 = await postCapture(cfg, { text: "[[embed-413]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   assert(rEmbed413 instanceof CaptureError && rEmbed413.kind === "failed", `…and so is a 413 (${rEmbed413?.kind})`);
-  assert(rEmbed instanceof CaptureError && rEmbed.kind === "failed" && /capture failed: Refused: the capture was not done/.test(rEmbed.message),
-    `an EMBEDDING_PROVIDER_ERROR, final as it is, keeps the payload (${rEmbed?.kind ?? JSON.stringify(rEmbed)}: ${String(rEmbed?.message).slice(0, 80)})`);
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.
   const bad = prepare({ session_id: "s-bad", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [b] = await postPending({ url: URL_, key: "wrong" }, bad.payloadPath);
@@ -3033,9 +3033,9 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
   // …and so does a 400 (the maintainer's call, 2026-11-12: a hosted provider answers it to every call for a setting it will
   // not take, and giving each copy up would lose them all).
-  const textRefused = await post("capture_thought", { content: "[[embed-400]] a copy the canary's provider refuses with a 400" }, captured(S(38)));
-  assert(textRefused.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 400/.test(textRefused.err),
-    `a copy refused with a 400 holds the queue too (${textRefused.err.trim().slice(0, 140)})`);
+  const refused400 = await post("capture_thought", { content: "[[embed-400]] a copy the canary's provider refuses with a 400" }, captured(S(38)));
+  assert(refused400.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 400/.test(refused400.err),
+    `a copy refused with a 400 holds the queue too (${refused400.err.trim().slice(0, 140)})`);
   rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
   rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
   // A copied edit the canary refuses retryable (its provider away): kept by the code as by `retryable` (review pass 6:

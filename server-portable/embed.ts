@@ -122,18 +122,17 @@ export const PROVIDER_ERROR_CHARS = 500;
  * the deadline passed (`timeout`), the provider answered with an error status
  * (`http`, with the status — a redirect among them, never followed:
  * refuseRedirect, SMD-2908), or it answered 2xx with a body that is not JSON,
- * or JSON holding no embedding (`body`; SMD-2892) — or the call was never made, because the egress gate refused to
- * send the text to an endpoint not declared local (`egress`, SMD-1903; no
- * status, and nothing about the provider). Anything else — a refused
- * connection, a reset — is the runtime's own error and is rethrown as it came.
+ * or JSON holding no embedding (`body`; SMD-2892) — or the call was never
+ * made, because the egress gate refused to send the text to an endpoint not
+ * declared local (`egress`, SMD-1903; no status, and nothing about the
+ * provider). Anything else — a refused connection, a reset — is the runtime's
+ * own error and is rethrown as it came.
  */
 export class ProviderError extends Error {
   /**
    * @param body The provider's own words, capped — what refusesLength reads,
    *   kept apart from the message so the base URL in the message cannot be
    *   mistaken for them.
-   */
-  /**
    * @param noEmbedding A `body` error whose answer was JSON holding no embedding (a gateway's error object, an empty
    *   `data`), as against one that is not JSON: told apart by this, not by the message (SMD-2892 review pass 5).
    */
@@ -203,11 +202,11 @@ export function answerWords(d: unknown): string {
  * outages providerDown names, retryable; and the provider's other answers —
  * an error status that is no outage (a credential refused, a model or path
  * that is not there, an input refused), or a 2xx whose body is not JSON or
- * holds no embedding — final, as providerDown's rule makes them (decided 2026-10-26: no rule of its
- * own; SMD-2461's classifier takes both later). `status` is the provider's;
- * `provider` its own capped words, which a caller that can read is shown and
- * the server logs — never the runtime's text, nor the message, which leads
- * with the base the caller names itself.
+ * holds no embedding — final, as providerDown's rule makes them (decided
+ * 2026-10-26: no rule of its own; SMD-2461's classifier takes both later).
+ * `status` is the provider's; `provider` its own capped words, which a caller
+ * that can read is shown and the server logs — never the runtime's text, nor
+ * the message, which leads with the base the caller names itself.
  *
  * Null for what is no provider's answer: an egress refusal (the gate's, with a
  * code of its own), a caller's abort, and a plain Error such as the width

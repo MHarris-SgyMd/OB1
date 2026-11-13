@@ -186,7 +186,8 @@ mender tick's — and by its own probes:
   answered: reachable, nothing yet said of the calls). With a `fault`, a call
   the provider answered and refused or answered unusably — a 4xx (a model not
   pulled, a key refused), a body that is not JSON, a vector of the wrong
-  width: the provider is there, and a capture, a search or an edit of a thought's text is refused (`EMBEDDING_PROVIDER_ERROR`) until it is fixed.
+  width: the provider is there, and a capture, a search or an edit of a
+  thought's text is refused (`EMBEDDING_PROVIDER_ERROR`) until it is fixed.
 - `unreachable` since `since` (the first outage of the run), `at` the latest,
   the `reason` word and its `detail` for the latest, and `clears`: `probe`
   for an outage a `GET /models` can see (the probe's own, a call's failed
@@ -1498,7 +1499,10 @@ Their refusals:
 | `WRITE_SCOPE_REQUIRED` | 403 | A principal without write scope reaching a writer through a caller of the core's own. |
 | `NOT_FOUND` | 404 | The thought was deleted between the capture and the record. |
 
-capture_thought's own refusals (a refused egress; the embedding provider refusing the call, `EMBEDDING_PROVIDER_ERROR`, 503, SMD-2892) stand for a capture; a provider that is down lands the output without its vector, as any capture.
+capture_thought's own refusals (the embedding provider refusing the call,
+`EMBEDDING_PROVIDER_ERROR`, 503, SMD-2892) stand for a capture; a provider that is down,
+or an egress policy keeping the text in, lands the output without its vector, as any
+capture.
 A role without the `deliverables` grant group has the deliverable calls fail, naming the
 table, and nothing else. Preflight's `deliverables` row checks the functions and the
 grant.

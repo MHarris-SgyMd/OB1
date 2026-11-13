@@ -331,9 +331,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // A provider that did not answer the embedding call (refused, timed out,
     // 5xx) lands the thought without its vector, as a refused call does,
     // rather than losing it: the capture is the one write whose text may
-    // exist nowhere else (SMD-2888). The provider's other answers refuse the
-    // capture, coded (SMD-2892), and a width mismatch still fails it, so a
-    // misconfigured brain says so.
+    // exist nowhere else (SMD-2888). A width mismatch still fails the
+    // capture, so a misconfigured brain says so.
     let vectorFailed: { reason: string; detail: string } | undefined;
     // The provider's other answers (a credential refused, a model not there, a redirect, a 2xx that is not JSON or holds
     // no embedding) refuse the capture, coded and final, where they reached the caller as STORE_UNAVAILABLE (SMD-2892).

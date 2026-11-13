@@ -53,7 +53,7 @@ const summaryOf = (c: Captured): CaptureSummary => ({
 type WriterCode = "WRITE_SCOPE_REQUIRED" | "NOT_FOUND";
 /** `capture` is null when this call captured nothing: its text was a thought already, answered by what that thought is. */
 export type CaptureDeliverableResult = { outcome: "captured" | "unchanged"; deliverable: Deliverable; event: DeliverableEvent | null; capture: CaptureSummary | null };
-/** capture_thought's own refusals stand (a refused egress, the embedding provider refusing the call…), the spec's missing one renamed. */
+/** capture_thought's own refusals stand (the embedding provider refusing the call…; a refused egress lands the text without its vector), the spec's missing one renamed. */
 export type CaptureDeliverableCode = Exclude<RefusalCode, "DERIVED_FROM_MISSING"> | WriterCode | "SPEC_NOT_FOUND" | "SPEC_IS_SELF" | "ALREADY_A_DELIVERABLE" | "OUTPUT_EXISTS";
 export type VerifyDeliverableResult = { outcome: "changed"; deliverable: Deliverable; event: DeliverableEvent | null; from: string; to: string };
 export type VerifyDeliverableCode = WriterCode | "NOT_A_DELIVERABLE" | "ILLEGAL_TRANSITION" | "VERIFY_NOT_YOURS";

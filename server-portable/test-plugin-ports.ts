@@ -2975,15 +2975,15 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   // the call (SMD-2892), any status, is a 503 EMBEDDING_PROVIDER_REFUSED, sent again once an operator mends it — a 400
   // or a 422 too, which a hosted provider answers to every call for a setting it will not take (the maintainer's call,
   // 2026-11-12).
-  for (const [code, status, retryable, want, wantStatus] of [["EMBEDDING_PROVIDER_ERROR", 401, false, "EMBEDDING_PROVIDER_REFUSED", 503], ["EMBEDDING_PROVIDER_ERROR", 400, false, "EMBEDDING_PROVIDER_REFUSED", 503], ["EMBEDDING_PROVIDER_ERROR", 422, false, "EMBEDDING_PROVIDER_REFUSED", 503]] as const) {
+  for (const status of [401, 400, 422] as const) {
     const stubCtx = {
-      call: async () => ({ ok: false, refusal: { code, retryable, status, reason: `provider_${status}`, setting: "OB1_LLM_BASE_URL" } }),
+      call: async () => ({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, status, reason: `provider_${status}`, setting: "OB1_LLM_BASE_URL" } }),
       db: { tx: async (fn: (sql: unknown) => Promise<unknown>) => fn(((strings: TemplateStringsArray) => Promise.resolve(strings.join("$").includes("RETURNING claimed_at") ? [{ claimed: "2026-11-05 00:00:00+00" }] : strings.join("$").includes("RETURNING id") ? [{ id: "9101" }] : [])) as unknown) },
       secret: READWISE_SECRET, captureSeconds: 30, defer: () => undefined,
     };
     const answer = await manifest.hooks!.highlight.handler(stubCtx as never, { headers: {}, query: {}, body: new Uint8Array(), text: JSON.stringify(event({ id: 9101 })) });
-    assert(answer.status === wantStatus && answer.body?.code === want && answer.body?.refused === code && answer.body?.retryable === (wantStatus === 503),
-      `the embedding provider answering ${status}: ${wantStatus} ${want} (${JSON.stringify(answer)})`);
+    assert(answer.status === 503 && answer.body?.code === "EMBEDDING_PROVIDER_REFUSED" && answer.body?.refused === "EMBEDDING_PROVIDER_ERROR" && answer.body?.retryable === true,
+      `the embedding provider answering ${status}: 503 EMBEDDING_PROVIDER_REFUSED (${JSON.stringify(answer)})`);
   }
   for (const retryable of [true, false]) {
     const queries: string[] = [];
@@ -3665,9 +3665,9 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     assert(/an operator's to mend/.test(String(refusedRecall.body.message)), `…its message naming the provider's refusal an operator mends (${refusedRecall.body.message})`);
     // A 400 may be the query's own (an over-long one): its message says a shorter one may land (review pass 6).
     embedStatus = 400;
-    const longQuery = await am("recall", rq({ query: "am_ledger with a query the provider refuses" }), { as: KEYS.reader });
-    assert(longQuery.status === 422 && longQuery.body.refused === "EMBEDDING_PROVIDER_ERROR" && /a shorter one may land/.test(String(longQuery.body.message)),
-      `recall under a 400: 422, its message saying the query may be the cause (${JSON.stringify(longQuery.body)})`);
+    const recall400 = await am("recall", rq({ query: "am_ledger with a query the provider refuses" }), { as: KEYS.reader });
+    assert(recall400.status === 422 && recall400.body.refused === "EMBEDDING_PROVIDER_ERROR" && /a shorter one may land/.test(String(recall400.body.message)),
+      `recall under a 400: 422, its message saying the query may be the cause (${JSON.stringify(recall400.body)})`);
   } finally {
     embedStatus = null;
   }
@@ -4252,15 +4252,15 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   // to every call for a setting it will not take): the job fails once, and the same text runs again once it is mended.
   extraction = answering([{ content: "si_k4: the user keeps the spare key under the blue flowerpot.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
   embedStatus = 400;
-  let textRefused: Called;
+  let refused400: Called;
   try {
-    textRefused = await si("extract", { text: doc([]).text, dry_run: true });
+    refused400 = await si("extract", { text: doc([]).text, dry_run: true });
   } finally {
     embedStatus = null;
   }
-  const textItems = (await si("get_job", { job_id: String(textRefused.body.job?.job_id) })).body.items ?? [];
-  assert(textRefused.status === 422 && textRefused.body.code === "EMBEDDING_PROVIDER_REFUSED" && textRefused.body.provider_status === 400 && (await jobOf(textRefused.body))?.status === "failed" && textItems.length === 0,
-    `a 400 while deciding: the job failed once, 422 EMBEDDING_PROVIDER_REFUSED, no item kept (${JSON.stringify(textRefused.body).slice(0, 160)} ${textItems.length})`);
+  const items400 = (await si("get_job", { job_id: String(refused400.body.job?.job_id) })).body.items ?? [];
+  assert(refused400.status === 422 && refused400.body.code === "EMBEDDING_PROVIDER_REFUSED" && refused400.body.provider_status === 400 && (await jobOf(refused400.body))?.status === "failed" && items400.length === 0,
+    `a 400 while deciding: the job failed once, 422 EMBEDDING_PROVIDER_REFUSED, no item kept (${JSON.stringify(refused400.body).slice(0, 160)} ${items400.length})`);
   // The key refused while executing (review pass 2: each item failed and the job ended complete, its items lost): the
   // job paused, a dry run's again, its items still ready, 422 EMBEDDING_PROVIDER_REFUSED; execute_job, the key mended, carries them out.
   // A vector of its own, so the dry run decides an add (the suite's other texts share one stub vector; a token is matched

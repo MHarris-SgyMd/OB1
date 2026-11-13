@@ -27,7 +27,7 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { adviceFor } from "./core/provider-refusal.ts";
+import { adviceFor, type EmbeddingProviderError } from "./core/provider-refusal.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
@@ -118,12 +118,11 @@ const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
  * check, and — to a key that can read — where it is and its own words. `Error:` while it is away (the same call lands
  * once it answers), `Refused:` on its other answers (an operator's to mend), as the session hook's prose rule reads them.
  */
-function providerErrorText(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_ERROR" }>, what: string): string {
+function providerErrorText(r: EmbeddingProviderError, what: string): string {
   const at = r.base ? `the embedding provider at ${r.base}` : "the brain's embedding provider";
   if (r.retryable) return `Error: ${what} was not done — ${at} is unavailable: ${r.detail}. The same call can land once it answers.`;
-  const advice = adviceFor(r);
   const said = r.provider ? ` It said: ${JSON.stringify(oneLine(snipText(r.provider, 200)))}` : "";
-  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. ${advice}${said}`;
+  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. ${adviceFor(r)}${said}`;
 }
 
 /**

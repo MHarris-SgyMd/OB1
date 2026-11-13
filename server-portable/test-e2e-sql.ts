@@ -3650,6 +3650,8 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     assert(edit429.isError && edit429.sc?.code === "EMBEDDING_PROVIDER_ERROR" && edit429.sc?.retryable === true && edit429.sc?.reason === "provider_429" && edit429.sc?.status === 429
       && /^Error: the edit \(its new text needs its vector\) was not done — the embedding provider at https:\/\/stub\.invalid\/v1 is unavailable: it answered 429\./.test(edit429.text),
       `an edit while the provider answers 429: coded, retryable, said as an Error (${edit429.text.slice(0, 200)})`);
+    const [kept] = await sql`SELECT content FROM thoughts WHERE id = ${target}::uuid`;
+    assert(kept.content === "[20] a thought an edit will try to change", `…and neither edit was made (${kept.content})`);
     // capture_deliverable (SMD-1715) captures through capture(), so the refusal is its too (review pass 7, main merged:
     // a fourth door, unheld): coded, final, nothing stored, where it was a thrown 500 FAILED.
     stubDown = 401;
@@ -3658,8 +3660,6 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     assert(deliverable.isError && deliverable.sc?.code === "EMBEDDING_PROVIDER_ERROR" && deliverable.sc?.retryable === false && deliverable.sc?.status === 401
       && /^Refused: the capture was not done — the embedding provider at https:\/\/stub\.invalid\/v1 answered 401/.test(deliverable.text) && deliverableRows.n === 0,
       `capture_deliverable under 401: refused coded, final, nothing stored (${deliverable.text.slice(0, 160)} ${JSON.stringify(deliverable.sc)})`);
-    const [kept] = await sql`SELECT content FROM thoughts WHERE id = ${target}::uuid`;
-    assert(kept.content === "[20] a thought an edit will try to change", `…and neither edit was made (${kept.content})`);
 
     // The provider back: the same text sent again lands on the same row and takes its vector.
     stubDown = null;

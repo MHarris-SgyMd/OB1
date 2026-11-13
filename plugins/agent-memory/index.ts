@@ -136,8 +136,8 @@ export const coreRefused = (r: { code: string; retryable: boolean; status?: unkn
   refuse(r.retryable ? 503 : 422, "CORE_REFUSED", {
     refused: r.code,
     // The brain's embedding provider refusing the call (SMD-2892): said, so a client that shows the text alone tells it
-    // from an input refused — a 400, 413 or 422 perhaps this query's own (review pass 6: an over-long query was told
-    // its fix was an operator's).
+    // from an input refused — a 400, 413 or 422 perhaps this text's own, a recall's query or a write-back's memory
+    // (review pass 6: an over-long query was told its fix was an operator's).
     ...(r.code === "EMBEDDING_PROVIDER_ERROR"
       ? { message: [400, 413, 422].includes(r.status as number)
           ? "the brain's embedding provider refused the request: a setting it is sent with (an operator's), or this text — a shorter one may land"

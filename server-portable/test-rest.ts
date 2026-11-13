@@ -881,8 +881,8 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   assert(eu.status === 503 && eu.headers.get("retry-after") === "2" && same(eub, { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, reason: "provider_unreachable", matched: "text" }),
     `the compat search's outage with nothing found: 503, Retry-After, the code, the word and what was matched alone (${eu.status} ${JSON.stringify(eub)})`);
   // The embedding provider refusing the brain's key (SMD-2892): 503 with no Retry-After, as a refusal waiting on an
-  // operator; its facts the code, final, the word, the status and the setting — the endpoint and the provider's words
-  // ride the MCP text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does.
+  // operator; its facts the code, final, the word, the status, the setting and `check` — the endpoint and the provider's
+  // words ride the MCP text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does.
   answer = async () => refuse({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", detail: "it answered 401 (its credential was refused)", status: 401, setting: "OB1_LLM_BASE_URL", check: ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"], base: "https://api.example/v1", provider: "{\"error\":\"bad key\"}" });
   const pe = await hit("/v1/search", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "plain words" }) });
   const peb = await pe.json() as Record<string, unknown>;

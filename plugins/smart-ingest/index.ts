@@ -424,8 +424,8 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
   const found = await ctx.call("search_thoughts", { query: t.content, limit: SEARCH_HITS });
   if (!found.ok) {
     if (found.refusal.retryable) throw new Unavailable({ refused: found.refusal.code });
-    const refusedHere = providerRefusal(found.refusal);
-    if (refusedHere) throw refusedHere;
+    const provider = providerRefusal(found.refusal);
+    if (provider) throw provider;
     return { ...t, ...none, action: "skip", reason: "search_refused", status: "failed", error: `search_thoughts refused: ${found.refusal.code}` };
   }
   const same = found.value.hits.find((h) => sameText(h.content) === key);

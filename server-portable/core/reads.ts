@@ -108,11 +108,13 @@ export const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts
     const down = stopped ? { reason: "deadline", detail: "the read's deadline came before the provider answered" } : providerDown(e);
     if (!down) {
       heardFrom(ctx.providerHealth, embedStarted, e);
-      // The provider's other answers — a credential refused, a model not there, a body that is not JSON — refuse the
-      // search, coded and final, and the provider's words go to the log (SMD-2892); anything else is still a fault.
-      const refused = embeddingProviderError(e, ctx.embedConfig().embeddings, canRead(principal));
+      // The provider's other answers — a credential refused, a model not there, a redirect, a 2xx that is not JSON or
+      // holds no embedding — refuse the search, coded and final, and the provider's words go to the log (SMD-2892);
+      // anything else is still a fault.
+      const at = ctx.embedConfig().embeddings;
+      const refused = embeddingProviderError(e, at, canRead(principal));
       if (!refused) throw e;
-      console.error(`${opts.tool}: the embedding provider at ${shownBase(ctx.embedConfig().embeddings)} refused the query's embedding: ${providerLogWords(e, ctx.embedConfig().embeddings)}`);
+      console.error(`${opts.tool}: the embedding provider at ${shownBase(at)} refused the query's embedding: ${providerLogWords(e, at)}`);
       return { refusal: refused, rows: [] };
     }
     // As a row prints an endpoint: userinfo masked (SMD-2885).
