@@ -1093,10 +1093,10 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   ok(await api.wait("waiting", "s2"), "a second waits at the broker");
   link.refuse(true);
   link.cut();
-  await sleep(1700);
+  await sleep(1800);
   link.refuse(false);
   await sleep(600);
-  ok(!api.saw("run", "s2") && relay.state().own === 0 && pool(b).waiting.stable === 1, "back 1.7 s into the grace: found before it ends, the parked call asked again, not on the own share", { pool: pool(b), relay: relay.state() });
+  ok(!api.saw("run", "s2") && relay.state().own === 0 && pool(b).waiting.stable === 1, "back 1.8 s into the grace: found before it ends, the parked call asked again, not on the own share", { pool: pool(b), relay: relay.state() });
   api.cmd({ cmd: "end", id: "s1" });
   ok(await api.wait("run", "s2", 3000), "and granted as the first ends");
   api.cmd({ cmd: "end", id: "s2" });

@@ -360,6 +360,8 @@ export const RELAY_EASE_MS = 10_000;
 export const RELAY_EASED_MS = 5000;
 /** How long the api's asks wait for its next socket after one is lost, rather than taking its own share. */
 export const RELAY_GRACE_MS = 2000;
+/** The api's dials within its grace: a coordinator back late in it still found before it ends (a few dozen local dials). */
+export const RELAY_GRACE_RETRY_MS = 100;
 /** How long a dial may take to open before it is dropped and tried again. */
 export const RELAY_DIAL_MS = 3000;
 /** A refused dial is asked why (a plain request) at most this often. */
@@ -581,10 +583,10 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   const again = () => {
     if (closed) return;
     if (failingSince === null) failingSince = performance.now();
-    // Within the grace, every RELAY_RECONNECT_MS.first: a coordinator back in it is found before the parked asks take
+    // Within the grace, every RELAY_GRACE_RETRY_MS: a coordinator back in it is found before the parked asks take
     // their own share (review pass 3 of 3b-2: dials at 1.75 and 2.75 s missed one back at 1.8 s), as the relay's
     // GRACE_RETRY_MS for its broker.
-    if (performance.now() < graceUntil) { retry = setTimeout(() => { retry = null; connect(); }, RELAY_RECONNECT_MS.first); return; }
+    if (performance.now() < graceUntil) { retry = setTimeout(() => { retry = null; connect(); }, RELAY_GRACE_RETRY_MS); return; }
     retry = setTimeout(() => { retry = null; connect(); }, wait);
     // Quick through a recreate; past RELAY_EASE_MS of failing (no coordinator listening), every RELAY_EASED_MS.
     wait = performance.now() - failingSince < RELAY_EASE_MS ? Math.min(wait * 2, RELAY_RECONNECT_MS.max) : RELAY_EASED_MS;
