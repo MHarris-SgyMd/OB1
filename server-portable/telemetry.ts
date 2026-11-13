@@ -80,6 +80,9 @@ const FAULT_CODES: ReadonlySet<string> = new Set(["FAILED", "STORE_UNAVAILABLE",
 /** Whether an answer's code is a fault's (FAULT_CODES): a tool reply carrying one ends as an error, not a refusal. */
 export const isFaultCode = (code: string | undefined): boolean => code !== undefined && FAULT_CODES.has(code);
 
+/** How a tool call that answered ended: `ok`, else `refused` — or `error` when the refusal's code is a fault's (SMD-2892), on either door. */
+export const toolOutcome = (ok: boolean, code: string | undefined): "ok" | "refused" | "error" => (ok ? "ok" : isFaultCode(code) ? "error" : "refused");
+
 /**
  * A request's outcome from its status and its answer's code, for one that
  * called no tool: `error` for a fault — a 5xx whose code is a fault's, or that

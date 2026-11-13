@@ -1568,7 +1568,7 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
   `citedBy`), and `REFUSED` for a refusal the store names that this server does not
   know. A search's, a capture's and an edit's: `EMBEDDING_PROVIDER_ERROR` (with its
-  `reason`, the provider's `status` and the `setting`, SMD-2892). A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
+  `reason`, the provider's `status`, the `setting` and `check`, SMD-2892). A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
   `REFUSED_WRITER` (each with the proposal's `id`, the WRITER and lineage ones with the
   `flags` force would also waive), `REFUSED_REVIEW_ARGUMENT` (with its `problem`),
   `REFUSED_DIRECTION_REQUIRED` (with the `verdict`), `REFUSED_ALREADY_ACCEPTED`,

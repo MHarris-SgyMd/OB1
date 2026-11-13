@@ -974,7 +974,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   for (const [what, e] of [["an egress refusal", new ProviderError("refused by the egress gate", "egress")], ["the width mismatch", new Error("Embedding width mismatch")], ["a TypeError with no code", new TypeError("x")], ["null", null]] as [string, unknown][])
     assert(providerFault(e) === null, `providerFault: ${what} is no provider's answer, so null: still a fault (${fault(e)})`);
   // A 200 holding no embedding (a gateway's error object): a body error, said so (review pass 1: a plain Error, raw).
-  const empty = providerFault(new ProviderError("http://x/v1 returned no embedding for model m", "body", 200, '{"error":{"message":"No successful provider responses."}}'));
+  const empty = providerFault(new ProviderError("http://x/v1 returned no embedding for model m", "body", 200, '{"error":{"message":"No successful provider responses."}}', true));
   assert(empty?.retryable === false && empty.reason === "provider_body" && empty.detail === "it answered 200 with no embedding in its answer" && /No successful provider/.test(empty.provider ?? ""),
     `providerFault: a 200 with no embedding is final, provider_body, said so, the gateway's words kept (${JSON.stringify(empty)})`);
   // The provider's words cleaned before a reply tells them or a log prints them (review pass 4): the brain's own key and
@@ -987,6 +987,9 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   assert(!cleaned.includes(KEY) && !cleaned.includes("dXNlcjpwYXNzd29yZA") && !cleaned.includes("sk-proj-0123") && !/[\n\x1b\x07\u200b]/.test(cleaned) && !/\u{E0041}/u.test(cleaned)
     && (cleaned.match(/\[redacted\]/g) ?? []).length >= 4 && /zerowidthtag/.test(cleaned),
     `the provider's words: the key and credential shapes redacted, one line, no escape or invisible character (${cleaned})`);
+  // A credential's shape, not a word: a provider's "Basic authentication failed" is kept (review pass 5: it was redacted).
+  const plainWords = providerSaid("Basic authentication failed; Bearer token missing", { key: KEY });
+  assert(plainWords === "Basic authentication failed; Bearer token missing", `words that name no credential are kept (${plainWords})`);
   const logged = providerLogWords(new ProviderError(`Embeddings request to http://x/v1 failed: 401 ${hostile}`, "http", 401, hostile), { key: KEY });
   assert(!logged.includes(KEY) && !/[\n\x1b]/.test(logged) && logged.startsWith("Embeddings request to http://x/v1 failed: 401 "), `…and a log line the same (${logged.slice(0, 120)})`);
   // A 200 holding no embedding is told by its own error words, never the whole answer.
@@ -2666,9 +2669,9 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     } finally { embedsOk.stop(true); }
   }
 
-  // A capture or a search the provider refuses with a 4xx: the call fails, as
-  // before, and the provider is there — answering (review pass 1, the mender's rule).
-  // Refused coded since SMD-2892, final, where each threw the provider's error.
+  // A capture or a search the provider refuses with a 4xx: refused coded, final
+  // (SMD-2892), where each threw the provider's error; and the provider is
+  // there — answering (review pass 1, the mender's rule).
   {
     const refuses = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
     try {

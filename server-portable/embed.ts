@@ -133,7 +133,11 @@ export class ProviderError extends Error {
    *   kept apart from the message so the base URL in the message cannot be
    *   mistaken for them.
    */
-  constructor(message: string, readonly kind: "timeout" | "http" | "body" | "egress", readonly status?: number, readonly body = "") {
+  /**
+   * @param noEmbedding A `body` error whose answer was JSON holding no embedding (a gateway's error object, an empty
+   *   `data`), as against one that is not JSON: told apart by this, not by the message (SMD-2892 review pass 5).
+   */
+  constructor(message: string, readonly kind: "timeout" | "http" | "body" | "egress", readonly status?: number, readonly body = "", readonly noEmbedding = false) {
     super(message);
     this.name = "ProviderError";
   }
@@ -182,21 +186,6 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
 }
 
 /**
- * A provider call's failure as a caller may be told it (SMD-2892): the
- * outages providerDown names, retryable; and the provider's other answers —
- * an error status that is no outage (a credential refused, a model or path
- * that is not there, an input refused), or a 2xx whose body is not JSON —
- * final, as providerDown's rule makes them (decided 2026-10-26: no rule of its
- * own; SMD-2461's classifier takes both later). `status` is the provider's;
- * `provider` its own capped words, which a caller that can read is shown and
- * the server logs — never the runtime's text, nor the message, which leads
- * with the base the caller names itself.
- *
- * Null for what is no provider's answer: an egress refusal (the gate's, with a
- * code of its own), a caller's abort, and a plain Error such as the width
- * mismatch, which stays a fault.
- */
-/**
  * What a 2xx answer with no embedding says of itself: its `error` (a string, or its `message`), else its `message` —
  * never the whole answer, which an endpoint echoing the request fills with the brain's own headers, and which a deep
  * nest makes JSON.stringify throw on (SMD-2892 review pass 4). Capped.
@@ -209,6 +198,21 @@ export function answerWords(d: unknown): string {
   return said.slice(0, PROVIDER_ERROR_CHARS);
 }
 
+/**
+ * A provider call's failure as a caller may be told it (SMD-2892): the
+ * outages providerDown names, retryable; and the provider's other answers —
+ * an error status that is no outage (a credential refused, a model or path
+ * that is not there, an input refused), or a 2xx whose body is not JSON or
+ * holds no embedding — final, as providerDown's rule makes them (decided 2026-10-26: no rule of its
+ * own; SMD-2461's classifier takes both later). `status` is the provider's;
+ * `provider` its own capped words, which a caller that can read is shown and
+ * the server logs — never the runtime's text, nor the message, which leads
+ * with the base the caller names itself.
+ *
+ * Null for what is no provider's answer: an egress refusal (the gate's, with a
+ * code of its own), a caller's abort, and a plain Error such as the width
+ * mismatch, which stays a fault.
+ */
 export function providerFault(e: unknown): { retryable: boolean; reason: string; detail: string; status?: number; provider?: string } | null {
   const down = providerDown(e);
   if (down) return { retryable: true, ...down, ...(e instanceof ProviderError && e.status !== undefined ? { status: e.status } : {}) };
@@ -216,7 +220,7 @@ export function providerFault(e: unknown): { retryable: boolean; reason: string;
   const provider = e.body ? { provider: e.body } : {};
   if (e.kind === "body") {
     // A 2xx with no embedding in it (a gateway's error object, an empty `data`) or no JSON at all (a proxy's page).
-    const what = /returned no embedding/.test(e.message) ? "with no embedding in its answer" : "with a body that is not JSON";
+    const what = e.noEmbedding ? "with no embedding in its answer" : "with a body that is not JSON";
     return { retryable: false, reason: "provider_body", detail: `it answered ${e.status ?? "2xx"} ${what}`, ...(e.status !== undefined ? { status: e.status } : {}), ...provider };
   }
   const s = e.status;
@@ -1045,7 +1049,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       // an empty `data`. A body error, as a 2xx that is not JSON is, so a caller is refused coded rather than told the
       // base in a raw message; its words kept (capped) for a reader. The message's phrase is reembed's and the
       // orchestration runner's to match (deploy/orchestration/runner.ts REEMBED_PHRASES).
-      throw new ProviderError(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`, "body", 200, answerWords(d));
+      throw new ProviderError(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`, "body", 200, answerWords(d), true);
     }
 
     // Refuse a width the column cannot hold. Postgres would reject the insert

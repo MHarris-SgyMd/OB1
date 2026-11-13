@@ -379,7 +379,13 @@ export class ProviderRefused {
   constructor(readonly facts: Record<string, unknown>) {}
 }
 
-/** The core's refusal as a ProviderRefused when it is the brain's embedding provider refusing the call; else null. */
+/** What a job or an answer says of ProviderRefused. */
+const PROVIDER_REFUSED_MESSAGE = "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)";
+
+/**
+ * The core's refusal as a ProviderRefused when it is the brain's embedding provider refusing the call; else null. Its
+ * status is `provider_status`: a plugin refusal's own `status` is the HTTP status `refuse` answers with.
+ */
 export function providerRefusal(r: { code: string; status?: unknown; reason?: unknown; setting?: unknown; check?: unknown }): ProviderRefused | null {
   if (r.code !== "EMBEDDING_PROVIDER_ERROR") return null;
   return new ProviderRefused({ refused: r.code, ...(typeof r.reason === "string" ? { reason: r.reason } : {}), ...(typeof r.status === "number" ? { provider_status: r.status } : {}), ...(typeof r.setting === "string" ? { setting: r.setting } : {}), ...(Array.isArray(r.check) ? { check: r.check } : {}) });
@@ -442,7 +448,7 @@ export async function decide(ctx: Pick<PluginContext, "call">, t: Extracted, see
 type Done = { status: "executed" | "existed" | "failed"; result: string | null; error: string | null; as?: { action: "append_evidence"; reason: "lower_trust_than_match" } };
 const failed = (error: string): Done => ({ status: "failed", result: null, error });
 /** A core refusal that says a moment later may do pauses the job (Unavailable), as does the provider refusing what an operator mends (ProviderRefused); any other fails the item. */
-const refusedBy = (name: string, r: { code: string; retryable: boolean; status?: unknown }): Done => {
+const refusedBy = (name: string, r: { code: string; retryable: boolean }): Done => {
   if (r.retryable) throw new Unavailable({ refused: r.code });
   const provider = providerRefusal(r);
   if (provider) throw provider;
@@ -613,7 +619,7 @@ async function executeJob(ctx: PluginContext, job: Job): Promise<Job> {
   } catch (e) {
     // The job a dry run's again, its counts what was done so far; a pause that could not be recorded is no pause (a 500).
     const why = e instanceof Unavailable ? "paused: a service the core needs did not answer"
-      : e instanceof ProviderRefused ? "paused: the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)" : `interrupted by ${FAULT}`;
+      : e instanceof ProviderRefused ? `paused: ${PROVIDER_REFUSED_MESSAGE}` : `interrupted by ${FAULT}`;
     const paused = await ctx.db.tx(async (sql) => (await sql<{ id: string }>`
         UPDATE ingestion_jobs SET status = 'dry_run_complete', error_message = ${`${why}; execute_job carries out the items still ready`}
          WHERE id = ${job.job_id}::bigint AND status = 'executing' RETURNING id::text AS id`).length > 0).catch(() => false);
@@ -725,7 +731,7 @@ export default definePlugin({
             const resumed = await executeJob(ctx, { ...made.job, status: "executing" });
             return ok({ existing: true, job: resumed, message: `${why} as job ${made.job.job_id}, paused while executing; carried out now` });
           } catch (e) {
-            if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", made.job.job_id, { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)", ...e.facts, paused: "the same call, or execute_job, carries out the items still ready once it is mended" });
+            if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", made.job.job_id, { message: PROVIDER_REFUSED_MESSAGE, ...e.facts, paused: "the same call, or execute_job, carries out the items still ready once it is mended" });
             if (!(e instanceof Unavailable)) throw e;
             return refused(503, "PROVIDER_UNAVAILABLE", made.job.job_id, { ...e.facts, paused: "the same call, or execute_job, carries out the items still ready" });
           }
@@ -811,7 +817,7 @@ export default definePlugin({
             try {
               job = await executeJob(ctx, job);
             } catch (e) {
-              if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", job.job_id, { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)", ...e.facts, paused: "this same call, or execute_job, carries out the items still ready once it is mended" });
+              if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", job.job_id, { message: PROVIDER_REFUSED_MESSAGE, ...e.facts, paused: "this same call, or execute_job, carries out the items still ready once it is mended" });
               if (!(e instanceof Unavailable)) throw e;
               return refused(503, "PROVIDER_UNAVAILABLE", job.job_id, { ...e.facts, paused: "this same call, or execute_job, carries out the items still ready" });
             }
@@ -847,7 +853,7 @@ export default definePlugin({
         try {
           return ok({ already: false, job: await executeJob(ctx, claimed.job) });
         } catch (e) {
-          if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", job_id, { message: "the brain's embedding provider refused the call (its key, its model or its address, an operator's to mend)", ...e.facts, paused: "execute_job carries out the items still ready once it is mended" });
+          if (e instanceof ProviderRefused) return refused(422, "EMBEDDING_PROVIDER_REFUSED", job_id, { message: PROVIDER_REFUSED_MESSAGE, ...e.facts, paused: "execute_job carries out the items still ready once it is mended" });
           if (!(e instanceof Unavailable)) throw e;
           return refused(503, "PROVIDER_UNAVAILABLE", job_id, { ...e.facts, paused: "execute_job carries out the items still ready" });
         }

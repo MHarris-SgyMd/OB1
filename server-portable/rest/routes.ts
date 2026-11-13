@@ -21,8 +21,8 @@ export type { CallOptions } from "../core/index.ts";
  * this server does not know (REFUSED), 501 a mode not built, 503 retry —
  * with Retry-After when the refusal is retryable, without it when the server waits
  * on an operator (CLAIM_UNATTRIBUTED's and PRIORITY_UNATTRIBUTED's set-up causes,
- * and EMBEDDING_PROVIDER_ERROR's provider answering an error: its credential, its
- * model, a redirect, the request).
+ * and EMBEDDING_PROVIDER_ERROR's provider answering an error: its key, its model,
+ * its address, a gateway's body, or a setting it will not take).
  */
 export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
   NOT_FOUND: 404,

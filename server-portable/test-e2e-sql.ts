@@ -3565,7 +3565,7 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
       assert(!r.isError && !!rid && new RegExp(`was unavailable \\(it answered ${status}\\)`).test(r.text) && (await rowOf(rid!))?.audited === `provider_${status}`,
         `a ${status}: saved without its vector, the audit row says provider_${status} (${r.text.replace(/\n+/g, " / ").slice(0, 160)})`);
     }
-    // A 400, a 401 and a 404 say the request, the credential or the model is wrong, not that the provider is away: the
+    // A 400, a 401, a 403 and a 404 say the request, the credential or the model is wrong, not that the provider is away: the
     // capture fails, as before, and nothing lands — refused coded since SMD-2892, final, the word and the status and
     // the setting; a write key told where and what the provider said, never the store's STORE_UNAVAILABLE.
     // The operator's log: each refusal's line names the endpoint and the provider's own words (review pass 2: unheld).

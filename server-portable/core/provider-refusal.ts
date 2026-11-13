@@ -7,23 +7,52 @@
 // STORE_UNAVAILABLE (retryable, naming the store), each carrying the
 // provider's body under the base it was sent to.
 
-import { providerFault, ProviderError, shownBase, type ProviderEndpoint } from "../embed.ts";
+import { isRedirect, providerFault, ProviderError, shownBase, type ProviderEndpoint } from "../embed.ts";
 import { oneLine } from "../consolidate.ts";
 import type { Refusal } from "./refusal.ts";
 
 export type EmbeddingProviderError = Extract<Refusal, { code: "EMBEDDING_PROVIDER_ERROR" }>;
 
+/** What a provider's final answer points at, by its status: the one table `check` and the reply's advice read (review pass 5: three tables drifted). */
+export type ProviderAnswerClass = "key" | "credit" | "model" | "redirect" | "request" | "body" | "other";
+export function answerClass(status: number | undefined, reason: string): ProviderAnswerClass {
+  if (reason === "provider_body") return "body";
+  if (status === 401 || status === 403) return "key";
+  if (status === 402) return "credit";
+  if (status === 404) return "model";
+  if (status !== undefined && isRedirect(status)) return "redirect";
+  if (status === 400 || status === 413 || status === 422) return "request";
+  return "other";
+}
+
 /**
  * The settings to look at, by what the provider answered (review pass 3: a REST caller was told only the base, a
  * key's or a model's refusal included): the key for a 401, 402 or 403, the model for a 404, the model and its width
- * for a 400, 413 or 422, the base alone for a redirect, a body or an outage. Names, never values.
+ * for a 400, 413 or 422, the base alone otherwise — a redirect, a body, an outage (whose status is an outage's, none of
+ * these). Names, never values.
  */
-export function checksFor(status: number | undefined, retryable: boolean): string[] {
-  if (retryable || status === undefined) return [];
-  if (status === 401 || status === 402 || status === 403) return ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"];
-  if (status === 404) return ["OB1_EMBEDDING_MODEL"];
-  if (status === 400 || status === 413 || status === 422) return ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"];
-  return [];
+export function checksFor(status: number | undefined, reason: string): string[] {
+  switch (answerClass(status, reason)) {
+    case "key": case "credit": return ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"];
+    case "model": return ["OB1_EMBEDDING_MODEL"];
+    case "request": return ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"];
+    default: return [];
+  }
+}
+
+/** The reply's advice for a final refusal, by the same class: what an operator checks, and that a retry will not help until then. */
+export function adviceFor(r: Pick<EmbeddingProviderError, "status" | "reason" | "setting">): string {
+  const key = "(OB1_LLM_API_KEY, else OPENROUTER_API_KEY)";
+  const wait = "retrying will not help until then.";
+  switch (answerClass(r.status, r.reason)) {
+    case "key": return `An operator checks ${r.setting} and its key ${key}; ${wait}`;
+    case "credit": return `An operator checks the credit of the account behind its key ${key}; ${wait}`;
+    case "model": return `An operator checks ${r.setting} and the embedding model it serves (OB1_EMBEDDING_MODEL); ${wait}`;
+    case "redirect": return `An operator sets ${r.setting} where it points; ${wait}`;
+    case "request": return `It may be a setting it is sent with (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM), which an operator checks, or this text (a shorter or plainer one may land).`;
+    case "body": return `Something in front of the provider (a proxy, a gateway) may be answering for it: an operator checks ${r.setting}; ${wait}`;
+    default: return `An operator checks ${r.setting}; ${wait}`;
+  }
 }
 
 /** Invisible characters a reader would not see but a model reads: zero-width, bidi embeddings and isolates, tags. */
@@ -39,7 +68,7 @@ export function providerSaid(words: string, at: Pick<ProviderEndpoint, "key">, c
   let s = words;
   // A key of eight characters or more, as any real one is: a shorter placeholder (a stub's "stub") would blank words.
   if (at.key && at.key.length >= 8) s = s.split(at.key).join("[redacted]");
-  s = s.replace(/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{6,}/gi, "$1 [redacted]").replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]");
+  s = s.replace(/\b(Bearer|Basic|Token)\s+(?=[A-Za-z0-9._~+/=-]*[0-9=])[A-Za-z0-9._~+/=-]{8,}/gi, "$1 [redacted]").replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]");
   return oneLine(s.replace(INVISIBLE, "")).slice(0, cap);
 }
 
@@ -65,7 +94,7 @@ export function embeddingProviderError(e: unknown, at: Pick<ProviderEndpoint, "b
   if (!f) return null;
   return {
     code: "EMBEDDING_PROVIDER_ERROR", retryable: f.retryable, reason: f.reason, detail: f.detail,
-    ...(f.status !== undefined ? { status: f.status } : {}), setting: "OB1_LLM_BASE_URL", check: checksFor(f.status, f.retryable),
+    ...(f.status !== undefined ? { status: f.status } : {}), setting: "OB1_LLM_BASE_URL", check: f.retryable ? [] : checksFor(f.status, f.reason),
     ...(reader ? { base: shownBase(at), ...(f.provider ? { provider: providerSaid(f.provider, at) } : {}) } : {}),
   };
 }

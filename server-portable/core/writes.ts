@@ -331,11 +331,12 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // A provider that did not answer the embedding call (refused, timed out,
     // 5xx) lands the thought without its vector, as a refused call does,
     // rather than losing it: the capture is the one write whose text may
-    // exist nowhere else (SMD-2888). Any other failure — a 4xx, a width
-    // mismatch — still fails the capture, so a misconfigured brain says so.
+    // exist nowhere else (SMD-2888). The provider's other answers refuse the
+    // capture, coded (SMD-2892), and a width mismatch still fails it, so a
+    // misconfigured brain says so.
     let vectorFailed: { reason: string; detail: string } | undefined;
-    // The provider's other answers (a credential refused, a model not there, a body that is not JSON) refuse the
-    // capture, coded and final, where they reached the caller as the store's STORE_UNAVAILABLE (SMD-2892).
+    // The provider's other answers (a credential refused, a model not there, a redirect, a 2xx that is not JSON or holds
+    // no embedding) refuse the capture, coded and final, where they reached the caller as STORE_UNAVAILABLE (SMD-2892).
     let providerRefused: EmbeddingProviderError | undefined;
     // The provider's state, as every embedding call tells it (SMD-2890).
     const embedStarted = performance.now();
@@ -344,39 +345,27 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // Its own promise, so a sibling's throw (a chat call's runtime error) still waits for it and the provider's coded
     // refusal is answered, not the sibling's raw fault (SMD-2892 review pass 1).
     const embedding = gate.embeddings.allowed
-        ? ctx.embedder.embedCapture(content, subject).then((v) => {
-            heardFrom(ctx.providerHealth, embedStarted);
-            return v;
-          }, (e: unknown) => {
-            const down = providerDown(e);
-            if (!down) {
-              heardFrom(ctx.providerHealth, embedStarted, e);
-              providerRefused = embeddingProviderError(e, cfg.embeddings, reader) ?? undefined;
-              if (!providerRefused) throw e;
-              console.error(`capture: the embedding provider at ${shownBase(cfg.embeddings)} refused the capture's embedding: ${providerLogWords(e, cfg.embeddings)}`);
-              // Thrown, so the capture is refused at once rather than after the chat calls beside it (review pass 2: it
-              // waited out the tags' and the priority's calls, which run on regardless, as they did before).
-              throw providerRefused;
-            }
-            console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
+      ? ctx.embedder.embedCapture(content, subject).then((v) => {
+          heardFrom(ctx.providerHealth, embedStarted);
+          return v;
+        }, (e: unknown) => {
+          const down = providerDown(e);
+          if (!down) {
             heardFrom(ctx.providerHealth, embedStarted, e);
-            vectorFailed = down;
-            return undefined;
-          })
-        : Promise.resolve(undefined);
-    let settled: Awaited<ReturnType<typeof gatherCapture>>;
-    try {
-      settled = await gatherCapture();
-    } catch (e) {
-      // The provider's refusal (thrown above), or a sibling's throw before the embedding settled: either way the
-      // provider's verdict, when it refused, is the answer.
-      await embedding.catch(() => {});
-      if (providerRefused) return refuse(providerRefused);
-      throw e;
-    }
-    const [embedded, metadata, genre, inferred] = settled;
-    function gatherCapture() {
-      return Promise.all([
+            providerRefused = embeddingProviderError(e, cfg.embeddings, reader) ?? undefined;
+            if (!providerRefused) throw e;
+            console.error(`capture: the embedding provider at ${shownBase(cfg.embeddings)} refused the capture's embedding: ${providerLogWords(e, cfg.embeddings)}`);
+            // Thrown, so the capture is refused at once rather than after the chat calls beside it (review pass 2: it
+            // waited out the tags' and the priority's calls, which run on regardless, as they did before).
+            throw providerRefused;
+          }
+          console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
+          heardFrom(ctx.providerHealth, embedStarted, e);
+          vectorFailed = down;
+          return undefined;
+        })
+      : Promise.resolve(undefined);
+    const gathered = Promise.all([
       embedding,
       // A chat provider that did not answer at the socket (extractMetadata
       // throws the runtime's error, so board-sync retries the item) is the
@@ -412,8 +401,18 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
               return null;
             })
         : Promise.resolve(null),
-      ]);
+    ]);
+    let settled: Awaited<typeof gathered>;
+    try {
+      settled = await gathered;
+    } catch (e) {
+      // The provider's refusal (thrown above), or a sibling's throw before the embedding settled: either way the
+      // provider's verdict, when it refused, is the answer.
+      await embedding.catch(() => {});
+      if (providerRefused) return refuse(providerRefused);
+      throw e;
     }
+    const [embedded, metadata, genre, inferred] = settled;
     const chunks = embedded?.chunks ?? [];
     const contextFailures = embedded?.contextFailures ?? 0;
 

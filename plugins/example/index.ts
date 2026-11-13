@@ -19,8 +19,6 @@ const TOLERANCE_S = 300;
  */
 const KEEP_S = 2 * TOLERANCE_S + 60;
 
-/** A core refusal that is the brain's embedding provider refusing the call, any status (SMD-2892; the maintainer's call, 2026-11-12: a 400 may be a setting it will not take, for every call). */
-const providerMends = (r: { code: string }) => r.code === "EMBEDDING_PROVIDER_ERROR";
 
 export default definePlugin({
   name: "example",
@@ -73,9 +71,10 @@ export default definePlugin({
         if ("duplicate" in once) return { status: 200, body: { id: once.duplicate, duplicate: true } };
         if ("inFlight" in once) return { status: 409, body: { code: "IN_FLIGHT", retryable: true } };
         const captured = once.ran;
-        // The brain's embedding provider refusing the call (SMD-2892): an operator's to mend, so a 503 the sender sends
-        // again once it is, rather than a final 422 that loses the delivery.
-        if (!captured.ok && providerMends(captured.refusal)) return { status: 503, body: { code: "EMBEDDING_PROVIDER_REFUSED", retryable: true, refused: captured.refusal.code } };
+        // The brain's embedding provider refusing the call, any status (SMD-2892; the maintainer's call, 2026-11-12: a 400
+        // may be a setting it will not take, for every call): an operator's to mend, so a 503 the sender sends again once
+        // it is, rather than a final 422 that loses the delivery.
+        if (!captured.ok && captured.refusal.code === "EMBEDDING_PROVIDER_ERROR") return { status: 503, body: { code: "EMBEDDING_PROVIDER_REFUSED", retryable: true, refused: captured.refusal.code } };
         // The core's refusal, as the sender reads it: one the core says is worth retrying is a 503 it will send again.
         if (!captured.ok) return { status: captured.refusal.retryable ? 503 : 422, body: { code: "CORE_REFUSED", retryable: captured.refusal.retryable, refused: captured.refusal.code } };
         return { status: 202, body: { id: captured.value.id } };
