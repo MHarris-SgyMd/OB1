@@ -3843,7 +3843,11 @@ they named none: a session on a branch may have done other work. The summary
 lists only 12 prompts, each cut at 200 characters, so where it shows them in
 part (`- … and N more`, or a prompt clipped) every listed ticket is keyed once
 a listed prompt names one, unless the header's own branch or project names
-them all, a header the branch's words may have given. Since the header rule's
+them all, a header the branch's words may have given. A header listing a ticket
+of another team than the first ticket its own project and branch name is left
+to the model: the hook learns a team from each ticket-shaped word of a branch,
+so on `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it. A prompt
+the user ended with `…` is no clip. Since the header rule's
 version 3 (SMD-3306 PR 7a-3b-2) a header listing several, its full three
 included, keys a set of one rule's (migration 130); version 2 keyed a header
 listing one alone, and left several to the model. A ticket-shaped word counts unless
@@ -3975,9 +3979,10 @@ exit 1, as the pass fails a malformed answer, or 3 once the judge's answers trip
 the garbage-judge alarm (below); `--retry-failed` puts the failed
 claims back in the pool. `--limit` counts the claims taken, the oldest pooled
 first. A run's summary counts the thoughts it recorded subjects on, and the
-subjects it wrote where a set makes those differ (a set's kept keys are not
-written); those it recorded in place of standing ones, a set widened, narrowed
-or changed, and how many of those took a new key; and a claim no longer the
+subjects it wrote unless each wrote one (a set's kept keys are not written);
+those it recorded in place of standing ones, as the door found them, a set
+widened, narrowed or changed, and how many of those took a key the set read at
+the claim did not hold; and a claim no longer the
 run's when it released it. A changed judge model leaves its predecessor's
 subjects standing, current at the same question, and is not asked the thoughts
 its predecessor named nothing for: the pool's key names whether a model is asked,

@@ -8,7 +8,8 @@
  *   1. `metadata`: the ticket the thought is filed under, `metadata.ticket` else `metadata.issue` (the fields
  *      node_state reads, 068), when it is a ticket id;
  *   2. `first_line`: a session summary's header tickets its listed prompts name, every one when the summary shows
- *      its prompts in part (sessionHeaderTickets). The capture hook's header lists the tickets a session's prompts
+ *      its prompts in part and its own branch and project do not name them all, none when it lists another team's
+ *      ticket than its branch's (sessionHeaderTickets). The capture hook's header lists the tickets a session's prompts
  *      named, and the branch's or directory's only when they named none: that one is the session's work only when it
  *      says so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), each of its
@@ -186,9 +187,14 @@ const HOOK_LINE = /\r\n|\n|\r/;
  */
 const TITLE_LINE = /^Title: /;
 const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
-/** The hook's marks of asks the summary does not show whole: its `- … and N more` line past 12, or a prompt clipped to its 200 characters. */
+/**
+ * The hook's marks of asks the summary does not show whole: its `- … and N more` line past 12, or a prompt clipped to
+ * its 200 characters, which renderSummary's clip writes as the first 199 UTF-16 units, its whitespace already one
+ * space and the end trimmed, and `…`: 199 or 200 units. A prompt the user ended with `…` is shorter (review pass 3,
+ * cold read: one widened a header the place gave).
+ */
 const ASKED_MORE = /^- … and [0-9]+ more$/;
-const CLIPPED = "…";
+const clipped = (line: string): boolean => line.endsWith("…") && line.length - 2 >= 199;
 
 /**
  * A session summary's header tickets: those the header lists that one of the session's listed prompts names, in any
@@ -201,7 +207,14 @@ const CLIPPED = "…";
  * are listed too (`SMD-55, NODE-22` from `smd-55-node-22-image`): so with every prompt shown, only the tickets a prompt
  * names are keyed (review pass 2, cold read and run-it: pass 1 keyed every listed ticket once one was named, NODE-22
  * among them); nor is a header widened whose every ticket the header's own later parts, its project and branch, name
- * too, which may be the branch's (`smd-610-bump-node-22`) though its prompts are shown in part.
+ * too, which may be the branch's (`smd-610-bump-node-22`) though its prompts are shown in part. Both guesses at where
+ * the header came from are the summary's alone, which does not say (review pass 3, cold read): a header the place gave,
+ * its prompts shown in part, a parent directory's ticket among its tickets, is still widened; and a set the prompts
+ * named, a hidden prompt naming one, on a branch naming them all, is keyed in part. And the hook learns a team from
+ * each ticket-shaped word of a branch or a directory (`node-22` of `smd-610-bump-node-22`), so a header listing a
+ * ticket of another team than the first ticket the header's own project and branch name is left to the model (review
+ * pass 3, run-it: `NODE-22, NODE-24` from a prompt's `bump node-22 to node-24`, keyed, the session's SMD-610 lost);
+ * a session over two teams' tickets is the model's too.
  * On Verify item 1 (post hoc) the header's ticket was the
  * session's own subject for 0.857 of the sessions whose prompts named it and 0.667 of those whose prompts did not,
  * where a session on a branch did other work: a triage, a release, a review. Version 3 (SMD-3306 PR 7a-3b-2) keys
@@ -221,6 +234,12 @@ export function sessionHeaderTickets(content: string): string[] {
   const tickets = [...new Set(listed.filter(isTicket))];
   const nameOf = (t: string) => new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i");
   const rest = lines[at].slice(HEADER_TICKETS.exec(lines[at])![0].length);
+  // The hook learns a team from every ticket-shaped word of the branch and the directory, so on `smd-610-bump-node-22`
+  // a prompt's `node-22` is a ticket to it, listed as one (review pass 3, run-it: `NODE-22, NODE-24` keyed, SMD-610
+  // lost): a header listing a ticket of a team other than the first ticket its own later parts name is the model's.
+  const home = [...rest.toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).find(isTicket);
+  const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
+  if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
   const anchored = tickets.every((t) => nameOf(t).test(rest));
   const named = new Set<string>();
   let asked = false, inPart = false;
@@ -228,7 +247,7 @@ export function sessionHeaderTickets(content: string): string[] {
     if (line.trim() === "" || (!asked && TITLE_LINE.test(line))) continue;
     if (!asked && ASKED_LINE.test(line)) asked = true;
     else if (asked && line.startsWith("- ")) {
-      if (ASKED_MORE.test(line) || line.trimEnd().endsWith(CLIPPED)) inPart = true;
+      if (ASKED_MORE.test(line) || clipped(line)) inPart = true;
       for (const t of tickets) if (nameOf(t).test(line)) named.add(t);
     } else break;
   }
@@ -416,10 +435,10 @@ export function subjectCurrent(by: string | null, judge: string | null, reasonin
  * as its first ticket, where it stands (`smd-12` or `smd-12 tests` beside `SMD-12`: review pass 1, run-it and cold
  * read, a ticket standing twice, once as a phrase thread; review pass 2, cold read and mutant, left out instead, its
  * ticket given past the cut, the model's first subject was lost); `smd-5 and smd-6 merge` beside `SMD-5` alone stays a
- * phrase. `answers` are the subjects they were
- * read from, each at most 200 code points, for a recipe: the answer's own up to the one that gave the last key, or all
- * read when fewer keys came, those naming nothing ("" or null) left out (ownSubjectsOf); null when the answer gave no
- * subjects. No key is none named: [] when every answer named nothing a key holds, or there were none. A PR answered
+ * phrase, as is one naming only a denied prefix beside its ticket (`sha-256 checks for smd-5`). `answers` are the
+ * subjects read, every one of the first SUBJECT_ANSWERS_READ, so the recipe holds whatever a key was read from or read
+ * as (review pass 3, cold read: one past the last key, which made a phrase its ticket, was left off), each at most 200
+ * code points, those empty or null left out (ownSubjectsOf); null when the answer gave no subjects. No key is none named: [] when every answer named nothing a key holds, or there were none. A PR answered
  * beside a ticket is its own subject: the question asks for a PR only where the work is no ticket's.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answers: string[] | null; keys: string[] }> {
@@ -438,13 +457,12 @@ export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: E
   if (whole === null) return { raw, answers: null, keys: [] };
   const read = whole.slice(0, SUBJECT_ANSWERS_READ).map((one) => ({ one, key: subjectKey(one, named) }));
   const given = new Set(read.flatMap((r) => (r.key?.startsWith("ticket:") ? [r.key.slice("ticket:".length)] : [])));
-  const answers: string[] = [], keys: string[] = [];
-  for (const { one, key: read1 } of read) {
+  const keys: string[] = [];
+  for (const { key: read1 } of read) {
     if (keys.length >= SUBJECT_SET_MAX) break;
-    answers.push(cutByCodePoint(one, 200));
-    const its = read1?.startsWith("phrase:") ? [...read1.slice("phrase:".length).toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]) : [];
+    const its = read1?.startsWith("phrase:") ? [...read1.slice("phrase:".length).toUpperCase().matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).filter(isTicket) : [];
     const key = its.length > 0 && its.every((t) => given.has(t)) ? `ticket:${its[0]}` : read1;
     if (key !== null && !keys.includes(key)) keys.push(key);
   }
-  return { raw, answers, keys };
+  return { raw, answers: read.map((r) => cutByCodePoint(r.one, 200)), keys };
 }

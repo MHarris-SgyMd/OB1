@@ -9364,8 +9364,8 @@ if (want("10h")) {
           && oldLeft.length === 1 && oldLeft[0].key === "ticket:SMD-77" && oldLeft[0].judge === "subject:first_line@r3",
         `the header's two tickets one rule's set; the version 2 subject found again under version 3 (${JSON.stringify([headerLeft, oldLeft].map((l) => l.map((x) => [x.key, x.judge])))})`);
       assert(JSON.stringify(manyLeft.map((x) => x.key).sort()) === JSON.stringify(["ticket:SMD-71", "ticket:SMD-72", "ticket:SMD-73"])
-          && manyLeft.every((x) => x.by === "model" && x.judge === "subject:stub-judge@p3r" && x.recipe?.prompt_version === 3 && JSON.stringify(x.recipe?.answers) === JSON.stringify(["SMD-71", "SMD-72", "SMD-71's tests", "SMD-73"])),
-        `the model's set: its first three keys, each once, the fourth answer unread, the answers read on each recipe (${JSON.stringify(manyLeft.map((x) => [x.key, x.recipe?.answers]))})`);
+          && manyLeft.every((x) => x.by === "model" && x.judge === "subject:stub-judge@p3r" && x.recipe?.prompt_version === 3 && JSON.stringify(x.recipe?.answers) === JSON.stringify(["SMD-71", "SMD-72", "SMD-71's tests", "SMD-73", "SMD-74"])),
+        `the model's set: its first three keys, each once, every answer read on each recipe (${JSON.stringify(manyLeft.map((x) => [x.key, x.recipe?.answers]))})`);
       await sql`DELETE FROM thoughts WHERE id IN (${header}::uuid, ${old}::uuid, ${many}::uuid)`;
       // A set widened at the same rule and pass: the header's one ticket standing, current, at a text whose header now
       // lists two. The door keeps it and writes the other (`added`, beside a standing set): the run counts a replacement

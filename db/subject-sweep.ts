@@ -2557,7 +2557,8 @@ async function sweep(
       if ((w.kept ?? 0) + (w.closed ?? 0) > 0) {
         n.replaced++;
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
-        // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key).
+        // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key) — the
+        // set read at the claim, which another writer may have changed since (PR 7a-3b-2's review pass 3, cold read).
         if (keys.some((k) => !(row.standing_keys ?? []).includes(k))) n.newKey++;
       }
     }

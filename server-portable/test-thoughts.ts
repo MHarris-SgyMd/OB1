@@ -2738,8 +2738,11 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(H(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === "SMD-2615" && H(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614" && H(hook("SMD-2614, FY-2026", ["plan FY-2026"])) === ""
       && H(hook("FY-2026, CWE-79, SMD-12", ["FY-2026 and CWE-79 for SMD-12, then SMD-13"])) === "SMD-12",
     "…of a header naming several, those a listed prompt names, every prompt shown (version 2 left them to the model); a denied prefix the hook listed beside one is no second ticket; a full list of three is read (version 2: none, as one may have been left out)");
-  assert(H(hook("SMD-55, NODE-22", ["start smd-55: move the image to node 22"])) === "SMD-55",
-    "…a header the branch's words gave (`smd-55-node-22-image`, an ask in lower case the hook did not count) keys the ticket a prompt names alone (review pass 2: pass 1 keyed NODE-22 too)");
+  assert(H(hook("SMD-55, SMD-56", ["pick up smd-55 and see where it got to…"])) === "SMD-55"
+      && H(hook("SMD-55, SMD-56", [`start smd-55 ${"x".repeat(200)}`].map((q) => `${q.slice(0, 199).trimEnd()}…`))) === "SMD-55,SMD-56",
+    "…a prompt the user ended with `…` is no clip, one the hook clipped is (review pass 3)");
+  assert(H(hook("SMD-55, NODE-22", ["start smd-55: move the image to node 22"])) === "" && H(hook("NODE-22", ["bump node-22"])) === "" && H(hook("SMD-2125, SMD-7", ["smd-2125 and smd-7"])) === "SMD-2125,SMD-7",
+    "…a header listing a ticket of another team than the first its own branch names is the model's (`NODE-22` beside the branch's SMD-2125: review pass 3, run-it; pass 1 keyed NODE-22, pass 2 SMD-55 alone); one team's are keyed");
   assert(H(hook("SMD-3, SMD-1, SMD-2", ["start smd-1", "then SMD-3 and SMD-2"])) === "SMD-3,SMD-1,SMD-2" && H(hook("SMD-1, SMD-2", ["smd-2 and smd-1"])) === "SMD-1,SMD-2"
       && H(hook("SMD-1, SMD-1", ["smd-1"])) === "SMD-1" && H(hook("SMD-1, SMD-2, SMD-3, SMD-4", ["smd-1"])) === "" && H(hook("SMD-1, SMD-2", ["neither"])) === "",
     "…every ticket of the header a prompt names, a full list of three, in the header's order, each once; none from a header listing more than the hook's three, or none a prompt names");
@@ -2776,9 +2779,23 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
       && /^Session summary — SMD-4, SMD-3 — /.test(longPrompt) && /…$/m.test(longPrompt) && H(longPrompt) === "SMD-4,SMD-3"
       && /^Session summary — SMD-1, SMD-2 — /.test(shownAll) && !/…/.test(shownAll) && H(shownAll) === "SMD-1",
     `…a ticket only an unlisted prompt names, or one past a long prompt's cut, keyed with the header's rest, the summary showing its prompts in part; with every prompt shown whole, those a prompt names alone (review pass 2) (${H(late)} | ${H(longPrompt)} | ${H(shownAll)})`);
-  const anchoredLate = renderSummary(hookSession("michaelharris/smd-610-bump-node-22", ["upgrade the runtime, see smd-610", ...Array.from({ length: 12 }, (_, i) => `step ${i + 2}`)], []));
-  assert(/^Session summary — SMD-610, NODE-22 — /.test(anchoredLate) && /^- … and 1 more$/m.test(anchoredLate) && H(anchoredLate) === "SMD-610",
+  const anchoredLate = renderSummary(hookSession("michaelharris/smd-610-and-smd-611", ["upgrade the runtime, see smd-610", ...Array.from({ length: 12 }, (_, i) => `step ${i + 2}`)], []));
+  assert(/^Session summary — SMD-610, SMD-611 — /.test(anchoredLate) && /^- … and 1 more$/m.test(anchoredLate) && H(anchoredLate) === "SMD-610",
     `…nor widened, its prompts shown in part, when the header's own branch names its every ticket (review pass 2, run-it: ${H(anchoredLate)})`);
+  assert(H(hook("SMD-2615, SMD-2614", ["… start smd-2615 … then review"])) === "SMD-2615",
+    "…an ellipsis a prompt was typed with, at its start or inside it, is no mark of the summary showing it in part (review pass 3, mutant)");
+  assert(H("Session summary — SMD-10, SMD-11, FY-2026 — claude-code — ob1 (smd-10-smd-11-x) — 2026-10-01\n\nAsked (13 prompts):\n- start smd-10\n- … and 12 more") === "SMD-10",
+    "…a denied prefix the hook listed, which no branch names, does not unanchor a header its branch names every ticket of (review pass 3, mutant)");
+  assert(H("Session summary — SMD-10, SMD-11 — claude-code — ob1 (main) — 2026-10-01\n\nAsked (13 prompts):\n- look around\n- … and 12 more") === "",
+    "…and a summary showing its prompts in part keys none when no listed prompt names a listed ticket (review pass 3, mutant)");
+  assert(H("Session summary — SMD-5 — claude-code — utf-8-tools (smd-5-x) — 2026-10-01\n\nAsked (1 prompt):\n- start smd-5") === "SMD-5",
+    "…the team a header's own parts name is their first ticket's, a denied prefix before it passed over (review pass 3)");
+  // Review pass 3 (run-it): the hook learns NODE from `smd-610-bump-node-22`, so a prompt's node-22 and node-24 are its
+  // named tickets, and the header lists them, or one beside SMD-610.
+  const nodes = renderSummary(hookSession("michaelharris/smd-610-bump-node-22", ["bump node-22 to node-24 in the Dockerfile", "run the tests"], ["NODE-22", "NODE-24"]));
+  const nodeAndOwn = renderSummary(hookSession("michaelharris/smd-610-bump-node-22", ["the image still pins node-22, see smd-610"], ["NODE-22", "SMD-610"]));
+  assert(/^Session summary — NODE-22, NODE-24 — /.test(nodes) && H(nodes) === "" && /^Session summary — NODE-22, SMD-610 — /.test(nodeAndOwn) && H(nodeAndOwn) === "",
+    `…a header listing another team's tickets than its branch's first left to the model (${H(nodes)} | ${H(nodeAndOwn)})`);
   // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
   const two = hook("SMD-7, SMD-8", ["start smd-8", "and smd-7"]);
   assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" })
@@ -2888,7 +2905,8 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     '{"subjects":["SMD-1","PR 9","SMD-1\'s tests","SMD-2","SMD-3"],"deliverables":[]}', '{"subjects":["SMD-999","the dashboard review","SMD-5"],"deliverables":[]}', '{"subject":"SMD-5","deliverables":[]}',
     '{"subjects":["smd-8 tests","SMD-8","smd-8","PR 3"],"deliverables":[]}', JSON.stringify({ subjects: [...Array.from({ length: 8 }, (_, i) => `SMD-90${i}`), "SMD-5"], deliverables: [] }),
     '{"subjects":["smd-8 tests","SMD-9","SMD-10","SMD-11","SMD-8"],"deliverables":[]}', '{"subjects":["SMD-5","smd-5 and smd-6 merge"],"deliverables":[]}',
-    '{"subjects":["SMD-8","smd-8 and smd-99 handoff","PR 3"],"deliverables":[]}', JSON.stringify({ subjects: ["smd-5 tests", ...Array.from({ length: 7 }, (_, i) => `SMD-90${i}`), "SMD-5"], deliverables: [] })];
+    '{"subjects":["SMD-8","smd-8 and smd-99 handoff","PR 3"],"deliverables":[]}', JSON.stringify({ subjects: ["smd-5 tests", ...Array.from({ length: 7 }, (_, i) => `SMD-90${i}`), "SMD-5"], deliverables: [] }),
+    '{"subjects":["sha-256 checks for smd-5","SMD-5"],"deliverables":[]}', '{"subjects":["smd-5 then smd-6","SMD-7","SMD-8","SMD-6","SMD-5"],"deliverables":[]}'];
   const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   /** An answer's subjects and keys, each list comma-joined, null when none was read. */
   const got = (a: { answers: string[] | null; keys: string[] }) => ({ answers: a.answers?.join(",") ?? null, keys: a.keys.join(",") });
@@ -2944,8 +2962,8 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     // Version 3 (PR 7a-3b-2): a set. Each subject read into its key under the guard, in the answer's order, each key
     // once, until SUBJECT_SET_MAX; the answers kept are those read, up to the one that gave the last key.
     const several = await askOwnSubject(cfg, { content: "SMD-1, SMD-2 and SMD-3 merged in PR 9.", createdAt: null, metadata: {}, writer: null }, subject);
-    assert(got(several).keys === "ticket:SMD-1,pr:9,ticket:SMD-2" && got(several).answers === "SMD-1,PR 9,SMD-1's tests,SMD-2" && several.keys.length === SUBJECT_SET_MAX,
-      `several subjects: each one's key in order, a key twice once, at most three, the answers read up to the third key (${JSON.stringify(got(several))})`);
+    assert(got(several).keys === "ticket:SMD-1,pr:9,ticket:SMD-2" && got(several).answers === "SMD-1,PR 9,SMD-1's tests,SMD-2,SMD-3" && several.keys.length === SUBJECT_SET_MAX,
+      `several subjects: each one's key in order, a key twice once, at most three, every answer read on the recipe (review pass 3) (${JSON.stringify(got(several))})`);
     const dropped = await askOwnSubject(cfg, { content: "The dashboard review for SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(got(dropped).keys === "phrase:the dashboard review,ticket:SMD-5" && got(dropped).answers === "SMD-999,the dashboard review,SMD-5",
       `…a subject naming nothing the thought names dropped, the rest kept, every answer read kept (${JSON.stringify(got(dropped))})`);
@@ -2955,12 +2973,12 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     // left out, not a second subject; a PR beside a ticket is its own. Only the first SUBJECT_ANSWERS_READ are read.
     const echo = await askOwnSubject(cfg, { content: "Work on smd-8, merged in PR 3.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(got(echo).keys === "ticket:SMD-8,pr:3" && got(echo).answers === "smd-8 tests,SMD-8,smd-8,PR 3",
-      `…a phrase echoing a ticket of the answer left out, its PR kept (${JSON.stringify(got(echo))})`);
+      `…a phrase echoing a ticket of the answer read as it, its PR kept (${JSON.stringify(got(echo))})`);
     const many = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(got(many).keys === "" && many.answers?.length === SUBJECT_ANSWERS_READ && SUBJECT_ANSWERS_READ === 8,
       `…and an answer of many read to its eighth: the ninth's ticket, which the thought names, unread (${JSON.stringify(got(many))})`);
     const pastCut = await askOwnSubject(cfg, { content: "Work on smd-8, then SMD-9, SMD-10, SMD-11.", createdAt: null, metadata: {}, writer: null }, subject);
-    assert(got(pastCut).keys === "ticket:SMD-8,ticket:SMD-9,ticket:SMD-10",
+    assert(got(pastCut).keys === "ticket:SMD-8,ticket:SMD-9,ticket:SMD-10" && got(pastCut).answers === "smd-8 tests,SMD-9,SMD-10,SMD-11,SMD-8",
       `…an echoing phrase read as its ticket where it stands: the model's first subject kept first, though its ticket was given past the cut (review pass 2: ${JSON.stringify(got(pastCut))})`);
     const twoOf = await askOwnSubject(cfg, { content: "Merged smd-5 and smd-6 together.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(got(twoOf).keys === "ticket:SMD-5,phrase:smd-5 and smd-6 merge", `…a phrase naming a ticket the answer does not give too stays a phrase (review pass 2: ${JSON.stringify(got(twoOf))})`);
@@ -2968,6 +2986,11 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     const pastRead = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(got(handoff).keys === "ticket:SMD-8,phrase:smd-8 and smd-99 handoff,pr:3" && got(pastRead).keys === "phrase:smd-5 tests",
       `…as with SMD-99 beside SMD-8; and a ticket given past the eighth answer, unread, makes no phrase its echo (review pass 2, mutant: ${JSON.stringify([got(handoff), got(pastRead)])})`);
+    const denied = await askOwnSubject(cfg, { content: "SHA-256 checks for SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(denied).keys === "ticket:SMD-5", `…a denied prefix beside its ticket no other ticket: the phrase read as SMD-5 (review pass 3: ${JSON.stringify(got(denied))})`);
+    const firstOfTwo = await askOwnSubject(cfg, { content: "SMD-5, smd-6, SMD-7 and SMD-8.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(firstOfTwo).keys === "ticket:SMD-5,ticket:SMD-7,ticket:SMD-8",
+      `…a phrase naming two tickets the answer gives read as its first, where it stands, the cut after it (review pass 3, mutant: ${JSON.stringify(got(firstOfTwo))})`);
   } finally {
     stub.stop(true);
   }
