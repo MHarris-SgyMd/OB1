@@ -4747,13 +4747,23 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 4 is the pass's** (`@p4d4`, SMD-3203): version 3, with the
+- **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with
+  no evolves of its own. The tier's evolves is stored as related, at the
+  tier's P(related), floored on the relation words' mass as any relation is,
+  so a pair it related before is related still: a pair evolves when the newer
+  comes next on the older's own subject's work thread, the edge migration 120
+  keeps between consecutive thoughts of a thread (origin `thread`), not by a
+  pair's judgement. The link step is asked only first, on the tier's outdates
+  at the floor; version 4's check after an evolves goes with the evolves. The
+  run's verdicts line counts no evolves, and a relation's note keeps the
+  tier's top, so an evolves stored as related says so.
+- **Version 4** (`@p4d4`, SMD-3203): version 3, with the
   writer's **link step**, the mediated-pair test's step 2
   (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
   equal to the ADR's by `evals/eval-mediated-pairs.ts --self-check`):
   - **When:** first on the tier's outdates at the floor, before any proposal
     is written, and after on a pair the pass would store as evolves (its
-    relation words' mass at the floor).
+    relation words' mass at the floor), which version 5 drops.
   - **The cap:** an H link (one thought's own subject named in passing by the
     other), an F link (both mention a third subject that is neither's own),
     or an answer naming none of the four caps the pair: related at most, and

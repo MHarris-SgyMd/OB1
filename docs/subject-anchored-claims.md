@@ -393,7 +393,7 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
    - **Done, then:** decide version 4 builds the cap on the writer's link step, as the maintainer chose (amended 2026-10-22, PR 2b).
    - **Done:** the canary re-judge under `@p4d4`. The cap's precision missed its bar, 0.686 against 0.7, and three rounds of asking the link step another way did not qualify either, the test's version 3 among them (amended 2026-10-25, SMD-3299).
    - **Decided:** version 4 stays (the maintainer, 2026-10-25).
-   - **Next:** evolves as work threads, built from each thought's own subject (SMD-3306).
+   - **Then:** evolves as work threads, built from each thought's own subject (SMD-3306). Decide version 5 stores the tier's evolves as related and asks the link step only on an outdates at the floor, so row 2's cap no longer guards an evolves: a pair whose own subjects differ is never one thread (amended 2026-11-14, SMD-3306 PR 7b). The cap on outdates, row 3, stays.
    - **SMD-3203's last Verify item** also waits on a subject with a timeline beyond tickets (steps 3 and 4). In it, a planted thought reads as stale once a non-ticket subject's state moves, and no pair whose thoughts share only that subject's state is joined.
 3. **SMD-3207, the spike:**
    - read the code artifacts a note names;
@@ -414,7 +414,7 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
 ## Related
 
 - SMD-3116: the typed labels, and the via slot.
-- SMD-3115, SMD-3117 and SMD-3151: decide mode, distinct recorded (migration 102), and decide version 3. Decide version 4 is this record's rows 2 and 3.
+- SMD-3115, SMD-3117 and SMD-3151: decide mode, distinct recorded (migration 102), and decide version 3. Decide version 4 is this record's rows 2 and 3; version 5 (SMD-3306) keeps row 3 and leaves evolves to the work threads.
 - SMD-2540 and SMD-3054: a ticket's stated status, labelled and maybe demoted.
 - SMD-2271: transitive freshness, migration 077.
 - SMD-1729: the claim log; `docs/event-log-as-truth.md` (SMD-1997).

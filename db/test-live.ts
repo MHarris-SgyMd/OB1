@@ -19501,10 +19501,11 @@ if (want("16")) {
   // with decide mode's lineage, a related pair is a relation with no writer
   // call, so is an outdates under the floor, and a writer's "none" leaves
   // neither. Since decide version 4 (SMD-3203) the writer's link step comes
-  // first on an outdates at the floor and after on an evolves the pass would
-  // store: an F link leaves the gateway pair no proposal, and an H link stores
-  // the pager pair's evolves as related. A start without the tier, or with the
-  // tier held to another model, is refused before anything is claimed.
+  // first on an outdates at the floor: an F link leaves the gateway pair no
+  // proposal. Since version 5 (SMD-3306 PR 7b) the pager pair's evolves is
+  // stored as related, the work threads giving evolves, and no link step is
+  // asked after it. A start without the tier, or with the tier held to another
+  // model, is refused before anything is claimed.
   {
     const DECIDER = "h2o-stub", WRITER = "stub-writer";
     const DKEY = decideKey(DECIDER, WRITER);
@@ -19548,8 +19549,8 @@ if (want("16")) {
         const prompt = body.messages?.[0]?.content ?? "";
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
         writerModels.add(String(body.model));
-        // Decide version 4's link step (SMD-3203): the gateway pair's thoughts share only a third subject, and the
-        // pager pair's one names the other's subject in passing; the rest are direct.
+        // Decide version 4's link step (SMD-3203): the gateway pair's thoughts share only a third subject; the rest are
+        // direct. The pager pair's evolves asks none since version 5: were it asked, its H link would cap it.
         if (prompt.endsWith(LINK_ANSWER)) {
           linkCalls++;
           const link = /gateway/.test(thoughtsIn(prompt)) ? { link: "F", via: "release 4", reason: "both report release 4's state" }
@@ -19610,6 +19611,7 @@ if (want("16")) {
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
+          && banner.some((l) => /^\s*decide: .*an evolves is stored as related, the work threads giving evolves \(OB1_CONSOLIDATE_DECIDER/.test(l))
           && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 12 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0 && linkCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
 
@@ -19654,8 +19656,8 @@ if (want("16")) {
         `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
       // Decide version 4 (SMD-3203): the gateway pair, an outdates at the floor whose link step finds F, is written no
       // proposal and takes the tier's related, capped, under the floor, and its stale proposal is settled, the note
-      // saying the link step capped it; the pager pair, an evolves the pass would store, is asked the link step after,
-      // and its H link stores it related at the tier's P(related), at the same floor.
+      // saying the link step capped it. Version 5 (SMD-3306 PR 7b): the pager pair, an evolves the pass would store, is
+      // stored related at the tier's P(related), at the same floor, no link step asked.
       const [gateAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${gateProp}::uuid`) as { status: string; review_note: string | null }[];
       const cappedNote = passSettledNote("judged again after a text moved — related, capped by the writer's link step (an F link, SMD-3203)", DKEY);
       type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
@@ -19667,14 +19669,15 @@ if (want("16")) {
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
       assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
           && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
-          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
-          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.asked === "after" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
-        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
-      assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
+          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link === undefined
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.verdict === "related" && (pagerDump.link ?? null) === null && (pagerDump.asked ?? null) === null
+          && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
+        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so); the pager pair's evolves is stored as related at the tier's P(related), no link step asked (version 5); and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
+      assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 3 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
           && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
-          && /decide: the writer's link step asked on 4 pair\(s\) — 2 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out),
-        `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and the evolves the pass would store, and the writer only about the two the link step found direct, as the judge's model with the part rule and not the record rule, and the run's summary counts each (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: the/.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"})`);
+          && /decide: the writer's link step asked on 3 pair\(s\) — 1 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out),
+        `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and not the evolves (version 5), and the writer only about the two the link step found direct, as the judge's model with the part rule and not the record rule, and the run's summary counts each (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: the/.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
       assert(dclaims.succeeded === 12 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
 
