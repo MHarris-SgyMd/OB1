@@ -21115,7 +21115,9 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
   await db.query(`SELECT write_page_section($1::uuid, 'facts', 'rewritten on O', 'generated', NULL, '{}'::jsonb, $2::uuid[], NULL, 'fg125-op')`, [page2, [O]]);
   await db.query(`INSERT INTO query_log (kind, tool, query, result_ids, result_scores) VALUES ('search', 'search', 'vault', ARRAY[$1::uuid, $2::uuid], ARRAY[0.9, 0.8]::real[])`, [T, O]);
   await db.query(`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'update_thought', $1::uuid)`, [T]);
-  await db.query(`INSERT INTO query_log (kind, tool, result_items) VALUES ('agenda', 'agenda', $1::jsonb)`, [JSON.stringify([{ kind: "item", key: O }, { kind: "item", key: T }, { kind: "ticket", key: "FG-126" }])]);
+  await db.query(`INSERT INTO query_log (kind, tool, result_items) VALUES ('agenda', 'agenda', $1::jsonb)`, [JSON.stringify([{ kind: "item", key: O }, { kind: "item", key: T }, { kind: "item", key: item }, { kind: "ticket", key: "FG-126" }])]);
+  await db.query(`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+                  VALUES ($1::uuid, 'linear', 'FG-128', 'the canonical', 'application/json', encode(sha256(convert_to('the canonical', 'UTF8')), 'hex'))`, [T]);
   const events = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [T])).n;
   assert(rel.ok !== false && deliv.event !== undefined && events === 3,
     `the fixture: a relation recorded, T a deliverable, T's capture and its two edits in the log (${JSON.stringify(rel).slice(0, 60)} | ${JSON.stringify(deliv).slice(0, 80)} | ${events})`);
@@ -21133,6 +21135,16 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
             (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid AND redacted_at IS NOT NULL) AS red`, [T]);
   assert(replaying.ok === false && replaying.error === "REPLAYING" && (replaying.rebuild as J)?.ok === false && afterReplay.live && afterReplay.led === 0 && afterReplay.red === 0,
     `under replay the forget answers rebuild_derived's REPLAYING, with its report, and nothing is forgotten (${JSON.stringify(replaying).slice(0, 80)}; ${JSON.stringify(afterReplay)})`);
+
+  // Above READ COMMITTED it is refused, as every priority writer is (116; review pass 7): its priority reads must
+  // postdate their locks.
+  let isolated = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+    try { await tx.query(`SELECT forget_thought($1::uuid, $2::jsonb)`, [T, ACT]); isolated = "taken"; } catch (e) { isolated = String((e as { code?: string }).code ?? "?"); }
+    throw new Error("roll back");
+  }).catch(() => undefined);
+  assert(isolated === "0A000", `under REPEATABLE READ the forget is refused, feature_not_supported (${isolated})`);
 
   // Refused CITED while an active citation leans on it (the maintainer, 2026-11-13): nothing touched.
   const cited = await forget(T);
@@ -21163,6 +21175,17 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
       && JSON.stringify(ans.irreproducible) === JSON.stringify([C, page].sort()) && JSON.stringify(ans.pages) === JSON.stringify([page, page2].sort()) && ans.gone === false
       && JSON.stringify(ans.twins) === "[]" && Array.isArray(ans.outside) && (ans.outside as string[]).length === 4,
     `forgotten: each store's count in the evidence, the child and the page (whose derived_from is its sections' evidence) listed for review, and the page whose section was once built on it, no twin, the copies outside named (${JSON.stringify(removed)} | ${JSON.stringify(ans.irreproducible)} | ${JSON.stringify(ans.pages)})`);
+
+  // The record it was ingested as, in the answer and the ledger, so a sync leaves it out (review pass 7); the ledger's
+  // actor is the tombstone's, both read from the call's envelope.
+  const tomb = await one<{ n: string | null; a: string | null; ln: string | null; la: string | null; src: J | null }>(
+    `SELECT (SELECT actor_name FROM thought_audit WHERE thought_id = $1::uuid ORDER BY seq DESC LIMIT 1) AS n,
+            (SELECT canonical_agent_id::text FROM thought_audit WHERE thought_id = $1::uuid ORDER BY seq DESC LIMIT 1) AS a,
+            f.actor_name AS ln, f.actor_agent_id::text AS la, f.evidence->'source' AS src
+       FROM thought_forgotten f WHERE f.thought_id = $1::uuid`, [T]);
+  assert(JSON.stringify(ans.source) === JSON.stringify({ system: "linear", identity: "FG-128" }) && JSON.stringify(tomb.src) === JSON.stringify(ans.source)
+      && tomb.ln === "fg125-op" && tomb.ln === tomb.n && tomb.la === tomb.a,
+    `the record it was ingested as named in the answer and the ledger; the ledger's actor the tombstone's (${JSON.stringify(ans.source)} | ${JSON.stringify(tomb)})`);
 
   // Nowhere holds the text.
   const text = await q<{ t: string; n: number }>(`

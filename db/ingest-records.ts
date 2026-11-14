@@ -559,6 +559,16 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
       // word for a row that is this very ticket (run-it, test-live [22]).
       // record_thought_source's IDENTITY_HELD stays the backstop for the race
       // between this look and the write.
+      // A record the brain forgot (139, SMD-1723): its row's id is in the
+      // ledger and no row stands there (one reinstated does). Asked by id,
+      // so an edited record — a new text the refusal would not know — stays
+      // forgotten too (review pass 7: it came back on its next edit).
+      const [fg] = (await tx`SELECT to_regclass('thought_forgotten') IS NOT NULL AS has`) as { has: boolean }[];
+      if (fg?.has) {
+        const [f] = (await tx`SELECT EXISTS (SELECT 1 FROM thought_forgotten WHERE thought_id = ${doc.id}::uuid)
+                                 AND NOT EXISTS (SELECT 1 FROM thoughts WHERE id = ${doc.id}::uuid) AS gone`) as { gone: boolean }[];
+        if (f?.gone) return { outcome: "forgotten" };
+      }
       if (doc.structure) {
         const [h] = (await tx`SELECT source_thought(${doc.structure.identity.system}, ${doc.structure.identity.key})::text AS t`) as { t: string | null }[];
         if (h?.t && h.t !== doc.id) return { outcome: "held", heldBy: h.t };
@@ -1032,7 +1042,7 @@ async function main(): Promise<void> {
 
   printCounts();
   const parts = docs.filter((d) => d.derivedFrom).length;
-  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}  stale ${tally.stale}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}${parts ? `  (${parts} of the records are derived parts — a ticket's dated sections, SMD-2059)` : ""}`);
+  console.log(`  tier=${tier}  inserted ${tally.inserted}  updated ${tally.updated}  patched ${tally.patched}  unchanged ${tally.unchanged}  skipped ${tally.skipped}  held ${tally.held}  stale ${tally.stale}${tally.forgotten ? `  forgotten ${tally.forgotten}` : ""}${dropped ? `  (+${dropped} duplicate-content dropped)` : ""}${parts ? `  (${parts} of the records are derived parts — a ticket's dated sections, SMD-2059)` : ""}`);
   for (const [source, n] of heldBy) console.log(`  ${source}: ${n} record(s) HELD — another thought already is that source item${source === LINEAR_SYSTEM ? " (the board sync's row for a ticket, on a brain it keeps)" : ""}; nothing written for them. db/README.md, "Two writers of one identity".`);
   if (tally.stale) console.log(`  ${tally.stale} record(s) STALE — the row carries a newer watermark than the record${perSource.linear ? " (the board sync moved the ticket past this dump)" : ""}; nothing written for them. ${perSource.linear ? "Rebuild the dump, or let the sync keep the board." : "Re-export from the source, or let the newer row stand."}`);
   if (structure.records) {

@@ -6786,7 +6786,7 @@ console.log("\n[20ce] Migration 141: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cf] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a close decision in flight is waited for, its copied reason blanked; a re-apply a no-op (SMD-1723)");
+console.log("\n[20cf] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a priority writer holding the item's lock is waited for; a close decision in flight is waited for, its copied reason blanked; a re-apply a no-op (SMD-1723)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6806,17 +6806,20 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
   });
   // A role granted thoughts' writes before 139, which the file grants the ledger the refusal reads.
   await sql.unsafe(`CREATE ROLE ob1_upgrade_139_writer NOLOGIN; GRANT INSERT, UPDATE ON thoughts TO ob1_upgrade_139_writer`);
+  // …and one granted an UPDATE of one column alone, which the table's own ACL does not show (review pass 7).
+  await sql.unsafe(`CREATE ROLE ob1_upgrade_139_col NOLOGIN; GRANT UPDATE (content) ON thoughts TO ob1_upgrade_139_col`);
   const made = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'forget_thought'`)[0].c);
 
   // Without 067's rebuild_derived: refused by name, nothing made.
   await sql`ALTER FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) RENAME TO rebuild_derived_away`;
   const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION rebuild_derived_away(uuid, text, boolean, text[], boolean, boolean) RENAME TO rebuild_derived`;
-  assert(/^migration 139 needs 016, 034, 055, 060, 064, 067, 116, 117, 123 and 134 /.test(without) && await made() === 0,
+  assert(/^migration 139 needs 016, 034, 053, 055, 060, 064, 067, 116, 117, 123 and 134 /.test(without) && await made() === 0,
     `without 067's rebuild_derived the file is refused by name, nothing made (${without.slice(0, 90)} | ${await made()})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
-  const reads = Boolean((await sql`SELECT has_table_privilege('ob1_upgrade_139_writer', 'thought_forgotten', 'SELECT') AS r`)[0].r);
+  const reads = Boolean((await sql`SELECT has_table_privilege('ob1_upgrade_139_writer', 'thought_forgotten', 'SELECT')
+                                          AND has_table_privilege('ob1_upgrade_139_col', 'thought_forgotten', 'SELECT') AS r`)[0].r);
   const ans = (await sql`SELECT forget_thought(${id}::uuid, (${ACT}::text)::jsonb) AS r`)[0].r as { ok: boolean; removed: { audit_events: number } };
   const log = (await sql`SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NOT NULL)::int AS red,
                                 count(*) FILTER (WHERE actor_name = 'upgrade-op')::int AS act,
@@ -6825,8 +6828,8 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
   let back = "taken";
   try { await sql`INSERT INTO thoughts (content) VALUES (${SECRET})`; } catch (e) { back = String((e as { errno?: string }).errno ?? (e as { code?: string }).code); }
   assert(reads && ans.ok === true && ans.removed.audit_events === 3 && log.n === 3 && log.red === 3 && log.act === 3 && log.text === 0 && back === "OB005",
-    `applied: the writer reads the ledger; the thought from 138 forgotten, its capture, edit and tombstone redacted with their actor kept; the text refused OB005 (${reads} | ${JSON.stringify(log)} | ${back})`);
-  await sql.unsafe(`DROP OWNED BY ob1_upgrade_139_writer; DROP ROLE ob1_upgrade_139_writer`);
+    `applied: the writers read the ledger, the column grant's too; the thought from 138 forgotten, its capture, edit and tombstone redacted with their actor kept; the text refused OB005 (${reads} | ${JSON.stringify(log)} | ${back})`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_139_writer; DROP ROLE ob1_upgrade_139_writer; DROP OWNED BY ob1_upgrade_139_col; DROP ROLE ob1_upgrade_139_col`);
 
   // A race, on two connections (review pass 1): while a forget of R runs, a capture of R's earlier text waits on the
   // fingerprint lock the forget holds; after the commit it is refused OB005, nothing written. (Another store's racing
@@ -6876,6 +6879,25 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
   assert(inLedger && editedBack === "OB005",
     `an edit committed while the forget waited on the row: its text in the ledger, refused after (${inLedger}; ${editedBack})`);
 
+  // A priority writer holding the item's lock (review pass 7): the forget takes each item's lock before it deletes
+  // the item's statements, so it waits for the writer, as 116's writers wait for one another.
+  const pr = String((await sql`SELECT (upsert_thought(${"upgrade 139: a thought with a priority"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  await sql`SELECT assert_priority('thought', ${pr}, 4, NULL, NULL, NULL, NULL, 'upgrade 139', false, (${ACT}::text)::jsonb)`;
+  const lockHolder = new SQL({ url: URL_, max: 1 });
+  let prForget: Promise<unknown> = Promise.resolve(null);
+  const prSettled: string[] = [];
+  let prWaited = false;
+  await lockHolder.begin(async (tx) => {
+    await tx`SELECT ob1_priority_lock('thought', ${pr})`;
+    prForget = sql`SELECT forget_thought(${pr}::uuid, (${ACT}::text)::jsonb) AS r`.then((x) => x).finally(() => prSettled.push("forget"));  // started now
+    await new Promise((res) => setTimeout(res, 400));
+    prWaited = prSettled.length === 0;  // read before the commit releases it
+  });
+  await prForget;
+  await lockHolder.close();
+  const prLeft = Number((await sql`SELECT count(*)::int AS c FROM priority_assertions WHERE item_key = ${pr}`)[0].c);
+  assert(prWaited && prLeft === 0, `a priority writer holding the thought's lock: the forget waited for it, then deleted the statement (${prWaited}, ${prLeft})`);
+
   // A close decision in flight (review pass 6): it copies the proposal's reason onto the item's status event and holds
   // the proposal; the forget locks the proposals citing its thought first, so it waits, then blanks the copy.
   const cited = String((await sql`SELECT (upsert_thought(${"upgrade 139: the cited note, door code 1357"}, '{}'::jsonb)->>'id') AS id`)[0].id);
@@ -6900,7 +6922,7 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
   const ledger = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten`)[0].c);
-  assert(ledger === 4 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
+  assert(ledger === 5 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
   await sql.close();
 }
 

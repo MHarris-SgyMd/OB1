@@ -308,7 +308,7 @@ export function namesMoved(c: CensusRow, metadata: Record<string, unknown> | und
   if (c.labels !== undefined && JSON.stringify(m.labels ?? []) !== JSON.stringify([...c.labels].sort((a, b) => a.localeCompare(b, "en")))) return true;
   return false;
 }
-export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra: string[]; unchanged: number };
+export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra: string[]; unchanged: number; forgotten: string[] };
 
 /**
  * The plan for one identifier from the census: which issues a pass must fetch
@@ -316,17 +316,24 @@ export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra:
  * older than Linear's, or absent (a hand capture, adopted on first sight), or
  * its tags fell back, or a name the census carries moved; `extra` — a ticket
  * row Linear's list does not name (deleted, or moved out of the initiative).
- * `full` puts every listed issue in the fetch.
+ * `full` puts every listed issue in the fetch. `forgotten` — a ticket with no
+ * row whose brain forgot it (migration 139's ledger, readForgottenTickets): not
+ * missing, and not fetched, since the brain refuses its text (review pass 7 of
+ * SMD-1723: it was fetched and refused on every pass, and the audit said drift).
  */
-export function planPass(census: Census, groups: Map<string, BrainRow[]>, full = false): Plan {
-  const missing: string[] = [], stale: string[] = [], fetch: string[] = [];
+export function planPass(census: Census, groups: Map<string, BrainRow[]>, full = false, forgottenTickets: ReadonlySet<string> = new Set()): Plan {
+  const missing: string[] = [], stale: string[] = [], fetch: string[] = [], forgotten: string[] = [];
   let unchanged = 0;
   const listed = new Set<string>();
   for (const c of census) {
     const { identifier, updatedAt } = c;
     listed.add(identifier);
     const rows = groups.get(identifier);
-    if (!rows) { missing.push(identifier); fetch.push(identifier); continue; }
+    if (!rows) {
+      if (forgottenTickets.has(identifier)) forgotten.push(identifier);
+      else { missing.push(identifier); fetch.push(identifier); }
+      continue;
+    }
     // The newest watermark any row of the group carries — not the first row's:
     // a hand twin left unsuperseded by a refused pointer, newer than the head
     // and without a watermark, would otherwise keep the ticket stale forever
@@ -348,7 +355,7 @@ export function planPass(census: Census, groups: Map<string, BrainRow[]>, full =
     else unchanged++;
   }
   const extra = [...groups.keys()].filter((k) => !listed.has(k)).sort();
-  return { fetch, missing, stale, extra, unchanged };
+  return { fetch, missing, stale, extra, unchanged, forgotten };
 }
 
 /** The patch that clears a refusal marker a row carries, or nothing — one spelling for the three places that ask (seventh review pass). */
@@ -548,6 +555,20 @@ export type Writer = {
    */
   holderOfIdentity?: (system: string, key: string) => Promise<BrainRow | null>;
 };
+
+/**
+ * The tickets the brain forgot (forget_thought, migration 139): the ledger
+ * keeps the record each forgotten thought was ingested as. Empty on a brain
+ * before 139. A ticket reinstated since has a row again, and the plan reads
+ * the row first.
+ */
+export async function readForgottenTickets(sql: SQL): Promise<Set<string>> {
+  const [r] = (await sql`SELECT to_regclass('thought_forgotten') IS NOT NULL AS has`) as { has: boolean }[];
+  if (!r?.has) return new Set();
+  const rows = (await sql`SELECT DISTINCT f.evidence->'source'->>'identity' AS id FROM thought_forgotten f
+                           WHERE f.evidence->'source'->>'system' = ${LINEAR_SYSTEM} AND f.evidence->'source'->>'identity' IS NOT NULL`) as { id: string }[];
+  return new Set(rows.map((x) => x.id));
+}
 
 /**
  * Read every ticket row the brain has: adopted rows by their claim
@@ -1067,14 +1088,15 @@ export type ReadRows = (scanHeaders: boolean, claimed?: BrainRow[]) => Promise<B
  */
 export type Board = { initiative: string; projects: { id: string; name: string }[] };
 
-export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative: string; full: boolean; scan?: boolean; board?: Board }) {
+export async function planBoard(opts: { gql: Gql; readRows: ReadRows; readForgotten?: () => Promise<ReadonlySet<string>>; initiative: string; full: boolean; scan?: boolean; board?: Board }) {
   // A board the caller resolved already (main's preflight) is not asked for twice (seventh review pass).
   const { initiative, projects } = opts.board ?? await initiativeProjects(opts.gql, opts.initiative);
   const census = await censusOf(opts.gql, projects.map((p) => p.id));
   const scanFirst = opts.scan || opts.full;
   const claimed = await opts.readRows(scanFirst);
   let groups = groupTicketRows(claimed);
-  let plan = planPass(census, groups, opts.full);
+  const forgotten = opts.readForgotten ? await opts.readForgotten() : new Set<string>();
+  let plan = planPass(census, groups, opts.full, forgotten);
   // …and when anything is to be fetched at all, not only when something is
   // missing: a hand paste of an ADOPTED ticket whose text is not Linear's
   // current text is found by no fingerprint, so a stale ticket's pass must see
@@ -1082,12 +1104,12 @@ export async function planBoard(opts: { gql: Gql; readRows: ReadRows; initiative
   // pays the claimed read alone.
   if (!scanFirst && plan.fetch.length > 0) {
     groups = groupTicketRows(await opts.readRows(true, claimed));
-    plan = planPass(census, groups, opts.full);
+    plan = planPass(census, groups, opts.full, forgotten);
   }
   return { initiative, projects, census, groups, plan };
 }
 
-export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writer; initiative: string; full: boolean; only?: string[]; board?: Board }): Promise<PassReport> {
+export async function runPass(opts: { gql: Gql; readRows: ReadRows; readForgotten?: () => Promise<ReadonlySet<string>>; writer: Writer; initiative: string; full: boolean; only?: string[]; board?: Board }): Promise<PassReport> {
   const { initiative, projects, census, groups, plan } = await planBoard(opts);
   const tally: Record<Outcome, number> = { captured: 0, updated: 0, patched: 0, unchanged: 0, refused: 0 };
   const report: PassReport = { initiative, projects: projects.length, census: census.length, plan, tally, derived: noDerived(), twinsMarked: 0, noVector: 0, errors: [], chainRefusals: [], headWindow: 0, listed: census.map((c) => c.identifier) };
@@ -1127,7 +1149,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
   const p = r.plan;
   const lines = [
     `  board: ${r.initiative} — ${r.projects} project(s), ${r.census} issue(s)`,
-    `  plan: ${p.missing.length} missing, ${p.stale.length} stale, ${p.unchanged} unchanged${p.extra.length ? `, ${p.extra.length} extra in the brain (${p.extra.slice(0, 8).join(", ")}${p.extra.length > 8 ? ", …" : ""})` : ""}`,
+    `  plan: ${p.missing.length} missing, ${p.stale.length} stale, ${p.unchanged} unchanged${p.forgotten.length ? `, ${p.forgotten.length} forgotten (left out)` : ""}${p.extra.length ? `, ${p.extra.length} extra in the brain (${p.extra.slice(0, 8).join(", ")}${p.extra.length > 8 ? ", …" : ""})` : ""}`,
     `  ${dryRun ? "would write" : "wrote"}: captured ${r.tally.captured}  updated ${r.tally.updated}  patched ${r.tally.patched}  unchanged ${r.tally.unchanged}${r.twinsMarked ? `  pointers re-chained ${r.twinsMarked}` : ""}${r.noVector ? `  without a vector ${r.noVector}` : ""}`,
   ];
   if (r.tally.refused) lines.push(`  refused: ${r.tally.refused} ticket(s) whose text another thought holds (DUPLICATE_CONTENT) — facets patched, text left, stale until the holder moves`);
@@ -1443,7 +1465,11 @@ function selfCheck(): Promise<number> {
     ["SMD-9", [row("z", "", { issue: "SMD-9" }, null, null)]],
   ]);
   const plan = planPass(census, g2);
-  ok(JSON.stringify(plan) === JSON.stringify({ fetch: ["SMD-1936", "SMD-2000"], missing: ["SMD-2000"], stale: ["SMD-1936"], extra: ["SMD-9"], unchanged: 0 }), `plan: an older linear_updated_at is stale, an absent row is missing, an unlisted row is extra (${JSON.stringify(plan)})`);
+  ok(JSON.stringify(plan) === JSON.stringify({ fetch: ["SMD-1936", "SMD-2000"], missing: ["SMD-2000"], stale: ["SMD-1936"], extra: ["SMD-9"], unchanged: 0, forgotten: [] }), `plan: an older linear_updated_at is stale, an absent row is missing, an unlisted row is extra (${JSON.stringify(plan)})`);
+  // A ticket the brain forgot (SMD-1723): not missing, not fetched; one with a row again (reinstated) is read as usual.
+  const planForgot = planPass(census, g2, false, new Set(["SMD-2000", "SMD-1936"]));
+  ok(JSON.stringify(planForgot) === JSON.stringify({ fetch: ["SMD-1936"], missing: [], stale: ["SMD-1936"], extra: ["SMD-9"], unchanged: 0, forgotten: ["SMD-2000"] }),
+    `plan: a forgotten ticket with no row is left out, neither missing nor fetched; one with a row is planned as any (${JSON.stringify(planForgot)})`);
   // A row whose tags fell back at capture is not the plan's concern (SMD-1975's worker repairs tags for every thought).
   ok(planPass([{ identifier: "SMD-1936", updatedAt: issue.updatedAt }], new Map([["SMD-1936", [row("F", text, { ...issueFacets(issue), metadata_extraction_failed: "provider_timeout" }, null, null)]]])).unchanged === 1, "fallback tags on a current row do not make the ticket stale");
   const fresh = planPass(census, new Map([["SMD-1936", [row("b", text, { linear_updated_at: "2026-09-22T01:00:00.000Z" }, null, null)]], ["SMD-2000", [row("d", "", { linear_updated_at: "2026-09-22T02:00:00.000Z" }, null, null)]]]));
@@ -2268,20 +2294,23 @@ async function main(): Promise<void> {
     run = runName(SELF);
     // planBoard asks for the header scan when it needs it; --audit always does (the census should see a hand paste too).
     const readRows: ReadRows = (scanHeaders, claimed) => readTicketRows(sql, { scanHeaders, claimed });
+    const readForgotten = () => readForgottenTickets(sql);
     // The board the preflight resolved serves the first pass; later passes ask again, so a project added to the initiative is seen.
     const board = resolved; resolved = undefined;
     if (cli.has("audit")) {
-      const { initiative: name, projects, census, plan } = await planBoard({ gql, readRows, initiative, full: false, scan: true, board });
+      const { initiative: name, projects, census, plan } = await planBoard({ gql, readRows, readForgotten, initiative, full: false, scan: true, board });
       console.log(`  board: ${name} — ${projects.length} project(s), ${census.length} issue(s)`);
       console.log(`  missing ${plan.missing.length}${plan.missing.length ? ` (${plan.missing.join(", ")})` : ""}`);
       console.log(`  stale   ${plan.stale.length}${plan.stale.length ? ` (${plan.stale.slice(0, 20).join(", ")}${plan.stale.length > 20 ? ", …" : ""})` : ""}`);
       console.log(`  extra   ${plan.extra.length}${plan.extra.length ? ` (${plan.extra.join(", ")})` : ""}`);
+      // A forgotten ticket is no drift: the brain refuses its text on purpose (SMD-1723).
+      if (plan.forgotten.length) console.log(`  forgotten ${plan.forgotten.length} (${plan.forgotten.join(", ")}; left out, the brain forgot them)`);
       // Extra counts too: a row for a ticket Linear no longer lists is not lockstep (fifth review pass; the docs said so all along).
       const drift = plan.missing.length + plan.stale.length + plan.extra.length;
       console.log(`  in lockstep: ${drift === 0 ? "yes" : "NO"}  (${Date.now() - t0} ms, ${spent()})`);
       return drift ? 1 : 0;
     }
-    const report = await runPass({ gql, readRows, writer, initiative, full: cli.has("full"), only, board });
+    const report = await runPass({ gql, readRows, readForgotten, writer, initiative, full: cli.has("full"), only, board });
     console.log(formatReport(report, dryRun));
     // After the pass, so the statuses it just wrote are the ones read; a
     // failed call fails the pass, so the heartbeat says so.

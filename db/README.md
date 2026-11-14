@@ -2552,8 +2552,12 @@ stay. The amendment takes only a deleted
 thought's events under the forget's own setting, once. `thought_forgotten` records
 each forgetting, append-only; a capture or edit to a forgotten text is refused
 `OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought already
-holds that text; `ingest-records.ts` and `sync-linear.ts` count such a record as
-`forgotten` and go on. A twin holding the same text keeps
+holds that text. The ledger keeps the record a thought was ingested as:
+`sync-linear.ts` leaves a forgotten ticket out of its plan (not missing, not
+fetched, no drift in `--audit`), and `ingest-records.ts` counts a record the
+brain forgot as `forgotten` by its id, so one edited at its source stays out
+too; both go on. It runs under READ COMMITTED alone, taking each item's priority
+lock before deleting its statements, as the priority writers do. A twin holding the same text keeps
 it and is named. Thoughts derived from the forgotten one, and every page whose own log names it
 (its earlier renders, and a section once built on it whose revision keeps the
 earlier body), are listed for a person to review: prose that absorbed the text
@@ -3068,7 +3072,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
-| | `thought_forgotten` (139) | `SELECT` — 139's refusal on `thoughts` reads the ledger of forgotten texts on every capture and every edit of a text (SMD-1723), so after 139 a role without it cannot write a thought at all; 139 grants it to each role already writing thoughts |
+| | `thought_forgotten` (139) | `SELECT` — 139's refusal on `thoughts` reads the ledger of forgotten texts on every capture and every edit of a text (SMD-1723), so after 139 a role without it cannot write a thought at all; 139 grants it to each role already writing thoughts, by a grant on the table, on one of its columns, or through PUBLIC |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
