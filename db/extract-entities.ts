@@ -1349,7 +1349,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /**
    * The thought's own subjects by the rules (SMD-3306), recorded once its
    * entities are: the ticket it is filed under, else a session summary's
-   * header tickets its asks name (subject.ts's ruleSubject), each under
+   * header ticket its asks name, when it lists one (subject.ts's ruleSubject), under
    * its rule's key, at the text the claim read; record_thought_subjects (130)
    * refuses a text that moved since, and a ticket that did. No model is asked
    * here: a thought no rule keys is --subjects' (db/subject-sweep.ts). A
