@@ -6786,7 +6786,7 @@ console.log("\n[20ce] Migration 141: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cf] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a re-apply a no-op (SMD-1723)");
+console.log("\n[20cf] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a close decision in flight is waited for, its copied reason blanked; a re-apply a no-op (SMD-1723)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6876,9 +6876,31 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
   assert(inLedger && editedBack === "OB005",
     `an edit committed while the forget waited on the row: its text in the ledger, refused after (${inLedger}; ${editedBack})`);
 
+  // A close decision in flight (review pass 6): it copies the proposal's reason onto the item's status event and holds
+  // the proposal; the forget locks the proposals citing its thought first, so it waits, then blanks the copy.
+  const cited = String((await sql`SELECT (upsert_thought(${"upgrade 139: the cited note, door code 1357"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  const holder = String((await sql`SELECT (upsert_thought(${"upgrade 139: the item's own note"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-decider', 'operator')`;
+  const itemH = String(((await sql`SELECT open_item('an item of the holder', NULL, NULL, ${holder}::uuid, NULL, false, (${ACT}::text)::jsonb) AS r`)[0] as { r: { item: { id: string } } }).r.item.id);
+  await sql`SELECT propose_item_close(${itemH}, 'done', ${cited}::uuid, NULL, ${"done, per the door code 1357"}, (${ACT}::text)::jsonb)`;
+  const propId = String((await sql`SELECT id FROM open_item_close_proposals WHERE item_id = ${itemH}::uuid`)[0].id);
+  const decider = new SQL({ url: URL_, max: 1 });
+  let racing: Promise<unknown> = Promise.resolve(null);
+  await decider.begin(async (tx) => {
+    await tx`SELECT decide_item_close(${propId}::uuid, true, NULL, (${JSON.stringify({ name: "upgrade-decider", scope: "write" })}::text)::jsonb)`;
+    racing = sql`SELECT forget_thought(${cited}::uuid, (${ACT}::text)::jsonb) AS r`.then((x) => x);  // started now
+    await new Promise((res) => setTimeout(res, 400));
+  });
+  await racing;
+  await decider.close();
+  const copyLeft = Number((await sql`SELECT count(*)::int AS c FROM open_item_events WHERE item_id = ${itemH}::uuid AND reason LIKE '%1357%'`)[0].c);
+  const itemKept = Number((await sql`SELECT count(*)::int AS c FROM open_items WHERE item_id = ${itemH}::uuid`)[0].c);
+  assert(copyLeft === 0 && itemKept === 1,
+    `a close decision in flight: the forget waited on the proposal, then blanked the reason it copied, the holder's item kept (${copyLeft}, ${itemKept})`);
+
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
   const ledger = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten`)[0].c);
-  assert(ledger === 3 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
+  assert(ledger === 4 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
   await sql.close();
 }
 

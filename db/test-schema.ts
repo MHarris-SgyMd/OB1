@@ -21278,10 +21278,19 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
   // The guards: under the forget's setting, a statement on a thought it isn't forgetting is still kept.
   await db.query(`SELECT assert_priority('thought', $1, 2, NULL, NULL, NULL, NULL, 'kept', false, $2::jsonb)`, [O, ACT]);
   const guarded = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${T}', true); DELETE FROM priority_assertions WHERE item_key = '${O}'; END $t$`);
+  // The events guard's blank (review pass 5) admits the reason alone, and only on an event whose proposal cites the
+  // thought being forgotten (review pass 6: two mutants loosening it passed). An accepted proposal citing O, and the
+  // event the T proposal left, are the probes.
+  const itemO3 = (await one<{ r: { item: { id: string } } }>(`SELECT open_item('a third item of O', NULL, NULL, $1::uuid, NULL, false, $2::jsonb) AS r`, [O, ACT])).r.item.id;
+  await db.query(`SELECT propose_item_close($1, 'done', $2::uuid, NULL, 'per O, kept', $3::jsonb)`, [itemO3, O, ACT]);
+  const oProp = (await one<{ id: string }>(`SELECT id FROM open_item_close_proposals WHERE item_id = $1::uuid AND evidence_thought_id = $2::uuid`, [itemO3, O])).id;
+  await db.query(`SELECT decide_item_close($1::uuid, true, NULL, $2::jsonb)`, [oProp, JSON.stringify({ name: "fg127-decider", scope: "write" })]);
+  const armOther = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${T}', true); UPDATE open_item_events SET reason = NULL WHERE proposal_id = '${oProp}'; END $t$`);
+  const armColumn = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${T}', true); UPDATE open_item_events SET reason = NULL, text = 'changed' WHERE proposal_id = '${acceptedId}'; END $t$`);
   const livingGuarded = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${O}', true); DELETE FROM priority_assertions WHERE item_key = '${O}'; END $t$`);
   const itemGuarded = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${T}', true); DELETE FROM open_item_events WHERE item_id = '${itemO}'; END $t$`);
-  assert(refusals.every((r) => r !== "taken") && lawful === "taken" && twice !== "taken" && guarded !== "taken" && itemGuarded !== "taken" && livingGuarded !== "taken",
-    `the redact amendment takes only a deleted thought's events under the forget's setting naming it, only to the redacted diff with its stamp, once; the log refuses a DELETE; the ledger an UPDATE and a DELETE; the guards an unrelated delete under the forget, and a living thought's own under a setting naming it (${refusals.join(",")} | ${lawful}, ${twice} | ${guarded}, ${itemGuarded}, ${livingGuarded})`);
+  assert(refusals.every((r) => r !== "taken") && lawful === "taken" && twice !== "taken" && guarded !== "taken" && itemGuarded !== "taken" && livingGuarded !== "taken" && armOther !== "taken" && armColumn !== "taken",
+    `the redact amendment takes only a deleted thought's events under the forget's setting naming it, only to the redacted diff with its stamp, once; the log refuses a DELETE; the ledger an UPDATE and a DELETE; the guards an unrelated delete under the forget, and a living thought's own under a setting naming it; the events guard's blank refuses an event whose proposal cites another thought, and a change to another column (${refusals.join(",")} | ${lawful}, ${twice} | ${guarded}, ${itemGuarded}, ${livingGuarded}, ${armOther}, ${armColumn})`);
 
   // A thought deleted before it is forgotten is forgotten all the same, from what the log still holds.
   const G = await thought(`deleted first: ${SECRET}-G`);
