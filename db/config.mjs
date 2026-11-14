@@ -2623,8 +2623,13 @@ export const ROLE_GRANTS = Object.freeze({
   // kind is read from ob1_agents, the capture group's SELECT. Soft: a role
   // without it is refused the claim calls, naming the table, and every read's
   // claimed label (SMD-3599) says its claims could not be read; nothing else.
+  // The per-holder cap (140, SMD-3606): claim_work reads work_claim_cap_settings
+  // on every new claim (SELECT), and set_work_claim_cap writes it (INSERT,
+  // UPDATE), the trigger holding the write to an operator key by its agent id —
+  // as the priority group holds priority_weight_settings (132).
   claims: Object.freeze([
     Object.freeze({ table: "work_claims", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "115" }),
+    Object.freeze({ table: "work_claim_cap_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "140" }),
   ]),
   // A closed ticket's claims (118, SMD-3600): board-sync's role ends every
   // unreleased claim on a ticket the brain records as settled, through

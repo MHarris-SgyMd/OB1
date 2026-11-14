@@ -74,6 +74,9 @@ const TABLES = [
   // ticket by its key, not a thought — so its place is free. Its CASCADE takes
   // the helpers whose arguments are its row type.
   "work_claims",
+  // 140's per-holder claim cap (SMD-3606): the operator's cap settings, no
+  // foreign key either way; its CASCADE takes its triggers.
+  "work_claim_cap_settings",
   // 116's priority assertions (SMD-3663): no foreign key either way — an
   // assertion names its item by a kind and a key, not a reference — so their
   // place is free. The first's CASCADE takes the helpers whose arguments or
@@ -410,6 +413,18 @@ const FUNCTIONS = [
   "ob1_work_claim_lock(text)",
   "ob1_work_claim_is_holder(work_claims, text, uuid, bytea)",
   "ob1_work_claims_in_the_way(text, text, uuid, timestamp with time zone)",
+  // 140 (SMD-3606): the per-holder claim cap — the builtin, the refusal, the
+  // setting's guard, the reader, the operator setter, the brain_info getter, and
+  // claim_work's per-holder lock and live-claim count (claim_work itself is
+  // 115's, redefined, named above).
+  "ob1_work_claim_cap_builtin()",
+  "ob1_work_claim_cap_refusal(integer)",
+  "ob1_work_claim_cap_settings_guard()",
+  "ob1_work_claim_cap()",
+  "set_work_claim_cap(integer, jsonb)",
+  "work_claim_cap_setting()",
+  "ob1_work_claim_holder_lock(text, uuid)",
+  "ob1_work_claim_holder_live_count(text, uuid, timestamp with time zone)",
   // 116 (SMD-3663): priority assertions — the five calls, the drift check, the
   // rebuild and the helpers (those taking or returning priority_assertions'
   // row type go with its CASCADE, and are named anyway).
