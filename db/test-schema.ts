@@ -20840,6 +20840,14 @@ console.log("\n[127] Migration 139: forget a thought — refused CITED while an 
   await db.query(`SELECT assert_priority('thought', $1, 1, NULL, NULL, 'item', $2, 'due when the item is', false, $3::jsonb)`, [C, item, ACT]);
   const itemO = (await one<{ r: { item: { id: string } } }>(`SELECT open_item('an item of O', NULL, NULL, $1::uuid, NULL, false, $2::jsonb) AS r`, [O, ACT])).r.item.id;
   await db.query(`SELECT propose_item_close($1, 'done', $2::uuid, NULL, $3, $4::jsonb)`, [itemO, T, `done, per ${SECRET}`, ACT]);
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('fg127-decider', 'operator')`);
+  const acceptedId = (await one<{ id: string }>(`SELECT id FROM open_item_close_proposals WHERE item_id = $1::uuid AND evidence_thought_id = $2::uuid`, [itemO, T])).id;
+  const accepted = (await one<{ r: J }>(`SELECT decide_item_close($1::uuid, true, NULL, $2::jsonb) AS r`, [acceptedId, JSON.stringify({ name: "fg127-decider", scope: "write" })])).r;
+  await db.query(`SELECT propose_item_close($1, 'done', $2::uuid, NULL, 'per O, not T', $3::jsonb)`, [item, O, ACT]);
+  const tEntity = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Vault T Entity 127', 'vault t entity 127') RETURNING id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p0')`, [T, tEntity]);
+  const tfp = (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [T])).f;
+  await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ($1, 'm127', $2::vector, ${EMBEDDING_DIM})`, [tfp, `[${Array(EMBEDDING_DIM).fill(0.2).join(",")}]`]);
   const deliv = (await one<{ r: { event?: J } }>(`SELECT record_deliverable($1, $2, 'v1', $3::jsonb) AS r`, [T, O, ACT])).r;
   await db.query(`SELECT upsert_page('forget-125', 'Forget 125', 'topic', '{}'::jsonb, 'fg125-op', NULL)`);
   const page = (await one<{ id: string }>(`SELECT id FROM pages WHERE slug = 'forget-125'`)).id;
@@ -20883,10 +20891,19 @@ console.log("\n[127] Migration 139: forget a thought — refused CITED while an 
   await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [active]);
 
   // Forgotten.
+  const copied = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM open_item_events WHERE item_id = $1::uuid AND proposal_id = $2::uuid AND reason LIKE '%' || $3 || '%'`, [itemO, acceptedId, SECRET])).n;
+  assert(copied === 1, `the fixture: the proposal citing T accepted by a second key, its reason copied onto O's item's status event (${copied}; ${JSON.stringify(accepted).slice(0, 80)})`);
   const ans = await forget(T);
   const removed = ans.removed as Record<string, number>;
+  // rebuild_derived on a live thought: its entity mention and the entity only it named, and its snapshot vector; the
+  // ledger holds the same counts the answer gave (review pass 5: none of these was held).
+  const live = await one<{ ent: number; snap: number; ledger: J }>(`SELECT (SELECT count(*)::int FROM ob1_entities WHERE id = $1::uuid) AS ent,
+    (SELECT count(*)::int FROM ob1_embedding_snapshot WHERE content_fingerprint = $2) AS snap,
+    (SELECT evidence->'removed' FROM thought_forgotten WHERE thought_id = $3::uuid) AS ledger`, [tEntity, tfp, T]);
+  assert(live.ent === 0 && live.snap === 0 && JSON.stringify(live.ledger) === JSON.stringify(ans.removed),
+    `rebuild_derived reached the live thought's entity and snapshot vector, and the ledger holds the answer's counts (${JSON.stringify(live).slice(0, 160)})`);
   assert(ans.ok === true && removed.relations === 1 && removed.inactive_citations === 1 && removed.derived_refs === 2
-      && removed.page_sections === 2 && removed.priority_statements === 4 && removed.item_proposals === 1 && removed.items === 1
+      && removed.page_sections === 2 && removed.priority_statements === 4 && removed.item_proposals === 2 && removed.item_reasons === 1 && removed.items === 1
       && removed.item_events >= 1 && removed.query_log_rows === 3 && removed.deliverable_events >= 1 && removed.audit_events === events + 1
       && JSON.stringify(ans.irreproducible) === JSON.stringify([C, page].sort()) && JSON.stringify(ans.pages) === JSON.stringify([page, page2].sort()) && ans.gone === false
       && JSON.stringify(ans.twins) === "[]" && Array.isArray(ans.outside) && (ans.outside as string[]).length === 4,

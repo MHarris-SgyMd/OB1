@@ -117,6 +117,10 @@
 --     listed, not deleted).
 --   * Another thought's own history: one that once held the same text and
 --     was edited away keeps it in its log.
+--   * rebuild_derived (067) deletes an entity the thought alone mentioned
+--     even when a priority statement names it; 136 closes that statement as
+--     `deleted`, keeping its reason and the entity's id. The bare-orphan
+--     prune, by contrast, keeps any entity a statement names.
 --   * A twin whose key a raw write left stale (neither the text's
 --     fingerprint nor NULL) is not read as a twin.
 --   * A raw INSERT takes no fingerprint lock: one racing the forget with the
@@ -570,13 +574,23 @@ BEGIN
   IF TG_OP = 'DELETE' AND ob1_forgetting_item(OLD.item_id::text) THEN
     RETURN OLD;
   END IF;
+  -- 139 (SMD-1723, review pass 5): an accepted close proposal's reason is
+  -- copied onto its item's status event (117's decide_item_close). When the
+  -- proposal's evidence is the thought being forgotten, the forget blanks that
+  -- copy — its reason alone, to NULL, every other column as it was — on an
+  -- item read from another thought, which it keeps.
+  IF TG_OP = 'UPDATE' AND ob1_forgetting() IS NOT NULL AND OLD.proposal_id IS NOT NULL
+     AND EXISTS (SELECT 1 FROM open_item_close_proposals p WHERE p.id = OLD.proposal_id AND p.evidence_thought_id = ob1_forgetting())
+     AND NEW.reason IS NULL AND to_jsonb(NEW) - 'reason' = to_jsonb(OLD) - 'reason' THEN
+    RETURN NEW;
+  END IF;
   RAISE EXCEPTION USING
     MESSAGE = format('open_item_events is append-only: %s refused (an item changes by a new event: update_item or set_item_status)', TG_OP),
     ERRCODE = 'restrict_violation';
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_events_guard() IS
-  'Refuses every UPDATE of open_item_events, every TRUNCATE, and every DELETE but forget_thought''s of the events of an item read from the thought it is forgetting (ob1_forgetting_item, 139) — for the owner too. Migration 117 / SMD-3665. The forget''s delete admitted by migration 139 / SMD-1723.';
+  'Refuses every UPDATE of open_item_events but forget_thought''s blanking of the reason a status event copied from a close proposal citing the thought it is forgetting, every TRUNCATE, and every DELETE but forget_thought''s of the events of an item read from that thought (ob1_forgetting_item, 139) — for the owner too. Migration 117 / SMD-3665. The forget''s delete admitted by migration 139 / SMD-1723.';
 
 CREATE OR REPLACE FUNCTION ob1_item_proposals_guard()
 RETURNS trigger
@@ -935,6 +949,13 @@ BEGIN
 
     -- The close proposals whose evidence it is, or on those items; then the
     -- items' events and their projection (117).
+    -- An accepted proposal citing it left its reason on its item's status
+    -- event (117): blanked first, the item kept when it was read from another
+    -- thought (review pass 5).
+    UPDATE open_item_events e SET reason = NULL
+     WHERE e.reason IS NOT NULL AND e.proposal_id IN (SELECT p.id FROM open_item_close_proposals p WHERE p.evidence_thought_id = p_id);
+    GET DIAGNOSTICS v_c = ROW_COUNT;
+    v_n := v_n || jsonb_build_object('item_reasons', v_c);
     DELETE FROM open_item_close_proposals p
      WHERE p.evidence_thought_id = p_id OR p.item_id::text = ANY(v_items);
     GET DIAGNOSTICS v_c = ROW_COUNT;
@@ -1030,7 +1051,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION forget_thought(uuid, jsonb) IS
-  'Forget a thought: remove it and everything in the database holding its text, in one transaction, and return the evidence (migration 139 / SMD-1723). Takes the supersession lock, then the capture''s fingerprint lock for every text it has had (ob1_forget_fingerprints, in order), then the row, then the lock for any text an edit gave it meanwhile; a write racing the forget on another store may land beside it, and a second call sweeps what it left (FORGOTTEN when nothing). An id the log never held: {ok:false, error:NOT_FOUND, id}. A refusal of rebuild_derived''s (REPLAYING) undoes it and is the answer, with the report. Cited by an active citation: {ok:false, error:CITED, id, cited_by, citations}, as delete_thought; the operator detaches first (delete_thought(id, actor, true)), then forgets it, its detached citations deleted. A thought deleted before is forgotten from what remains (gone true): its snapshot vectors and every store below. Else: rebuild_derived(id, ''forget'', true, its fingerprints) (windows, entity links, orphaned entities, snapshot vectors); relation facets targeting it, expired or superseded citations of it and citations detached from it deleted; its id stripped from other thoughts'' derived_from (those listed irreproducible); page sections whose evidence names it deleted through delete_page_section, each page re-rendered, and every page whose own log names it listed in pages (its log and its revisions may keep an earlier render); the query log''s result_ids (with their scores) and result_items cleared of it, its action rows deleted; the row deleted through delete_thought; then the priority statements on it, on open items read from it, or taking a due time from either, deleted and re-projected; those items, their events and close proposals (and proposals whose evidence it is) deleted; every bare orphan entity (no mention, edge, priority statement or merge record; in id order, skipping one a writer holds) deleted; its deliverable''s events deleted; every event of it in thought_audit redacted (the redact amendment); a thought_forgotten row written. Forgotten already with nothing left, and no fingerprint the ledger lacks: FORGOTTEN with forgotten_at (and the bare orphans pruned on the way). Returns {ok:true, id, forgotten_at, gone, orphan_entities, removed{relations, inactive_citations, detached_citations, derived_refs, page_sections, query_log_rows, priority_statements, item_proposals, item_events, items, deliverable_events, audit_events}, rebuild, irreproducible[] (thoughts derived from it, for a person to review), pages[] (pages to review), twins[] (standing thoughts holding the same text), item_ids[] (the items it took, which a later call sweeps again), outside[] (copies beyond the brain)}.';
+  'Forget a thought: remove it and everything in the database holding its text, in one transaction, and return the evidence (migration 139 / SMD-1723). Takes the supersession lock, then the capture''s fingerprint lock for every text it has had (ob1_forget_fingerprints, in order), then the row, then tries (never waits for) the lock of any text an edit gave it meanwhile; a write racing the forget on another store may land beside it, and a second call sweeps what it left (FORGOTTEN when nothing). An id the log never held: {ok:false, error:NOT_FOUND, id}. A refusal of rebuild_derived''s (REPLAYING) undoes it and is the answer, with the report. Cited by an active citation: {ok:false, error:CITED, id, cited_by, citations}, as delete_thought; the operator detaches first (delete_thought(id, actor, true)), then forgets it, its detached citations deleted. A thought deleted before is forgotten from what remains (gone true): its snapshot vectors and every store below. Else: rebuild_derived(id, ''forget'', true, its fingerprints) (windows, entity links, orphaned entities, snapshot vectors); relation facets targeting it, expired or superseded citations of it and citations detached from it deleted; its id stripped from other thoughts'' derived_from (those listed irreproducible); page sections whose evidence names it deleted through delete_page_section, each page re-rendered, and every page whose own log names it listed in pages (its log and its revisions may keep an earlier render); the query log''s result_ids (with their scores) and result_items cleared of it, its action rows deleted; the row deleted through delete_thought; then the priority statements on it, on open items read from it, or taking a due time from either, deleted and re-projected; those items, their events and close proposals (and proposals whose evidence it is) deleted; every bare orphan entity (no mention, edge, priority statement or merge record; in id order, skipping one a writer holds) deleted; its deliverable''s events deleted; every event of it in thought_audit redacted (the redact amendment); a thought_forgotten row written. Forgotten already with nothing left, and no fingerprint the ledger lacks: FORGOTTEN with forgotten_at (and the bare orphans pruned on the way). Returns {ok:true, id, forgotten_at, gone, orphan_entities, removed{relations, inactive_citations, detached_citations, derived_refs, page_sections, query_log_rows, priority_statements, item_reasons, item_proposals, item_events, items, deliverable_events, audit_events}, rebuild, irreproducible[] (thoughts derived from it, for a person to review), pages[] (pages to review), twins[] (standing thoughts holding the same text), item_ids[] (the items it took, which a later call sweeps again), outside[] (copies beyond the brain)}.';
 
 -- ---------------------------------------------------------------------------
 -- 7. Every role that writes thoughts reads the ledger, which the refusal on
