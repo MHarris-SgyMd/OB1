@@ -1391,30 +1391,53 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const reviewRead = await atStart(async () => (await sql`
     SELECT CASE WHEN to_regprocedure('ob1_priority_review(integer, timestamp with time zone)') IS NULL THEN 'missing'
                 WHEN has_function_privilege('ob1_priority_review(integer, timestamp with time zone)', 'EXECUTE')
-                 AND has_table_privilege('priority_findings', 'INSERT') AND has_table_privilege('priority_findings', 'UPDATE')
-                 AND has_table_privilege('priority_assertions', 'SELECT') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
+                 AND has_table_privilege('priority_findings', 'SELECT') AND has_table_privilege('priority_findings', 'INSERT')
+                 AND has_table_privilege('priority_findings', 'UPDATE') AND has_table_privilege('priority_assertions', 'SELECT')
+                 -- The scan's working tables are temporary (review pass 3).
+                 AND has_database_privilege(current_database(), 'TEMP') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
   if (reviewRead === null) { err(STOPPED_EARLY); return 130; }
   if (!sweeps) err(`  re-derive: ${sweepRead === "missing" ? "rebuild_derived is not on this brain (migration 063 not applied)" : "this role cannot execute rebuild_derived (GRANT EXECUTE ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) TO the role, as the owner)"} — the periods sweep no orphaned lineage row; a running scheduler takes it up once restarted`);
   /** Whether the periods run the priority review: off for this process once a call is refused its privilege. */
-  // A dry run writes nothing, so it reviews nothing.
+  // A dry run writes nothing, so it reviews nothing, and says nothing of it (review pass 2: it said the role lacked grants).
   let reviews = reviewRead === "yes" && !opts.dryRun;
-  if (!reviews) err(`  priority review: ${reviewRead === "missing" ? "ob1_priority_review is not on this brain (migration 142 not applied)" : "this role lacks what it takes (EXECUTE on ob1_priority_review, the priority group's write on priority_findings)"} — the periods propose no priority finding; a running scheduler takes it up once restarted`);
+  if (reviewRead !== "yes" && !opts.dryRun) err(`  priority review: ${reviewRead === "missing" ? "ob1_priority_review is not on this brain (migration 142 not applied)" : "this role lacks what it takes (EXECUTE on ob1_priority_review, the priority group's grant on priority_findings, TEMP on the database)"} — the periods propose no priority finding; a running scheduler takes it up once restarted`);
   /** When the priority review last ran, or is next due after a failure (0: due now). */
   let reviewedAt = 0;
   const REVIEW_EVERY_MS = opts.priorityReviewEveryMs ?? PRIORITY_REVIEW_EVERY_MS;
   /**
    * The priority review (SMD-3671): ob1_priority_review()'s scan, at an idle poll and at a period's start, at most once
-   * every REVIEW_EVERY_MS — an idle brain's priorities are the ones that go stale, so the review waits on no work (review
-   * pass 1). One statement on a connection of its own, held to a minute and its locks waited half of one: it proposes
+   * every REVIEW_EVERY_MS and first at the process's first poll — an idle brain's priorities are the ones that go stale,
+   * so the review waits on no work (review pass 1). A stop cancels it on the server (review pass 2). One statement on a connection of its own, held to a minute and its locks waited half of one: it proposes
    * findings and changes no priority, so nothing waits on it long. A courtesy, as the re-derive sweep is: a failure is
    * said and tried again after PRIORITY_REVIEW_RETRY_MS; a call refused its privilege (42501) or a function gone (42883)
    * ends the reviews for this process.
    */
   const priorityReview = async (): Promise<void> => {
-    if (!reviews || Date.now() - reviewedAt < REVIEW_EVERY_MS) return;
+    if (!reviews || stopping || Date.now() - reviewedAt < REVIEW_EVERY_MS) return;
     const client = openSql(url, { max: 1, session: { ...SESSION, statement_timeout: "60s", lock_timeout: "30s" } });
     try {
-      const r = (await client`SELECT ob1_priority_review() AS r`)[0].r as { found: number; refreshed: number; moot: number; suppressed: number; pending: number };
+      // A stop cancels the scan on the server, as the sweep's grace does, rather than waiting out its minute (review
+      // pass 2): its backend read first, on its one connection.
+      const pid = Number((await client`SELECT pg_backend_pid() AS pid`)[0].pid);
+      const scan = client`SELECT ob1_priority_review() AS r`.then((rows) => ({ rows }), (e: unknown) => ({ e: e as Error }));
+      let onAbort = (): void => {};
+      const stopped = new Promise<"stop">((res) => {
+        onAbort = () => res("stop");
+        if (onStop.signal.aborted) res("stop");
+        else onStop.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const won = await Promise.race([scan, stopped]).finally(() => onStop.signal.removeEventListener("abort", onAbort));
+      if (won === "stop") {
+        // Cancelled on a connection of the scheduler's own, as the sweep's killer is: a caller's client may lack the
+        // right to signal it (review pass 3).
+        const killer = openSql(url, { max: 1 });
+        await killer`SELECT pg_cancel_backend(${pid})`.catch(() => {});
+        await killer.close().catch(() => {});
+        await scan;
+        return;
+      }
+      if ("e" in won) throw won.e;
+      const r = won.rows[0].r as { found: number; refreshed: number; moot: number; suppressed: number; pending: number };
       reviewedAt = Date.now();
       out(`  [priority review] ${r.found} found, ${r.refreshed} still standing, ${r.moot} moot, ${r.suppressed} held back by a decision; ${r.pending} pending`);
     } catch (e) {
@@ -1422,6 +1445,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (code === "42501" || code === "42883") {
         reviews = false;
         err(`  priority review: ${(e as Error).message} — the reviews stop for this process`);
+      } else if (statementTimedOut(e)) {
+        // Past its minute: tried again at the next interval, not every ten minutes (review pass 2: a brain whose scan
+        // always runs long would spend a minute of the database's time every ten, and write nothing).
+        reviewedAt = Date.now();
+        err(`  priority review: the scan ran past its minute and was cancelled — tried again in ${REVIEW_EVERY_MS / 3_600_000} hours`);
       } else {
         reviewedAt = Date.now() - REVIEW_EVERY_MS + PRIORITY_REVIEW_RETRY_MS;
         err(`  priority review: ${(e as Error).message} — tried again in ${PRIORITY_REVIEW_RETRY_MS / 60_000} minutes`);

@@ -21197,11 +21197,16 @@ console.log("\n[128] Migration 142: priority findings — ob1_priority_review() 
   await review();
   const rof = await pending(roT, "stale");
   const readOnly = await decide(rof!.id, "accept", { level: 1 }, { ...OP, scope: "read" });
+  // A read-scoped key decides nothing, a reject included (review pass 3); a capture-scoped one reaches the writer, which
+  // refuses a note it did not capture.
+  const readReject = await decide(rof!.id, "reject", {}, { ...OP, scope: "read" });
+  const captureAcc = await decide(rof!.id, "accept", { level: 1 }, { ...OP, scope: "capture" });
   const longNote = "n".repeat(1500);
   const longAcc = await decide(rof!.id, "accept", { level: 1, note: longNote });
   const kept = (await db.query<{ n: number }>(`SELECT length(decision_note)::int AS n FROM priority_findings WHERE id = $1::uuid`, [rof!.id])).rows[0].n;
-  assert(readOnly.error === "WRITER_REFUSED" && longAcc.ok === true && kept === 1500,
-    `a read-only key's accept is WRITER_REFUSED, deciding nothing; a 1500-character note is kept whole, the reason cut to the writer's limit (${readOnly.error}, ${longAcc.ok}, ${kept})`);
+  assert(readOnly.error === "READ_ONLY_KEY" && readReject.error === "READ_ONLY_KEY" && captureAcc.error === "WRITER_REFUSED" && /ITEM_NOT_YOURS/.test(String(captureAcc.message))
+         && longAcc.ok === true && kept === 1500,
+    `a read-scoped key's accept and reject are READ_ONLY_KEY; a capture-scoped key's accept the writer refuses, WRITER_REFUSED naming ITEM_NOT_YOURS, deciding nothing; a 1500-character note is kept whole, the reason cut (${readOnly.error}, ${readReject.error}, ${captureAcc.error}, ${kept})`);
 
   // A maker's older statement in a ticket's pool is not its stance (review pass 1): the operator's 5 on the ticket's own
   // row and its later 2 on the ticket, both open (written raw, as a late row leaves them), against the source's 1 on
@@ -21251,6 +21256,104 @@ console.log("\n[128] Migration 142: priority findings — ob1_priority_review() 
   await db.query(`SELECT ob1_priority_review(60, $1::timestamptz + interval '60 days')`, [mid]);
   assert(Date.parse(edited) > Date.parse(mid) && !(await pending(activeT, "stale")) && !!(await pending(ctlT, "stale")),
     `a note edited within the window is active, no stale finding; the note left alone is stale (${edited} after ${mid})`);
+
+  // Review pass 2. Re-confirming keeps the operator's own statement's terms: its due time, start and reason stand.
+  const keepT = await thought("[128] the operator's word with a due time and a start");
+  const keepDue = new Date(Date.now() + 400 * 86_400_000).toISOString(), keepStart = new Date(Date.now() - 86_400_000).toISOString();
+  const kr = (await db.query<{ r: { outcome: string } }>(`SELECT assert_priority('thought', $1, 3, $2::timestamptz, $3::timestamptz, NULL, NULL, 'launch blocker', false, $4::jsonb) AS r`,
+    [keepT, keepDue, keepStart, JSON.stringify(OP)])).rows[0].r;
+  // Its due time a year off: in force, never stale — the window passed, so the scan's now is past the start too.
+  await review(60, "61 days");
+  const inForce = !(await pending(keepT, "stale"));
+  await review(60, "500 days");
+  const kf = await pending(keepT, "stale");
+  const kacc = kf ? await decide(kf.id, "accept", { level: 3 }) : { ok: false };
+  const keptRow = (await db.query<{ due_at: string; not_before: string; reason: string }>(
+    `SELECT due_at::text, not_before::text, reason FROM ob1_priority_open('thought', $1) WHERE maker_name = '[128] op'`, [keepT])).rows;
+  assert(kr.outcome === "asserted" && inForce && kacc.ok === true && keptRow.length === 1 && Date.parse(keptRow[0].due_at) === Date.parse(keepDue)
+         && Date.parse(keptRow[0].not_before) === Date.parse(keepStart) && keptRow[0].reason === "launch blocker",
+    `a statement due a year off is in force, not stale; past it, re-confirming the level keeps its due time, start and reason (${JSON.stringify(keptRow)})`);
+
+  // A background pass's write is no activity (review pass 2: read from updated_at, a re-embed silenced every finding).
+  const bgT = await thought("[128] a note a background pass rewrote");
+  await put("thought", bgT, 3, BOT);
+  await Bun.sleep(20);
+  const bgMid = (await db.query<{ m: string }>(`SELECT (clock_timestamp() - interval '10 milliseconds')::text AS m`)).rows[0].m;
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "reembed", background: "reembed" })]);
+    await tx.query(`UPDATE thoughts SET metadata = metadata || '{"x": 1}'::jsonb WHERE id = $1::uuid`, [bgT]);
+  });
+  const bgAudit = (await db.query<{ b: string | null }>(`SELECT actor_context->>'background' AS b FROM thought_audit WHERE thought_id = $1::uuid ORDER BY created_at DESC LIMIT 1`, [bgT])).rows[0]?.b;
+  await db.query(`SELECT ob1_priority_review(60, $1::timestamptz + interval '60 days')`, [bgMid]);
+  assert(bgAudit === "reembed" && !!(await pending(bgT, "stale")),
+    `a background pass's rewrite within the window is no activity: the note still goes stale (${bgAudit})`);
+
+  // An unchanged pending finding is not rewritten by a second scan.
+  const stillAt = async (id: string) => (await db.query<{ r: string }>(`SELECT refreshed_at::text AS r FROM priority_findings WHERE id = $1::uuid`, [id])).rows[0].r;
+  const bgf = await pending(bgT, "stale");
+  const at1 = await stillAt(bgf!.id);
+  await db.query(`SELECT ob1_priority_review(60, $1::timestamptz + interval '60 days 1 minute')`, [bgMid]);
+  assert(await stillAt(bgf!.id) === at1, `a second scan leaves an unchanged pending finding unwritten`);
+
+  // Review pass 3. One due time, one finding: a note's open item due before now gives the item's overdue finding, not
+  // a second on the note, which takes its due time from the item.
+  const parentT = await thought("[128] a note with an item due yesterday");
+  await put("thought", parentT, 2, BOT);
+  const child = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, $2, $3::uuid, NULL, false, $4::jsonb) AS r`,
+    ["[128] pay the invoice", new Date(Date.now() - 86_400_000).toISOString(), parentT, JSON.stringify(OP)])).rows[0].r;
+  const childId = String((child.item as J | undefined)?.id ?? child.id ?? "");
+  await review(60, "1 day");
+  assert(!!(await pending(childId, "overdue")) && !(await pending(parentT, "overdue")),
+    `an open item past due is one overdue finding, on the item, not a second on the note it was read from`);
+
+  // A new level is a new statement: accepting a disagreement at another level keeps none of the operator's old reason.
+  const lvT = await thought("[128] a note the operator moves the level of");
+  await db.query(`SELECT assert_priority('thought', $1, 4, NULL, NULL, NULL, NULL, 'critical for launch', false, $2::jsonb)`, [lvT, JSON.stringify(OP)]);
+  await sourced("thought", lvT, 1);
+  await review(60, "1 day");
+  const lvf = await pending(lvT, "disagree");
+  const moved2 = lvf ? await decide(lvf.id, "accept", { level: 1 }) : { ok: false };
+  const lvRow = (await db.query<{ reason: string; level: number }>(`SELECT reason, level FROM ob1_priority_open('thought', $1) WHERE maker_name = '[128] op'`, [lvT])).rows;
+  assert(moved2.ok === true && lvRow.length === 1 && lvRow[0].level === 1 && lvRow[0].reason !== "critical for launch",
+    `accepting a disagreement at a new level writes a new statement, the old reason not carried (${JSON.stringify(lvRow)})`);
+
+  // The operator's statement is read from the pool (review pass 3): stated on a ticket's own row, with a due time and a
+  // reason, against the source's 1 on the ticket; re-confirming 3 on the ticket's finding keeps both.
+  let row2 = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[128] op" })]);
+    const content = "[128] SMD-9872 the ticket's own row";
+    row2 = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+      [content, JSON.stringify({ source: "linear", issue: "SMD-9872", status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    await tx.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9872', $2, 'text/markdown')`, [row2, content]);
+  });
+  const rowDue = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  await db.query(`SELECT assert_priority('thought', $1, 3, $2::timestamptz, NULL, NULL, NULL, 'row reason', false, $3::jsonb)`, [row2, rowDue, JSON.stringify(OP)]);
+  await sourced("ticket", "SMD-9872", 1);
+  await review(60, "1 day");
+  const pf = await pending("SMD-9872", "disagree");
+  const pacc = pf ? await decide(pf.id, "accept", { level: 3 }) : { ok: false };
+  const onPool = (await db.query<{ reason: string; due_at: string }>(`SELECT reason, due_at::text FROM ob1_priority_open('ticket', 'SMD-9872') WHERE maker_name = '[128] op'`)).rows;
+  assert(pacc.ok === true && onPool.length === 1 && onPool[0].reason === "row reason" && Date.parse(onPool[0].due_at) === Date.parse(rowDue),
+    `re-confirming on a ticket's finding keeps the operator's statement's terms though it stood on the ticket's own row (${JSON.stringify(onPool)})`);
+
+  // An operator's decision is the item's activity (review pass 3): an entity with no other activity, the operator's 3
+  // stated 90 days ago against the source's 1; re-confirming the disagreement writes nothing (the same terms), and the
+  // item, reviewed now, does not go stale within the window.
+  const ent = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[128] Winch', '[128] winch') RETURNING id::text`)).rows[0].id;
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, reason, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 3, 'winch reason', '[128] op', $2::uuid, 'operator', 'operator', 'write', false, 1, now() - interval '90 days')`, [ent, OP.agent_id]);
+  // The source's 1 backdated too: a statement on the pool is activity.
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+     VALUES ('entity', $1, 1, '[128] source', 'ingested', 'ingested', 'write', true, 2, now() - interval '90 days')`, [ent]);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await review(60, "1 minute");
+  const ef = await pending(ent, "disagree");
+  const staleBefore = !!(await pending(ent, "stale"));
+  const eacc = ef ? await decide(ef.id, "accept", { level: 3 }) : { ok: false, answer: null };
+  await review(60, "1 day");
+  assert(staleBefore && eacc.ok === true && ((eacc.answer as J | null)?.outcome) === "unchanged" && !(await pending(ent, "stale")),
+    `an entity's 90-day-old statement, stale, is reviewed through its disagreement: the writer answers unchanged, and the decision is activity, so it is not stale again within the window (${JSON.stringify(eacc).slice(0, 120)})`);
 
   // A re-apply keeps the rows and replaces the functions as they were.
   const count = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings`)).rows[0].n;

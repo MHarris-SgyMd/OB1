@@ -2510,16 +2510,19 @@ statements (SMD-3671 PR 1). A priority stated once stood for ever; docs/priority
 decision 6 has the brain propose findings and an operator decide them.
 `priority_findings` holds them, one pending per kind and item (keyed by its pool):
 **stale**, a statement by the brain's own keys (not a source's: Linear's level is
-Linear's, decision 9) at level 1 or more, older than the window (60 days), on an item
-with no activity within it (a statement on its pool, its row written, a thought on a
-ticket's subject, an open item's change, an entity seen); **overdue**, an unsettled
+Linear's, decision 9) at level 1 or more, older than the window (60 days), its due time
+and start not still ahead, on an item with no activity within it (a statement on its
+pool, its row written by anything but a background pass, a thought on a ticket's
+subject, an open item's change, a thought mentioning an entity, an operator's decision
+on a finding about it); **overdue**, an unsettled
 item past its due time; **disagree**, an operator's and a source's statements two or
 more levels apart; **settled**, a statement by the brain's own keys left on a settled
 item. `ob1_priority_review(window_days, now)` is the scan: it writes what it newly
 finds, refreshes what stands, marks moot what no longer holds, and raises nothing a
-decision suppressed within its window. Sleep runs it at the start of a period, at most
-once every six hours. `review_priority_finding` is an operator key's decision (by its
-agent id): accepting states a level (and a due time) through `assert_priority`, or
+decision suppressed within its window. Sleep runs it at its first idle poll or period,
+then at most once every six hours, idle or not. `review_priority_finding` is an operator key's decision (by its
+agent id): accepting states a level (and a due time; re-confirming keeps the operator's
+own statement's terms) through `assert_priority`, or
 clears the operator's own statement through `clear_priority`, so the history shows
 the operator's key; rejecting changes nothing; both suppress the same finding for the
 window. No finding changes a priority. The operations over REST and MCP, `brain_info`
