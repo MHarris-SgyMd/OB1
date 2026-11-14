@@ -5729,7 +5729,7 @@ brings a brain back.
 ```bash
 bun lint-sweep.ts --url postgres://…                        # both tiers; ./lint-report-YYYY-MM-DD.md
 bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
-#   --tier 1|2|all (all; 3 is refused until SMD-3318 PR 2b)   --report <path> (absolute, or inside the working directory)
+#   --tier 1|2|all (all; 3 is refused until SMD-3318 PR 2b)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
 #   exits 0 report written · 1 a read or the write failed (no report) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
 ```
 
@@ -5739,13 +5739,19 @@ and rows with no fingerprint (exact), and in the 2,000 newest the thoughts
 with no topics, tags or people, with more than 10 tags, or with empty or
 over-20,000-character content. Tier 2: in the 500 newest, the thoughts no
 `thought_entities` row mentions, and the `ob1_entities` with no edge (exact).
-The recipe's two `importance` checks and its exact-duplicate groups are gone:
-the core has no `importance` (SMD-3661), and migration 003's partial unique
-index rules duplicates out. The markdown report is written 0600 once every read
-succeeded. Tier 3, a model's reading of sampled thoughts, follows in SMD-3318
+The recipe's two `importance` checks and its fingerprint groups are gone: the
+core has no `importance` (SMD-3661), and migration 003's partial unique index
+makes a set fingerprint unique (a twin of a fingerprinted thought's content
+keeps none, among the rows the no-fingerprint count counts). A thought with no
+`created_at` is in no sample, and counted. The first statement locks the
+tables the tiers read (ACCESS SHARE, as pg_dump does), under
+`--statement-timeout` (60 s), which the whole-table counts lift: keep a sweep
+apart from an upgrade. The markdown report is written 0600 through a file of
+the run's own renamed into place, once every read succeeded. Tier 3, a model's reading of sampled thoughts, follows in SMD-3318
 PR 2b through the provider and the egress gate. test-live [26] holds every
-count against a planted table, the report's previews made safe, a role that
-may not read a table, and the refusals.
+count against a planted table (undated rows and non-array metadata among it),
+the report's previews made safe and its path rules, the statement bound, a role
+that may not read a table, a report that cannot be written, and the refusals.
 
 ## Extensions
 
@@ -7222,7 +7228,7 @@ page, which Brain Checks writes on every push to main (SMD-3614).
 
 ```bash
 bun test-schema.ts                          # PGlite, no container
-./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
