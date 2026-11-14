@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 139: an entity's priority statements follow it — the prunes spare
+-- Migration 141: an entity's priority statements follow it — the prunes spare
 --                an entity someone stated a priority on, a retype merge moves
 --                its statements as merge_entities does, and a merge restates
 --                the due references naming its loser (SMD-4241)
@@ -97,15 +97,15 @@
 --   order, but across its merges the locks pile up out of that order, so a
 --   rebuild of the projection beside it can deadlock with it, and Postgres
 --   aborts one (review pass 2, said: both are an operator's steps). The
---   carried bodies are verbatim but for the lines marked `139`.
+--   carried bodies are verbatim but for the lines marked `141`.
 --
 -- SAFETY
 --   Two new functions and one partial index; four functions replaced with
 --   their signatures and return types (record_thought_entities,
 --   prune_orphan_entities, merge_entities, apply_entity_type_gate). No table or grant changes. The
 --   prunes delete fewer rows; a merge writes rows only by restating.
---   MINOR under FORK.md's version rules. test-schema [126],
---   test-upgrade [20cd].
+--   MINOR under FORK.md's version rules. test-schema [127],
+--   test-upgrade [20ce].
 --
 -- Prerequisites
 --   What the carried bodies call: 016 (normalize_entity_name,
@@ -139,7 +139,7 @@ BEGIN
   FOR i IN 1 .. array_length(v_need, 1) LOOP
     IF to_regprocedure(v_need[i][1]) IS NULL THEN
       RAISE EXCEPTION USING
-        MESSAGE = format('migration 139 needs %s; this schema lacks it', v_need[i][2]),
+        MESSAGE = format('migration 141 needs %s; this schema lacks it', v_need[i][2]),
         -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
         HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
         ERRCODE = 'invalid_schema_definition';
@@ -148,13 +148,13 @@ BEGIN
   -- By name: ob1_record_derivation, whatever its argument list.
   IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'ob1_record_derivation') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 139 needs 061 (ob1_record_derivation); this schema lacks it',
+      MESSAGE = 'migration 141 needs 061 (ob1_record_derivation); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regclass('priority_assertions') IS NULL OR to_regclass('ob1_entities') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 139 needs 016 and 116 (ob1_entities, priority_assertions); this schema lacks one',
+      MESSAGE = 'migration 141 needs 016 and 116 (ob1_entities, priority_assertions); this schema lacks one',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -179,7 +179,7 @@ CREATE INDEX IF NOT EXISTS priority_assertions_open_due_ref_idx
 -- a SQL function's query, or the prune's own, is checked for privilege
 -- whole at every call, and a role without SELECT on priority_assertions
 -- would fail its extraction (SMD-3711's lesson). Such a role is answered
--- false, and prunes as before 139.
+-- false, and prunes as before 141.
 CREATE OR REPLACE FUNCTION ob1_entity_has_open_priority(p_id uuid)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -197,7 +197,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_entity_has_open_priority(uuid) IS
-  'Whether an entity has an open priority statement, or is the due reference of one, which spares it from the prunes of unreferenced entities (record_thought_entities, prune_orphan_entities; rebuild_derived, a forgetting, spares nothing): an entity someone stated a priority on is no orphan. False for a role without SELECT on priority_assertions, which prunes as before; 136''s ob1_close_orphan_priorities closes what that leaves. Migration 139 / SMD-4241.';
+  'Whether an entity has an open priority statement, or is the due reference of one, which spares it from the prunes of unreferenced entities (record_thought_entities, prune_orphan_entities; rebuild_derived, a forgetting, spares nothing): an entity someone stated a priority on is no orphan. False for a role without SELECT on priority_assertions, which prunes as before; 136''s ob1_close_orphan_priorities closes what that leaves. Migration 141 / SMD-4241.';
 
 -- ---------------------------------------------------------------------------
 -- prune_orphan_entities — 016's, an entity with an open statement spared
@@ -213,7 +213,7 @@ BEGIN
   -- record_thought_entities, for the same reason: a worker's concurrent
   -- mention waits on the lock or is already visible, so each candidate is
   -- decided against the current state and none is lost to the snapshot.
-  -- 139: an entity with an open priority statement is no orphan.
+  -- 141: an entity with an open priority statement is no orphan.
   PERFORM 1 FROM ob1_entities en
    WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
      AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
@@ -229,13 +229,13 @@ END;
 $$;
 
 COMMENT ON FUNCTION prune_orphan_entities() IS
-  'Delete entities with no mention and no edge — what a deleted thought leaves behind. Returns the count. Since 139 an entity with an open priority statement, or one an open statement takes its due time from, is spared (ob1_entity_has_open_priority). Migration 016; migration 139 / SMD-4241.';
+  'Delete entities with no mention and no edge — what a deleted thought leaves behind. Returns the count. Since 141 an entity with an open priority statement, or one an open statement takes its due time from, is spared (ob1_entity_has_open_priority). Migration 016; migration 141 / SMD-4241.';
 
 
 -- ---------------------------------------------------------------------------
 -- record_thought_entities — 061's, an entity with an open statement spared
 -- ---------------------------------------------------------------------------
--- 061's body verbatim but for the lines marked 139: its prune skips an
+-- 061's body verbatim but for the lines marked 141: its prune skips an
 -- entity someone stated a priority on.
 
 CREATE OR REPLACE FUNCTION record_thought_entities(
@@ -481,7 +481,7 @@ BEGIN
      WHERE en.id IN (SELECT id FROM _rte_touched)
        AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
        AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
-       -- 139: an entity with an open priority statement is no orphan.
+       -- 141: an entity with an open priority statement is no orphan.
        AND NOT ob1_entity_has_open_priority(en.id)
     RETURNING 1
   )
@@ -530,7 +530,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb) IS
-  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule and 056''s name gate. An extraction''s entities are written under entity_type_gate()''s type: a number or a type-vocabulary word is refused (not written, and a relation naming it dropped and counted), an identifier-shaped person or place retyped to project or tool; a structured pass is not gated. An extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Since 061 the pass''s lineage row is written with its rows in `derivations` (artifact_kind entities, the thought''s id, produced_by the key): the input''s fingerprint as checked, p_recipe (the model, prompt version and hash, the windows — or the key alone, marked undeclared, when NULL), replaced under the pass''s own rule; no rows standing under the key, no lineage row. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities, refused_entities, retyped_entities}. Migrations 016, 053, 056, 061 / SMD-947, SMD-1867, SMD-1935, SMD-1731. Since 139 an entity with an open priority statement, or one an open statement takes its due time from, is not pruned (ob1_entity_has_open_priority). Migration 139 / SMD-4241.';
+  'Writes one thought''s entities and relations atomically (016), with 053''s resolution rule and 056''s name gate. An extraction''s entities are written under entity_type_gate()''s type: a number or a type-vocabulary word is refused (not written, and a relation naming it dropped and counted), an identifier-shaped person or place retyped to project or tool; a structured pass is not gated. An extraction_key `source:<system>` is a structured pass (the source''s own project, labels, members — no model call) that keeps its own rows as a set — the same set twice writes nothing, and moves no last_seen_at; an `extract:*` pass replaces only extracted rows; and where both name one (thought, entity) or (thought, from, to, relation) the structured row stands — an extracted insert onto it does nothing, a structured insert onto an extracted row takes it over. Entities upserted by (type, normalised name); a relation naming an unlisted entity is dropped and counted; entities left unreferenced are pruned. p_content_fingerprint NULL skips the stale check. Since 061 the pass''s lineage row is written with its rows in `derivations` (artifact_kind entities, the thought''s id, produced_by the key): the input''s fingerprint as checked, p_recipe (the model, prompt version and hash, the windows — or the key alone, marked undeclared, when NULL), replaced under the pass''s own rule; no rows standing under the key, no lineage row. Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations, ambiguous_relations, pruned_entities, refused_entities, retyped_entities}. Migrations 016, 053, 056, 061 / SMD-947, SMD-1867, SMD-1935, SMD-1731. Since 141 an entity with an open priority statement, or one an open statement takes its due time from, is not pruned (ob1_entity_has_open_priority). Migration 141 / SMD-4241.';
 
 
 -- ---------------------------------------------------------------------------
@@ -616,7 +616,7 @@ BEGIN
   v_now := clock_timestamp();
 
   -- The due references naming the loser, on the pools locked, in the order
-  -- written (139): by pool, not by the items read, so one written meanwhile
+  -- written (141): by pool, not by the items read, so one written meanwhile
   -- on another row of a locked ticket's pool is restated too (review pass 1). None is on the loser: 116's CHECK refuses a reference to
   -- the item itself, as it would the survivor's restated, which is dropped.
   FOR v_ref IN SELECT x.* FROM priority_assertions x
@@ -700,7 +700,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_merge_entity(uuid, uuid) IS
-  'A merge''s priority statements, moved (merge_entities and apply_entity_type_gate''s merge call it before deleting the loser): each open statement on another item whose due reference names the loser is restated with the reference naming the survivor (dropped where that would name the survivor itself, which 116''s CHECK refuses), and each open statement on the loser is restated on the survivor by its maker (136''s rule: the maker''s later word on the survivor stands). Every item touched is locked first, in its pool key''s order, and re-projected; a merge with nothing to move takes no lock. Returns restated and repointed, the ids of the restatements written (the caller counts those still standing); empty when nothing is to move (taking no lock), for a role that could not restate, or in a transaction above READ COMMITTED. Migration 139 / SMD-4241.';
+  'A merge''s priority statements, moved (merge_entities and apply_entity_type_gate''s merge call it before deleting the loser): each open statement on another item whose due reference names the loser is restated with the reference naming the survivor (dropped where that would name the survivor itself, which 116''s CHECK refuses), and each open statement on the loser is restated on the survivor by its maker (136''s rule: the maker''s later word on the survivor stands). Every item touched is locked first, in its pool key''s order, and re-projected; a merge with nothing to move takes no lock. Returns restated and repointed, the ids of the restatements written (the caller counts those still standing); empty when nothing is to move (taking no lock), for a role that could not restate, or in a transaction above READ COMMITTED. Migration 141 / SMD-4241.';
 
 -- ---------------------------------------------------------------------------
 -- merge_entities — 136's, its priority step the shared helper's
@@ -774,7 +774,7 @@ BEGIN
    WHERE id = p_survivor;
 
   -- The loser's priority statements restated on the survivor (136), and the
-  -- due references naming the loser restated to name it (139): a merge says
+  -- due references naming the loser restated to name it (141): a merge says
   -- the two were one.
   SELECT h.restated, h.repointed INTO v_restated, v_repointed FROM ob1_priority_merge_entity(p_survivor, p_loser) h;
 
@@ -787,13 +787,13 @@ END;
 $$;
 
 COMMENT ON FUNCTION merge_entities(uuid, uuid) IS
-  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 136 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. Since 139 each open statement whose due reference names the loser is restated to name the survivor, counted as priority_refs_moved (ob1_priority_merge_entity does both). A role that could not restate, or a transaction above READ COMMITTED, moves none, and the loser''s close as deleted. Both rows are locked first, in id order. The one resolution step that is a human''s to take. Migration 016; priorities, migration 136 / SMD-3711; due references, migration 139 / SMD-4241.';
+  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. Since 136 the loser''s open priority statements are restated on the survivor by the same maker, matched as 116''s is_maker matches one (the loser''s closed as replaced by the restatement; where the maker''s latest word on the survivor is later, a statement replaces the loser''s and a clear clears it), counted as priorities_moved; a restatement is the survivor''s newest within its tier. Since 141 each open statement whose due reference names the loser is restated to name the survivor, counted as priority_refs_moved (ob1_priority_merge_entity does both). A role that could not restate, or a transaction above READ COMMITTED, moves none, and the loser''s close as deleted. Both rows are locked first, in id order. The one resolution step that is a human''s to take. Migration 016; priorities, migration 136 / SMD-3711; due references, migration 141 / SMD-4241.';
 
 
 -- ---------------------------------------------------------------------------
 -- apply_entity_type_gate — 056's, its merge moving priority statements
 -- ---------------------------------------------------------------------------
--- 056's body verbatim but for the lines marked 139: a retyped entity merged
+-- 056's body verbatim but for the lines marked 141: a retyped entity merged
 -- into the one of its new type has its statements moved by the helper
 -- merge_entities calls.
 
@@ -914,7 +914,7 @@ BEGIN
            first_seen_at = LEAST(en.first_seen_at, r.first_seen_at),
            last_seen_at  = GREATEST(en.last_seen_at, r.last_seen_at)
      WHERE en.id = v_target;
-    -- 139: its priority statements restated on the target, and the due
+    -- 141: its priority statements restated on the target, and the due
     -- references naming it restated to name the target, as merge_entities
     -- does (one helper). Without this the delete closed them as deleted.
     SELECT h.restated, h.repointed INTO v_m, v_r FROM ob1_priority_merge_entity(v_target, r.id) h;
@@ -927,11 +927,11 @@ BEGIN
   RETURN jsonb_build_object('ok', true, 'refused_entities', v_refused, 'dropped_mentions', v_mentions, 'dropped_edges', v_edges,
                             'moved_entities', v_moved, 'merged_entities', v_merged,
                             -- What still stands: a later merge into one target can replace an
-                            -- earlier one's restatement (139's review pass 2).
+                            -- earlier one's restatement (141's review pass 2).
                             'priorities_moved', (SELECT count(*)::int FROM priority_assertions WHERE id = ANY(v_restated) AND closed_at IS NULL),
                             'priority_refs_moved', (SELECT count(*)::int FROM priority_assertions WHERE id = ANY(v_repointed) AND closed_at IS NULL));
 END;
 $$;
 
 COMMENT ON FUNCTION apply_entity_type_gate() IS
-  'Applies entity_type_gate() to the entities already written (056), each judged on its name; an entity a structured pass names or a human curated (a non-empty merged_from) is left as it stands. A refused entity''s edges, mentions and row are deleted; a retyped one merges into the entity of its new type the writer would resolve its name to (the one a human merged the name into, else the one of that name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded — or moves when there is none. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, moved_entities, merged_entities, priorities_moved, priority_refs_moved}; the first run''s is kept in ob1_config under entity_name_gate_056. SMD-1935. Since 139 a merge moves the retyped entity''s priority statements, and the due references naming it, as merge_entities does (ob1_priority_merge_entity), counted as priorities_moved and priority_refs_moved; a refused entity''s close as deleted (136). Migration 139 / SMD-4241.';
+  'Applies entity_type_gate() to the entities already written (056), each judged on its name; an entity a structured pass names or a human curated (a non-empty merged_from) is left as it stands. A refused entity''s edges, mentions and row are deleted; a retyped one merges into the entity of its new type the writer would resolve its name to (the one a human merged the name into, else the one of that name) by merge_entities'' steps — the mentions it lacks moved, edges re-pointed, aliases and seen-at folded — or moves when there is none. Idempotent. Returns {ok, refused_entities, dropped_mentions, dropped_edges, moved_entities, merged_entities, priorities_moved, priority_refs_moved}; the first run''s is kept in ob1_config under entity_name_gate_056. SMD-1935. Since 141 a merge moves the retyped entity''s priority statements, and the due references naming it, as merge_entities does (ob1_priority_merge_entity), counted as priorities_moved and priority_refs_moved; a refused entity''s close as deleted (136). Migration 141 / SMD-4241.';

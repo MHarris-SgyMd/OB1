@@ -767,17 +767,21 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 115, 122, 123 or 129 ([20cb]); 138 replaces 133's two writers, their answers naming
   // the item and every statement closed, and adds
   // ob1_priority_closed_json, refusing by name without 115, 116, 117,
-  // 122 or 133 ([20cc]); 139 has the prunes spare an entity with an open
+  // 122 or 133 ([20cc]); 140 adds the per-holder claim cap — a table, two
+  // refusing triggers and eight functions, claim_work redefined to count a
+  // holder's live claims under a per-holder lock and refuse CLAIM_LIMIT past the
+  // operator-settable cap — refusing by name without 046, 061 or 115 ([20cd]);
+  // 141 has the prunes spare an entity with an open
   // priority statement (061's record_thought_entities and 016's
   // prune_orphan_entities carried) and moves a merge's statements and due
   // references through ob1_priority_merge_entity (136's merge_entities and
   // 056's apply_entity_type_gate carried), refusing by name without 016,
-  // 056, 061, 116, 133 or 136 ([20cd]) — all recorded by the
+  // 056, 061, 116, 133 or 136 ([20ce]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 110, `030 is among the last one hundred and ten migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 111, `030 is among the last one hundred and eleven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5302,8 +5306,8 @@ console.log("\n[20bg] Migration 115: onto a populated brain at the file before i
   assert((await rows()) === before && (await audits()) === auditBefore && claimed.outcome === "claimed" && claimed.claim?.holder === "laptop" && other.outcome === "refused" && other.code === "WORK_CLAIMED",
     `applied, the file moves no thought nor audit row; a claim is taken under the envelope's key, and another holder's piece of it refused (${claimed.outcome}, ${other.code})`);
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["claims"] });
-  assert(grants.length === 1 && /^GRANT SELECT, INSERT, UPDATE ON work_claims TO "ob1_upgrade_probe";$/.test(grants[0]),
-    `--grant's claims group is SELECT, INSERT and UPDATE on work_claims, no DELETE (${grants.join("; ")})`);
+  assert(grants.length === 2 && /^GRANT SELECT, INSERT, UPDATE ON work_claims TO "ob1_upgrade_probe";$/.test(grants[0]) && /^GRANT SELECT, INSERT, UPDATE ON work_claim_cap_settings TO "ob1_upgrade_probe";$/.test(grants[1]),
+    `--grant's claims group is SELECT, INSERT and UPDATE on work_claims and 140's work_claim_cap_settings, no DELETE (${grants.join("; ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the115 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9201'])`)[0].n);
   assert((await rows()) === before && kept === 1, `a re-apply is a no-op: the thoughts as they were, the claim kept (${kept})`);
@@ -6561,11 +6565,83 @@ console.log("\n[20cc] Migration 138: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 136's ob1_priority_can_close, nothing made; then applied: an extraction's prune spares an entity with an open statement (at 138 the same prune closed one as deleted); a merge waits on the lock of an item whose due reference names the loser while another session writes there, then restates both statements to name the survivor, and on a ticket's pool restates one written on its other row; a merge with nothing to move takes no advisory lock; a re-apply a no-op (SMD-4241)");
+console.log("\n[20cd] Migration 140: onto a populated brain at the file before it — refused by name without 115's ob1_work_claims_in_the_way, nothing made; then applied: the built-in cap 50, an operator sets a cap of 1, a holder's second live claim refused CLAIM_LIMIT while its renewal is taken; two new claims by one holder racing under the per-holder lock, only one taken; a re-apply a no-op (SMD-3606)");
 {
-  const the139 = MIGRATIONS.find((f) => /^\d{3}_entity_priorities_follow\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const the140 = MIGRATIONS.find((f) => /^\d{3}_work_claim_cap\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the139 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the140 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('cap-op', 'operator'), ('cap-holder', 'agent')`;
+  const idOf = async (label: string) => String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = ${label}`)[0].id);
+  // The actor envelope carries the key's agent id, as the server resolves and passes it (050): the operator check and the
+  // per-holder count both read it, never the client's word.
+  const OP = JSON.stringify({ name: "cap-op", agent_id: await idOf("cap-op"), via: "open-brain", scope: "write" });
+  const H = JSON.stringify({ name: "cap-holder", agent_id: await idOf("cap-holder") });
+  type Ans = { outcome: string; code: string | null; cap?: number; held?: number; claim: { id: string } | null; token: string | null };
+  const claim = async (issue: string, actor: string, token: string | null = null): Promise<Ans> =>
+    ((await sql`SELECT claim_work(${issue}, NULL, NULL, 14400, ${token}, (${actor}::text)::jsonb) AS r`)[0] as { r: Ans }).r;
+  const setCap = async (cap: number | null) => ((await sql`SELECT set_work_claim_cap(${cap}, (${OP}::text)::jsonb) AS r`)[0] as { r: { ok: boolean; cap: number | null } }).r;
+  const capNow = async () => Number((await sql`SELECT ob1_work_claim_cap() AS c`)[0].c);
+
+  // Without 115's ob1_work_claims_in_the_way: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_work_claims_in_the_way(text, text, uuid, timestamp with time zone) RENAME TO ob1_work_claims_in_the_way_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the140 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claims_in_the_way_away(text, text, uuid, timestamp with time zone) RENAME TO ob1_work_claims_in_the_way`;
+  const made = async () => (await sql`SELECT to_regprocedure('ob1_work_claim_cap()') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 140 needs 115 \(ob1_work_claims_in_the_way\); this schema lacks it/.test(without) && !(await made()),
+    `without 115's ob1_work_claims_in_the_way the file is refused by name; nothing made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the140 });
+  // The built-in 50; an operator sets 1; a second live claim refused, the renewal taken.
+  const builtIn = await capNow();
+  const set1 = await setCap(1);
+  const c1 = await claim("SMD-7001", H);
+  const c2 = await claim("SMD-7002", H);
+  const renew = await claim("SMD-7001", H, c1.token);
+  assert(builtIn === 50 && set1.ok === true && (await capNow()) === 1 && c1.outcome === "claimed" && c2.outcome === "refused" && c2.code === "CLAIM_LIMIT" && c2.cap === 1 && c2.held === 1 && renew.outcome === "renewed",
+    `applied: the built-in cap 50, an operator sets 1, the holder's second live claim refused CLAIM_LIMIT and its own renewal taken (${builtIn}, set ${set1.ok}, ${c2.code}, renew ${renew.outcome})`);
+
+  // Two NEW claims by one holder racing under the per-holder lock: the first, in an open transaction, holds the lock; the
+  // second waits on it, and once the first commits (a claim taken, at the cap) the second counts it and is refused
+  // CLAIM_LIMIT. Without the lock both would read one below the cap and both insert. Probed only once the second waits on
+  // the advisory lock in its own session (sql, one connection, whose backend pid it reads), never on a guess at timing.
+  await setCap(2);  // room for one more over the single live claim (SMD-7001), so the race is at the boundary
+  const racePid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  const other = new SQL({ url: URL_, max: 1 });
+  let second: Promise<Ans> = Promise.resolve({ outcome: "never ran", code: null, claim: null, token: null });
+  let firstOutcome = "never ran";
+  try {
+    await other.begin(async (tx) => {
+      const first = ((await tx`SELECT claim_work('SMD-7003', NULL, NULL, 14400, NULL, (${H}::text)::jsonb) AS r`)[0] as { r: Ans }).r;
+      firstOutcome = first.outcome;  // claimed, but uncommitted: it holds the per-holder advisory lock
+      second = claim("SMD-7004", H).catch((e: Error): Ans => ({ outcome: `raised: ${e.message.split("\n")[0]}`, code: null, claim: null, token: null }));
+      let waiting = false;
+      for (let i = 0; i < 200 && !waiting; i++) {
+        waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${racePid} AND locktype = 'advisory'`)[0].n) > 0;
+        if (!waiting) await Bun.sleep(50);
+      }
+      if (!waiting) throw new Error(`[20cd] the second claim never waited on the per-holder advisory lock within 10 s`);
+    });  // the first commits here, releasing the lock; the second then counts it and is refused
+  } finally {
+    await other.close();
+  }
+  const secondAns = await second;
+  assert(firstOutcome === "claimed" && secondAns.outcome === "refused" && secondAns.code === "CLAIM_LIMIT",
+    `two new claims by one holder race under the per-holder lock: the first taken (at the cap of 2), the second, waiting on the lock, refused CLAIM_LIMIT once the first commits (${firstOutcome}, ${secondAns.outcome}:${secondAns.code})`);
+
+  // A re-apply is a no-op: a clear leaves the built-in cap, and a claim is taken.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the140 });
+  await setCap(null);
+  assert((await capNow()) === 50 && (await claim("SMD-7005", H)).outcome === "claimed",
+    `a re-apply is a no-op: clearing the setting leaves the built-in cap 50 and a claim is taken (${await capNow()})`);
+  await sql.close();
+}
+
+console.log("\n[20ce] Migration 141: onto a populated brain at the file before it — refused by name without 136's ob1_priority_can_close, nothing made; then applied: an extraction's prune spares an entity with an open statement (at the file before, the same prune closed one as deleted); a merge waits on the lock of an item whose due reference names the loser while another session writes there, then restates both statements to name the survivor, and on a ticket's pool restates one written on its other row; a merge with nothing to move takes no advisory lock; a re-apply a no-op (SMD-4241)");
+{
+  const the141 = MIGRATIONS.find((f) => /^\d{3}_entity_priorities_follow\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the141 });
   const sql = new SQL({ url: URL_, max: 1 });
   await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator'), ('upgrade-bot', 'agent')`;
   const OP = JSON.stringify({ name: "upgrade-op", via: "open-brain", scope: "write" });
@@ -6581,39 +6657,39 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   const exists = async (id: string) => Number((await sql`SELECT count(*)::int AS n FROM ob1_entities WHERE id = ${id}::uuid`)[0].n) === 1;
   const ent = async (name: string) => String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${name}, ${name.toLowerCase()}) RETURNING id`)[0].id);
 
-  // At 138: the thought's next extraction names the entity no more, and the prune closes its statement as deleted.
-  const t138 = await thought("upgrade 139: Halyard at 138");
-  await extract(t138, ["Upgrade Halyard"]);
+  // Before 141: the thought's next extraction names the entity no more, and the prune closes its statement as deleted.
+  const tBefore = await thought("upgrade 141: Halyard before it");
+  await extract(tBefore, ["Upgrade Halyard"]);
   const halyard = await idOf("Upgrade Halyard");
   const onHalyard = (await put("entity", halyard, 3, OP)).assertion!.id;
-  const pruned138 = await extract(t138, []);
-  const at138 = { pruned: pruned138.pruned_entities, gone: !(await exists(halyard)), reason: await reasonOf(onHalyard) };
+  const prunedBefore = await extract(tBefore, []);
+  const before141 = { pruned: prunedBefore.pruned_entities, gone: !(await exists(halyard)), reason: await reasonOf(onHalyard) };
 
   // Without 136's ob1_priority_can_close: refused by name, nothing made.
   await sql`ALTER FUNCTION ob1_priority_can_close() RENAME TO ob1_priority_can_close_away`;
-  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 }).then(() => "applied", (e: Error) => e.message);
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the141 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION ob1_priority_can_close_away() RENAME TO ob1_priority_can_close`;
   const made = async () => (await sql`SELECT to_regprocedure('ob1_entity_has_open_priority(uuid)') IS NOT NULL AS m`)[0].m as boolean;
-  assert(/^migration 139 needs 136 \(ob1_priority_can_close\); this schema lacks it/.test(without) && !(await made()),
+  assert(/^migration 141 needs 136 \(ob1_priority_can_close\); this schema lacks it/.test(without) && !(await made()),
     `without 136's ob1_priority_can_close the file is refused by name; nothing made (${without.slice(0, 80)})`);
 
   // Applied: the same prune spares an entity with an open statement.
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
-  const t139 = await thought("upgrade 139: Bowline at 139");
-  await extract(t139, ["Upgrade Bowline"]);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the141 });
+  const tAfter = await thought("upgrade 141: Bowline at 141");
+  await extract(tAfter, ["Upgrade Bowline"]);
   const bowline = await idOf("Upgrade Bowline");
   const onBowline = (await put("entity", bowline, 3, OP)).assertion!.id;
-  const pruned139 = await extract(t139, []);
-  assert(at138.pruned === 1 && at138.gone && at138.reason === "deleted" && await made()
-         && pruned139.pruned_entities === 0 && await exists(bowline) && await reasonOf(onBowline) === null,
-    `applied: the prune spares the entity with an open statement, which stays open (at 138 it pruned one and closed its statement as deleted: ${JSON.stringify(at138)})`);
+  const prunedAfter = await extract(tAfter, []);
+  assert(before141.pruned === 1 && before141.gone && before141.reason === "deleted" && await made()
+         && prunedAfter.pruned_entities === 0 && await exists(bowline) && await reasonOf(onBowline) === null,
+    `applied: the prune spares the entity with an open statement, which stays open (before 141 it pruned one and closed its statement as deleted: ${JSON.stringify(before141)})`);
 
   // A merge beside a writer on an item whose due reference names the loser: the writer holds that item's priority lock,
   // uncommitted, having added a second statement naming the loser; the merge waits on the lock — probed in pg_locks by
   // its own backend's pid, never by timing — and, once the writer commits, restates both to name the survivor.
   const S = await ent("Upgrade Survivor");
   const L = await ent("Upgrade Loser");
-  const due = await thought("upgrade 139: due when the loser is");
+  const due = await thought("upgrade 141: due when the loser is");
   const onDue = (await put("thought", due, 3, OP, L)).assertion!.id;
   const mergePid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
   const other = new SQL({ url: URL_, max: 1 });
@@ -6629,7 +6705,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
         waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${mergePid} AND locktype = 'advisory'`)[0].n) > 0;
         if (!waiting) await Bun.sleep(50);
       }
-      if (!waiting) throw new Error("[20cd] the merge never waited on the item's priority lock within 10 s");
+      if (!waiting) throw new Error("[20ce] the merge never waited on the item's priority lock within 10 s");
     });
   } finally {
     await other.close();
@@ -6644,7 +6720,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   // merge locks the pool; another session, holding that pool's lock, writes a statement naming the loser on the ticket's
   // other row, which the merge's first read never saw. Read again by pool under the lock, it is restated too.
   const ticketRow = async (issue: string, n: number) => {
-    const content = `upgrade 139: ${issue} row ${n}`;
+    const content = `upgrade 141: ${issue} row ${n}`;
     const id = String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })}::text)::jsonb) RETURNING id`)[0].id);
     await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
     return id;
@@ -6667,7 +6743,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
         waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${mergePid} AND locktype = 'advisory'`)[0].n) > 0;
         if (!waiting) await Bun.sleep(50);
       }
-      if (!waiting) throw new Error("[20cd] the merge never waited on the ticket pool's priority lock within 10 s");
+      if (!waiting) throw new Error("[20ce] the merge never waited on the ticket pool's priority lock within 10 s");
     });
   } finally {
     await other2.close();
@@ -6693,7 +6769,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   assert(bareLocks === 0 && heldLocks >= 2, `a merge with nothing to move takes no advisory lock; one moving a statement locks both entities (${bareLocks}, ${heldLocks})`);
 
   // A re-apply is a no-op: the prune still spares the entity.
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the141 });
   await sql`SELECT prune_orphan_entities()`;
   assert(await exists(bowline) && await reasonOf(onBowline) === null,
     `a re-apply is a no-op: prune_orphan_entities still spares the entity with an open statement`);

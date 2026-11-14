@@ -210,7 +210,7 @@ function definedIn(file: string): string[] {
  * whose door and thread functions it does not define. 137 is 129's
  * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
  * carries 129, whose nine-argument wrapper it does not define and whose
- * agenda it needs ([110] drops both). 139 is 061's record_thought_entities
+ * agenda it needs ([110] drops both). 141 is 061's record_thought_entities
  * with its prune sparing an entity someone stated a priority on (SMD-4241),
  * and carries 061: a restore of the writer re-applied 061, whose other
  * functions it restored and whose DROP took 053's six-argument writer ([52]
@@ -218,7 +218,7 @@ function definedIn(file: string): string[] {
  * merge_entities it also carries, are not carried: 056 runs the gate over the
  * rows at each apply.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["061"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "141": ["061"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -7105,7 +7105,7 @@ console.log("\n[48] Migration 053: the source beside the thought â€” the canonic
   const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'thought_facets' AND indexname LIKE 'thought_facets_link%' ORDER BY 1`)).map((x) => x.n);
   assert(idx.join(",") === "thought_facets_link_active_uniq,thought_facets_link_target_idx", `the active-link unique index and the target probe exist (${idx.join(",")})`);
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
-  assert(lastDefinerOf("record_thought_entities").startsWith("139") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 139, its last definer (061's body, 056's with the lineage row [57], its prune sparing an entity with a priority [126]), keeps it ([52])");
+  assert(lastDefinerOf("record_thought_entities").startsWith("141") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 141, its last definer (061's body, 056's with the lineage row [57], its prune sparing an entity with a priority [127]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
   assert(lastDefinerOf("thought_facets_validate").startsWith("134") && /ob1:link-facet/.test(validatorSrc), "â€¦and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 134, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [121])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
@@ -8032,8 +8032,8 @@ console.log("\n[52] Migration 056: the entity name gate â€” a number or a type w
     "the SQL rule spells every shape, every vocabulary word (no more), the numeric pattern and the trim entity-gate.ts does, no pattern beside them, and places each shape by its scope: the any and notPerson overrides before the type door, the person/place shapes after it, the place-only handle shape inside the place clause (SMD-2300)");
   const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
   assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
-  assert(lastDefinerOf("record_thought_entities").startsWith("139") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),
-    "139 is the last definer of record_thought_entities (061's body, 056's with the lineage row, [126]), and its live body carries the name-gate sentinel beside 053's");
+  assert(lastDefinerOf("record_thought_entities").startsWith("141") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),
+    "141 is the last definer of record_thought_entities (061's body, 056's with the lineage row, [127]), and its live body carries the name-gate sentinel beside 053's");
   assert(/en\.merged_from @> ARRAY\[i\.nname\]/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && !/= ANY\(en\.merged_from\)/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),
     "â€¦and resolves a merged name with `@>`, which 016's GIN index serves, not `= ANY`");
   const passSrc = await src("apply_entity_type_gate()");
@@ -9293,7 +9293,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact â€” one de
     assert((await functionsNamed(fn)) === 1, `one ${fn} â€” the older arity dropped where it moved`);
   assert((await functionsNamed("upsert_thought")) === 3, "three upsert_thought overloads still");
   assert(lastDefinerOf("ob1_record_vector_lineage").startsWith("061"), `061 is the last definer of ob1_record_vector_lineage (${lastDefinerOf("ob1_record_vector_lineage")})`);
-  assert(lastDefinerOf("record_thought_entities").startsWith("139"), `139 is the last definer of record_thought_entities â€” 061's body, its prune sparing an entity with a priority, [126] (${lastDefinerOf("record_thought_entities")})`);
+  assert(lastDefinerOf("record_thought_entities").startsWith("141"), `141 is the last definer of record_thought_entities â€” 061's body, its prune sparing an entity with a priority, [127] (${lastDefinerOf("record_thought_entities")})`);
   for (const [fn, last] of [["upsert_thought", "080"], ["update_thought", "099"]])
     assert(lastDefinerOf(fn).startsWith(last), `${last} is the last definer of ${fn} â€” 061's body with the trust stamp, [66] (${lastDefinerOf(fn)})`);
   assert(lastDefinerOf("record_supersession_proposal").startsWith("063"), `063 is the last definer of record_supersession_proposal â€” the stale proposal's replacement, on 061's body (${lastDefinerOf("record_supersession_proposal")})`);
@@ -16519,6 +16519,8 @@ console.log("\n[103] Migration 115: work claims â€” a ticket or one piece of it 
   const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
   const ones = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
   assert(after === before && ones.every((n) => n === 1), `115 applied again changes nothing: ${after} claims stand, one of each call (${ones.join(",")})`);
+  // 140 redefines claim_work: this section re-applied 115's above, so restore 140's â€” the last definer â€” for [126] and any later section, as every section re-applying an older definer must (SMD-3778).
+  await restoreShipped("claim_work");
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);
@@ -20072,8 +20074,8 @@ console.log("\n[123] Migration 136: a deleted item's priority statements close â
     maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
   const file = files.find((f) => /^\d{3}_priority_deleted_items\.sql$/.test(f)) ?? "no NNN_priority_deleted_items.sql";
   await reapply(file.slice(0, 4));
-  // 136's merge_entities, just re-applied, is no longer the shipped one: the merge rows below hold 139's, which keeps 136's
-  // rules for the loser's statements (139's [126] holds its due references).
+  // 136's merge_entities, just re-applied, is no longer the shipped one: the merge rows below hold 141's, which keeps 136's
+  // rules for the loser's statements (141's [127] holds its due references).
   await restoreShipped("merge_entities");
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[123] op', 'operator'), ('[123] bot', 'agent')`);
   const OP = { name: "[123] op", scope: "write" }, BOT = { name: "[123] bot", scope: "write" };
@@ -20404,7 +20406,7 @@ console.log("\n[123] Migration 136: a deleted item's priority statements close â
   assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(upper)).close_reason === null && (await row(kept.id)).close_reason === null
          && await closedCount() === before && await drift() === 0,
     `on upgrade the statements on a thought and an entity gone before 136, and on a thought key that is no uuid, close as deleted; a living thought's stay open, keyed in upper case too; a re-apply closes nothing more (${reasons.join(", ")})`);
-  // The re-applies above put 136's merge_entities back over 139's.
+  // The re-applies above put 136's merge_entities back over 141's.
   await restoreShipped("merge_entities");
 }
 
@@ -20610,19 +20612,185 @@ console.log("\n[125] Migration 138: a priority write names every statement it cl
     `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
-console.log("\n[126] Migration 139: an entity's priority statements follow it â€” the prunes (record_thought_entities, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting (rebuild_derived, unchanged) still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references, counting what stands; the shape; a re-apply a no-op (SMD-4241)");
+console.log("\n[126] Migration 140: the per-holder cap on live work claims, operator-settable â€” work_claim_cap_settings one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_work_claim_cap_builtin() 50; ob1_work_claim_cap_refusal at the range's edges; ob1_work_claim_cap() the builtin under the standing setting; set_work_claim_cap an operator key's alone, by its agent id, refusing a bad cap, writing nothing for the cap standing, NULL clearing; claim_work refusing a NEW claim past the holder's cap CLAIM_LIMIT, counting live claims by agent id or by name, a renewal and a lapsed claim exempt, a release freeing a slot; a stored cap the refusal names failing every new claim 22000 while a renewal is still taken, work_claim_cap_setting() saying it without raising; claim_work 140's; a re-apply a no-op (SMD-3606)");
+{
+  const file = files.find((f) => /^\d{3}_work_claim_cap\.sql$/.test(f)) ?? "no NNN_work_claim_cap.sql";
+  // [103] re-applies 115's claim_work for its idempotency check, then restores 140's (SMD-3778); this restore is the backstop so this section holds 140's.
+  await restoreShipped("claim_work");
+  type Claim = { id: string; issue: string; holder: string; holder_agent_id: string | null; state: string; expires_at: string };
+  type Answer = { outcome: string; code: string | null; message: string | null; claim: Claim | null; held_by: Claim[]; token: string | null; cap?: number; held?: number };
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: null, message: null, claim: null, held_by: [], token: null }; }
+  };
+  const claim = (issue: string, actor: object | null, token: string | null = null, lease = 14400) =>
+    ans(`SELECT claim_work($1, NULL, NULL, $3, $2, $4::jsonb) AS r`, [issue, token, lease, actor === null ? null : JSON.stringify(actor)]);
+  const release = (id: string, token: string, actor: object) =>
+    ans(`SELECT release_work_claim($1::uuid, $2, 'done', false, $3::jsonb) AS r`, [id, token, JSON.stringify(actor)]);
+  const setCap = async (cap: number | null, actor: unknown) => (await one<{ r: Record<string, unknown> }>(`SELECT set_work_claim_cap($1, $2::jsonb) AS r`, [cap, actor === null ? null : JSON.stringify(actor)])).r;
+  const capNow = async () => Number((await one<{ c: number }>(`SELECT ob1_work_claim_cap() AS c`)).c);
+  const settingNow = async () => (await one<{ r: Record<string, unknown> }>(`SELECT work_claim_cap_setting() AS r`)).r;
+  const refusal = async (c: number | null) => (await one<{ r: string | null }>(`SELECT ob1_work_claim_cap_refusal($1) AS r`, [c])).r;
+  // Both columns back by five hours (over the default four-hour lease), so the claim has lapsed (expires_at < now) while the lease interval, which work_claims_lease checks positive, stands (as [103]'s age does).
+  const age = (id: string) => db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [id]);
+  const liveFor = async (name: string) => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = $1 AND released_at IS NULL AND expires_at > now()`, [name])).n;
+  const rows = async () => q<{ id: string; cap: number; set_by: string; ended_by: string | null; standing: boolean }>(
+    `SELECT id::text AS id, cap, set_by, ended_by, ended_at IS NULL AS standing FROM work_claim_cap_settings ORDER BY id`);
+
+  await db.exec(`SELECT set_agent_kind('[126] op', 'operator'); SELECT set_agent_kind('[126] h', 'agent'); SELECT set_agent_kind('[126] h2', 'agent'); INSERT INTO ob1_agents (label) VALUES ('[126] plain') ON CONFLICT DO NOTHING`);
+  const idOf = async (label: string) => (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).id;
+  const OP = { name: "[126] op", agent_id: await idOf("[126] op") };
+  const H = { name: "[126] h", agent_id: await idOf("[126] h") };
+
+  // The shape: the table, its key and one-standing index, two triggers; eight functions commented by 140, the reads STABLE,
+  // the builtin and refusal IMMUTABLE, the setter, the guard and the lock VOLATILE, none SECURITY DEFINER; 140 the last
+  // definer of each, and of claim_work.
+  const cols = (await q<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'work_claim_cap_settings'::regclass AND attnum > 0 AND NOT attisdropped`))[0].c;
+  const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('work_claim_cap_settings_one_standing')) AS d`)).d ?? "";
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'work_claim_cap_settings'::regclass AND NOT tgisinternal`)).t;
+  const FNS = ["ob1_work_claim_cap_builtin()", "ob1_work_claim_cap_refusal(integer)", "ob1_work_claim_cap_settings_guard()", "ob1_work_claim_cap()", "set_work_claim_cap(integer, jsonb)", "work_claim_cap_setting()", "ob1_work_claim_holder_lock(text, uuid)", "ob1_work_claim_holder_live_count(text, uuid, timestamptz)"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  assert(cols === "id bigint not null, cap integer not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
+         && /UNIQUE INDEX work_claim_cap_settings_one_standing ON public\.work_claim_cap_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
+         && trig === "work_claim_cap_settings_history:31 work_claim_cap_settings_no_truncate:34"
+         && fns.length === 8 && fns.every((f) => !f.d && /[Mm]igration 140 \/ SMD-3606/.test(f.c ?? ""))
+         && vol["ob1_work_claim_cap()"] === "s" && vol["work_claim_cap_setting()"] === "s" && vol["ob1_work_claim_holder_live_count(text,uuid,timestamp with time zone)"] === "s"
+         && vol["ob1_work_claim_cap_builtin()"] === "i" && vol["ob1_work_claim_cap_refusal(integer)"] === "i"
+         && vol["set_work_claim_cap(integer,jsonb)"] === "v" && vol["ob1_work_claim_cap_settings_guard()"] === "v" && vol["ob1_work_claim_holder_lock(text,uuid)"] === "v"
+         && ["ob1_work_claim_cap_builtin", "ob1_work_claim_cap_refusal", "ob1_work_claim_cap_settings_guard", "ob1_work_claim_cap", "set_work_claim_cap", "work_claim_cap_setting", "ob1_work_claim_holder_lock", "ob1_work_claim_holder_live_count", "claim_work"].every((f) => lastDefinerOf(f) === file),
+    `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; eight functions commented by 140 with the right volatilities, none SECURITY DEFINER, 140 the last definer of each and of claim_work (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+
+  // No setting: the cap is the built-in 50; the setting says so.
+  const none = { c: await capNow(), s: await settingNow(), b: Number((await one<{ b: number }>(`SELECT ob1_work_claim_cap_builtin() AS b`)).b) };
+  assert(none.c === 50 && none.b === 50 && none.s.cap === 50 && none.s.source === "builtin" && (await rows()).length === 0,
+    `with no setting the cap is the built-in 50, and work_claim_cap_setting() says source builtin (${JSON.stringify(none.s)})`);
+
+  // The refusal at the range's edges: NULL, below 1, above 100000 refused; 1, 50, 100000 taken.
+  const probes: [number | null, boolean][] = [[null, true], [0, true], [-5, true], [1, false], [2, false], [50, false], [100000, false], [100001, true], [999999, true]];
+  const refs = await Promise.all(probes.map(([c]) => refusal(c)));
+  assert(probes.every(([, bad], i) => (refs[i] !== null) === bad) && /a cap is required/.test(refs[0] ?? "") && /a cap below 1 \(0\)/.test(refs[1] ?? "") && /a cap above 100000 \(100001\)/.test(refs[7] ?? ""),
+    `ob1_work_claim_cap_refusal refuses NULL, below 1 and above 100000, takes 1, 50 and 100000 (${probes.map(([c], i) => `${c}:${refs[i] === null ? "ok" : "no"}`).join(" ")})`);
+
+  // Who may set: an operator key by its agent id; a name alone, an agent's key, an unclassified key refused saying what it is; no envelope raises; a bad cap BAD_CAP.
+  const refusedBy = [await setCap(10, { name: "[126] op" }), await setCap(10, { name: "[126] h", agent_id: H.agent_id }), await setCap(10, { name: "[126] plain", agent_id: await idOf("[126] plain") })];
+  const noEnvelope = await failure(`SELECT set_work_claim_cap(10)`);
+  const badCap = [await setCap(0, OP), await setCap(100001, OP)];
+  assert(refusedBy.every((r) => r.ok === false && r.error === "NOT_OPERATOR") && refusedBy[0].kind === null && /named by its name alone$/.test(String(refusedBy[0].message))
+         && refusedBy[1].kind === "agent" && refusedBy[2].kind === null && /is unclassified$/.test(String(refusedBy[2].message))
+         && /needs a holder: no actor envelope names one/.test(noEnvelope)
+         && badCap.every((r) => r.ok === false && r.error === "BAD_CAP") && /a cap below 1/.test(String(badCap[0].message)) && /a cap above 100000/.test(String(badCap[1].message))
+         && (await rows()).length === 0,
+    `only an operator key by its agent id sets the cap; a name alone, an agent's and an unclassified key answer NOT_OPERATOR, no envelope raises, a bad cap BAD_CAP, nothing written (${refusedBy.map((r) => `${r.error}:${r.kind}`).join(", ")}; ${noEnvelope.slice(0, 40)})`);
+
+  // Set a low cap, and the cap bites: two claims taken, the third refused CLAIM_LIMIT naming the cap and the count; a
+  // renewal of the holder's own claim is exempt even at the cap; a release frees a slot; a lapsed claim does not count.
+  const set2 = await setCap(2, OP);
+  const setSame = await setCap(2, OP);  // the cap already standing: nothing written, changed false (132's no-op)
+  const c1 = await claim("SMD-8601", H);
+  const c2 = await claim("SMD-8602", H);
+  const c3 = await claim("SMD-8603", H);
+  const renewAtCap = await claim("SMD-8601", H, c1.token);  // the holder's own, with its token: renewed, never capped
+  assert(set2.ok === true && set2.changed === true && setSame.ok === true && setSame.changed === false && (await rows()).filter((r) => r.standing).length === 1 && (await capNow()) === 2
+         && c1.outcome === "claimed" && c2.outcome === "claimed"
+         && c3.outcome === "refused" && c3.code === "CLAIM_LIMIT" && c3.cap === 2 && c3.held === 2 && c3.claim === null && c3.token === null
+         && /^\[126\] h holds 2 live claims, the cap of 2; release one/.test(c3.message ?? "")
+         && renewAtCap.outcome === "renewed",
+    `at a cap of 2 the holder's first two claims are taken, the third refused CLAIM_LIMIT naming the cap and the count, and its own renewal is exempt (${c1.outcome}, ${c2.outcome}, ${c3.outcome}:${c3.code}:${c3.cap}/${c3.held}, renew ${renewAtCap.outcome})`);
+
+  const rel = await release(c1.claim!.id, c1.token!, H);
+  const c3b = await claim("SMD-8603", H);  // a slot freed by the release
+  const c4 = await claim("SMD-8604", H);   // at the cap again
+  await age(c2.claim!.id);                  // c2 lapses: it counts as free
+  const c4b = await claim("SMD-8604", H);  // c3b + c4b = 2 live, c2 lapsed uncounted
+  assert(rel.outcome === "released" && c3b.outcome === "claimed" && c4.outcome === "refused" && c4.code === "CLAIM_LIMIT"
+         && c4b.outcome === "claimed" && (await liveFor("[126] h")) === 2,
+    `a release frees a slot (the next claim taken), the cap bites again, and a lapsed claim does not count so a new claim is taken (${c3b.outcome}, ${c4.outcome}, ${c4b.outcome})`);
+
+  // The operator raises the cap, and more claims pass; clearing it returns to the built-in 50.
+  const raise = await setCap(5, OP);
+  const capAtFive = await capNow();
+  const more = [await claim("SMD-8605", H), await claim("SMD-8606", H), await claim("SMD-8607", H)];  // 2 live + 3 = 5, then the 6th refused
+  const sixth = await claim("SMD-8608", H);
+  const cleared = await setCap(null, OP);
+  const capAfterClear = await capNow();
+  assert(raise.changed === true && capAtFive === 5 && more.filter((r) => r.outcome === "claimed").length === 3 && sixth.code === "CLAIM_LIMIT"
+         && cleared.ok === true && cleared.changed === true && capAfterClear === 50 && (await settingNow()).source === "builtin",
+    `the operator raises the cap to 5 (three more taken, the sixth refused), and clearing returns to the built-in 50 (${more.map((r) => r.outcome).join(",")}, ${sixth.code}, cleared ${capAfterClear})`);
+
+  // The holder is the agent id when it has one, the name alone when it does not: a name-only key is capped by its name,
+  // apart from another name-only key.
+  await setCap(1, OP);
+  const N1 = { name: "[126] nameonly" }, N2 = { name: "[126] nameonly-two" };
+  const n1a = await claim("SMD-8631", N1);
+  const n1b = await claim("SMD-8632", N1);  // the same name at the cap of 1: refused
+  const n2a = await claim("SMD-8633", N2);  // a different name: its own count
+  assert(n1a.outcome === "claimed" && n1a.claim!.holder_agent_id === null && n1b.code === "CLAIM_LIMIT" && n2a.outcome === "claimed",
+    `a name-only key is capped by its name, apart from another name-only key (${n1a.outcome}:${n1a.claim?.holder_agent_id}, ${n1b.code}, ${n2a.outcome})`);
+  await setCap(null, OP);
+
+  // History: a row changes only to end, once; a DELETE, a TRUNCATE refused; a raw row with a bad cap, a second standing row, a non-operator maker refused; one standing.
+  await setCap(7, OP);
+  const hist = [
+    await failure(`UPDATE work_claim_cap_settings SET cap = 9 WHERE ended_at IS NULL`),
+    await failure(`UPDATE work_claim_cap_settings SET ended_by = 'x' WHERE ended_at IS NOT NULL`),
+    await failure(`DELETE FROM work_claim_cap_settings WHERE ended_at IS NOT NULL`),
+    await failure(`TRUNCATE work_claim_cap_settings`),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (200000, 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (9, 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (9, 'x', gen_random_uuid(), now())`),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (9, 'x', $1::uuid, now())`, [H.agent_id]),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at, ended_at, ended_by, ended_by_agent_id) VALUES (9, 'x', $1::uuid, now(), now(), 'x', $1::uuid)`, [OP.agent_id]),
+    await failure(`UPDATE work_claim_cap_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [H.agent_id]),
+  ];
+  assert(/^23001 work_claim_cap_settings is history: a row changes only to end, once/.test(hist[0]) && /^23001 .* a row changes only to end, once/.test(hist[1])
+         && /^23001 work_claim_cap_settings is history: DELETE refused/.test(hist[2]) && /^23001 work_claim_cap_settings is history: TRUNCATE refused/.test(hist[3])
+         && /^22023 a cap above 100000/.test(hist[4]) && /^23505 .*work_claim_cap_settings_one_standing/.test(hist[5])
+         && /^42501 work_claim_cap_settings: set_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[6]) && /^42501 work_claim_cap_settings: set_by_agent_id /.test(hist[7])
+         && /^23001 work_claim_cap_settings: a setting stands when written/.test(hist[8]) && /^42501 work_claim_cap_settings: ended_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[9])
+         && (await rows()).filter((r) => r.standing).length === 1,
+    `history: an UPDATE of a standing row and of an ended row refused, a DELETE and a TRUNCATE refused; a raw row with a bad cap, a second standing row, an unknown or an agent's maker, one written already ended, and an end by an agent's key all refused; one standing (${hist.map((h) => h.slice(0, 36)).join(" | ")})`);
+
+  // A stored cap the refusal names (the trigger off, as a later migration narrowing the range would leave one): every new
+  // claim fails 22000 naming the setting, a renewal is still taken, work_claim_cap_setting() says it without raising; a clear mends it.
+  const e1 = await claim("SMD-8611", H, null, 14400);  // a live claim with a token to renew later
+  await db.exec(`ALTER TABLE work_claim_cap_settings DISABLE TRIGGER work_claim_cap_settings_history; UPDATE work_claim_cap_settings SET cap = 200000 WHERE ended_at IS NULL; ALTER TABLE work_claim_cap_settings ENABLE TRIGGER work_claim_cap_settings_history`);
+  const brokenClaim = await claim("SMD-8612", H);
+  const brokenRenew = await claim("SMD-8611", H, e1.token);
+  const said = await settingNow();
+  const capRaise = await failure(`SELECT ob1_work_claim_cap()`);
+  const mend = await setCap(null, OP);
+  assert(/^raised: /.test(brokenClaim.outcome) && /the operator's work-claim cap .* is refused/.test(brokenClaim.outcome) && brokenRenew.outcome === "renewed"
+         && said.source === "operator" && said.cap === 200000 && /a cap above 100000/.test(String(said.refused))
+         && /^22000 /.test(capRaise) && mend.changed === true && (await capNow()) === 50,
+    `a stored cap the refusal names fails every new claim 22000 naming it, a renewal is still taken, the setting says it without raising, and a clear mends it (${brokenClaim.outcome.slice(0, 50)}; renew ${brokenRenew.outcome}; ${JSON.stringify(said).slice(0, 70)})`);
+
+  // A re-apply is a no-op: the cap and the reader answer as before.
+  await reapply(file.slice(0, 4));
+  assert((await capNow()) === 50 && lastDefinerOf("claim_work") === file && (await claim("SMD-8621", H)).outcome === "claimed",
+    `a re-apply is a no-op: the built-in cap stands, 140 is still claim_work's last definer, and a claim is taken (${await capNow()})`);
+}
+
+console.log("\n[127] Migration 141: an entity's priority statements follow it â€” the prunes (record_thought_entities, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting (rebuild_derived, unchanged) still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references, counting what stands; the shape; a re-apply a no-op (SMD-4241)");
 {
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; reason: string | null; due_ref: { kind: string; key: string } | null; asserted_at: string;
     maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
   type J = Record<string, unknown>;
   const file = files.find((f) => /^\d{3}_entity_priorities_follow\.sql$/.test(f)) ?? "no NNN_entity_priorities_follow.sql";
   await reapply(file.slice(0, 4));
-  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[126] op', 'operator'), ('[126] bot', 'agent')`);
-  const OP = { name: "[126] op", scope: "write" }, BOT = { name: "[126] bot", scope: "write" };
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[127] op', 'operator'), ('[127] bot', 'agent')`);
+  const OP = { name: "[127] op", scope: "write" }, BOT = { name: "[127] bot", scope: "write" };
   const thought = async (content: string) => {
     let id = "";
     await db.transaction(async (tx) => {
-      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[126] op" })]);
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[127] op" })]);
       id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [content])).rows[0].id;
     });
     return id;
@@ -20638,7 +20806,7 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   const put = async (kind: string, key: string, level: number, actor: object, o: { ref?: [string, string]; reason?: string } = {}) => {
     const r = (await db.query<{ r: { outcome: string; assertion: Assertion } }>(`SELECT assert_priority($1, $2, $3, NULL, NULL, $4, $5, $6, false, $7::jsonb) AS r`,
       [kind, key, level, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.reason ?? null, JSON.stringify(actor)])).rows[0].r;
-    if (r.outcome !== "asserted") throw new Error(`[126] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+    if (r.outcome !== "asserted") throw new Error(`[127] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
     return r.assertion;
   };
   const clear = async (kind: string, key: string, actor: object) => db.query(`SELECT clear_priority($1, $2, $3::jsonb)`, [kind, key, JSON.stringify(actor)]);
@@ -20649,24 +20817,24 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
   const merge = async (s: string, l: string) => (await db.query<{ r: J }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [s, l])).rows[0].r;
 
-  // The shape: two new functions, and the four carried, each naming 139; the partial index.
+  // The shape: two new functions, and the four carried, each naming 141; the partial index.
   const named = (await db.query<{ n: string }>(
     `SELECT p.proname AS n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
-      WHERE s.nspname = 'public' AND obj_description(p.oid, 'pg_proc') ILIKE '%migration 139 / SMD-4241%' ORDER BY 1`)).rows.map((r) => r.n);
+      WHERE s.nspname = 'public' AND obj_description(p.oid, 'pg_proc') ILIKE '%migration 141 / SMD-4241%' ORDER BY 1`)).rows.map((r) => r.n);
   assert(JSON.stringify(named) === JSON.stringify(["apply_entity_type_gate", "merge_entities", "ob1_entity_has_open_priority", "ob1_priority_merge_entity",
                                                    "prune_orphan_entities", "record_thought_entities"]),
-    `six functions name 139: two new, four carried, rebuild_derived not among them (${named.join(", ")})`);
+    `six functions name 141: two new, four carried, rebuild_derived not among them (${named.join(", ")})`);
   const dueIdx = (await db.query<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'priority_assertions_open_due_ref_idx'`)).rows[0]?.d ?? "";
   assert(/\(due_ref_kind, due_ref_key\) WHERE \(\(closed_at IS NULL\) AND \(due_ref_key IS NOT NULL\)\)/.test(dueIdx),
     `a partial index on the open statements' due references serves the spare test and the merge (${dueIdx})`);
 
   // The ticket's Verify: an entity with a statement, re-extracted under the same name, keeps its id and its statement.
-  const t1 = await thought("[126] Atlas and Borealis ship on Friday");
-  await rte(t1, [E("[126] Atlas"), E("[126] Borealis")]);
-  const atlas = (await idOf("tool", "[126] Atlas"))!, borealis = (await idOf("tool", "[126] Borealis"))!;
+  const t1 = await thought("[127] Atlas and Borealis ship on Friday");
+  await rte(t1, [E("[127] Atlas"), E("[127] Borealis")]);
+  const atlas = (await idOf("tool", "[127] Atlas"))!, borealis = (await idOf("tool", "[127] Borealis"))!;
   const onAtlas = await put("entity", atlas, 4, OP, { reason: "the launch" });
-  const again = await rte(t1, [E("[126] Atlas"), E("[126] Borealis")]);
-  assert(again.ok === true && await idOf("tool", "[126] Atlas") === atlas && (await row(onAtlas.id)).close_reason === null,
+  const again = await rte(t1, [E("[127] Atlas"), E("[127] Borealis")]);
+  assert(again.ok === true && await idOf("tool", "[127] Atlas") === atlas && (await row(onAtlas.id)).close_reason === null,
     `a re-extraction naming the entity again keeps its id, and its statement stands (${JSON.stringify(again)})`);
 
   // The thought's next extraction names neither: Borealis, with no statement, is pruned; Atlas, with one, is spared, its
@@ -20677,9 +20845,9 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
     `record_thought_entities prunes the unmentioned entity without a statement and spares the one with an open statement (${JSON.stringify(none)})`);
 
   // A later capture naming Atlas finds it, under its id, statement and all.
-  const t2 = await thought("[126] Atlas again");
-  await rte(t2, [E("[126] Atlas")]);
-  assert(await idOf("tool", "[126] Atlas") === atlas && (await open("entity", atlas))[0]?.id === onAtlas.id,
+  const t2 = await thought("[127] Atlas again");
+  await rte(t2, [E("[127] Atlas")]);
+  assert(await idOf("tool", "[127] Atlas") === atlas && (await open("entity", atlas))[0]?.id === onAtlas.id,
     `a later capture naming the spared entity writes onto it, its statement standing`);
 
   // Cleared, the next prune touching it takes it.
@@ -20692,23 +20860,23 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   // 'operator: forget'), and spares nothing (the maintainer, review pass 1; review pass 2: whatever the reason says): the
   // walk's prune (a thought whose entities came through the writer, lineage and all) and the fallback's (mentions written
   // raw, no lineage row) both take an entity with a statement, which 136's trigger closes as deleted.
-  const walked = await thought("[126] the walk's thought");
-  await rte(walked, [E("[126] Walked kept"), E("[126] Walked gone")]);
-  const wKept = (await idOf("tool", "[126] Walked kept"))!, wGone = (await idOf("tool", "[126] Walked gone"))!;
+  const walked = await thought("[127] the walk's thought");
+  await rte(walked, [E("[127] Walked kept"), E("[127] Walked gone")]);
+  const wKept = (await idOf("tool", "[127] Walked kept"))!, wGone = (await idOf("tool", "[127] Walked gone"))!;
   const onWKept = await put("entity", wKept, 3, OP);
   const lineage = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = $1::uuid`, [walked])).rows[0].n;
   await db.query(`SELECT rebuild_derived($1::uuid, 'operator: forget', true, NULL, false, false)`, [walked]);
-  const raw = await thought("[126] the fallback's thought");
-  const fKept = await entity("[126] Fallback kept"), fGone = await entity("[126] Fallback gone");
+  const raw = await thought("[127] the fallback's thought");
+  const fKept = await entity("[127] Fallback kept"), fGone = await entity("[127] Fallback gone");
   await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:raw'), ($1::uuid, $3::uuid, 0.9, 'extract:raw')`, [raw, fKept, fGone]);
   const onFKept = await put("entity", fKept, 2, OP);
-  await db.query(`SELECT rebuild_derived($1::uuid, '[126] input gone', true, NULL, false, false)`, [raw]);
+  await db.query(`SELECT rebuild_derived($1::uuid, '[127] input gone', true, NULL, false, false)`, [raw]);
   assert(lineage === 1 && !(await exists(wKept)) && !(await exists(wGone)) && (await row(onWKept.id)).close_reason === "deleted"
          && !(await exists(fKept)) && !(await exists(fGone)) && (await row(onFKept.id)).close_reason === "deleted" && await drift() === 0,
     `rebuild_derived with its input leaving, whatever its reason, prunes an entity with a statement in the walk's prune and in the fallback's, closed as deleted (${lineage})`);
 
   // prune_orphan_entities spares it too; a deliberate DELETE still closes it as deleted (136).
-  const lone = await entity("[126] Lone with a word"), bare = await entity("[126] Lone bare");
+  const lone = await entity("[127] Lone with a word"), bare = await entity("[127] Lone bare");
   const onLone = await put("entity", lone, 5, BOT);
   const swept = (await db.query<{ n: number }>(`SELECT prune_orphan_entities() AS n`)).rows[0].n;
   const spared = await exists(lone), bareGone = !(await exists(bare));
@@ -20719,10 +20887,10 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   // An entity with no statement of its own that another item's open statement takes its due time from is spared too
   // (review pass 1: pruned, the reference named a deleted id and read no due time); once that statement is cleared, the
   // next prune takes it.
-  const tE = await thought("[126] Keel is named here");
-  await rte(tE, [E("[126] Keel")]);
-  const keel = (await idOf("tool", "[126] Keel"))!;
-  const dueOnKeel = await thought("[126] due when Keel is");
+  const tE = await thought("[127] Keel is named here");
+  await rte(tE, [E("[127] Keel")]);
+  const keel = (await idOf("tool", "[127] Keel"))!;
+  const dueOnKeel = await thought("[127] due when Keel is");
   await put("thought", dueOnKeel, 3, OP, { ref: ["entity", keel] });
   const keelPrune = await rte(tE, []);
   const keelSpared = await exists(keel);
@@ -20737,9 +20905,9 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   await db.exec(`CREATE ROLE ${BLIND} NOLOGIN`);
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${BLIND}`, ...grantStatements(BLIND, { groups: ["capture", "extraction"] }),
                     `REVOKE SELECT ON priority_assertions FROM ${BLIND}`]) await db.exec(st);
-  const blindT = await thought("[126] pruned by a role that cannot read priorities");
-  await rte(blindT, [E("[126] Blind")]);
-  const blind = (await idOf("tool", "[126] Blind"))!;
+  const blindT = await thought("[127] pruned by a role that cannot read priorities");
+  await rte(blindT, [E("[127] Blind")]);
+  const blind = (await idOf("tool", "[127] Blind"))!;
   const onBlind = await put("entity", blind, 3, OP);
   let blindRun = "";
   try {
@@ -20757,8 +20925,8 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   // A merge restates the due references naming the loser: another maker's statement on a thought, and a statement on the
   // survivor (its reference, which would now name itself, dropped: 116's CHECK refuses one); a closed statement naming the
   // loser untouched; the loser's own statement restated on the survivor beside them, as 136 does.
-  const S = await entity("[126] Survivor"), L = await entity("[126] Loser");
-  const tRef = await thought("[126] due when the loser is"), tRef2 = await thought("[126] also due when the loser is");
+  const S = await entity("[127] Survivor"), L = await entity("[127] Loser");
+  const tRef = await thought("[127] due when the loser is"), tRef2 = await thought("[127] also due when the loser is");
   const refBot = await put("thought", tRef, 3, BOT, { ref: ["entity", L], reason: "follows the loser" });
   const refOld = await put("thought", tRef2, 1, OP, { ref: ["entity", L] });
   await Bun.sleep(5);
@@ -20767,10 +20935,10 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   const onL = await put("entity", L, 2, OP);
   const m = await merge(S, L);
   const onT = await open("thought", tRef), onT2 = await open("thought", tRef2), onS = await open("entity", S);
-  const sBot = onS.find((h) => h.maker.name === "[126] bot"), sOp = onS.find((h) => h.maker.name === "[126] op");
+  const sBot = onS.find((h) => h.maker.name === "[127] bot"), sOp = onS.find((h) => h.maker.name === "[127] op");
   assert(m.ok === true && m.priority_refs_moved === 3 && m.priorities_moved === 1
          && onT.length === 1 && onT[0].due_ref?.key === S && onT[0].due_ref?.kind === "entity" && onT[0].level === 3 && onT[0].reason === "follows the loser"
-         && onT[0].maker.name === "[126] bot" && onT[0].asserted_at === refBot.asserted_at
+         && onT[0].maker.name === "[127] bot" && onT[0].asserted_at === refBot.asserted_at
          && (await row(refBot.id)).close_reason === "replaced" && (await row(refBot.id)).closed_by === onT[0].id
          && onT2.length === 1 && onT2[0].level === 2 && onT2[0].due_ref?.key === S && (await row(refOld.id)).closed_by === refNew.id
          && sBot?.level === 4 && sBot?.due_ref === null && (await row(refOnS.id)).closed_by === sBot?.id
@@ -20779,7 +20947,7 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
 
   // The maker's statement on the survivor naming the loser, restated with its reference dropped, is then replaced by the
   // same maker's later statement on the loser, restated: priority_refs_moved counts what still stands, none.
-  const S2 = await entity("[126] Survivor replaced"), L2 = await entity("[126] Loser later");
+  const S2 = await entity("[127] Survivor replaced"), L2 = await entity("[127] Loser later");
   const refOnS2 = await put("entity", S2, 1, OP, { ref: ["entity", L2] });
   await Bun.sleep(5);  // the times are what the merge compares, and PGlite's clock can give two calls one millisecond
   const onL2 = await put("entity", L2, 5, OP);
@@ -20793,8 +20961,8 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   const NOINS = "ob1_test_no_insert_126";
   await db.exec(`CREATE ROLE ${NOINS} NOLOGIN`);
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOINS}`, ...grantStatements(NOINS, { groups: ["capture", "extraction"] })]) await db.exec(st);
-  const sNo = await entity("[126] Survivor no insert"), lNo = await entity("[126] Loser no insert");
-  const tNo = await thought("[126] due when the loser no insert is");
+  const sNo = await entity("[127] Survivor no insert"), lNo = await entity("[127] Loser no insert");
+  const tNo = await thought("[127] due when the loser no insert is");
   const refNo = await put("thought", tNo, 3, OP, { ref: ["entity", lNo] });
   let noIns = "";
   try {
@@ -20808,8 +20976,8 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   await db.exec(`DROP OWNED BY ${NOINS}; DROP ROLE ${NOINS}`);
 
   // Under REPEATABLE READ a merge moves no reference, as the writers refuse a transaction there.
-  const sRR = await entity("[126] Survivor repeatable read"), lRR = await entity("[126] Loser repeatable read");
-  const tRR = await thought("[126] due when the loser repeatable read is");
+  const sRR = await entity("[127] Survivor repeatable read"), lRR = await entity("[127] Loser repeatable read");
+  const tRR = await thought("[127] due when the loser repeatable read is");
   const refRR = await put("thought", tRR, 3, OP, { ref: ["entity", lRR] });
   let rr = "";
   await db.transaction(async (tx) => {
@@ -20824,7 +20992,7 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   const toType = (await db.query<{ t: string | null }>(`SELECT entity_type_gate('WGT-1261', 'person') AS t`)).rows[0].t;
   const target = await entity("WGT-1261", toType ?? "tool"), retyped = await entity("WGT-1261", "person");
   const onRetyped = await put("entity", retyped, 4, OP, { reason: "the widget" });
-  const tGate = await thought("[126] due when the widget is");
+  const tGate = await thought("[127] due when the widget is");
   const refGate = await put("thought", tGate, 2, BOT, { ref: ["entity", retyped] });
   const gate = (await db.query<{ r: J }>(`SELECT apply_entity_type_gate() AS r`)).rows[0].r;
   const onTarget = await open("entity", target), onTGate = await open("thought", tGate);
