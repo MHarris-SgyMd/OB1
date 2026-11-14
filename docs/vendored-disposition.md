@@ -134,7 +134,7 @@ fails CI"):**
 
 Thirty scripts in twenty-one recipes reached the brain as PostgREST clients at the decision
 (twenty in thirteen remain — `obsidian-vault-import`'s and `local-ollama-embeddings`'
-retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim, SMD-2144 — `brain-backup`'s since `db/backup.ts`, SMD-3318 —
+retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim, SMD-2144 — since `db/backup.ts` and `db/lint-sweep.ts`, SMD-3318 —
 `thought-enrichment`'s three, SMD-2139, `weekly-digest`'s retired, SMD-2239, and
 `brain-smoke-test`'s, SMD-2103, and `ob-graph`'s with the recipe, SMD-2920, their rows kept as the record) —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
@@ -191,8 +191,8 @@ actor a JSON object naming the script; a `CITED` answer arrives as `data.ok === 
 `error`, and each ticket says whether a cited row stays or `p_detach` goes. The key variable
 (`SUPABASE_SERVICE_ROLE_KEY`, `OPEN_BRAIN_SERVICE_KEY`) is read and ignored by the shim, so a
 script may stop requiring it. The first two ports landed with SMD-2144 — `brain-backup` and
-`lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres (`brain-backup`'s
-export has since moved to `db/backup.ts`, driven in [50], SMD-3318); the first
+`lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres (both have
+since moved to `db/`: `db/backup.ts`, driven in [50], and `db/lint-sweep.ts`, in [26], SMD-3318); the first
 writers with SMD-2139 — `thought-enrichment`'s three backfills, `type`, `sensitivity_tier` and
 metadata through `.update().eq()`, never content or vector, driven in [29]; `weekly-digest`,
 the third read-only script at the decision, left the class: a sink posting thought text to Telegram,
@@ -240,7 +240,7 @@ nothing.
 | `entity-wiki` | `generate-wiki.mjs` (1) | `thoughts`, `entities`, `thought_entities` (016's on a migrated brain — above), `edges`; `match_thoughts`, `upsert_thought` (reads `OPEN_BRAIN_URL`) | a REST-core client (SMD-3216; was onto the shim) | SMD-2143 |
 | `fingerprint-dedup-backfill` | `delete-duplicates.mjs` (1), `backfill-fingerprints.mjs` (1) | `thoughts` (PATCH, DELETE) | `delete-duplicates.mjs` onto the shim, its deletes through `delete_thought`; `backfill-fingerprints.mjs` removed (migration 023) | SMD-2145 |
 | `google-activity-import` | `import-google-activity.mjs` (1) | `thoughts` (raw POST with a vector) | port onto the ingestion contract | SMD-2150 |
-| `lint-sweep` | `lint-sweep.js` (0; was 1) | `thoughts`, `entities`, `edges`, `thought_entities` (read; either URL name; the seven `lint_*` views are psql's, the script reads none) | on the shim since SMD-2144; read-only — recency by `created_at` (uuid ids), `edges` by entity-extraction's columns | SMD-2144 |
+| `lint-sweep` | none (was `lint-sweep.js`, 1) | — | tiers 1–2 moved to `db/lint-sweep.ts` (SMD-3318): the core's `thoughts` and 016's entity graph, read-only in one snapshot; its `importance` checks and exact-duplicate groups dropped; Tier 3 follows through the provider and egress gate (SMD-3318 PR 2b); the script gone, the README a pointer, `views.sql` kept; on the shim SMD-2144 → SMD-3318 | SMD-2144, SMD-3318 |
 | `local-ollama-embeddings` | `embed-local.py` (2) | `upsert_thought` over `/rest/v1/rpc/` | retired: the server embeds locally (`OB1_LLM_BASE_URL`), `db/reembed.ts` for existing rows; the directory, its two test-writes guards and its check 24 entry are gone | SMD-2138 |
 | `ob-graph` | `smoke-graph-rpcs.mjs` (gone) | `graph_nodes`, `graph_edges`; `traverse_graph`, `find_shortest_path` | **retired** with the recipe: the directory and its check 24 entry are gone | SMD-2920 ✅ (SMD-2146 canceled) |
 | `obsidian-vault-import` | `import-obsidian.py` (3) | `thoughts` (raw POST with a vector) | retired: `db/ingest-markdown.ts` is Daemonic Brain's Obsidian import (`ingest-records.ts --source markdown --markdown`); the directory, its registry rows and its check 24 entry are gone | SMD-2137 |
@@ -438,7 +438,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `journals-blogger-import` | keep + audited → SMD-1867 candidate → **ported onto the ingestion contract (SMD-2493)** | Blogger Atom-XML import; an emitter of ingestion-contract items for `db/ingest-records.ts --source items` since SMD-2493: no database client, no embedding call. |
 | `life-engine` | keep + audited | Background `/loop` personal-assistant recipe; own `schema.sql` (no core clobber). |
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
-| `lint-sweep` | keep + audited → **on the shim (SMD-2144)** | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. Tier 1 needs `schemas/enhanced-thoughts`' columns. |
+| `lint-sweep` | keep + audited → on the shim (SMD-2144) → **moved to `db/lint-sweep.ts` (SMD-3318)** | Read-only quality audit; tiers 1–2 are the `db/` script, Tier 3 follows (SMD-3318 PR 2b). The recipe keeps `views.sql`, whose views need `schemas/enhanced-thoughts`' columns. |
 | `live-retrieval` | keep + audited | Read-side "flywheel" workflow that surfaces thoughts on topic shifts. |
 | `local-brain-no-mcp` | ~~keep + audited *(own-database)*~~ → **retired (SMD-1800)** | Was a self-hosted LAN Supabase stack with three Edge Functions for curl-only capture/search/list where MCP is blocked. Daemonic Brain's stack (`SETUP.md`) already runs without a cloud, and `integrations/open-brain-rest` is the HTTP surface without MCP; the companion `skills/ob1-local-http` now calls it. Its check 7/10/11/22 exceptions went with it. |
 | `local-ollama-embeddings` | ~~keep + audited~~ → **retired (SMD-2138)** *(no-parity posture; SMD-2126 → SMD-2138)* | Was the capture-without-a-cloud-key recipe. The `ALTER COLUMN embedding TYPE` was a README example explicitly annotated "not altered by hand in Daemonic Brain — build at `db/config.mjs`'s width; `upsert_thought` refuses another width."; the example was CI-held (`test-writes.ts`, SMD-1524; its two guards went with it). **SMD-2126:** Daemonic Brain embeds locally by default (`OB1_LLM_BASE_URL`, `deploy/compose.yaml --profile local-models`) and `db/reembed.ts` re-embeds existing rows, so the recipe's capability is core and its only transport is one the stack lacks; it retired in SMD-2138 (test-writes' two text assertions on it went with it; the two models it named that `SETUP.md`'s table lacked are rows there — mxbai with Daemonic Brain's own 0.882 MRR, gte-qwen2 unmeasured here). |

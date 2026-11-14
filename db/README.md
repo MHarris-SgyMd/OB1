@@ -5721,6 +5721,31 @@ a brain with no companion table, the CLI's defaults, and a failed rename. Loaded
 what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
 brings a brain back.
 
+## A quality audit of the brain (SMD-3318)
+
+### `lint-sweep.ts`
+
+```bash
+bun lint-sweep.ts --url postgres://…                        # both tiers; ./lint-report-YYYY-MM-DD.md
+bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
+#   --tier 1|2|all (all; 3 is refused until SMD-3318 PR 2b)   --report <path> (absolute, or inside the working directory)
+#   exits 0 report written · 1 a read or the write failed (no report) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+```
+
+Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read
+in one REPEATABLE READ, READ ONLY transaction. Tier 1: the thoughts' row count
+and rows with no fingerprint (exact), and in the 2,000 newest the thoughts
+with no topics, tags or people, with more than 10 tags, or with empty or
+over-20,000-character content. Tier 2: in the 500 newest, the thoughts no
+`thought_entities` row mentions, and the `ob1_entities` with no edge (exact).
+The recipe's two `importance` checks and its exact-duplicate groups are gone:
+the core has no `importance` (SMD-3661), and migration 003's partial unique
+index rules duplicates out. The markdown report is written 0600 once every read
+succeeded. Tier 3, a model's reading of sampled thoughts, follows in SMD-3318
+PR 2b through the provider and the egress gate. test-live [26] holds every
+count against a planted table, the report's previews made safe, a role that
+may not read a table, and the refusals.
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
