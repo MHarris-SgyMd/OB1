@@ -48,9 +48,10 @@
  * JavaScript, which cut timestamps to milliseconds and wrote numerics as
  * strings.
  *
- * Every row once. Pages of 1,000 follow the table's primary key (keyset, not
- * OFFSET), and each table's rows written are compared with its count(*) in the
- * same snapshot; a difference fails the run.
+ * Every row once. Pages (100 rows for thoughts, 1,000 for the others) follow
+ * the table's primary key (keyset, not OFFSET), and each table's rows written
+ * are compared with its count(*) in the same snapshot; a difference fails the
+ * run.
  *
  * Nothing in place until the reads are done. Each table is written to a file
  * of this run's own (`<file>.<run id>.tmp`, the id the pid and a random part,
@@ -97,8 +98,8 @@
  * at a billion, the locks and the snapshot held throughout. A large brain's
  * backup is pg_dump.
  *
- * Not during an upgrade. A migration that alters a table the run reads (most
- * alter thoughts) asks for ACCESS EXCLUSIVE, waits behind the run's lock, and
+ * Not during an upgrade. A migration that alters a table the run reads
+ * (thoughts, most often) asks for ACCESS EXCLUSIVE, waits behind the run's lock, and
  * every read and write of that table waits behind it until the migrator's
  * 10 s lock timeout, when the upgrade fails (exit 1; run it again once the
  * backup is done). pg_dump does the same. One run at a time in a process: the

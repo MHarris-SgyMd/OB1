@@ -32352,7 +32352,7 @@ if (want("50")) {
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
     // The retired recipe's export (recipes/brain-backup, [26] until SMD-3318) as the db/ script: driven as deployed — `bun
-    // db/backup.ts` with DATABASE_URL alone — and in process for what a spawn cannot reach, a page of two rows and a
+    // db/backup.ts` with DATABASE_URL alone — and in process for what a spawn cannot reach, a page of three rows and a
     // write between tables. A companion table (schemas/entity-extraction's `entities`, in a shape of its own here) is
     // made when the database lacks one, and dropped after. The planted rows are the truth each file is held to, in Postgres: every row of the file is
     // a row of the table, none twice, as many as the table has, and each reads back through jsonb_populate_record into
@@ -32408,7 +32408,7 @@ if (want("50")) {
       await sql`CREATE TABLE ingestion_jobs (job text)`;
       madeJobs = true;
       // 1,001 thoughts, one past the CLI's page; one at a microsecond with a vector. Three entities; two thoughts'
-      // mentions and edges, so a page of two splits rows that share a thought.
+      // mentions and edges, so a page of three splits rows that share a thought.
       await sql.unsafe(`INSERT INTO thoughts (content, metadata) SELECT '[50] row ' || i, jsonb_build_object('i', i) FROM generate_series(1, 1000) i`);
       await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at, embedding) VALUES ('[50] the precise row', '{"n": 1.10}', '2026-01-02 03:04:05.123456+00', array_fill(0.123456789::real, ARRAY[${EMBEDDING_DIM}])::vector)`);
       await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
@@ -32433,9 +32433,10 @@ if (want("50")) {
              && /^  edges: not exported — a view \(public\.edges\) stands under the name$/m.test(cli.stdout)
              && /^  ingestion_jobs: not exported — a table of another shape \(public\.ingestion_jobs, primary key none, not \(id\)\) stands under the name$/m.test(cli.stdout)
              && /Done: 5 table\(s\) from one snapshot, in .*\. Not on this brain: ingestion_items\. Passed over, another relation under the name: edges, ingestion_jobs\./.test(cli.stdout) && cliFiles.every(exact)
+             && /^Total\s+1024\s+\d+(\.\d)? (B|KB|MB)$/m.test(cli.stdout) && !/An earlier run's file/.test(cli.stdout)
              && !cli.out.includes(URL_) && (password === "" || !cli.out.includes(`:${password}@`))
              && listed === PRESENT.map((t) => `${t.name}-${date}.json`).sort().join(" ") && modeOf(cliDir) === "700" && PRESENT.every((t) => modeOf(join(cliDir, `${t.name}-${date}.json`)) === "600"),
-        `bun db/backup.ts, DATABASE_URL alone: exit 0, the core's four files and the companion's, each the table's rows once and read back unchanged, 1,001 thoughts past the 1,000-row page, the absent companion named, the view under edges' name and the keyless table under ingestion_jobs' passed over, the directory 0700 and the files 0600, the URL never printed (exit ${cli.code}: ${cliFiles.map(brief).join("; ")}; ${listed}; ${cli.stderr.split("\n")[0]})`);
+        `bun db/backup.ts, DATABASE_URL alone: exit 0, the core's four files and the companion's, each the table's rows once and read back unchanged, 1,001 thoughts over 11 pages of 100, the summary's total 1,024 rows, no earlier run's file named, the absent companion named, the view under edges' name and the keyless table under ingestion_jobs' passed over, the directory 0700 and the files 0600, the URL never printed (exit ${cli.code}: ${cliFiles.map(brief).join("; ")}; ${listed}; ${cli.stderr.split("\n")[0]})`);
       assert(/"created_at": "2026-01-0[12]T\d\d:\d4:05\.123456[+-]\d\d:\d\d"/.test(cliFiles[0]?.text ?? "") && cliFiles[0]?.text.includes('"n": 1.10') === true && /"embedding": "\[0\.12345679,/.test(cliFiles[0]?.text ?? ""),
         `…the rows are Postgres's JSON: the timestamp keeps its microseconds, the numeric its trailing zero, the vector its text (${/"created_at": "2026-01-02[^"]*"/.exec(cliFiles[0]?.text ?? "")?.[0] ?? "no precise row"})`);
 
@@ -32517,17 +32518,31 @@ if (want("50")) {
         mkdirSync(midDir);
         writeFileSync(join(midDir, "thoughts-2026-01-08.json"), "[\"an earlier backup\"]\n");
         const midLines: string[] = [];
-        let tmpSeen = false;
+        let tmpSeen = false, thoughtsPages = 0;
         const mid = await runBackup({
           sql, out: midDir, date: "2026-01-08", writer: { out: () => {}, err: (l) => midLines.push(l) },
           afterTable: async (t) => {
             tmpSeen = readdirSync(midDir).some((f) => f.endsWith(".tmp"));
+            thoughtsPages = t.pages;
             throw new Error(`stopped after ${t.table}`);
           },
         });
-        assert(mid === 1 && tmpSeen && /backup FAILED — thoughts: stopped after thoughts\. No file was renamed into place, and this run's own files are removed\./.test(midLines.join(" "))
+        assert(mid === 1 && tmpSeen && thoughtsPages === 11 && /backup FAILED — thoughts: stopped after thoughts\. No file was renamed into place, and this run's own files are removed\./.test(midLines.join(" "))
                && readdirSync(midDir).join(" ") === "thoughts-2026-01-08.json" && readFileSync(join(midDir, "thoughts-2026-01-08.json"), "utf8") === "[\"an earlier backup\"]\n",
-          `…a run failing once thoughts is written: exit 1, its .tmp removed, the date's earlier file kept (exit ${mid}: tmp seen ${tmpSeen}; ${readdirSync(midDir).join(" ")}; ${midLines[0]?.slice(0, 120)})`);
+          `…a run failing once thoughts is written (11 pages of 100, thoughts' own page): exit 1, its .tmp removed, the date's earlier file kept (exit ${mid}: tmp seen ${tmpSeen}, ${thoughtsPages} page(s); ${readdirSync(midDir).join(" ")}; ${midLines[0]?.slice(0, 120)})`);
+      }
+
+      // A brain with no companion table — the common one — locks and exports the core's four alone.
+      {
+        await sql`DROP TABLE entities`;
+        madeEntities = false;
+        const bareLines: string[] = [];
+        const bare = await runBackup({ sql, out: join(scratch, "bare"), date: "2026-01-09", writer: { out: (l) => bareLines.push(l), err: (l) => bareLines.push(l) } });
+        assert(bare === 0 && /Done: 4 table\(s\) from one snapshot, in .*\. Not on this brain: entities, ingestion_items\. Passed over, another relation under the name: edges, ingestion_jobs\./.test(bareLines.join("\n")),
+          `…a brain without the companion table: the core's four exported, entities named absent (exit ${bare}: ${bareLines.find((l) => /^Done|FAILED/.test(l)) ?? bareLines[0]})`);
+        await sql`CREATE TABLE entities (id bigserial PRIMARY KEY, canonical_name text NOT NULL)`;
+        madeEntities = true;
+        await sql`INSERT INTO entities (canonical_name) VALUES ('Ada'), ('Bob'), ('Graphs')`;
       }
 
       // A table the role may not read: exit 1 naming it, nothing written, the date's earlier file untouched; with SELECT
@@ -32633,26 +32648,45 @@ if (want("50")) {
           const waiting = await pollUntil(async () => (await waitingNow()) === 1, 8000);
           child.kill("SIGTERM");
           const code = await child.exited;
+          // The CLI's handler exits 143 itself; a death by the signal's default also reads 143, but with signalCode set.
+          const own = child.signalCode === null;
           const ended = await pollUntil(async () => (await waitingNow()) === 0, 14_000);
-          return { code, out: "", stderr: `${waiting ? "waited" : "never waited"}; ${existsSync(termDir) ? `made [${readdirSync(termDir).join(" ")}]` : "no directory"}; ${ended ? "statement ended" : "statement still on the server"}` };
+          return { code, out: "", stderr: `${waiting ? "waited" : "never waited"}; ${own ? "its own exit" : `killed by ${child.signalCode}`}; ${existsSync(termDir) ? `made [${readdirSync(termDir).join(" ")}]` : "no directory"}; ${ended ? "statement ended" : "statement still on the server"}` };
         });
-        assert(term.code === 143 && /^waited; no directory; statement ended$/.test(term.stderr),
-          `…a SIGTERM while the run waits on its lock: exit 143, no directory made, the statement ended on the server while the hold stood (exit ${term.code}: ${term.stderr})`);
+        assert(term.code === 143 && /^waited; its own exit; no directory; statement ended$/.test(term.stderr),
+          `…a SIGTERM while the run waits on its lock: the CLI's own handler exits 143, no directory made, the statement ended on the server while the hold stood (exit ${term.code}: ${term.stderr})`);
       } finally {
         await locker.close();
       }
 
-      // installSignalCleanup, the CLI's: a real SIGTERM to a process holding a pending file removes it and exits 143.
+      // installSignalCleanup, the CLI's: a real SIGINT, SIGTERM or SIGHUP to a process holding a pending file removes it
+      // and exits 130, 143 or 129 by the handler's own exit (no signalCode).
       const sigDir = join(scratch, "signal");
       mkdirSync(sigDir);
-      const pendingPath = join(sigDir, "thoughts-2026-01-06.json.pending.tmp");
-      const sigChild = Bun.spawn(["bun", "--no-env-file", "-e", `const m = await import(${JSON.stringify(join(HERE, "backup.ts"))}); require("node:fs").writeFileSync(${JSON.stringify(pendingPath)}, "[\\n"); m.pendingFiles.add(${JSON.stringify(pendingPath)}); m.installSignalCleanup(); console.log("ready"); setInterval(() => {}, 1000);`], { cwd: scratch, env: env({}), stdout: "pipe", stderr: "pipe" });
-      const sigReady = await pollUntil(async () => existsSync(pendingPath), 8000);
-      await Bun.sleep(200);
-      sigChild.kill("SIGTERM");
-      const sigCode = await sigChild.exited;
-      assert(sigReady && sigCode === 143 && !existsSync(pendingPath),
-        `…installSignalCleanup: a SIGTERM removes the pending file and exits 143 (ready ${sigReady}, exit ${sigCode}, ${existsSync(pendingPath) ? "file left" : "file gone"})`);
+      const sigResults: string[] = [];
+      // Typed, not `as const`: a loop over a const tuple's union types took [50] past TypeScript's control-flow limit (TS2563).
+      const signals: [NodeJS.Signals, number][] = [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]];
+      for (const [sig, want] of signals) {
+        const pendingPath = join(sigDir, `thoughts-2026-01-06.json.${sig}.tmp`);
+        const sigChild = Bun.spawn(["bun", "--no-env-file", "-e", `const m = await import(${JSON.stringify(join(HERE, "backup.ts"))}); require("node:fs").writeFileSync(${JSON.stringify(pendingPath)}, "[\\n"); m.pendingFiles.add(${JSON.stringify(pendingPath)}); m.installSignalCleanup(); console.log("ready"); setInterval(() => {}, 1000);`], { cwd: scratch, env: env({}), stdout: "pipe", stderr: "pipe" });
+        const sigReady = await pollUntil(async () => existsSync(pendingPath), 8000);
+        await Bun.sleep(200);
+        sigChild.kill(sig);
+        const sigCode = await sigChild.exited;
+        sigResults.push(`${sig} ${sigReady ? "" : "never ready, "}exit ${sigCode}${sigChild.signalCode ? ` by ${sigChild.signalCode}` : ""}${existsSync(pendingPath) ? ", file left" : ""}${sigCode === want && sigChild.signalCode === null && sigReady && !existsSync(pendingPath) ? "" : " ✗"}`);
+      }
+      assert(sigResults.every((r) => !r.endsWith(" ✗")),
+        `…installSignalCleanup: SIGINT, SIGTERM and SIGHUP each remove the pending file and exit 130, 143 and 129 by the handler's own exit (${sigResults.join("; ")})`);
+
+      // The CLI's defaults: no --out writes ./backup under the working directory; --statement-timeout 0 is no bound, and
+      // one past the flag's range is usage, exit 2.
+      const defaultsDir = join(scratch, "defaults");
+      mkdirSync(defaultsDir);
+      const unbounded = await runScript(["bun", join(HERE, "backup.ts"), "--statement-timeout", "0"], { cwd: defaultsDir, env: env({ DATABASE_URL: URL_ }) });
+      const pastRange = await runScript(["bun", join(HERE, "backup.ts"), "--statement-timeout", "2147484"], { cwd: defaultsDir, env: env({ DATABASE_URL: URL_ }) });
+      const defaultFiles = existsSync(join(defaultsDir, "backup")) ? readdirSync(join(defaultsDir, "backup")).filter((f) => f.startsWith("thoughts-")) : [];
+      assert(unbounded.code === 0 && defaultFiles.length === 1 && pastRange.code === 2 && !/Brain backup/.test(pastRange.out),
+        `…the CLI's defaults: no --out writes ./backup under the working directory, --statement-timeout 0 runs, 2147484 is usage (${unbounded.code}: ${defaultFiles.join(" ") || "no file"}; ${pastRange.code}: ${pastRange.stderr.split("\n")[0]})`);
 
       // Another database than the URL's — PGDATABASE beats it in Bun's client — is refused before any directory is made.
       const otherDir = join(scratch, "other");

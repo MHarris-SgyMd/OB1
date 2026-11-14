@@ -5655,12 +5655,12 @@ ONLY transaction whose first statement locks every table it reads (ACCESS
 SHARE, before the snapshot, as pg_dump does), so the files agree and no
 TRUNCATE or rename lands under the run. Each row is Postgres's own
 `to_jsonb(row)`: timestamps keep their microseconds and the vector its text,
-and `jsonb_populate_record` reads a row back into the same values. Pages of
-1,000 follow each table's primary key, and each table's rows are compared with
+and `jsonb_populate_record` reads a row back into the same values. Pages
+follow each table's primary key, and each table's rows are compared with
 its `count(*)` in the same snapshot. Every file is written new to a
 `.<run id>.tmp` of its own (the pid and a random part; never through an
 existing path) and renamed only once all are, so a run that fails first renames
-nothing and removes its files; a directory it made once connected stays.
+nothing and removes its files; a directory it made once the tables were locked stays.
 SIGINT, SIGTERM and SIGHUP remove the run's files too; a run killed outright
 leaves them. A page of thoughts is 100 rows (the others 1,000), and the run
 holds about three times a page's JSON. Thoughts are read in key order, at
@@ -5683,12 +5683,12 @@ leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
 one named absent and a view and a keyless table under companions' names passed
 over, a page of three across composite keys, an empty table and an earlier
 run's companion file named, the one snapshot under a write between tables and
-a TRUNCATE kept waiting by the lock, the refusals of a role that may not read a
-table, of a planted path and of another database, the statement bound on the
+a TRUNCATE kept waiting by the lock, the failures of a role that may not read a
+table and of a planted path, the refusal of another database, the statement bound on the
 session and put back after a count, the lock taken before the snapshot, a run
 failing mid-read leaving no file of its own, a SIGTERM while the run waits on its lock
-(the statement ended on the server), the signal cleanup itself, and a failed
-rename. Loaded back into a brain the rows pass through its triggers and lack
+(the statement ended on the server), the signal cleanup itself (130, 143, 129),
+a brain with no companion table, the CLI's defaults, and a failed rename. Loaded back into a brain the rows pass through its triggers and lack
 what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
 brings a brain back.
 

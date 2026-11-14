@@ -97,7 +97,7 @@ cd ~/brain-backup && bun /path/to/checkout/db/backup.ts --out ~/brain-backups
 - **The timeout.** `--statement-timeout SECONDS` (60; 0 for none) bounds each
   page, as `FETCH_TIMEOUT_MS` did. The counts run unbounded.
 - **Not during an upgrade.** While the run holds its locks, a migration that
-  alters a table it reads (most alter `thoughts`) waits, the brain's reads and
+  alters a table it reads (`thoughts`, most often) waits, the brain's reads and
   writes of that table wait behind the migration, and after the migrator's 10 s
   lock timeout the upgrade fails: run it again once the backup is done.
   Schedule backups apart from upgrades; `pg_dump` behaves the same.
