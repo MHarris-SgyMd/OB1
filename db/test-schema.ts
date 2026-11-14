@@ -17247,8 +17247,8 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   // A role granted the priority group as 116 listed it, not re-granted after 117: every priority call it made still answers; only an item of kind item reaches open_items (review pass 2).
   const OLDROLE = "ob1_test_priority_at_116";
   await db.exec(`CREATE ROLE ${OLDROLE} NOLOGIN`);
-  // 117's open items, 132's weights and 133's thought_sources joined the group later.
-  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON (?:open_item|priority_weight_settings|thought_sources)/.test(st));
+  // 117's open items, 132's weights, 133's thought_sources and 142's findings joined the group later.
+  const at116 = grantStatements(OLDROLE, { groups: ["priority"] }).filter((st) => !/ON (?:open_item|priority_weight_settings|thought_sources|priority_findings)/.test(st));
   for (const st of [`GRANT USAGE ON SCHEMA public TO ${OLDROLE}`, ...grantStatements(OLDROLE, { groups: ["capture", "server"] }), ...at116]) await db.exec(st);
   const capOld = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role granted at 116");
   const oldUse = async (sql: string, params: unknown[]) => {
@@ -21020,6 +21020,243 @@ console.log("\n[127] Migration 141: an entity's priority statements follow it �
   const before = await closedCount();
   await reapply(file.slice(0, 4));
   assert(await closedCount() === before && await drift() === 0, `a re-apply closes nothing`);
+}
+
+console.log("\n[128] Migration 142: priority findings — ob1_priority_review() finds a stale statement by the brain's own keys (not a source's), an overdue item, an operator and a source two levels apart, and a statement left on a settled item, one pending finding each; refreshes, moots what no longer holds, and raises nothing a decision suppressed; review_priority_finding lets an operator key alone accept (stating a level, or clearing its own) or reject, the writers making the operator's statement; the shape; a re-apply a no-op (SMD-3671)");
+{
+  type J = Record<string, unknown>;
+  type Finding = { id: string; kind: string; item_kind: string; item_key: string; status: string; assertion_ids: string[]; evidence: J; suppressed_until: string | null };
+  const file = files.find((f) => /^\d{3}_priority_findings\.sql$/.test(f)) ?? "no NNN_priority_findings.sql";
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[128] op', 'operator'), ('[128] bot', 'agent')`);
+  const idOfAgent = async (label: string) => (await db.query<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).rows[0].id;
+  const OP = { name: "[128] op", agent_id: await idOfAgent("[128] op"), scope: "write" };
+  const BOT = { name: "[128] bot", agent_id: await idOfAgent("[128] bot"), scope: "write" };
+  const thought = async (content: string) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[128] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [content])).rows[0].id;
+    });
+    return id;
+  };
+  const put = async (kind: string, key: string, level: number, actor: object, due: string | null = null) => {
+    const r = (await db.query<{ r: { outcome: string; assertion: { id: string } } }>(`SELECT assert_priority($1, $2, $3, $4::timestamptz, NULL, NULL, NULL, NULL, false, $5::jsonb) AS r`,
+      [kind, key, level, due, JSON.stringify(actor)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[128] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+    return r.assertion.id;
+  };
+  // A source's statement, as board-sync writes one: tier 2, maker_source.
+  const sourced = async (kind: string, key: string, level: number) =>
+    (await db.query<{ id: string }>(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ($1, $2, $3, '[128] source', 'ingested', 'ingested', 'write', true, 2, now()) RETURNING id::text`, [kind, key, level])).rows[0].id;
+  const review = async (days = 60, plus = "61 days") =>
+    (await db.query<{ r: J }>(`SELECT ob1_priority_review($1, now() + $2::interval) AS r`, [days, plus])).rows[0].r;
+  const findings = async (key: string) =>
+    (await db.query<Finding>(`SELECT id::text, kind, item_kind, item_key, status, assertion_ids::text[], evidence, suppressed_until::text FROM priority_findings WHERE item_key = $1 ORDER BY found_at, kind`, [key])).rows;
+  const pending = async (key: string, kind: string) => (await findings(key)).find((f) => f.kind === kind && f.status === "pending");
+  const decide = async (id: string, decision: string, o: { level?: number; due?: string; clear?: boolean; note?: string } = {}, actor: object = OP) =>
+    (await db.query<{ r: J }>(`SELECT review_priority_finding($1::uuid, $2, $3, $4::timestamptz, $5, $6, $7::jsonb) AS r`,
+      [id, decision, o.level ?? null, o.due ?? null, o.clear ?? false, o.note ?? null, JSON.stringify(actor)])).rows[0].r;
+  const openOn = async (kind: string, key: string) =>
+    (await db.query<{ maker_name: string; level: number; tier: number }>(`SELECT maker_name, level, tier FROM ob1_priority_open($1, $2) ORDER BY seq`, [kind, key])).rows;
+  await db.exec(`DELETE FROM priority_findings`);
+
+  // The shape: the table, its one-pending index, three functions naming 142.
+  const fns = (await db.query<{ n: string }>(`SELECT p.proname AS n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+     WHERE s.nspname = 'public' AND obj_description(p.oid, 'pg_proc') LIKE '%Migration 142 / SMD-3671%' ORDER BY 1`)).rows.map((r) => r.n);
+  const uniq = (await db.query<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'priority_findings_one_pending'`)).rows[0]?.d ?? "";
+  assert(JSON.stringify(fns) === JSON.stringify(["ob1_priority_activity", "ob1_priority_review", "review_priority_finding"]) && /UNIQUE INDEX .*\(kind, item_kind, item_key\) WHERE \(status = 'pending'/.test(uniq),
+    `three functions name 142, and one pending finding per kind and item is the index's (${fns.join(", ")})`);
+
+  // The ticket's Verify, seeded: an agent's level-4 statement with no activity for 61 days, an open item due the day
+  // before, and an operator's High against a source's Low each yield one finding; nothing's priority changes.
+  const staleT = await thought("[128] a note an agent marked urgent and nobody touched");
+  const staleId = await put("thought", staleT, 4, BOT);
+  const dueT = await thought("[128] a note due tomorrow");
+  await put("thought", dueT, 2, BOT, new Date(Date.now() + 86_400_000).toISOString());
+  const odItem = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, $2, NULL, NULL, false, $3::jsonb) AS r`,
+    ["[128] renew the lease", new Date(Date.now() + 86_400_000).toISOString(), JSON.stringify(OP)])).rows[0].r;
+  const itemId = String((odItem.item as J | undefined)?.id ?? odItem.id ?? (odItem.item as J | undefined)?.item_id ?? "");
+  const disT = await thought("[128] a note the operator and its source disagree on");
+  const srcId = await sourced("thought", disT, 1);
+  const opId = await put("thought", disT, 3, OP);
+  const before = JSON.stringify([await openOn("thought", staleT), await openOn("thought", dueT), await openOn("thought", disT)]);
+  const first = await review(60, "2 days");  // the window not passed: overdue and disagree only
+  // The scan is the brain's whole: earlier sections' statements make findings of their own, so this section reads its items'.
+  const early = [await pending(dueT, "overdue"), await pending(itemId, "overdue"), await pending(disT, "disagree")];
+  const earlyStale = await pending(staleT, "stale");
+  const r1 = await review();                   // 61 days on: stale too
+  const st = await pending(staleT, "stale"), od = await pending(dueT, "overdue"), oi = await pending(itemId, "overdue"), dg = await pending(disT, "disagree");
+  const after = JSON.stringify([await openOn("thought", staleT), await openOn("thought", dueT), await openOn("thought", disT)]);
+  assert(early.every(Boolean) && !earlyStale && (first.found as number) >= 3,
+    `two days on, before the window: the two overdue and the disagreement, no stale yet (${JSON.stringify(first)})`);
+  assert(itemId !== "" && !!st && st.assertion_ids.includes(staleId) && !!od && !!oi && !!dg && dg.assertion_ids.includes(opId) && dg.assertion_ids.includes(srcId)
+         && (dg.evidence.operator as J).level === 3 && (dg.evidence.source as J).level === 1 && before === after,
+    `seeded: a stale agent statement, a note and an open item past due, and an operator's 3 against a source's 1 each yield one pending finding; no statement moves (${JSON.stringify(r1)})`);
+
+  // A source's own statement never goes stale (decision 9: Linear's level is Linear's); nor a level-0 one. The note
+  // holds an agent's level 0 beside its source's 3, so the scan reads it (a pool of source statements alone is not read).
+  const srcOnlyT = await thought("[128] a note its source stated on, and an agent at none");
+  await sourced("thought", srcOnlyT, 3);
+  await put("thought", srcOnlyT, 0, BOT);
+  const noneT = await thought("[128] a note stated at none");
+  await put("thought", noneT, 0, BOT);
+  await review();
+  assert((await findings(srcOnlyT)).length === 0 && (await findings(noneT)).length === 0,
+    `a source's statement, and a statement at level 0, raise no stale finding`);
+
+  // Idempotent: a second scan refreshes, finds nothing new.
+  const r2 = await review();
+  assert(r2.found === 0 && (r2.refreshed as number) >= 4 && (await findings(staleT)).filter((f) => f.kind === "stale").length === 1,
+    `a second scan finds nothing new and refreshes what stands (${JSON.stringify(r2)})`);
+
+  // A condition gone: moot. The operator agrees with the source now (a level within one).
+  await put("thought", disT, 2, OP);
+  const r3 = await review();
+  const dgNow = (await findings(disT)).find((f) => f.id === dg!.id);
+  assert(dgNow?.status === "moot" && !(await pending(disT, "disagree")) && (r3.moot as number) >= 1,
+    `the operator's level moved within one of the source's: the pending disagreement goes moot (${JSON.stringify(r3)})`);
+
+  // settled: an agent's statement on an open item since done yields a settled finding, not stale.
+  const settledItem = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, NULL, NULL, NULL, false, $2::jsonb) AS r`, ["[128] fix the gate", JSON.stringify(OP)])).rows[0].r;
+  const sItem = String((settledItem.item as J | undefined)?.id ?? settledItem.id ?? "");
+  await put("item", sItem, 3, BOT);
+  await db.query(`SELECT set_item_status($1, 'done', NULL, $2::jsonb)`, [sItem, JSON.stringify(OP)]);
+  await review();
+  const sf = await findings(sItem);
+  assert(sf.some((f) => f.kind === "settled" && f.status === "pending") && !sf.some((f) => f.kind === "stale"),
+    `a statement left on an item since done yields a settled finding, not a stale one (${sf.map((f) => f.kind).join(", ")})`);
+
+  // Only an operator key decides, by its agent id.
+  const notOp = await decide(st!.id, "reject", {}, BOT);
+  const byName = await decide(st!.id, "reject", {}, { name: "[128] op", scope: "write" });
+  assert(notOp.error === "NOT_OPERATOR" && byName.error === "NOT_OPERATOR" && (await pending(staleT, "stale"))?.id === st!.id,
+    `an agent key, and the operator named by name alone, are refused NOT_OPERATOR; the finding stays pending (${notOp.error}, ${byName.error})`);
+
+  // Accepting says the outcome: neither or both refused.
+  const neither = await decide(st!.id, "accept");
+  const both = await decide(st!.id, "accept", { level: 2, clear: true });
+  const rejectWithLevel = await decide(st!.id, "reject", { level: 2 });
+  assert(neither.error === "ACCEPT_NEEDS_OUTCOME" && both.error === "ACCEPT_NEEDS_OUTCOME" && rejectWithLevel.error === "BAD_OUTCOME",
+    `accepting needs a level or clear, not both; a level goes with accepting (${neither.error}, ${both.error}, ${rejectWithLevel.error})`);
+
+  // Accepting with a level: the operator's own statement, tier 1, through assert_priority; suppressed for the window.
+  const acc = await decide(st!.id, "accept", { level: 1, note: "no longer urgent" });
+  const onStale = await openOn("thought", staleT);
+  assert(acc.ok === true && acc.status === "accepted" && onStale.some((s) => s.maker_name === "[128] op" && s.tier === 1 && s.level === 1)
+         && onStale.some((s) => s.maker_name === "[128] bot" && s.level === 4) && typeof acc.suppressed_until === "string",
+    `accepting with level 1 writes the operator's tier-1 statement beside the agent's, which stands; suppressed until the window passes (${JSON.stringify(acc).slice(0, 160)})`);
+  const again = await decide(st!.id, "reject");
+  assert(again.error === "NOT_PENDING" && again.status === "accepted", `a decided finding is not decided again (${again.error})`);
+
+  // Rejecting changes nothing, and suppresses the same finding for the window: the overdue note stays overdue, unraised.
+  const rej = await decide(od!.id, "reject", { note: "it can wait" });
+  const r4 = await review(60, "2 days");  // within the decision's window
+  assert(rej.ok === true && rej.status === "rejected" && !(await pending(dueT, "overdue")) && (r4.suppressed as number) >= 1,
+    `rejecting changes nothing, and the same overdue finding is not raised again within the window (${JSON.stringify(r4)})`);
+  // Past the window, it is raised again.
+  const r5 = await review(60, "200 days");
+  assert(!!(await pending(dueT, "overdue")), `past the decision's window, the finding is raised again (${JSON.stringify(r5)})`);
+
+  // Clearing closes the operator's own statement; with none, NOTHING_TO_CLEAR and the finding stays pending.
+  const nothing = await decide(oi!.id, "accept", { clear: true });
+  assert(nothing.error === "NOTHING_TO_CLEAR" && (await pending(itemId, "overdue"))?.id === oi!.id,
+    `clearing where the operator holds no statement is refused NOTHING_TO_CLEAR, the finding pending (${nothing.error})`);
+  const clrT = await thought("[128] the operator's own stale word");
+  await put("thought", clrT, 3, OP);
+  await review();
+  const cf = await pending(clrT, "stale");
+  const cleared = await decide(cf!.id, "accept", { clear: true });
+  assert(cleared.ok === true && (await openOn("thought", clrT)).length === 0 && (cleared.answer as J).outcome === "cleared",
+    `clearing closes the operator's own stale statement through clear_priority (${JSON.stringify(cleared).slice(0, 120)})`);
+
+  // Accepting an overdue finding with a new due time: the operator states the level and the due time.
+  const newDue = new Date(Date.now() + 90 * 86_400_000).toISOString();
+  const moved = await decide(oi!.id, "accept", { level: 2, due: newDue });
+  const onItem = (await db.query<{ due_at: string }>(`SELECT due_at::text FROM ob1_priority_open('item', $1) WHERE maker_name = '[128] op'`, [itemId])).rows;
+  assert(moved.ok === true && onItem.length === 1 && Date.parse(onItem[0].due_at) === Date.parse(newDue),
+    `accepting an overdue finding with level 2 and a new due time writes the operator's statement with them (${JSON.stringify(moved).slice(0, 120)})`);
+
+  // A bad window is refused; so is a role without the priority group's grant on the findings.
+  let badWindow = "";
+  try { await db.query(`SELECT ob1_priority_review(0)`); } catch (e) { badWindow = String((e as { code?: string }).code); }
+  const NOGRANT = "ob1_test_no_findings";
+  await db.exec(`CREATE ROLE ${NOGRANT} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOGRANT}`, ...grantStatements(NOGRANT, { groups: ["capture", "server"] })]) await db.exec(st);
+  let noGrant = "";
+  try { await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${NOGRANT}`); await tx.query(`SELECT ob1_priority_review()`); }); }
+  catch (e) { noGrant = String((e as { code?: string }).code); }
+  await db.exec(`DROP OWNED BY ${NOGRANT}; DROP ROLE ${NOGRANT}`);
+  assert(badWindow === "22023" && noGrant === "42501", `a window of 0 days is refused 22023; a role without the priority group 42501 (${badWindow}, ${noGrant})`);
+
+  // A writer's refusal decides nothing (review pass 1): a read-only operator key's accept is WRITER_REFUSED, the
+  // finding still pending. A note past the writer's 1000-character reason is kept whole, the reason cut.
+  const roT = await thought("[128] a note a read-only operator key reviews");
+  await put("thought", roT, 3, BOT);
+  await review();
+  const rof = await pending(roT, "stale");
+  const readOnly = await decide(rof!.id, "accept", { level: 1 }, { ...OP, scope: "read" });
+  const longNote = "n".repeat(1500);
+  const longAcc = await decide(rof!.id, "accept", { level: 1, note: longNote });
+  const kept = (await db.query<{ n: number }>(`SELECT length(decision_note)::int AS n FROM priority_findings WHERE id = $1::uuid`, [rof!.id])).rows[0].n;
+  assert(readOnly.error === "WRITER_REFUSED" && longAcc.ok === true && kept === 1500,
+    `a read-only key's accept is WRITER_REFUSED, deciding nothing; a 1500-character note is kept whole, the reason cut to the writer's limit (${readOnly.error}, ${longAcc.ok}, ${kept})`);
+
+  // A maker's older statement in a ticket's pool is not its stance (review pass 1): the operator's 5 on the ticket's own
+  // row and its later 2 on the ticket, both open (written raw, as a late row leaves them), against the source's 1 on
+  // the ticket — its newest, 2, agrees within one, so no disagreement.
+  let rowT = "";
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[128] op" })]);
+    const content = "[128] SMD-9871 the ticket's own row";
+    rowT = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`,
+      [content, JSON.stringify({ source: "linear", issue: "SMD-9871", status: "Backlog", status_type: "backlog", linear_updated_at: "2027-03-01T00:00:00Z" })])).rows[0].id;
+    await tx.query(`SELECT record_thought_source($1::uuid, 'linear', 'SMD-9871', $2, 'text/markdown')`, [rowT, content]);
+  });
+  const rawOp = async (kind: string, key: string, level: number) =>
+    db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ($1, $2, $3, '[128] op', $4::uuid, 'operator', 'operator', 'write', false, 1, now())`, [kind, key, level, OP.agent_id]);
+  await rawOp("thought", rowT, 5);
+  await Bun.sleep(5);
+  await rawOp("ticket", "SMD-9871", 2);
+  await sourced("ticket", "SMD-9871", 1);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await review(60, "2 days");
+  const subject = (await db.query<{ k: string }>(`SELECT (ob1_priority_subject('thought', $1)).key AS k`, [rowT])).rows[0].k;
+  assert(subject === "SMD-9871" && !(await pending("SMD-9871", "disagree")),
+    `the operator's newest statement in the ticket's pool (2) agrees within one of the source's 1: its older 5 on the ticket's row raises no disagreement (${subject})`);
+
+  // A settled finding decided is not raised again while its statements are those decided on (review pass 1): past
+  // the window too, as the agent's statement on the done item stays open (only its maker can close it).
+  const sfp = sf.find((f) => f.kind === "settled" && f.status === "pending")!;
+  await decide(sfp.id, "reject", { note: "the agent's to clear" });
+  await review(60, "200 days");
+  assert(!(await pending(sItem, "settled")), `a decided settled finding is not raised again past its window while its statements are the same`);
+
+  // Activity within the window keeps a statement from going stale: a note stated on, then edited; the scan's now put
+  // 60 days past a moment between the statement and the edit, so the statement is older than the window and the edit
+  // within it. A note stated before that moment and not edited is the control: stale.
+  const activeT = await thought("[128] a note stated on, then edited");
+  const ctlT = await thought("[128] a note stated on, never edited");
+  await put("thought", ctlT, 3, BOT);
+  await put("thought", activeT, 3, BOT);
+  await Bun.sleep(20);
+  const mid = (await db.query<{ m: string }>(`SELECT (clock_timestamp() - interval '10 milliseconds')::text AS m`)).rows[0].m;
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[128] op" })]);
+    await tx.query(`UPDATE thoughts SET content = content || ' (edited)' WHERE id = $1::uuid`, [activeT]);
+  });
+  const edited = (await db.query<{ u: string }>(`SELECT updated_at::text AS u FROM thoughts WHERE id = $1::uuid`, [activeT])).rows[0].u;
+  await db.query(`SELECT ob1_priority_review(60, $1::timestamptz + interval '60 days')`, [mid]);
+  assert(Date.parse(edited) > Date.parse(mid) && !(await pending(activeT, "stale")) && !!(await pending(ctlT, "stale")),
+    `a note edited within the window is active, no stale finding; the note left alone is stale (${edited} after ${mid})`);
+
+  // A re-apply keeps the rows and replaces the functions as they were.
+  const count = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings`)).rows[0].n;
+  const n = await count();
+  await reapply(file.slice(0, 4));
+  assert(await count() === n && (await review()).ok === true, `a re-apply keeps the findings and the scan answers (${n})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

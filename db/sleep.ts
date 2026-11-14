@@ -550,6 +550,10 @@ const RESTART_EVERY_MS = 60_000;
 const WAKE_SLACK_S = 30;
 /** The longest --poll: the idle wait is at most a minute, the heartbeat's floor, and a poll past it would break that. */
 const MAX_POLL_S = 60;
+/** The priority review's least interval (SMD-3671): its scan reads every pool holding a statement, so not every period. */
+export const PRIORITY_REVIEW_EVERY_MS = 6 * 3600 * 1000;
+/** A failed review is tried again after this, not the whole interval (review pass 1). */
+const PRIORITY_REVIEW_RETRY_MS = 10 * 60 * 1000;
 /** A pass's statement_timeout: a statement past it is cancelled (57014), and the pass is held until a restart (N9). 0 is none. */
 const DEFAULT_STATEMENT_TIMEOUT_S = 300;
 /** A pass's work_mem: Postgres's own default, which a server SMD-1499 sizes up would otherwise hand the background passes too. */
@@ -636,6 +640,8 @@ export interface SleepOptions {
   rescanMs?: number;
   /** The sweep's thoughts a period in place of sweepOrphans' 500, when a test reaches its limit sooner (SMD-3379 PR 1c-4b). */
   sweepLimit?: number;
+  /** The priority review's least interval in ms in place of PRIORITY_REVIEW_EVERY_MS (six hours), when a test runs it each period (SMD-3671). */
+  priorityReviewEveryMs?: number;
   /** The capture in ms in place of `capture`'s whole seconds, when a test drives it faster. */
   captureMs?: number;
   /** N12's bound in ms in place of `abortAfter`'s whole seconds, when a test drives it faster: at or above the stall floor. */
@@ -1379,7 +1385,51 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (sweepRead === null) { err(STOPPED_EARLY); return 130; }
   /** Whether each period runs the re-derive sweep: off for this process once a call is refused its privilege. */
   let sweeps = sweepRead === "yes";
+  // The priority review's scan (142, SMD-3671) and what it takes: EXECUTE on
+  // it and the priority group's write on its findings, read once as the
+  // sweep's is. Without them the periods review nothing, said once.
+  const reviewRead = await atStart(async () => (await sql`
+    SELECT CASE WHEN to_regprocedure('ob1_priority_review(integer, timestamp with time zone)') IS NULL THEN 'missing'
+                WHEN has_function_privilege('ob1_priority_review(integer, timestamp with time zone)', 'EXECUTE')
+                 AND has_table_privilege('priority_findings', 'INSERT') AND has_table_privilege('priority_findings', 'UPDATE')
+                 AND has_table_privilege('priority_assertions', 'SELECT') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
+  if (reviewRead === null) { err(STOPPED_EARLY); return 130; }
   if (!sweeps) err(`  re-derive: ${sweepRead === "missing" ? "rebuild_derived is not on this brain (migration 063 not applied)" : "this role cannot execute rebuild_derived (GRANT EXECUTE ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) TO the role, as the owner)"} — the periods sweep no orphaned lineage row; a running scheduler takes it up once restarted`);
+  /** Whether the periods run the priority review: off for this process once a call is refused its privilege. */
+  // A dry run writes nothing, so it reviews nothing.
+  let reviews = reviewRead === "yes" && !opts.dryRun;
+  if (!reviews) err(`  priority review: ${reviewRead === "missing" ? "ob1_priority_review is not on this brain (migration 142 not applied)" : "this role lacks what it takes (EXECUTE on ob1_priority_review, the priority group's write on priority_findings)"} — the periods propose no priority finding; a running scheduler takes it up once restarted`);
+  /** When the priority review last ran, or is next due after a failure (0: due now). */
+  let reviewedAt = 0;
+  const REVIEW_EVERY_MS = opts.priorityReviewEveryMs ?? PRIORITY_REVIEW_EVERY_MS;
+  /**
+   * The priority review (SMD-3671): ob1_priority_review()'s scan, at an idle poll and at a period's start, at most once
+   * every REVIEW_EVERY_MS — an idle brain's priorities are the ones that go stale, so the review waits on no work (review
+   * pass 1). One statement on a connection of its own, held to a minute and its locks waited half of one: it proposes
+   * findings and changes no priority, so nothing waits on it long. A courtesy, as the re-derive sweep is: a failure is
+   * said and tried again after PRIORITY_REVIEW_RETRY_MS; a call refused its privilege (42501) or a function gone (42883)
+   * ends the reviews for this process.
+   */
+  const priorityReview = async (): Promise<void> => {
+    if (!reviews || Date.now() - reviewedAt < REVIEW_EVERY_MS) return;
+    const client = openSql(url, { max: 1, session: { ...SESSION, statement_timeout: "60s", lock_timeout: "30s" } });
+    try {
+      const r = (await client`SELECT ob1_priority_review() AS r`)[0].r as { found: number; refreshed: number; moot: number; suppressed: number; pending: number };
+      reviewedAt = Date.now();
+      out(`  [priority review] ${r.found} found, ${r.refreshed} still standing, ${r.moot} moot, ${r.suppressed} held back by a decision; ${r.pending} pending`);
+    } catch (e) {
+      const code = (e as { errno?: string }).errno;
+      if (code === "42501" || code === "42883") {
+        reviews = false;
+        err(`  priority review: ${(e as Error).message} — the reviews stop for this process`);
+      } else {
+        reviewedAt = Date.now() - REVIEW_EVERY_MS + PRIORITY_REVIEW_RETRY_MS;
+        err(`  priority review: ${(e as Error).message} — tried again in ${PRIORITY_REVIEW_RETRY_MS / 60_000} minutes`);
+      }
+    } finally {
+      await client.close().catch(() => {});
+    }
+  };
 
   /** The embedding model the brain records ("" for none): re-embed never switches it, and a record unlike EMBED's sets the pass aside. */
   const recordedModel = async (): Promise<string> => ((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0]?.value as string | undefined) ?? "";
@@ -2217,6 +2267,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let wholeWork = false;
     for (let first = true; !stopping; first = false) {
       if (await outsideNow()) return null;
+      // The priority review, at most once an interval, whether or not a pass has work (SMD-3671).
+      await priorityReview();
       // A model switch's record put right while idle — a --switch-model run by hand, which writes no audited row —
       // read each poll, as a period reads it: the next read whole takes up re-embed's backlog.
       if (reembedAside !== null) {
@@ -2531,6 +2583,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     const swept = await sweep(from);
     if (swept === "stopped") return stopped();
     if (swept === "woken") return "woken";
+    // The priority review after it, at most once an interval (SMD-3671); a stop during it starts no pass.
+    await priorityReview();
+    if (stopping) return stopped();
     // ── The pause (SMD-3379 PR 1c-3b) ──────────────────────────────────────
     // A live write closes this period's gate: the passes stay up and wait at it
     // between thoughts, windows and pairs, holding no claim between thoughts,
