@@ -150,6 +150,10 @@
       "scope": "write"
     },
     {
+      "name": "set_work_claim_cap",
+      "scope": "write"
+    },
+    {
       "name": "capture_deliverable",
       "scope": "write"
     },

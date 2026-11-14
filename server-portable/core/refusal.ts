@@ -81,6 +81,8 @@ export type Refusal =
   | { code: "REFUSED_PRIORITY_INPUT"; retryable: false; problem: PriorityProblem; message: string } // an argument 116 refused by its rule (SQLSTATE 22023); message: the database's words
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own thoughts, is not to hand while the registry may answer
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
+  | { code: "CLAIM_CAP_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // set_work_claim_cap needs the operator's agent id to classify the key, and the registry does not give it just now (SMD-3606 PR 1b)
+  | { code: "CLAIM_CAP_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
   // Open items (117, SMD-3665 PR 2): the item writers' own refusals. ITEM_NOT_FOUND, ITEM_NOT_YOURS and READ_ONLY_KEY
   // above answer them too, an open item named `{kind: "item", key: <its id>}` — ITEM_NOT_YOURS's item null for a
   // proposal a capture-only key may not decide, which names no item it may be told of.
@@ -231,6 +233,7 @@ const FACTS: Facts = {
   REFUSED_PRIORITY_INPUT: (r) => ({ problem: r.problem }),
   READ_ONLY_KEY: none,
   PRIORITY_UNATTRIBUTED: (r) => ({ cause: r.cause }),
+  CLAIM_CAP_UNATTRIBUTED: (r) => ({ cause: r.cause }),
   // The open items' (SMD-3665 PR 2): ids and the words 117 answers in, never another key's text.
   REFUSED_ITEM_INPUT: (r) => ({ problem: r.problem }),
   ITEM_UNOWNABLE: none,
