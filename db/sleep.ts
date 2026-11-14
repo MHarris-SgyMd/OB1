@@ -1393,6 +1393,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
                 WHEN has_function_privilege('ob1_priority_review(integer, timestamp with time zone)', 'EXECUTE')
                  AND has_table_privilege('priority_findings', 'SELECT') AND has_table_privilege('priority_findings', 'INSERT')
                  AND has_table_privilege('priority_findings', 'UPDATE') AND has_table_privilege('priority_assertions', 'SELECT')
+                 -- Every table the scan reads (review pass 4: an entity's mentions are the extraction group's).
+                 AND has_table_privilege('thought_audit', 'SELECT') AND has_table_privilege('thought_entities', 'SELECT')
+                 AND has_table_privilege('thought_facets', 'SELECT') AND has_table_privilege('open_items', 'SELECT')
+                 AND has_table_privilege('ob1_ticket_head', 'SELECT')
                  -- The scan's working tables are temporary (review pass 3).
                  AND has_database_privilege(current_database(), 'TEMP') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
   if (reviewRead === null) { err(STOPPED_EARLY); return 130; }
@@ -1400,7 +1404,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** Whether the periods run the priority review: off for this process once a call is refused its privilege. */
   // A dry run writes nothing, so it reviews nothing, and says nothing of it (review pass 2: it said the role lacked grants).
   let reviews = reviewRead === "yes" && !opts.dryRun;
-  if (reviewRead !== "yes" && !opts.dryRun) err(`  priority review: ${reviewRead === "missing" ? "ob1_priority_review is not on this brain (migration 142 not applied)" : "this role lacks what it takes (EXECUTE on ob1_priority_review, the priority group's grant on priority_findings, TEMP on the database)"} — the periods propose no priority finding; a running scheduler takes it up once restarted`);
+  if (reviewRead !== "yes" && !opts.dryRun) err(`  priority review: ${reviewRead === "missing" ? "ob1_priority_review is not on this brain (migration 142 not applied)" : "this role lacks what it takes (EXECUTE on ob1_priority_review, the priority group's grant on priority_findings, SELECT on thought_audit, thought_entities, thought_facets, open_items and ob1_ticket_head, TEMP on the database)"} — the periods propose no priority finding; a running scheduler takes it up once restarted`);
   /** When the priority review last ran, or is next due after a failure (0: due now). */
   let reviewedAt = 0;
   const REVIEW_EVERY_MS = opts.priorityReviewEveryMs ?? PRIORITY_REVIEW_EVERY_MS;
@@ -1419,6 +1423,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // A stop cancels the scan on the server, as the sweep's grace does, rather than waiting out its minute (review
       // pass 2): its backend read first, on its one connection.
       const pid = Number((await client`SELECT pg_backend_pid() AS pid`)[0].pid);
+      // A stop while the backend was read starts no scan: a cancel sent before it began would reach an idle backend
+      // and cancel nothing (review pass 4).
+      if (stopping || onStop.signal.aborted) return;
       const scan = client`SELECT ob1_priority_review() AS r`.then((rows) => ({ rows }), (e: unknown) => ({ e: e as Error }));
       let onAbort = (): void => {};
       const stopped = new Promise<"stop">((res) => {

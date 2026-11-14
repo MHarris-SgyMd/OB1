@@ -73,7 +73,9 @@
 --   NOT CHANGED. No priority is changed by a finding; nothing is posted to
 --   Linear (SMD-4304); the operations over REST and MCP, brain_info's count
 --   and preflight's row are PR 2; the read's "stated N days ago,
---   unreviewed" label is PR 3. Clearing closes the operator's own statement
+--   unreviewed" label is PR 3. A hand-run re-embed (db/reembed.ts without
+--   --follow) marks its writes not background, so they read as activity
+--   (review pass 4, said: the marking is reembed.ts's). Clearing closes the operator's own statement
 --   only: another maker's stale statement is outranked by the operator
 --   stating a level (0 for none), as decision 4's tiers have it.
 --
@@ -160,7 +162,7 @@ CREATE INDEX IF NOT EXISTS priority_findings_suppressed
 -- ---------------------------------------------------------------------------
 -- ob1_priority_activity — when an item was last active
 -- ---------------------------------------------------------------------------
--- The newest of: a statement on its pool; for a ticket, its head row written
+-- The newest of: a statement on its pool made, or cleared or replaced; for a ticket, its head row written
 -- or a thought standing on its subject captured; for a thought, its row
 -- written; for an open item, its last change; for an entity, its last
 -- sighting (a thought captured that mentions it); an operator's decision on a
@@ -179,6 +181,12 @@ DECLARE
   v_at timestamptz;
 BEGIN
   SELECT max(a.asserted_at) INTO v_at FROM ob1_priority_open(p_kind, p_key) a;
+  -- A statement on its pool cleared or replaced: a maker acting on it, even
+  -- with nothing left open from it (review pass 4: a clear made directly was
+  -- not activity, though a decision through a finding is).
+  v_at := GREATEST(v_at, (SELECT max(a.closed_at) FROM ob1_priority_pool_items(p_kind, p_key) i
+                           JOIN priority_assertions a ON a.item_kind = i.item_kind AND a.item_key = i.item_key
+                          WHERE a.close_reason IN ('cleared', 'replaced')));
   -- An operator's decision on a finding about it: a re-confirmed level the
   -- writer answered unchanged (the same terms) wrote no statement, and is
   -- a review all the same (review pass 3).
@@ -223,6 +231,7 @@ DECLARE
   v_id      uuid;
   v_batch   jsonb;
   v_act     timestamptz;
+  v_stale   uuid[];
 BEGIN
   IF p_window_days IS NULL OR p_window_days < 1 OR p_window_days > 3660 THEN
     RAISE EXCEPTION USING MESSAGE = format('ob1_priority_review: the window must be 1 to 3660 days, not %s', p_window_days), ERRCODE = '22023';
@@ -272,19 +281,21 @@ BEGIN
     -- stale: the brain's own keys' statements from before the window, on an
     -- item with no activity within it (its activity read once, and only for
     -- an item with such a statement).
-    -- A statement whose due time or start is still ahead is in force, not
+    -- The candidates, once (review pass 4: the rule was written twice). A
+    -- statement whose due time or start is still ahead is in force, not
     -- stale (review pass 2).
-    IF EXISTS (SELECT 1 FROM _opr_pool a WHERE NOT a.maker_source AND a.level >= 1 AND a.asserted_at < v_cut
-                AND (a.due_at IS NULL OR a.due_at <= p_now) AND (a.not_before IS NULL OR a.not_before <= p_now)) THEN
+    v_stale := ARRAY(SELECT a.id FROM _opr_pool a
+                      WHERE NOT a.maker_source AND a.level >= 1 AND a.asserted_at < v_cut
+                        AND (a.due_at IS NULL OR a.due_at <= p_now) AND (a.not_before IS NULL OR a.not_before <= p_now)
+                      ORDER BY a.seq);
+    IF cardinality(v_stale) > 0 THEN
       v_act := ob1_priority_activity(c.kind, c.key);
       IF COALESCE(v_act, '-infinity') < v_cut THEN
         INSERT INTO _opr_found
-        SELECT 'stale', c.kind, c.key, array_agg(a.id ORDER BY a.seq),
+        SELECT 'stale', c.kind, c.key, v_stale,
                jsonb_build_object('last_activity', v_act, 'window_days', p_window_days,
                  'statements', jsonb_agg(jsonb_build_object('id', a.id, 'level', a.level, 'maker', a.maker_name, 'asserted_at', a.asserted_at) ORDER BY a.seq))
-          FROM _opr_pool a
-         WHERE NOT a.maker_source AND a.level >= 1 AND a.asserted_at < v_cut
-           AND (a.due_at IS NULL OR a.due_at <= p_now) AND (a.not_before IS NULL OR a.not_before <= p_now);
+          FROM _opr_pool a WHERE a.id = ANY(v_stale);
       END IF;
     END IF;
     -- disagree: an operator's statement and a source's two or more levels apart.
@@ -311,9 +322,10 @@ BEGIN
            jsonb_build_object('due_at', e.due_at, 'due_from', e.due_from, 'level', e.level)
       FROM effective_priority(v_batch, NULL, p_now) e
      WHERE e.overdue AND NOT e.settled
-       -- A due time a thought takes from its open items is the item's own
-       -- finding (review pass 3: one due time raised two).
-       AND e.due_from IS DISTINCT FROM 'from_items';
+       -- A due time an item takes from another (a thought's open items, or a
+       -- due reference) is that item's own finding (review passes 3 and 4:
+       -- one due time raised two).
+       AND e.due_from IS DISTINCT FROM 'from_items' AND e.due_from IS DISTINCT FROM 'due_ref';
   END LOOP;
 
   -- Pending findings whose condition no longer holds: moot.
@@ -403,9 +415,9 @@ BEGIN
       'message', 'accepting says what to do: a level to state (the same one re-confirms it), or clear, not both');
   END IF;
   IF (p_decision = 'reject' AND (p_level IS NOT NULL OR p_due_at IS NOT NULL OR COALESCE(p_clear, false)))
-     OR (p_due_at IS NOT NULL AND p_level IS NULL) THEN
+     OR (p_due_at IS NOT NULL AND p_level IS NULL) OR p_level NOT BETWEEN 0 AND 5 THEN
     RETURN jsonb_build_object('ok', false, 'error', 'BAD_OUTCOME',
-      'message', 'a level, a due time and clear go with accepting, and a due time with a level');
+      'message', 'a level (0 none to 5 critical), a due time and clear go with accepting, and a due time with a level');
   END IF;
 
   SELECT * INTO v_f FROM priority_findings WHERE id = p_id FOR UPDATE;
@@ -441,6 +453,15 @@ BEGIN
       IF v_prev.level IS DISTINCT FROM p_level THEN
         v_prev := NULL;
       END IF;
+      -- A due time given replaces the kept due reference, and a kept start
+      -- after it (review pass 4: assert_priority refused the pair, raising).
+      IF p_due_at IS NOT NULL THEN
+        v_prev.due_ref_kind := NULL;
+        v_prev.due_ref_key := NULL;
+        IF v_prev.not_before > p_due_at THEN
+          v_prev.not_before := NULL;
+        END IF;
+      END IF;
       -- The reason within assert_priority's 1000 characters (115's
       -- ob1_work_claim_text): the note is kept whole on the finding (review
       -- pass 1: a longer one raised).
@@ -472,7 +493,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION review_priority_finding(uuid, text, int, timestamptz, boolean, text, jsonb) IS
-  'An operator key''s decision on a pending priority finding (SMD-3671): only a key the registry classifies operator, named by its agent id in p_actor (NOT_OPERATOR otherwise). accept says the outcome: p_level (with p_due_at, optionally) stated on the item through assert_priority — the same level re-confirms it, keeping the operator''s own statement''s due time, start, due reference and, with no note, reason — or p_clear, closing the operator''s own statement there through clear_priority (NOTHING_TO_CLEAR when it holds none: state 0 to outrank another maker''s); reject changes nothing. Both record who decided, the note and the writer''s answer, and suppress the same kind and item for the finding''s window. Refused: READ_ONLY_KEY, BAD_DECISION, BAD_NOTE, ACCEPT_NEEDS_OUTCOME, BAD_OUTCOME, NOT_FOUND, NOT_PENDING, and WRITER_REFUSED when the writer refused the outcome (its answer carried); a writer''s raise decides nothing either. Migration 142 / SMD-3671.';
+  'An operator key''s decision on a pending priority finding (SMD-3671): only a key the registry classifies operator, named by its agent id in p_actor (NOT_OPERATOR otherwise). accept says the outcome: p_level (with p_due_at, optionally) stated on the item through assert_priority — the same level re-confirms it, keeping the operator''s own statement''s due time, start, due reference and, with no note, reason — or p_clear, closing the operator''s own statement there through clear_priority (NOTHING_TO_CLEAR when it holds none: state 0 to outrank another maker''s); reject changes nothing. Both record who decided, the note and the writer''s answer, and suppress the same kind and item for the finding''s window. Refused: READ_ONLY_KEY, BAD_DECISION, BAD_NOTE, ACCEPT_NEEDS_OUTCOME, BAD_OUTCOME (a level outside 0 to 5 included), NOT_FOUND, NOT_PENDING, and WRITER_REFUSED when the writer refused the outcome (its answer carried); a writer''s raise decides nothing either. Migration 142 / SMD-3671.';
 
 -- ---------------------------------------------------------------------------
 -- The priority group's grant, carried

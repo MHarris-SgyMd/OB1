@@ -21355,6 +21355,40 @@ console.log("\n[128] Migration 142: priority findings — ob1_priority_review() 
   assert(staleBefore && eacc.ok === true && ((eacc.answer as J | null)?.outcome) === "unchanged" && !(await pending(ent, "stale")),
     `an entity's 90-day-old statement, stale, is reviewed through its disagreement: the writer answers unchanged, and the decision is activity, so it is not stale again within the window (${JSON.stringify(eacc).slice(0, 120)})`);
 
+  // Review pass 4. A level outside 0 to 5 is refused as a value; a due time given replaces a kept start after it.
+  const startT = await thought("[128] the operator's word with a start");
+  const startAt = new Date(Date.now() + 100 * 86_400_000).toISOString();
+  await db.query(`SELECT assert_priority('thought', $1, 3, NULL, $2::timestamptz, NULL, NULL, 'from spring', false, $3::jsonb) AS r`, [startT, startAt, JSON.stringify(OP)]);
+  await review(60, "200 days");
+  const sf4 = await pending(startT, "stale");
+  const badLevel = sf4 ? await decide(sf4.id, "accept", { level: 7 }) : { error: "no finding" };
+  const earlyDue = new Date(Date.now() + 50 * 86_400_000).toISOString();
+  const earlyAcc = sf4 ? await decide(sf4.id, "accept", { level: 3, due: earlyDue }) : { ok: false };
+  const startRow = (await db.query<{ due_at: string; not_before: string | null }>(`SELECT due_at::text, not_before::text FROM ob1_priority_open('thought', $1) WHERE maker_name = '[128] op'`, [startT])).rows;
+  assert(badLevel.error === "BAD_OUTCOME" && earlyAcc.ok === true && startRow.length === 1 && Date.parse(startRow[0].due_at) === Date.parse(earlyDue) && startRow[0].not_before === null,
+    `a level of 7 is BAD_OUTCOME; re-confirming with a due time before the kept start drops the start rather than raising (${badLevel.error}, ${JSON.stringify(startRow)})`);
+
+  // A clear made directly is activity: an entity's agent statement 90 days old beside the operator's, which the operator
+  // clears today; the agent's is not stale.
+  const ent4 = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[128] Capstan', '[128] capstan') RETURNING id::text`)).rows[0].id;
+  for (const [maker, agent, kind, tier, level] of [["[128] bot", BOT.agent_id, "agent", 3, 4], ["[128] op", OP.agent_id, "operator", 1, 3]] as const)
+    await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+       VALUES ('entity', $1, $2, $3, $4::uuid, $5, $5, 'write', false, $6, now() - interval '90 days')`, [ent4, level, maker, agent, kind, tier]);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await db.query(`SELECT clear_priority('entity', $1, $2::jsonb)`, [ent4, JSON.stringify(OP)]);
+  await review(60, "1 minute");
+  assert(!(await pending(ent4, "stale")), `a clear the operator made directly today is activity: the agent's 90-day-old statement beside it is not stale`);
+
+  // One due time, one finding, through a due reference: a note due when an open item is, the item past due.
+  const refT = await thought("[128] a note due when its item is");
+  const refItem = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, $2, NULL, NULL, false, $3::jsonb) AS r`,
+    ["[128] ship the parts", new Date(Date.now() - 86_400_000).toISOString(), JSON.stringify(OP)])).rows[0].r;
+  const refItemId = String((refItem.item as J | undefined)?.id ?? refItem.id ?? "");
+  await db.query(`SELECT assert_priority('thought', $1, 2, NULL, NULL, 'item', $2, NULL, false, $3::jsonb)`, [refT, refItemId, JSON.stringify(BOT)]);
+  await review(60, "1 day");
+  assert(!!(await pending(refItemId, "overdue")) && !(await pending(refT, "overdue")),
+    `a note whose due time is its referenced item's raises no overdue finding of its own: the item's stands alone`);
+
   // A re-apply keeps the rows and replaces the functions as they were.
   const count = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings`)).rows[0].n;
   const n = await count();
