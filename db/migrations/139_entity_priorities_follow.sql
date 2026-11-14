@@ -540,10 +540,11 @@ COMMENT ON FUNCTION record_thought_entities(uuid, text, jsonb, jsonb, text, uuid
 -- it, with the due references naming the loser restated first. The caller
 -- holds both entity rows (merge_entities locks them, the gate locks the
 -- table) and deletes the loser after. restated: the ids of the loser's
--- statements restated on the survivor; repointed: of the statements whose
--- due reference now names the survivor (or was dropped, naming it). The
--- caller counts those still standing when it is done (review pass 2: the
--- gate's later merge into one target can replace an earlier one's).
+-- statements restated on the survivor; repointed: the ids of the
+-- restatements whose due reference now names the survivor, or was dropped
+-- where it would have named the survivor itself. The caller counts those
+-- still standing when it is done (review pass 2: the gate's later merge into
+-- one target can replace an earlier one's).
 CREATE OR REPLACE FUNCTION ob1_priority_merge_entity(p_survivor uuid, p_loser uuid)
 RETURNS TABLE (restated uuid[], repointed uuid[])
 LANGUAGE plpgsql
@@ -692,17 +693,14 @@ BEGIN
   repointed := v_repointed;
   -- Every item locked, and any other row of a locked pool a reference was
   -- restated on.
-  FOR i IN 1 .. cardinality(v_kinds) LOOP
-    PERFORM ob1_priority_project(v_kinds[i], v_keys[i]);
-  END LOOP;
-  PERFORM ob1_priority_project(a.item_kind, a.item_key)
-     FROM (SELECT DISTINCT item_kind, item_key FROM priority_assertions WHERE id = ANY(v_repointed)) a
-    WHERE NOT (a.item_kind, a.item_key) IN (SELECT * FROM unnest(v_kinds, v_keys));
+  PERFORM ob1_priority_project(u.kind, u.key)
+     FROM (SELECT * FROM unnest(v_kinds, v_keys)
+           UNION SELECT item_kind, item_key FROM priority_assertions WHERE id = ANY(v_repointed)) u(kind, key);
   RETURN NEXT;
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_merge_entity(uuid, uuid) IS
-  'A merge''s priority statements, moved (merge_entities and apply_entity_type_gate''s merge call it before deleting the loser): each open statement on another item whose due reference names the loser is restated with the reference naming the survivor (dropped where that would name the survivor itself, which 116''s CHECK refuses), and each open statement on the loser is restated on the survivor by its maker (136''s rule: the maker''s later word on the survivor stands). Every item touched is locked first, in its pool key''s order, and re-projected; a merge with nothing to move takes no lock. Returns restated and repointed, the ids of the restatements written (the caller counts those still standing); empty for a role that could not restate or a transaction above READ COMMITTED. Migration 139 / SMD-4241.';
+  'A merge''s priority statements, moved (merge_entities and apply_entity_type_gate''s merge call it before deleting the loser): each open statement on another item whose due reference names the loser is restated with the reference naming the survivor (dropped where that would name the survivor itself, which 116''s CHECK refuses), and each open statement on the loser is restated on the survivor by its maker (136''s rule: the maker''s later word on the survivor stands). Every item touched is locked first, in its pool key''s order, and re-projected; a merge with nothing to move takes no lock. Returns restated and repointed, the ids of the restatements written (the caller counts those still standing); empty when nothing is to move (taking no lock), for a role that could not restate, or in a transaction above READ COMMITTED. Migration 139 / SMD-4241.';
 
 -- ---------------------------------------------------------------------------
 -- merge_entities — 136's, its priority step the shared helper's

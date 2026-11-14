@@ -20649,7 +20649,7 @@ console.log("\n[126] Migration 139: an entity's priority statements follow it â€
   const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
   const merge = async (s: string, l: string) => (await db.query<{ r: J }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [s, l])).rows[0].r;
 
-  // The shape: two new functions, and the five carried, each naming 139.
+  // The shape: two new functions, and the four carried, each naming 139; the partial index.
   const named = (await db.query<{ n: string }>(
     `SELECT p.proname AS n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
       WHERE s.nspname = 'public' AND obj_description(p.oid, 'pg_proc') ILIKE '%migration 139 / SMD-4241%' ORDER BY 1`)).rows.map((r) => r.n);

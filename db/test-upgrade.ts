@@ -6579,6 +6579,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
     ((await sql`SELECT assert_priority(${kind}, ${key}, ${level}::int, NULL, NULL, ${ref ? "entity" : null}, ${ref}, NULL, false, (${actor}::text)::jsonb) AS r`)[0] as { r: Answer }).r;
   const reasonOf = async (id: string) => ((await sql`SELECT close_reason FROM priority_assertions WHERE id = ${id}::uuid`)[0] as { close_reason: string | null }).close_reason;
   const exists = async (id: string) => Number((await sql`SELECT count(*)::int AS n FROM ob1_entities WHERE id = ${id}::uuid`)[0].n) === 1;
+  const ent = async (name: string) => String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${name}, ${name.toLowerCase()}) RETURNING id`)[0].id);
 
   // At 138: the thought's next extraction names the entity no more, and the prune closes its statement as deleted.
   const t138 = await thought("upgrade 139: Halyard at 138");
@@ -6610,8 +6611,8 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   // A merge beside a writer on an item whose due reference names the loser: the writer holds that item's priority lock,
   // uncommitted, having added a second statement naming the loser; the merge waits on the lock — probed in pg_locks by
   // its own backend's pid, never by timing — and, once the writer commits, restates both to name the survivor.
-  const S = String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Upgrade Survivor', 'upgrade survivor') RETURNING id`)[0].id);
-  const L = String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Upgrade Loser', 'upgrade loser') RETURNING id`)[0].id);
+  const S = await ent("Upgrade Survivor");
+  const L = await ent("Upgrade Loser");
   const due = await thought("upgrade 139: due when the loser is");
   const onDue = (await put("thought", due, 3, OP, L)).assertion!.id;
   const mergePid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
@@ -6648,8 +6649,8 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
     await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
     return id;
   };
-  const S2 = String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Upgrade Survivor two', 'upgrade survivor two') RETURNING id`)[0].id);
-  const L2 = String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', 'Upgrade Loser two', 'upgrade loser two') RETURNING id`)[0].id);
+  const S2 = await ent("Upgrade Survivor two");
+  const L2 = await ent("Upgrade Loser two");
   const row1 = await ticketRow("SMD-9995", 1);
   await put("thought", row1, 3, OP, L2);
   const row2 = await ticketRow("SMD-9995", 2);
@@ -6681,7 +6682,6 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   // A merge with nothing to move takes no advisory lock (review pass 3: the gate's merges share one transaction, and
   // their locks piled up one per entity until the shared lock table ran out); one with a statement to move takes them.
   // Counted on Postgres, in the merge's own transaction (PGlite's pg_locks lists none).
-  const ent = async (name: string) => String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${name}, ${name.toLowerCase()}) RETURNING id`)[0].id);
   const sBare = await ent("Upgrade survivor bare"), lBare = await ent("Upgrade loser bare");
   const sHeld = await ent("Upgrade survivor held"), lHeld = await ent("Upgrade loser held");
   await put("entity", lHeld, 2, OP);
