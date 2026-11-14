@@ -460,6 +460,9 @@ const FUNCTIONS = [
   "ob1_close_orphan_priorities()",
   // 138 (SMD-4238): the writers' closed lists.
   "ob1_priority_closed_json(uuid[])",
+  // 141 (SMD-4241): the prunes' spare test and a merge's priority step.
+  "ob1_entity_has_open_priority(uuid)",
+  "ob1_priority_merge_entity(uuid, uuid)",
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row
   // type of 117's go with its table's CASCADE, and are named anyway).

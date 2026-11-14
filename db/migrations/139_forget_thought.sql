@@ -119,8 +119,9 @@
 --     was edited away keeps it in its log.
 --   * rebuild_derived (067) deletes an entity the thought alone mentioned
 --     even when a priority statement names it; 136 closes that statement as
---     `deleted`, keeping its reason and the entity's id. The bare-orphan
---     prune, by contrast, keeps any entity a statement names.
+--     `deleted`, keeping its reason and the entity's id. Decided in SMD-4241
+--     (141): erasing the thought's text wins. The bare-orphan prune, which
+--     can't tell whose an orphan was, keeps any entity a statement names.
 --   * A twin whose key a raw write left stale (neither the text's
 --     fingerprint nor NULL) is not read as a twin.
 --   * A raw INSERT takes no fingerprint lock: one racing the forget with the
@@ -143,7 +144,7 @@
 --   holds. Each role able to write thoughts is granted
 --   SELECT on the ledger: after 139 a capture reads it, so a role without it
 --   cannot write a thought at all. MINOR under the version rules.
---   test-schema [127], test-upgrade [20ce].
+--   test-schema [128], test-upgrade [20cf].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 034 (query_log), 042 (citations), 055 (the
