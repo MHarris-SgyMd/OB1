@@ -1023,6 +1023,20 @@ function promptLabel(i) {
 const when = (iso) => iso.slice(0, 16).replace("T", " ");
 
 /**
+ * The tickets a summary's header lists, at most three, and where they came from: `asks`, those the episode's asks
+ * named; else `place`, those its branch or directory names; null for none (SMD-2013). The capture sends `from` as
+ * `metadata.tickets_from` (SMD-3306 PR 7a-3b-2): the brain's subject rule keys a session by its header's tickets, and
+ * the text alone cannot say which kind of list it holds — the summary lists only 12 asks, each cut at 200
+ * characters, and an ask in lower case before a team is known counts for none.
+ */
+export function headerTickets(s) {
+  const named = s.named ? [...s.named] : [];
+  if (named.length) return { tickets: named.slice(0, 3), from: "asks" };
+  const place = anchorOf(s.cwd, s.branch).slice(0, 3);
+  return { tickets: place, from: place.length ? "place" : null };
+}
+
+/**
  * Render the summary — the session's, or one episode's — as one thought.
  * Deterministic: the same transcript renders the same text, which is what the
  * fingerprint and the state compare; and an episode's text depends on nothing
@@ -1036,8 +1050,7 @@ export function renderSummary(s) {
   const prompts = distinctPrompts(s.prompts);
   // The tickets first (SMD-2013): those the asks named, else the one the branch
   // or the directory names — a search for the ticket lands on this episode.
-  const named = s.named ? [...s.named] : [];
-  const tickets = (named.length ? named : anchorOf(s.cwd, s.branch)).slice(0, 3).join(", ");
+  const tickets = headerTickets(s).tickets.join(", ");
   const head = ["Session summary", tickets, s.harness, project, s.branch ? `(${s.branch})` : "", day].filter(Boolean).join(" — ").replace(" — (", " (");
   const parts = [head];
   const title = oneLine(s.title || prompts[0] || "");
@@ -1612,6 +1625,17 @@ export async function rpc(cfg, method, params, timeoutMs = POST_TIMEOUT_MS) {
 const textOfResult = (result) => (result?.content ?? []).map((c) => c?.text ?? "").join("\n");
 
 /**
+ * Whether a refusal is the brain's embedding provider refusing the call (SMD-2892): EMBEDDING_PROVIDER_ERROR, any
+ * status. Its key, its model, its address, a gateway's answer, or a request it refuses — a 400 included, which a
+ * hosted provider answers to every call for a setting it will not take (the maintainer's call, 2026-11-12: kept, as
+ * before the code, rather than lose every summary to a misconfigured brain). Such a payload is kept, as a transient
+ * is, until the mend lands it or the week is up.
+ */
+export function providerMends(result) {
+  return result?.structuredContent?.code === "EMBEDDING_PROVIDER_ERROR";
+}
+
+/**
  * The server's machine-readable verdict on a result (SMD-1978), read from the
  * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
  * for a server from before that field, derived from the prose rules unchanged.
@@ -1636,7 +1660,7 @@ export function verdictOf(result, text) {
     const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
       : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
       : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
-        : (sc.retryable !== true && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2)
+        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2), and never on EMBEDDING_PROVIDER_ERROR, whose provider's words may say metadata (SMD-2892)
           : null;
     return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
   }
@@ -1676,10 +1700,15 @@ export async function postCapture(cfg, payload) {
   // summary from a derived one, and a redacted one from a clean one): the model
   // that wrote the summary if one did (SMD-2014), and the COUNT of secrets
   // blanked from it (SMD-2168) — the count alone, never the reasons or offsets,
-  // which the text's markers already name.
+  // which the text's markers already name; and where its header's tickets came
+  // from, the asks or the place (SMD-3306 PR 7a-3b-2), for the brain's subject
+  // rule, which the text alone leaves to guess — not with a model's summary,
+  // whose prose has no header for the word to describe (review pass 4: a model
+  // echoing the header it was shown would have its tickets keyed).
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
+  if (payload.tickets_from && !payload.summary_model) meta.tickets_from = payload.tickets_from;
   if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
@@ -1719,7 +1748,11 @@ export async function postCapture(cfg, payload) {
     // worth keeping (first review pass: every isError was "refused", and a brain
     // whose database was down for a minute lost the session for good).
     const v = verdictOf(result, text);
-    const err = new CaptureError(v.retryable ? "failed" : "refused", `capture ${v.retryable ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
+    // Kept by its code too (SMD-2892): the brain's embedding provider refusing it — a key or a model an operator
+    // mends — is final for the call and no fault of the summary's, so the payload waits for the mend as an outage's
+    // does (up to PENDING_MAX_AGE_MS), not dead on the first refusal.
+    const kept = v.retryable || providerMends(result);
+    const err = new CaptureError(kept ? "failed" : "refused", `capture ${kept ? "failed" : "refused"}: ${oneLine(text).slice(0, 200)}`);
     // A pointer the server could not judge: a failure ON the pointer, counted by
     // postPending so the last attempt can drop it (eighth review pass).
     if (v.on === "supersedes") err.on = "supersedes";
@@ -1858,17 +1891,19 @@ export function prepare(hook, opts = {}) {
     // redaction, so no single-line secret the scan can see is sent (SMD-2127).
     const where = gateFindings(cleaned, text);
     if (where.length) { refused.push({ ep, where: `${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}` }); continue; }
+    const ticketsFrom = headerTickets(cleaned.ep).from;
     const payload = {
       session_id: sessionId, chain_id: chain, episode: ep.n, harness: s.harness, event: ep === last ? event : "", trigger: ep === last ? last.checkpoint?.trigger : undefined, text, fingerprint, // a closed episode's summary is final whatever event the run is: it carries no event, so the log says none (second review pass)
       derived_from: provenanceOf(ep), supersedes: state.thought_id || undefined,
       prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
       ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
+      ...(ticketsFrom ? { tickets_from: ticketsFrom } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running
     // checkpoint, which keeps its derived text (the same event-table test
-    // modelSummary applies): so a derived-mode payload is byte-identical to
-    // before (SMD-2014), and a checkpoint payload never carries the assistant
+    // modelSummary applies): so a derived-mode payload carries nothing of the
+    // model (SMD-2014), and a checkpoint payload never carries the assistant
     // excerpt at rest unread (review pass 2). The fingerprint stays the DERIVED
     // text's, so an episode is asked of the model once — a re-end with the same
     // derived summary is skipped, not re-modelled.
@@ -2679,7 +2714,9 @@ export async function postWrite(cfg, op) {
       if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, supersedes, names no thought there` };
       continue;
     }
-    if (v.retryable) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    // The receiving brain's embedding provider refusing it (a key or a model its operator mends, SMD-2892): held as a
+    // fault is, not given up — its edits and delete would otherwise meet NOT_FOUND there (review pass 1).
+    if (v.retryable || providerMends(result)) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
     return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}` };
   }
   return { dead: true, line: `not copied (given up): ${opLabel(op)} — still refused after dropping ${dropped.join(", ")}` };
@@ -3644,7 +3681,8 @@ export async function main(argv) {
       const ids = provenanceOf(ep);
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
-      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}`);
+      const from = headerTickets(cleaned.ep).from;
+      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}${from ? `, metadata.tickets_from=${from}` : ""}`);
       if (where.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
       else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
       else console.log("--- secret scan: clean");

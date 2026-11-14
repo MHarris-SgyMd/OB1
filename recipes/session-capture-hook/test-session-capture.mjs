@@ -41,7 +41,7 @@ delete process.env.OB1_BRAIN_URL;
 delete process.env.OB1_CAPTURE_KEY;
 
 const {
-  stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
+  stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, headerTickets, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
   loadBrains, useStateRoot,
@@ -184,6 +184,10 @@ const fake = Bun.serve({
       if (/\[\[slow\]\]/.test(content)) await slowGate();
       const id = uuid(1000 + n);
       if (/\[\[refused-naming-id\]\]/.test(content)) return err(`Refused: the thought with id ${id} will not hold this.`, { code: "REFUSED", retryable: false });
+      // The brain's embedding provider refusing its key (SMD-2892): final for the call, no fault of the summary's.
+      if (/\[\[embed-413\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 413 (it refused the request: this text, or a setting sent with it such as the model).", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_413", status: 413, setting: "OB1_LLM_BASE_URL" });
+      if (/\[\[embed-400\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 400 (it refused the request: this text, or a setting sent with it such as the model).", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_400", status: 400, setting: "OB1_LLM_BASE_URL" });
+      if (/\[\[embed-401\]\]/.test(content)) return err("Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key (OB1_LLM_API_KEY, else OPENROUTER_API_KEY); retrying will not help until then.", { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" });
       return sse({ result: { content: [{ type: "text", text: `Captured as observation — id ${id} — topics` }] } });
     }
     return json({ error: { code: -32601, message: "Method not found" } });
@@ -1000,6 +1004,34 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(prov.code === 0 && prov.payload?.derived_from.length === 3 && prov.payload.redactions?.length === 1 && prov.payload.prompts === 3 && /\n- now push and open the PR with the key \[redacted:anthropic key\]\n/.test(prov.payload.text) && !prov.payload.text.includes("Ab1Ab1"),
     `derived_from keeps its three ids beside one redaction; the retried prompt is one line and counted once (${prov.message.slice(0, 120)})`);
   if (prov.payloadPath) unlinkSync(prov.payloadPath);
+  // SMD-3306 PR 7a-3b-2: where the header's tickets came from — the asks, else the place — rides the payload, as
+  // renderSummary chose them, so the brain's subject rule need not guess it from the text.
+  const asked = headerTickets({ named: new Set(["SMD-11", "SMD-12", "SMD-13", "SMD-14"]), cwd: "/x/ob1", branch: "smd-90-x" });
+  const placed = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "michaelharris/smd-90-x" });
+  const nowhere = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "main" });
+  assert(JSON.stringify(asked) === '{"tickets":["SMD-11","SMD-12","SMD-13"],"from":"asks"}' && JSON.stringify(placed) === '{"tickets":["SMD-90"],"from":"place"}' && JSON.stringify(nowhere) === '{"tickets":[],"from":null}',
+    `headerTickets: the asks' tickets, three at most, from the asks; else the branch's, from the place; none from nowhere (${JSON.stringify([asked, placed, nowhere])})`);
+  const placedText = renderSummary({ ...summariseTranscript(CLAUDE_T), named: new Set(), branch: "michaelharris/smd-90-x" });
+  assert(/^Session summary — SMD-90 — /.test(placedText), `…and the header renderSummary writes is its list (${placedText.split("\n")[0]})`);
+  const ownFrom = headerTickets(cleanEpisode(summariseTranscript(provT).episodes[0], "redact").ep).from;
+  assert(prov.payload.tickets_from === (ownFrom ?? undefined) && (ownFrom === null || ownFrom === "asks" || ownFrom === "place"),
+    `the payload carries its own header's origin (${prov.payload.tickets_from} beside ${ownFrom})`);
+  const askedT = join(TMP, "tickets-from.jsonl");
+  writeFileSync(askedT, claudeTranscript().replaceAll("now push and open the PR", "now push SMD-2013 and open the PR"));
+  const askedPrep = prepare({ ...base, session_id: "s-tickets-from", transcript_path: askedT });
+  assert(askedPrep.code === 0 && /^Session summary — SMD-2013 — /.test(askedPrep.payload?.text ?? "") && askedPrep.payload.tickets_from === "asks",
+    `…an ask naming its ticket: the header lists it, and the payload says the asks named it (${askedPrep.payload?.tickets_from}; ${askedPrep.payload?.text?.split("\n")[0]})`);
+  if (askedPrep.payloadPath) unlinkSync(askedPrep.payloadPath);
+  // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says
+  // `place`.
+  const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });
+  assert(JSON.stringify(placedFour) === '{"tickets":["SMD-11","SMD-12","SMD-13"],"from":"place"}', `…the place's tickets three at most (${JSON.stringify(placedFour)})`);
+  const placedT = join(TMP, "tickets-from-place.jsonl");
+  writeFileSync(placedT, [user("bump the node-22 image", { origin: { kind: "human" }, gitBranch: "michaelharris/smd-90-x" }), line({ type: "assistant", sessionId: SID, timestamp: "2026-09-22T13:20:00.000Z", cwd: "/repo/proj", gitBranch: "michaelharris/smd-90-x", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } })].join("\n"));
+  const placedPrep = prepare({ ...base, session_id: "s-tickets-from-place", transcript_path: placedT });
+  assert(placedPrep.code === 0 && /^Session summary — SMD-90 — /.test(placedPrep.payload?.text ?? "") && placedPrep.payload.tickets_from === "place",
+    `…a branch's ticket, no ask naming one: the payload says the place gave it (${placedPrep.payload?.tickets_from}; ${placedPrep.payload?.text?.split("\n")[0]})`);
+  if (placedPrep.payloadPath) unlinkSync(placedPrep.payloadPath);
   // First review pass: the gate reads each prompt on its own, as the redaction blanks them — a flag ending one prompt and a word opening the next was a refusal under either mode that no redaction could clear.
   writeFileSync(join(TMP, "join.jsonl"), [user("run psql --password", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }]), user("hunter2 then check the row count", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
   const jn = prepare({ ...base, session_id: "s-join", transcript_path: join(TMP, "join.jsonl") });
@@ -1089,6 +1121,15 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   // error that saved a thought, a save whose vector did not attach, left with its code).
   const r2 = await postCapture(cfg, { text: "[[refused-naming-id]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
   assert(r2 instanceof CaptureError && r2.kind === "refused" && r2.id === undefined, `a refusal whose words name an id is refused, not read as a save (${r2?.kind ?? JSON.stringify(r2)})`);
+  // The embedding provider refusing the brain's key (SMD-2892): final for the call, but the summary is not at fault, so
+  // the payload waits for an operator's mend as an outage's does — kept ("failed"), never dead on the first refusal.
+  const rEmbed = await postCapture(cfg, { text: "[[embed-401]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed instanceof CaptureError && rEmbed.kind === "failed" && /capture failed: Refused: the capture was not done/.test(rEmbed.message),
+    `an EMBEDDING_PROVIDER_ERROR, final as it is, keeps the payload (${rEmbed?.kind ?? JSON.stringify(rEmbed)}: ${String(rEmbed?.message).slice(0, 80)})`);
+  const rEmbed400 = await postCapture(cfg, { text: "[[embed-400]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed400 instanceof CaptureError && rEmbed400.kind === "failed", `…a 400 kept too, a setting the provider will not take for every call (the maintainer's call, 2026-11-12) (${rEmbed400?.kind})`);
+  const rEmbed413 = await postCapture(cfg, { text: "[[embed-413]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(rEmbed413 instanceof CaptureError && rEmbed413.kind === "failed", `…and so is a 413 (${rEmbed413?.kind})`);
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.
   const bad = prepare({ session_id: "s-bad", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [b] = await postPending({ url: URL_, key: "wrong" }, bad.payloadPath);
@@ -1473,6 +1514,15 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   received.length = 0;
   await postCapture(cfg, { text: "the model's redacted summary", harness: "claude-code", derived_from: [], summary_model: "test-model", redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] });
   assert(received[0].args.metadata?.summary_model === "test-model" && received[0].args.metadata?.redactions === 1, "a model summary that was also redacted carries both keys");
+  received.length = 0;
+  await postCapture(cfg, { text: "the model's prose, no header", harness: "claude-code", derived_from: [], summary_model: "test-model", tickets_from: "asks" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"summary_model":"test-model"}', `…and a model's summary no tickets_from: its prose has no header for the word to describe (SMD-3306 review pass 4: ${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
+  await postCapture(cfg, { text: "a session's summary", harness: "claude-code", derived_from: [], tickets_from: "asks" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"tickets_from":"asks"}', `where its header's tickets came from rides metadata.tickets_from (SMD-3306 PR 7a-3b-2: ${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
+  await postCapture(cfg, { text: "a session's summary", harness: "claude-code", derived_from: [], tickets_from: "place" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"tickets_from":"place"}', `…\`place\` as the payload says it (review pass 4, mutant: ${JSON.stringify(received[0]?.args?.metadata)})`);
   // A server that refuses the metadata key drops it and posts the summary anyway (SMD-2168): the summary is the point, the count a nicety.
   received.length = 0;
   let rm; try { rm = await postCapture(cfg, { text: "[[refuse-metadata]] a redacted summary", harness: "claude-code", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] }); } catch (e) { rm = { error: e.message }; } // a mutant that drops the mend throws; the guard turns that into a failed arm, not a crashed suite
@@ -2120,6 +2170,10 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
     const vp = (text) => verdictOf({ isError: true }, text);
     const vD = vc({ code: "DERIVED_FROM_MISSING", retryable: false, positions: [2] }, "any prose at all");
     assert(vD.mend === "derived" && vD.retryable === false && vD.positions.join() === "2", "verdictOf reads DERIVED_FROM_MISSING and its positions from the code, whatever the prose");
+    // The provider's own words may say "metadata" (OpenRouter's upstream errors carry a `metadata` field): no mend of
+    // the capture's metadata for that, which would drop it and post again for nothing (SMD-2892 review pass 1).
+    const vE = vc({ code: "EMBEDDING_PROVIDER_ERROR", retryable: false, status: 401 }, 'Refused: … It said: {"error":{"metadata":{"provider_name":"OpenAI"}}}');
+    assert(vE.mend === null && vE.retryable === false, `an EMBEDDING_PROVIDER_ERROR whose provider words say metadata mends nothing (${JSON.stringify(vE)})`);
     const vU = vc({ code: "SUPERSEDES_UNJUDGED", retryable: true });
     assert(vU.retryable === true && vU.on === "supersedes" && vU.mend === null, "…SUPERSEDES_UNJUDGED is a kept transient marking the pointer, mending nothing");
     const vS = vc({ code: "REFUSED_SUPERSEDES_OWNERSHIP", retryable: false });
@@ -2398,6 +2452,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
+  // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
+  assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
   const dryCp = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "auto"]);
   assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),
@@ -2423,6 +2479,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const dryEp = await run(["--dry-run", EPISODES_T]);
   assert(dryEp.code === 0 && /^--- 4 episodes — one thought each, on its own supersedes chain:\n    1\. SMD-1844 — \(michaelharris\/smd-1844-loopback\) — 2 prompt\(s\) — 2026-09-24 09:00 → 2026-09-24 09:40 — from the start — ended at a compaction\n    2\. SMD-1843, SMD-1844 — \(michaelharris\/smd-1843-env\) — 2 prompt\(s\) — 2026-09-24 10:00 → 2026-09-24 10:30 — begun after a compaction with SMD-1843 — ended when SMD-1917 was taken up\n    3\. SMD-1917 — [^\n]*— begun with SMD-1917 — ended at a compaction\n    4\. SMD-1917 — \(michaelharris\/smd-1917-fork-md\) — 2 prompt\(s\) — 2026-09-24 11:10 → 2026-09-24 11:31 — begun after a compaction — still open\n\n=== episode 1 ===\nSession summary — SMD-1844/.test(dryEp.out) && (dryEp.out.match(/^=== episode \d ===$/gm) ?? []).length === 4 && (dryEp.out.match(/^--- would send \(episode \d\): source=claude-code, derived_from=/gm) ?? []).length === 4 && (dryEp.out.match(/secret scan: clean/g) ?? []).length === 4,
     `--dry-run prints the segmentation — one line per episode with its tickets, branch, asks, span and bounds — then each episode's text and what it would send (${dryEp.out.split("\n")[1]})`);
+  // Review pass 5 (mutants: the line naming no word, or always `asks`, lived): each episode's would-send line names its
+  // word, as its payload carries it; one with no ticket in its header names none.
+  const sends = dryEp.out.split("\n").filter((l) => l.startsWith("--- would send"));
+  const sentWords = sends.map((l) => l.replace(/^.*derived_from=[0-9]+ id\(s\)(?: \[[^\]]*\])?/, ""));
+  assert(JSON.stringify(sentWords) === JSON.stringify([", metadata.tickets_from=place", ", metadata.tickets_from=asks", ", metadata.tickets_from=asks", ", metadata.tickets_from=place"]),
+    `--dry-run's would-send line names each episode's metadata.tickets_from (SMD-3306 review pass 5: ${JSON.stringify(sentWords)})`);
   const dryEpCp = await run(["--dry-run", EPISODES_T, "--event", "PreCompact", "--trigger", "manual"]);
   assert((dryEpCp.out.match(/Checkpoint: compacted/g) ?? []).length === 1 && /=== episode 4 ===[^]*Checkpoint: compacted at 2026-09-24 11:31 \(manual\)/.test(dryEpCp.out), "…with --event, the checkpoint line previews on the open episode alone");
   const dryEpSec = await spawnScript(["--dry-run", join(TMP, "episodes-secret.jsonl")], { env: { OB1_CAPTURE_ON_SECRET: "refuse" } });
@@ -2796,6 +2858,9 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     if (slowMs) await sleep(slowMs);
     if (/\[\[fault\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "update_thought failed: the REST core did not answer" }], structuredContent: { code: "FAILED", message: "the REST core did not answer" } } }));
     if (/\[\[meta\]\]/.test(String(args.content ?? "")) && args.metadata) return err("Refused: `metadata.reserved_x` is set by the server, not the caller.", { code: "REFUSED_METADATA_SHAPE", problem: "reserved_key" });
+    if (/\[\[embed-down\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Error: the edit (its new text needs its vector) was not done — the brain's embedding provider is unavailable: the connection was refused. The same call can land once it answers." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL", check: [] } } }));
+    if (/\[\[embed-401\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" } } }));
+    if (/\[\[embed-400\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 400 (it refused the request: this text, or a setting sent with it such as the model)." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_400", status: 400, setting: "OB1_LLM_BASE_URL" } } }));
     if (/\[\[invalid\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool capture_thought" }] } }));
     if (name === "capture_thought") {
       if (busy && /\[\[busy\]\]/.test(args.content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
@@ -3003,6 +3068,28 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   assert(inval.code === 1 && !queueIn().length && existsSync(DEAD) && readdirSync(DEAD).length === 1 && /not copied \(given up\): capture_thought .* Input validation error/.test(logOf(CANARY_ROOT)),
     "a copy refused as invalid input goes to writes/dead, the queue moving on");
   rmSync(DEAD, { recursive: true, force: true });
+  // The canary's embedding provider refusing its key (SMD-2892): held as a fault is, not given up, so the thought's
+  // later edits and delete still find it there once the operator mends the key (review pass 1: it went to dead/).
+  calls.length = 0;
+  const keyless = await post("capture_thought", { content: "[[embed-401]] a copy met by the canary's refused key" }, captured(S(37)));
+  assert(keyless.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 401/.test(keyless.err),
+    `a copy refused EMBEDDING_PROVIDER_ERROR for the canary's key holds the queue, not given up (${keyless.err.trim().slice(0, 140)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  // …and so does a 400 (the maintainer's call, 2026-11-12: a hosted provider answers it to every call for a setting it will
+  // not take, and giving each copy up would lose them all).
+  const refused400 = await post("capture_thought", { content: "[[embed-400]] a copy the canary's provider refuses with a 400" }, captured(S(38)));
+  assert(refused400.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: capture_thought .* answered 400/.test(refused400.err),
+    `a copy refused with a 400 holds the queue too (${refused400.err.trim().slice(0, 140)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  // A copied edit the canary refuses retryable (its provider away): kept by the code as by `retryable` (review pass 6:
+  // only final refusals were held).
+  const editAway = await post("update_thought", { id: S(73), content: "[[embed-down]] an edit copied while the canary's provider is away" }, [{ type: "text", text: `Updated ${S(73)} (content re-embedded).` }]);
+  assert(editAway.code === 1 && queueIn().length === 1 && !existsSync(DEAD) && /kept: update_thought .* is unavailable/.test(editAway.err),
+    `a copied edit refused EMBEDDING_PROVIDER_ERROR, retryable, holds the queue (${editAway.err.trim().slice(0, 160)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
 
   // A copy kept for a week is given up, so a brain that never answers does not hold the queue for ever.
   away = true;

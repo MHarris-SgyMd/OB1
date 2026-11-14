@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, refuseRedirect, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
 import { createProviderHealth, DEFAULT_REPROBE_INTERVAL_S, heardFrom, inContainer, isLoopback, probeable, probeClears, probeProvider, reprobeIntervalFrom, startProviderReprobe, startsDegraded } from "./provider-health.ts";
@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -955,6 +955,74 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   ] as [string, unknown][])
     assert(providerDown(e) === null, `${what} is not an outage: it still fails the call (${said(e)})`);
 
+  // SMD-2892: providerFault, the same failures as a caller is told them. retryable is providerDown's alone; the
+  // provider's other answers final with their status and words; what is no provider's answer, null (still a fault).
+  const fault = (e: unknown) => JSON.stringify(providerFault(e));
+  for (const [what, e, reason] of [["a refused connection", refused, "provider_unreachable"], ["the deadline", new ProviderError("x", "timeout"), "provider_timeout"], ["a 429", http(429), "provider_429"], ["a 503", http(503), "provider_503"]] as [string, unknown, string][])
+    assert(providerFault(e)?.retryable === true && providerFault(e)?.reason === reason, `providerFault: ${what} is retryable, ${reason} (${fault(e)})`);
+  assert(providerFault(http(429))?.status === 429 && providerFault(refused)?.status === undefined, "…an outage carries the provider's status when it answered one");
+  for (const [what, e, reason, detail] of [
+    ["a 401", http(401, "{\"error\":\"bad key\"}"), "provider_401", "it answered 401 (its credential was refused)"], ["a 403", http(403), "provider_403", "it answered 403 (its credential was refused)"],
+    ["a 404", http(404), "provider_404", "it answered 404 (the path or the model is not there)"], ["a 400", http(400, "input too long"), "provider_400", "it answered 400 (it refused the request: this text, or a setting sent with it such as the model)"],
+    ["a 402", http(402), "provider_402", "it answered 402 (payment is required: the account's credit)"], ["a 413", http(413), "provider_413", "it answered 413 (it refused the request: this text, or a setting sent with it such as the model)"], ["a 422", http(422), "provider_422", "it answered 422 (it refused the request: this text, or a setting sent with it such as the model)"],
+    ["a body that is not JSON", new ProviderError("http://x/v1 answered 200 with a body that is not JSON", "body", 200, "<html>"), "provider_body", "it answered 200 with a body that is not JSON"],
+  ] as [string, ProviderError, string, string][]) {
+    const f = providerFault(e);
+    assert(f?.retryable === false && f.reason === reason && f.detail === detail && f.status === e.status && f.provider === (e.body || undefined) && !JSON.stringify(f).includes("http://x"),
+      `providerFault: ${what} is final, ${reason}, said "${detail}", its status and the provider's own words, never the base (${fault(e)})`);
+  }
+  for (const [what, e] of [["an egress refusal", new ProviderError("refused by the egress gate", "egress")], ["the width mismatch", new Error("Embedding width mismatch")], ["a TypeError with no code", new TypeError("x")], ["null", null]] as [string, unknown][])
+    assert(providerFault(e) === null, `providerFault: ${what} is no provider's answer, so null: still a fault (${fault(e)})`);
+  // A 200 holding no embedding (a gateway's error object): a body error, said so (review pass 1: a plain Error, raw).
+  const empty = providerFault(new ProviderError("http://x/v1 returned no embedding for model m", "body", 200, '{"error":{"message":"No successful provider responses."}}', true));
+  assert(empty?.retryable === false && empty.reason === "provider_body" && empty.detail === "it answered 200 with no embedding in its answer" && /No successful provider/.test(empty.provider ?? ""),
+    `providerFault: a 200 with no embedding is final, provider_body, said so, the gateway's words kept (${JSON.stringify(empty)})`);
+  // The provider's words cleaned before a reply tells them or a log prints them (review pass 4): the brain's own key and
+  // credential shapes redacted (an echoing endpoint sends the Authorization back), one line (no forged log line), no
+  // terminal escape, no invisible character a model would read.
+  const { providerSaid, providerLogWords } = await import("./core/provider-refusal.ts");
+  const KEY = "abcd1234efgh5678";
+  const hostile = `{"headers":{"authorization":"Bearer ${KEY}","proxy":"Basic dXNlcjpwYXNzd29yZA==","x":"sk-proj-0123456789abcdef"}}\n{"door":"api","outcome":"ok"}\x1b]52;c;ZXZpbA==\x07 zero\u200bwidth\u{E0041}tag your ${KEY} again`;
+  const cleaned = providerSaid(hostile, { key: KEY });
+  assert(!cleaned.includes(KEY) && !cleaned.includes("dXNlcjpwYXNzd29yZA") && !cleaned.includes("sk-proj-0123") && !/[\n\x1b\x07\u200b]/.test(cleaned) && !/\u{E0041}/u.test(cleaned)
+    && (cleaned.match(/\[redacted\]/g) ?? []).length >= 4 && /zerowidthtag/.test(cleaned),
+    `the provider's words: the key and credential shapes redacted, one line, no escape or invisible character (${cleaned})`);
+  // The one table `check` and the reply's advice read (review pass 5), each status class: the key for a 401, 402 or 403
+  // (a 402 its account's credit), the model for a 404, the model and its width for a 400, 413 or 422, nothing more for
+  // a redirect or a body, which name the base.
+  const { checksFor, adviceFor } = await import("./core/provider-refusal.ts");
+  const KEYS = ["OB1_LLM_API_KEY", "OPENROUTER_API_KEY"];
+  const table: [number | undefined, string, string[], RegExp][] = [
+    [401, "provider_401", KEYS, /its key \(OB1_LLM_API_KEY/], [403, "provider_403", KEYS, /its key/], [402, "provider_402", KEYS, /credit of the account behind its key/],
+    [404, "provider_404", ["OB1_EMBEDDING_MODEL"], /embedding model it serves/], [400, "provider_400", ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"], /a shorter or plainer one may land/],
+    [422, "provider_422", ["OB1_EMBEDDING_MODEL", "OB1_EMBEDDING_DIM"], /a setting it is sent with/], [307, "provider_307", [], /sets OB1_LLM_BASE_URL where it points/],
+    [200, "provider_body", [], /a proxy, a gateway/], [418, "provider_418", [], /^An operator checks OB1_LLM_BASE_URL; retrying/],
+  ];
+  const misclassed = table.filter(([status, reason, check, advice]) => JSON.stringify(checksFor(status, reason)) !== JSON.stringify(check) || !advice.test(adviceFor({ status, reason, setting: "OB1_LLM_BASE_URL" })));
+  assert(misclassed.length === 0, `checksFor and adviceFor read one class per status (wrong: ${JSON.stringify(misclassed.map((t) => t[0]))})`);
+  // The Authorization the endpoint sends, by value: a base's userinfo goes as Basic, and a base64 with no digit or `=`
+  // passed the shape rule (review pass 6: `x:abcdefghij` is `eDphYmNkZWZnaGlq`).
+  const basicEcho = providerSaid('{"headers":{"authorization":"Basic eDphYmNkZWZnaGlq"}} and again eDphYmNkZWZnaGlq', { key: undefined, headers: { Authorization: "Basic eDphYmNkZWZnaGlq" } });
+  assert(!basicEcho.includes("eDphYmNkZWZnaGlq"), `the endpoint's own Basic credential redacted by value (${basicEcho})`);
+  // The refusal's base masked when the base carried userinfo (review pass 6: unheld here).
+  const { embeddingProviderError } = await import("./core/provider-refusal.ts");
+  const masked = embeddingProviderError(http(401), { base: "https://provider.example/v1", userinfo: true, key: undefined, headers: {} }, true);
+  assert(masked?.base === "https://***@provider.example/v1", `a refusal names the base with its userinfo masked (${masked?.base})`);
+  // A credential's shape, not a word: a provider's "Basic authentication failed" is kept (review pass 5: it was redacted).
+  const plainWords = providerSaid("Basic authentication failed; Bearer token missing", { key: KEY });
+  assert(plainWords === "Basic authentication failed; Bearer token missing", `words that name no credential are kept (${plainWords})`);
+  const logged = providerLogWords(new ProviderError(`Embeddings request to http://x/v1 failed: 401 ${hostile}`, "http", 401, hostile), { key: KEY });
+  assert(!logged.includes(KEY) && !/[\n\x1b]/.test(logged) && logged.startsWith("Embeddings request to http://x/v1 failed: 401 "), `…and a log line the same (${logged.slice(0, 120)})`);
+  // A 200 holding no embedding is told by its own error words, never the whole answer.
+  const { answerWords } = await import("./embed.ts");
+  assert(answerWords({ error: { message: "No successful provider responses." } }) === "No successful provider responses." && answerWords({ error: "quota" }) === "quota"
+    && answerWords({ message: "m" }) === "m" && answerWords({ headers: { authorization: `Bearer ${KEY}` }, json: { input: "the thought" } }) === "" && answerWords(null) === "",
+    "answerWords: an answer's error or message alone, never an echo of the request");
+  // A redirect: never followed, and where it points is the provider's words, for a reader to set the base (review pass 1).
+  const moved = providerFault(refuseRedirect("Embeddings", "http://x/v1", new Response(null, { status: 307, headers: { location: "https://user:pw@y.example/v1?key=k" } })));
+  assert(moved?.retryable === false && moved.reason === "provider_307" && moved.detail === "it answered 307 (a redirect, never followed)" && moved.provider === "redirecting to https://***@y.example/v1?…",
+    `providerFault: a 307 is final, and where it points is its words, userinfo and query masked (${JSON.stringify(moved)})`);
+
   for (const code of ["ETIMEDOUT", "ENETUNREACH", "ETIMEOUT"]) assert(providerDown(Object.assign(new Error("x"), { code }))?.reason === "provider_unreachable", `${code} is an outage`);
   assert(providerDown(Object.assign(new Error("x"), { syscall: "getaddrinfo" }))?.detail === "its name does not resolve" && providerDown(Object.assign(new Error("x"), { code: "ENOTFOUND" }))?.detail === "its name does not resolve (ENOTFOUND)",
     "a failed resolution is read by the syscall alone and by the code alone");
@@ -1112,6 +1180,43 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     // The handshake's own error, whatever the platform calls it (EPROTO on macOS), not some other throw in capture.
     const tlsSaid = `${String(eTls)} ${(eTls as { code?: unknown })?.code ?? ""}`;
     assert(eTls !== undefined && providerDown(eTls) === null && /TLS|SSL|EPROTO|handshake/i.test(tlsSaid) && written2.length === 0, `a chat call that fails on a misconfiguration fails the capture, nothing written (${tlsSaid})`);
+    // An endpoint echoing the request (the brain's own Authorization in it), and a 2xx nested past JSON.stringify's
+    // depth (review pass 4): each refused coded, provider_body, and the key in neither the refusal nor its words.
+    const echo = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => Response.json({ headers: Object.fromEntries(req.headers), error: { message: `echo of ${req.headers.get("authorization")}` } }) });
+    const deep = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(`{"data":${"[".repeat(120_000)}${"]".repeat(120_000)}}`, { headers: { "content-type": "application/json" } }) });
+    try {
+      for (const [what, port] of [["an echoing endpoint", echo.port], ["a deep nest", deep.port]] as const) {
+        const ctx4 = createContext({
+          env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_LLM_API_KEY: "secret-key-0123456789", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+          store: async () => ({ captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000b4", existed: false }) }) as never,
+          door: "test",
+        });
+        const out = await capture(ctx4, { name: "writer", scope: "write", keyHash: "h" } as never, { content: `a thought sent to ${what}` } as never).then((o) => o, (e) => e);
+        assert(out?.ok === false && out.refusal.code === "EMBEDDING_PROVIDER_ERROR" && out.refusal.reason === "provider_body" && !JSON.stringify(out).includes("secret-key-0123456789"),
+          `${what}: refused coded, provider_body, the brain's key nowhere in it (${JSON.stringify(out).slice(0, 220)})`);
+      }
+    } finally {
+      echo.stop(true);
+      deep.stop(true);
+    }
+    // The same misconfigured chat while the embeddings refuse the brain's key (SMD-2892 review pass 1): the chat's throw
+    // no longer wins the race — the capture is refused coded, the provider's verdict, and still nothing is written.
+    // Its 401 comes after the chat's handshake fails, so the chat's throw reaches Promise.all first (review pass 2: an
+    // at-once 401 never raced, and the wait on the embedding went unheld).
+    const keyless = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async () => { await Bun.sleep(400); return new Response(JSON.stringify({ error: "bad key" }), { status: 401 }); } });
+    try {
+      const written3: unknown[] = [];
+      const ctx3 = createContext({
+        env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${keyless.port}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
+        store: async () => ({ captureThought: async (args: unknown) => { written3.push(args); return { id: "00000000-0000-4000-8000-0000000000b3", existed: false }; } }) as never,
+        door: "test",
+      });
+      const both = await capture(ctx3, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought both endpoints fail" } as never).then((o) => o, (e) => e);
+      assert(both?.ok === false && both.refusal.code === "EMBEDDING_PROVIDER_ERROR" && both.refusal.status === 401 && written3.length === 0,
+        `a chat call's runtime throw beside the embeddings' 401: refused EMBEDDING_PROVIDER_ERROR, nothing written (${JSON.stringify(both).slice(0, 200)})`);
+    } finally {
+      keyless.stop(true);
+    }
   } finally {
     plain.stop(true);
   }
@@ -1323,7 +1428,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       const t = await mendOnce(ctx, newMendState());
       bad.delete("");
       const st = ctx.providerHealth.state();
-      assert(t.down !== null && st.status === "answering" && st.fault === "its answer was not JSON", `a tick of broken bodies: the tick's outage, the state's fault (${JSON.stringify(st)})`);
+      assert(t.down !== null && st.status === "answering" && st.fault === "its answer was not JSON, or held no embedding", `a tick of broken bodies: the tick's outage, the state's fault (${JSON.stringify(st)})`);
     }
     // The provider away for many ticks over many rows, some of them failed
     // before: two calls a tick at most, whatever the rows' history.
@@ -2395,7 +2500,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   }
   // What a real call says (review pass 4: one rule on every path): a vector,
   // answering; a 4xx, a broken body or an answer the call could not use,
-  // answering with a fault — the provider is there, a capture fails outright;
+  // answering with a fault — the provider is there, a capture, a search or an edit is refused (SMD-2892);
   // an outage; an egress refusal nothing.
   {
     const lines: string[] = [];
@@ -2407,7 +2512,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     heardFrom(h, started, new Error("embedding width 3, expected 4"));
     assert(faultOf() === "its answer could not be used", `a width mismatch: answering, with its fault (${JSON.stringify(h.state())})`);
     heardFrom(h, started, new ProviderError("x answered a body that is not JSON", "body"));
-    assert(faultOf() === "its answer was not JSON", "a broken body: answering, with its fault");
+    assert(faultOf() === "its answer was not JSON, or held no embedding", "a broken body: answering, with its fault");
     heardFrom(h, performance.now(), new ProviderError("x failed: 503", "http", 503));
     assert(h.state().status === "unreachable", "a 503 is an outage");
     heardFrom(h, performance.now(), new ProviderError("x failed: 404", "http", 404));
@@ -2567,7 +2672,8 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   }
 
   // update_thought's re-embed feeds the state too (review pass 1): an outage
-  // refuses the edit whole, as before, and says so; an answer clears it.
+  // refuses the edit whole, as before, and says so; an answer clears it. Refused
+  // coded since SMD-2892 (EMBEDDING_PROVIDER_ERROR, retryable), not thrown.
   {
     const uid = "00000000-0000-4000-8000-0000000000d1";
     const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
@@ -2575,30 +2681,31 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     let port = closedNow();
     const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });
     try {
-      let threw: unknown;
-      try { await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never); } catch (e) { threw = e; }
-      assert(threw !== undefined && providerDown(threw) !== null && ectx.providerHealth.state().status === "unreachable", `an edit whose provider is down: refused whole, the state unreachable (${JSON.stringify(ectx.providerHealth.state())})`);
+      const edit = await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never);
+      assert(!edit.ok && edit.refusal.code === "EMBEDDING_PROVIDER_ERROR" && edit.refusal.retryable === true && ectx.providerHealth.state().status === "unreachable",
+        `an edit whose provider is down: refused whole, coded and retryable, the state unreachable (${JSON.stringify(edit)} ${JSON.stringify(ectx.providerHealth.state())})`);
       port = embedsOk.port!;
       await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "newer text" } as never);
       assert(ectx.providerHealth.state().status === "answering", "…and an edit it answers: answering");
     } finally { embedsOk.stop(true); }
   }
 
-  // A capture or a search the provider refuses with a 4xx: the call fails, as
-  // before, and the provider is there — answering (review pass 1, the mender's rule).
+  // A capture or a search the provider refuses with a 4xx: refused coded, final
+  // (SMD-2892), where each threw the provider's error; and the provider is
+  // there — answering (review pass 1, the mender's rule).
   {
     const refuses = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
     try {
       const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
-      let capThrew = false;
-      try { await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never); } catch { capThrew = true; }
-      assert(capThrew && fctx.providerHealth.state().status === "answering", `a capture refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      const cap = await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never);
+      assert(!cap.ok && cap.refusal.code === "EMBEDDING_PROVIDER_ERROR" && cap.refusal.retryable === false && cap.refusal.status === 400 && fctx.providerHealth.state().status === "answering",
+        `a capture refused 400: refused coded and final, and the provider answering (${JSON.stringify(cap)} ${JSON.stringify(fctx.providerHealth.state())})`);
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
       const { searchThoughts: st } = await import("./core/reads.ts");
-      let searchThrew = false;
-      try { await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never); } catch { searchThrew = true; }
-      assert(searchThrew && fctx.providerHealth.state().status === "answering", `a search refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      const found = await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+      assert(!found.ok && found.refusal.code === "EMBEDDING_PROVIDER_ERROR" && found.refusal.retryable === false && fctx.providerHealth.state().status === "answering",
+        `a search refused 400: refused coded and final, and the provider answering (${JSON.stringify(found)} ${JSON.stringify(fctx.providerHealth.state())})`);
     } finally { refuses.stop(true); }
   }
 
@@ -2712,12 +2819,13 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "the metadata's ticket, else its issue, the first that is a ticket id, trimmed");
   assert(metadataTicket({ ticket: 5 }) === null && metadataTicket({ ticket: "SMD-1 and SMD-2" }) === null && metadataTicket({ ticket: "smd-1" }) === null && metadataTicket(null) === null && metadataTicket({}) === null,
     "…and nothing that is not a ticket id alone");
-  // Version 2: a first line's ticket is a session summary's header ticket, when the header names that one alone and
-  // one of the session's listed prompts names it too, in any case, as the capture hook reads a prompt's tickets (its
-  // header lists those, else the branch's). The fixtures are the hook's layout as renderSummary writes it
-  // (recipes/session-capture-hook): the header's parts joined by " — ", then each part a blank line apart — `Title: …`,
-  // `Asked (N prompts):` with a `- …` line a prompt, the outcome — so the blank lines between them are read as the
-  // canary's summaries carry them (review pass 1: a single-newline fixture passed with the blank-line skip deleted).
+  // Version 3 (PR 7a-3b-2): a first line's tickets are a session summary's header tickets, each that one of the
+  // session's listed prompts names too, in any case, as the capture hook reads a prompt's tickets (its header lists
+  // those, else the branch's), in the header's order; version 2 keyed a header naming one alone. The fixtures are the
+  // hook's layout as renderSummary writes it (recipes/session-capture-hook): the header's parts joined by " — ", then
+  // each part a blank line apart — `Title: …`, `Asked (N prompts):` with a `- …` line a prompt, the outcome — so the
+  // blank lines between them are read as the canary's summaries carry them (review pass 1: a single-newline fixture
+  // passed with the blank-line skip deleted).
   const hook = (tickets: string, prompts: string[], outcome = "", title = prompts[0] ?? "") => [
     `Session summary — ${tickets ? `${tickets} — ` : ""}claude-code — ob1 (michaelharris/smd-2125-x) — 2026-10-01`,
     ...(title ? [`Title: ${title}`] : []),
@@ -2725,32 +2833,44 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     ...(outcome ? [`Outcome (the assistant's last message):\n${outcome}`] : []),
     "Brain: no thoughts read or written this session.",
   ].join("\n\n");
+  /** The header rule's tickets, comma-joined, read with the hook's word `from` when one is given: "" for none. */
+  const H = (content: string, from?: unknown): string => sessionHeaderTickets(content, from).join(",");
   const named = hook("SMD-2125", ["start smd-2125", "review for issues"], "Done: SMD-2125 is merged.");
-  assert(sessionHeaderTicket(named) === "SMD-2125" && sessionHeaderTicket(hook("SMD-2125", ["look around", "merge SMD-2125 now"], "", "x")) === "SMD-2125"
-    && sessionHeaderTicket(`\r\n\n${named.replaceAll("\n", "\r\n")}`) === "SMD-2125" && sessionHeaderTicket(named.replaceAll("\n\n", "\n")) === "SMD-2125",
+  assert(H(named) === "SMD-2125" && H(hook("SMD-2125", ["look around", "merge SMD-2125 now"], "", "x")) === "SMD-2125"
+    && H(`\r\n\n${named.replaceAll("\n", "\r\n")}`) === "SMD-2125" && H(named.replaceAll("\n\n", "\n")) === "SMD-2125",
     "a session summary's header ticket a listed prompt names, in any case: in the hook's layout, its parts a blank line apart, past blank lines and CRLF, and with none between");
-  assert(sessionHeaderTicket(hook("SMD-2125", ["highest value open issue"], "- Recommendation: SMD-2125, or SMD-1972")) === null
-    && sessionHeaderTicket(hook("SMD-2125", ["look at SMD-21250, smd-2125x and xsmd-2125"])) === null && sessionHeaderTicket(hook("SMD-2125", [], "", "")) === null
-    && sessionHeaderTicket(hook("SMD-2125", [], "", "SMD-2125 implementation")) === null && sessionHeaderTicket(hook("SMD-2125", ["continue"], "", "Continue SMD-2125 work")) === null,
+  assert(H(hook("SMD-2125", ["highest value open issue"], "- Recommendation: SMD-2125, or SMD-1972")) === ""
+    && H(hook("SMD-2125", ["look at SMD-21250, smd-2125x and xsmd-2125"])) === "" && H(hook("SMD-2125", [], "", "")) === ""
+    && H(hook("SMD-2125", [], "", "SMD-2125 implementation")) === "" && H(hook("SMD-2125", ["continue"], "", "Continue SMD-2125 work")) === "",
     "…none when only the outcome names it (its `- ` lines included), when a prompt names only a longer id, with no prompt, or when only the title does: the harness's own title may name the branch's ticket (review pass 3)");
-  assert(sessionHeaderTicket(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === null && sessionHeaderTicket(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614"
-      && sessionHeaderTicket(hook("FY-2026, CWE-79, SMD-12", ["FY-2026 and CWE-79 for SMD-12, then SMD-13"])) === null,
-    "…none from a header naming several tickets, the model's to choose among (review pass 1); a denied prefix the hook listed beside one is no second ticket; a full list of three may have left one out (review pass 2)");
-  assert(sessionHeaderTicket("Session summary — claude-code — ob1 (feature/SMD-7) — 2026-10-01\n\nTitle: SMD-8 builds on SMD-7: implement SMD-8") === null
-      && sessionHeaderTicket("Session summary — SMD-3400 — claude-code — ob1 (feature/SMD-3306-x) — 2026-10-01\n\nTitle: implement SMD-3400\n\nAsked (1 prompt):\n- implement SMD-3400") === "SMD-3400",
+  assert(H(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === "SMD-2615" && H(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614" && H(hook("SMD-2614, FY-2026", ["plan FY-2026"])) === ""
+      && H(hook("FY-2026, CWE-79, SMD-12", ["FY-2026 and CWE-79 for SMD-12, then SMD-13"])) === "SMD-12",
+    "…of a header naming several, those a listed prompt names, every prompt shown (version 2 left them to the model); a denied prefix the hook listed beside one is no second ticket; a full list of three is read (version 2: none, as one may have been left out)");
+  /** A prompt the hook clipped at its 200 characters, as renderSummary's clip writes it. */
+  const clippedAsk = [`start smd-55 ${"x".repeat(200)}`].map((q) => `${q.slice(0, 199).trimEnd()}…`);
+  assert(H(hook("SMD-55, SMD-56", ["pick up smd-55 and see where it got to…"])) === "SMD-55"
+      && H(hook("SMD-55, SMD-56", clippedAsk)) === "SMD-55,SMD-56",
+    "…a prompt the user ended with `…` is no clip, one the hook clipped is (review pass 3)");
+  assert(H(hook("SMD-55, NODE-22", ["start smd-55: move the image to node 22"])) === "" && H(hook("NODE-22", ["bump node-22"])) === "" && H(hook("SMD-2125, SMD-7", ["smd-2125 and smd-7"])) === "SMD-2125,SMD-7",
+    "…a header listing a ticket of another team than the first its own branch names is the model's (`NODE-22` beside the branch's SMD-2125: review pass 3, run-it; pass 1 keyed NODE-22, pass 2 SMD-55 alone); one team's are keyed");
+  assert(H(hook("SMD-3, SMD-1, SMD-2", ["start smd-1", "then SMD-3 and SMD-2"])) === "SMD-3,SMD-1,SMD-2" && H(hook("SMD-1, SMD-2", ["smd-2 and smd-1"])) === "SMD-1,SMD-2"
+      && H(hook("SMD-1, SMD-1", ["smd-1"])) === "SMD-1" && H(hook("SMD-1, SMD-2, SMD-3, SMD-4", ["smd-1"])) === "" && H(hook("SMD-1, SMD-2", ["neither"])) === "",
+    "…every ticket of the header a prompt names, a full list of three, in the header's order, each once; none from a header listing more than the hook's three, or none a prompt names");
+  assert(H("Session summary — claude-code — ob1 (feature/SMD-7) — 2026-10-01\n\nTitle: SMD-8 builds on SMD-7: implement SMD-8") === ""
+      && H("Session summary — SMD-3400 — claude-code — ob1 (feature/SMD-3306-x) — 2026-10-01\n\nTitle: implement SMD-3400\n\nAsked (1 prompt):\n- implement SMD-3400") === "SMD-3400",
     "…the header's tickets part alone: a branch's ticket in a later part is none the hook listed, and no second ticket beside the one it did (review pass 2)");
-  assert(sessionHeaderTicket(hook("SMD-3306", ["pasted log\u0085then start smd-3306"], "", "x")) === "SMD-3306",
+  assert(H(hook("SMD-3306", ["pasted log\u0085then start smd-3306"], "", "x")) === "SMD-3306",
     "…a prompt read whole past a NEL inside it, which the hook keeps on the prompt's line (review pass 2)");
-  assert(sessionHeaderTicket("Session summary: SMD-2125\n- Open: filed SMD-2125's follow-up") === null && sessionHeaderTicket("Session summary: SMD-2125\n\nTitle: start smd-2125") === null
-      && sessionHeaderTicket("Session summary — SMD-2125 — claude-code — x — 2026-10-01\n\n- smd-2125, in a list no Asked heads") === null
-      && sessionHeaderTicket("Forwarded: Session summary — SMD-5 — claude-code — x — 2026-10-01\n\nAsked (1 prompt):\n- smd-5") === null,
+  assert(H("Session summary: SMD-2125\n- Open: filed SMD-2125's follow-up") === "" && H("Session summary: SMD-2125\n\nTitle: start smd-2125") === ""
+      && H("Session summary — SMD-2125 — claude-code — x — 2026-10-01\n\n- smd-2125, in a list no Asked heads") === ""
+      && H("Forwarded: Session summary — SMD-5 — claude-code — x — 2026-10-01\n\nAsked (1 prompt):\n- smd-5") === "",
     "…none from a summary the hook did not write, even one whose title names its ticket, nor from `- ` lines no `Asked (N prompts):` heads (review pass 1), nor from a header that does not open its line (review pass 6)");
-  assert(sessionHeaderTicket("SMD-2125 session summary\nTitle: smd-2125") === null && sessionHeaderTicket("OB1 process note (SMD-1933): Title: SMD-1933") === null && sessionHeaderTicket("") === null
-    && sessionHeaderTicket(hook("UTF-8", ["utf-8"])) === null && sessionHeaderTicket("Session summary — claude-code — OB1 (michaelharris/smd-1156-x) — 2026-09-24\n\nTitle: smd-1156") === null,
+  assert(H("SMD-2125 session summary\nTitle: smd-2125") === "" && H("OB1 process note (SMD-1933): Title: SMD-1933") === "" && H("") === ""
+    && H(hook("UTF-8", ["utf-8"])) === "" && H("Session summary — claude-code — OB1 (michaelharris/smd-1156-x) — 2026-09-24\n\nTitle: smd-1156") === "",
     "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
   // The hook's own renderSummary (review passes 1 and 3), its session as the segmenter fills one: a header it writes for
   // prompts naming their ticket is keyed; one carrying the branch's ticket, the harness's title naming it, is not.
-  const { renderSummary } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string };
+  const { renderSummary, headerTickets } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string; headerTickets: (s: Record<string, unknown>) => { tickets: string[]; from: string | null } };
   const hookSession = (branch: string, prompts: string[], named: string[], title = "") => ({
     harness: "claude-code", sessionId: "s-1", title, cwd: "/work/ob1", branch, roots: new Set(), prompts, outcome: "Done.", assistant: [], files: new Set(), commits: 0, prs: [],
     retrieved: new Set(), captured: new Set(), first: "2026-10-01T10:00:00Z", last: "2026-10-01T11:00:00Z", pushed: false, checkpoint: undefined, n: 0, named: new Set(named),
@@ -2758,13 +2878,98 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   });
   const fromHook = renderSummary(hookSession("michaelharris/smd-2125-x", ["start smd-2125", "review for issues"], ["SMD-2125"]));
   const branchOnly = renderSummary(hookSession("michaelharris/smd-55-x", ["continue"], [], "Continue SMD-55 work"));
-  assert(sessionHeaderTicket(fromHook) === "SMD-2125" && /^Session summary — SMD-55 — /.test(branchOnly) && sessionHeaderTicket(branchOnly) === null,
+  assert(H(fromHook) === "SMD-2125" && /^Session summary — SMD-55 — /.test(branchOnly) && H(branchOnly) === "",
     `…as the hook's own renderSummary writes a session: its prompts' ticket keyed; the branch's, named by its title alone, not (${JSON.stringify(fromHook.split("\n")[0])})`);
+  // Review pass 1 (PR 7a-3b-2, run-it): a ticket named only by a prompt the summary does not list — the 13th, or past
+  // the 200th character of a long one — is on the header, and keyed with the rest.
+  const lateSession = hookSession("michaelharris/smd-1-x", ["start smd-1", ...Array.from({ length: 11 }, (_, i) => `step ${i + 2}`), "and SMD-2 too"], ["SMD-1", "SMD-2"]);
+  const late = renderSummary(lateSession);
+  const longPrompt = renderSummary(hookSession("michaelharris/smd-3-x", [`${"x".repeat(230)} SMD-4`, "SMD-3 too"], ["SMD-4", "SMD-3"]));
+  const shownAll = renderSummary(hookSession("michaelharris/smd-1-x", ["start smd-1", ...Array.from({ length: 10 }, (_, i) => `step ${i + 2}`)], ["SMD-1", "SMD-2"]));
+  assert(/^Session summary — SMD-1, SMD-2 — /.test(late) && !/and SMD-2 too/.test(late) && /^- … and 1 more$/m.test(late) && H(late) === "SMD-1,SMD-2"
+      && /^Session summary — SMD-4, SMD-3 — /.test(longPrompt) && /…$/m.test(longPrompt) && H(longPrompt) === "SMD-4,SMD-3"
+      && /^Session summary — SMD-1, SMD-2 — /.test(shownAll) && !/…/.test(shownAll) && H(shownAll) === "SMD-1",
+    `…a ticket only an unlisted prompt names, or one past a long prompt's cut, keyed with the header's rest, the summary showing its prompts in part; with every prompt shown whole, those a prompt names alone (review pass 2) (${H(late)} | ${H(longPrompt)} | ${H(shownAll)})`);
+  const anchoredSession = hookSession("michaelharris/smd-610-and-smd-611", ["upgrade the runtime, see smd-610", ...Array.from({ length: 12 }, (_, i) => `step ${i + 2}`)], []);
+  const anchoredLate = renderSummary(anchoredSession);
+  assert(/^Session summary — SMD-610, SMD-611 — /.test(anchoredLate) && /^- … and 1 more$/m.test(anchoredLate) && H(anchoredLate) === "SMD-610",
+    `…nor widened, its prompts shown in part, when the header's own branch names its every ticket (review pass 2, run-it: ${H(anchoredLate)})`);
+  assert(H(hook("SMD-2615, SMD-2614", ["… start smd-2615 … then review"])) === "SMD-2615",
+    "…an ellipsis a prompt was typed with, at its start or inside it, is no mark of the summary showing it in part (review pass 3, mutant)");
+  assert(H("Session summary — SMD-10, SMD-11, FY-2026 — claude-code — ob1 (smd-10-smd-11-x) — 2026-10-01\n\nAsked (13 prompts):\n- start smd-10\n- … and 12 more") === "SMD-10",
+    "…a denied prefix the hook listed, which no branch names, does not unanchor a header its branch names every ticket of (review pass 3, mutant)");
+  assert(H("Session summary — SMD-10, SMD-11 — claude-code — ob1 (main) — 2026-10-01\n\nAsked (13 prompts):\n- look around\n- … and 12 more") === "",
+    "…and a summary showing its prompts in part keys none when no listed prompt names a listed ticket (review pass 3, mutant)");
+  assert(H("Session summary — SMD-5 — claude-code — utf-8-tools (smd-5-x) — 2026-10-01\n\nAsked (1 prompt):\n- start smd-5") === "SMD-5",
+    "…a denied prefix in the header's own place names no team: the team is its branch's first ticket (review pass 3)");
+  // Review pass 3 (run-it): the hook learns NODE from `smd-610-bump-node-22`, so a prompt's node-22 and node-24 are its
+  // named tickets, and the header lists them, or one beside SMD-610.
+  const nodes = renderSummary(hookSession("michaelharris/smd-610-bump-node-22", ["bump node-22 to node-24 in the Dockerfile", "run the tests"], ["NODE-22", "NODE-24"]));
+  const nodeAndOwn = renderSummary(hookSession("michaelharris/smd-610-bump-node-22", ["the image still pins node-22, see smd-610"], ["NODE-22", "SMD-610"]));
+  assert(/^Session summary — NODE-22, NODE-24 — /.test(nodes) && H(nodes) === "" && /^Session summary — NODE-22, SMD-610 — /.test(nodeAndOwn) && H(nodeAndOwn) === "",
+    `…a header listing another team's tickets than its branch's first left to the model (${H(nodes)} | ${H(nodeAndOwn)})`);
+  // The hook's word on where the header's tickets came from (metadata.tickets_from, the hook from 1.8.0): `asks`, every
+  // listed ticket, named by an ask though no listed line shows it; `place`, those a listed prompt names, never widened;
+  // without it, or with a word it does not send, the reading above. The team guard holds either way (PR 7a-3b-2).
+  assert(TICKETS_FROM === "tickets_from" && H(hook("SMD-2125, SMD-7", ["start smd-2125"]), "asks") === "SMD-2125,SMD-7" && H(hook("SMD-2125, SMD-7", ["start smd-2125"])) === "SMD-2125"
+      && H(hook("SMD-55, SMD-56", clippedAsk), "place") === "SMD-55" && H(hook("SMD-55, SMD-56", clippedAsk)) === "SMD-55,SMD-56" && H(hook("SMD-55, SMD-56", ["look around"]), "place") === ""
+      && H(hook("NODE-22, NODE-24", ["bump node-22 to node-24"]), "asks") === "" && H(hook("SMD-2125, SMD-7", ["start smd-2125"]), "bogus") === "SMD-2125",
+    "…with the hook's word: the asks' every ticket; the place's those a prompt names, never widened; another team's still the model's; a word it does not send read as none");
+  assert(H("Session summary — SMD-2125, SMD-2126 — claude-code — OB1 (main) — 2026-11-13\n\nWe decided to ship SMD-2125.", "asks") === "" && H("Session summary — SMD-2125, SMD-2126 — claude-code — x — 2026-11-13", "asks") === "",
+    "…`asks` only in the hook's layout, an Asked list read: a model's prose echoing a header, or a header line alone claiming the word, keys none (review pass 4, cold read)");
+  assert(H(late, headerTickets(lateSession).from) === "SMD-1,SMD-2" && headerTickets(lateSession).from === "asks"
+      && H(anchoredLate, headerTickets(anchoredSession).from) === "SMD-610" && headerTickets(anchoredSession).from === "place",
+    `…as the hook's own headerTickets says of its sessions (${headerTickets(lateSession).from}, ${headerTickets(anchoredSession).from})`);
+  assert(JSON.stringify(ruleSubject({ content: hook("SMD-2125, SMD-7", ["start smd-2125"]), metadata: { tickets_from: "asks" } })) === JSON.stringify({ keys: ["ticket:SMD-2125", "ticket:SMD-7"], by: "first_line", from: "asks" })
+      && JSON.stringify(subjectRecipe({ by: "first_line", from: "asks" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 3, tickets_from: "asks" }),
+    "…ruleSubject reads the word off the thought's metadata, and the rule's recipe keeps it (review pass 4)");
+  assert(H(hook("SMD-2614, FY-2026", ["start smd-2614"]), "asks") === "SMD-2614" && H(hook("SMD-1, SMD-2, SMD-3, SMD-4", ["smd-1"]), "asks") === ""
+      && H(hook("SMD-55, SMD-56", clippedAsk), "bogus") === "SMD-55,SMD-56" && H(hook("SMD-55, SMD-56", clippedAsk), 1) === "SMD-55,SMD-56",
+    "…under `asks` a denied prefix still no ticket and a header over three none; a word the hook does not send, its prompts shown in part, widened as with none (review pass 4, mutants)");
+  /** A summary of one ask in the hook's layout, its header listing `ticket` at `place` (`project (branch)`). */
+  const onPlace = (ticket: string, ask: string, place: string) => `Session summary — ${ticket} — claude-code — ${place} — 2026-10-01\n\nAsked (1 prompt):\n- ${ask}`;
+  const onBranch = (branch: string, project = "ob1") => onPlace("SMD-55", "work on SMD-55 please", `${project} (${branch})`);
+  assert(["hotfix-2026", "release-2", "v2-26", "dependabot/npm/vite-5", "feat/x"].every((b) => H(onBranch(b), "asks") === "SMD-55") && H(onBranch("feat/x", "ob1-2"), "asks") === "SMD-55"
+      && H(onPlace("NODE-22", "work on node-22 please", "ob1 (smd-610-bump-node-22)"), "asks") === "",
+    "…the team the header's own parts name read as the hook reads a ticket, two to five letters and two to six digits: `hotfix-2026`, `release-2` or `ob1-2` no team (review pass 5, run-it); `node-22` beside `smd-610` still another team's");
+  assert(H(onPlace("SMD-55", "fix smd-55", "site-2025 (smd-55-fix)"), "asks") === "SMD-55" && H(onPlace("SMD-55", "fix smd-55", "aoc-2024 (feature/smd-55-day1)"), "asks") === "SMD-55"
+      && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)"), "asks") === "SMD-34" && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)")) === "SMD-34"
+      && ["ed-25519-keys", "md-12-render", "html-2026"].every((b) => H(onPlace("SMD-55", "Work on SMD-55 please", `ob1 (${b})`), "asks") === "SMD-55")
+      && H(onPlace("NODE-3", "x", "smd-12-wt (main)"), "asks") === "" && H(onPlace("SMD-12", "start smd-12", "smd-12-wt (main)"), "asks") === "SMD-12"
+      && H(onPlace("NODE-22, NODE-24", "bump node-22 to node-24", "ob1 (smd-610-bump-node-22)"), "asks") === "",
+    "…the branch's team first, then the project's, as the hook reads a place, no prefix either list denies: a project `site-2025` or a worktree of another team's ticket beside a ticket branch, and `ed-25519-keys`, keep the session (review pass 6, cold read)");
+  // Review pass 6 (mutants): the model's summary as the hook sends it, with no word (pass 4 keeps the word off it),
+  // keys no header; and the place's team read as the hook reads one, no wider: seven digits, a digit or `_` glued
+  // after the number, or a prefix the server denies (`sha-256`), name no team.
+  assert(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen" } }) === null
+      && ["build-1234567", "rel-2026a", "abc-12_x", "fix/sha-256-check"].every((b) => H(onBranch(b), "asks") === "SMD-55"),
+    `…a model's summary with no word keys none; the place's team only as the hook reads one (review pass 6, mutants: ${["build-1234567", "rel-2026a", "abc-12_x", "fix/sha-256-check"].map((b) => H(onBranch(b), "asks")).join("|")})`);
+  assert(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen", tickets_from: "asks" } }) === null
+      && JSON.stringify(ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "qwen", issue: "SMD-9" } })) === JSON.stringify({ keys: ["ticket:SMD-9"], by: "metadata" })
+      && ruleSubject({ content: hook("SMD-2125", ["start smd-2125"]), metadata: { summary_model: "" } }) !== null,
+    "…a summary the hook's model wrote keys no header, its prose never the hook's layout; a ticket it is filed under still keys it (review pass 5, run-it)");
+  // Review pass 5 (mutants): `asks` keys the header whose every ticket only an unlisted ask named; the Asked list, not
+  // a Title, is the hook's layout, its heading read whole; the recipe's word only the hook's two, `place` as itself,
+  // and none on the filed ticket's.
+  const hiddenSession = hookSession("main", [...Array.from({ length: 12 }, (_, i) => `step ${i + 1}`), "and SMD-2 too"], ["SMD-2"]);
+  const hidden = renderSummary(hiddenSession);
+  const titled = "Session summary — SMD-2125, SMD-2126 — claude-code — x — 2026-11-13\n\nTitle: start smd-2125";
+  const looseAsked = "Session summary — SMD-2125 — claude-code — x — 2026-11-13\n\nAsked the team:\n- smd-2125 is done";
+  const ruled = (metadata: Record<string, unknown>, content = hook("SMD-55, SMD-56", ["start smd-55"])) => JSON.stringify(ruleSubject({ content, metadata }));
+  assert(/^Session summary — SMD-2 — /.test(hidden) && !/SMD-2 too/.test(hidden) && headerTickets(hiddenSession).from === "asks" && H(hidden, "asks") === "SMD-2" && H(hidden) === ""
+      && H(titled, "asks") === "" && H(looseAsked, "asks") === "" && H(looseAsked) === ""
+      && ruled({ tickets_from: "place" }) === JSON.stringify({ keys: ["ticket:SMD-55"], by: "first_line", from: "place" })
+      && ruled({ tickets_from: "bogus" }) === JSON.stringify({ keys: ["ticket:SMD-55"], by: "first_line" })
+      && ruled({ tickets_from: "asks", issue: "SMD-1" }) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" }),
+    `…\`asks\` keys a header only an unlisted ask named; a Title alone, or an \`Asked\` heading not the hook's, no Asked list; the recipe's word \`place\` as itself, a word the hook does not send none, the filed ticket's none (review pass 5, mutants: ${H(hidden, "asks")} | ${ruled({ tickets_from: "place" })})`);
   // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
-  assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
-    && JSON.stringify(ruleSubject({ content: named, metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2125", by: "first_line" })
+  const two = hook("SMD-7, SMD-8", ["start smd-8", "and smd-7"]);
+  assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ keys: ["ticket:SMD-1"], by: "metadata" })
+    && JSON.stringify(ruleSubject({ content: named, metadata: { issue: "none" } })) === JSON.stringify({ keys: ["ticket:SMD-2125"], by: "first_line" })
+    && JSON.stringify(ruleSubject({ content: two })) === JSON.stringify({ keys: ["ticket:SMD-7", "ticket:SMD-8"], by: "first_line" })
+    && JSON.stringify(ruleSubject({ content: two, metadata: { ticket: "SMD-7" } })) === JSON.stringify({ keys: ["ticket:SMD-7"], by: "metadata" })
     && ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } }) === null && ruleSubject({ content: "no ticket", metadata: null }) === null,
-    "the metadata's ticket before the session header's; a note's first-line ticket, or none, the model's to find");
+    "the metadata's ticket alone before the session header's, which are a set; a note's first-line ticket, or none, the model's to find");
 
   // Which ticket-shaped words are tickets: any whose prefix is no encoding, hash, cipher, protocol, standard, licence,
   // model name or dated period — a fixed list, so a key is the same on every brain and run (review passes 1 and 2).
@@ -2776,7 +2981,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(metadataTicket({ ticket: `SMD-${"1".repeat(250)}`, issue: "SMD-2" }) === "SMD-2" && metadataTicket({ issue: "SHA-1" }) === "SHA-1" && ruleSubject({ content: "GPT-4 x" }) === null,
     "a filed ticket too long for 111's key is passed over; a filed one is the brain's own, denied prefix or not; a first line naming no ticket leaves the thought to the model");
 
-  // The question, version 2: the subject's own rules, by hash over three thoughts: a ticket's, one with no date or
+  // The question, version 3: the subject's own rules, by hash over three thoughts: a ticket's, one with no date or
   // writer and a delimiter in its text, and one past prompt 4's content cap. A changed word fails here: bump
   // SUBJECT_PROMPT_VERSION with it, so the sweep asks again.
   const sides = [
@@ -2788,94 +2993,119 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   // pins are never rewritten, so a changed word needs SUBJECT_PROMPT_VERSION moved too (review pass 1: re-pinning the
   // hash under the same version passed). Version 1 is SMD-3299's round 4 own question, PR 2's. Version 2's were set
   // again before it shipped: when review pass 2 had it ask for one subject, and when review pass 5 gave a closing
-  // message's ticket its words, with two more that review pass 6 took back on the 27B's answers.
+  // message's ticket its words, with two more that review pass 6 took back on the 27B's answers. Version 3 is SMD-3306
+  // PR 7a-3b-2's, a set.
   const PINNED: Record<number, string[]> = {
     1: ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"],
     2: ["6230109e71743caad2c3536ad7b6b8532b8c36f5ea9782a268c9d84e890d62ca", "16fe05607579a76d8fe1a44682506c045e2a6ef16f2c760302ba6ec760893d2c", "32b152d4ea475087133e8aad17a9fe49dc5216c9336bda452c5ef3bc8c8c8077"],
+    3: ["6653075a38b474a366fc3449a86fe9a157559831207d368b5c53efeb2ebfabaf", "7c6ce3f25f393bb4c99c26fe631cffea1289343e26f125d560fde0eaa2459507", "c1ebe990a2c9d666600948c0e0d68124235dac0328f2368a19d0ba3d0f1424c8"],
   };
   assert(SUBJECT_PROMPT_VERSION === Math.max(...Object.keys(PINNED).map(Number)), `the question's version is the newest pinned (${SUBJECT_PROMPT_VERSION})`);
   sides.forEach((s, i) => {
     const m = ownSubjectMessages(s);
     assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === PINNED[SUBJECT_PROMPT_VERSION]?.[i], `the question is version ${SUBJECT_PROMPT_VERSION}'s, word for word (thought ${i + 1})`);
   });
-  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "beed271ae9531d5ec63f827c5763c1fdb26ba7ee93e9d5d97d31dcc3a21fa914", "…and the fixed text a recipe's prompt_hash names");
+  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "48dd2c1055a66acae95e20ee437c5f6bc35fb962e4089d8976641a91f28737d7", "…and the fixed text a recipe's prompt_hash names");
   const q = ownSubjectMessages(sides[0])[0].content;
-  assert(q.includes(OWN_RULES) && OWN_RULES.includes("**a session summary:** the work the session did, which its prompts and its outcome show together") && OWN_RULES.includes("A follow-up the session files while working on its header's ticket does not change its subject")
+  assert(q.includes(OWN_RULES) && OWN_RULES.includes("**a session summary:** the work the session did, which its prompts and its outcome show together") && OWN_RULES.includes("A follow-up the session files while working on its header's ticket is not one of its subjects")
       && OWN_RULES.includes("**A thought is mainly about a component") && !q.includes("Step 2") && !q.includes("third subject") && !MEDIATED_TEST.includes("A follow-up the session files"),
     "the subject's own rules: a session's work, where its header's ticket comes from, the component rule; no pair test, no step 2");
-  assert(OWN_RULES.includes("nor does a ticket its closing message offers or asks about"), "a ticket a session's closing message offers has its words (review pass 5)");
+  assert(OWN_RULES.includes("nor is a ticket its closing message offers or asks about"), "a ticket a session's closing message offers has its words (review pass 5), no subject of it since version 3");
   assert(!/last message/.test(OWN_RULES) && !/several separate things/.test(OWN_RULES),
     "…and neither a session's last message nor a note reporting several things has any: with them the 27B passed over a ticket only a session's outcome named, and named a column for a note's own ticket (review pass 6)");
-  assert(OWN_ANSWER.includes("one thing") && OWN_ANSWER.includes("a ticket as its id alone, in its usual form") && OWN_RULES.includes("take the one the session mainly worked on") && OWN_ANSWER.includes("only when the work is the PR's and no ticket's") && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"),
-    "the answer's shape: one thing, a ticket by its id alone, a PR only for no ticket's work, one ticket of several (review pass 2); the prompt's fixed text, which the recipe hashes, holds no thought");
+  assert(OWN_ANSWER.includes("each one thing") && OWN_ANSWER.includes("a ticket as its id alone, in its usual form") && OWN_ANSWER.includes("only when the work is the PR's and no ticket's") && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"),
+    "the answer's shape: each subject one thing, a ticket by its id alone, a PR only for no ticket's work; the prompt's fixed text, which the recipe hashes, holds no thought");
+  assert(OWN_ANSWER.includes('"subjects": a list of its own subjects, usually one, at most three, the one its work is most about first') && OWN_HEAD.includes('{"subjects":[],"deliverables":[]}')
+      && OWN_RULES.includes("Most thoughts have one subject.") && OWN_RULES.includes("never for a thing it only mentions") && OWN_RULES.includes("each one the session worked on is a subject, the one it worked on most first")
+      && !OWN_RULES.includes("take the one the session mainly worked on"),
+    "version 3 (PR 7a-3b-2): a list of at most three, most-worked first, usually one, never a thing only mentioned; each ticket of several a session worked on, where version 2 took one");
 
-  // The answer's subject: one line, at most 200 characters; "" for none; null when the answer gives no subject string.
-  assert(ownSubjectOf('{"subject":" SMD-12  \\n x","deliverables":["a"]}') === "SMD-12 x" && ownSubjectOf('{"subject":""}') === "" && ownSubjectOf('```json\n{"subject":"a"}\n```') === "a",
-    "the subject, one line; an empty one; a fenced answer");
-  assert(ownSubjectOf("no json") === null && ownSubjectOf('{"subject":5}') === null && ownSubjectOf('{"deliverables":[]}') === null && [...(ownSubjectOf(JSON.stringify({ subject: "é".repeat(300) })) ?? "")].length === 200,
-    "…none from an answer without a subject string; a long one cut at 200 code points");
-  assert(ownSubjectOf('{"subject":null,"deliverables":[]}') === "", "a null subject is the model naming none, as \"\" is, not an answer of another shape (review pass 2)");
+  // The answer's subjects (version 3): each one line, at most 200 characters, in the answer's order, those naming
+  // nothing left out; null when the answer gives no subjects.
+  const S = (raw: string): string => JSON.stringify(ownSubjectsOf(raw));
+  assert(S('{"subjects":[" SMD-12  \\n x","PR 7"],"deliverables":["a"]}') === '["SMD-12 x","PR 7"]' && S('{"subjects":[]}') === "[]" && S('```json\n{"subjects":["a"]}\n```') === '["a"]'
+      && S('{"subjects":["", null, "b"]}') === '["b"]' && S('{"subjects":"one"}') === '["one"]' && S('{"subjects":null}') === "[]",
+    "the subjects, each one line, in order; none; a fenced answer; an empty or null entry naming nothing; one string or null read as a list of one");
+  assert(ownSubjectsOf("no json") === null && ownSubjectsOf('{"subjects":5}') === null && ownSubjectsOf('{"subjects":["a", 5]}') === null && ownSubjectsOf('{"subjects":[["a"]]}') === null && ownSubjectsOf('{"deliverables":[]}') === null
+      && [...(ownSubjectsOf(JSON.stringify({ subjects: ["é".repeat(300)] }))?.[0] ?? "")].length === 200,
+    "…none from an answer without a list of strings; a long one cut at 200 code points");
+  assert(S('{"subject":"SMD-1","deliverables":[]}') === '["SMD-1"]' && S('{"subject":null}') === "[]" && S('{"subject":"SMD-1","subjects":["SMD-2"]}') === '["SMD-2"]',
+    "version 2's `subject` read as one when `subjects` is not there, a null naming none (its review pass 2); `subjects` read first");
 
-  // The pass keys, one a rule (version 2: the first line's rule changed, the filed ticket's did not), and the lineage recipes.
-  assert(subjectRuleKey("metadata") === "subject:metadata@r1" && subjectRuleKey("first_line") === "subject:first_line@r2"
-      && subjectModelKey("qwen3.8:27b", true) === "subject:qwen3.8:27b@p2r" && subjectModelKey("qwen3.8:27b", false) === "subject:qwen3.8:27b@p2",
+  // The pass keys, one a rule (version 3: the first line's rule changed, the filed ticket's did not), and the lineage
+  // recipes.
+  assert(subjectRuleKey("metadata") === "subject:metadata@r1" && subjectRuleKey("first_line") === "subject:first_line@r3"
+      && subjectModelKey("qwen3.8:27b", true) === "subject:qwen3.8:27b@p3r" && subjectModelKey("qwen3.8:27b", false) === "subject:qwen3.8:27b@p3"
+      && subjectPoolKey(true, true) === "subjects:r1.3:p3r" && subjectPoolKey(true, false) === "subjects:r1.3:p3" && subjectPoolKey(false, true) === "subjects:r1.3",
     "each rule's key and the model's, beside extract's `extract:<model>@p<n>`: `r` when it was asked with its reasoning on (PR 4)");
   assert(subjectReasoning(resolveEmbedConfig({})) === "on" && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "0" })) === "off" && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "none" })) === "off"
       && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "Low" })) === "low"
       && subjectReasoningOn(resolveEmbedConfig({})) && subjectReasoningOn(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "low" })) && !subjectReasoningOn(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "none" })),
     "the reasoning's name, for a recipe and the sweep's line: on, off (an effort of none is off), or the effort; on at its default or an effort");
-  assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 2 })
+  assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 3 })
     && JSON.stringify(subjectRecipe({ by: "metadata" })) === JSON.stringify({ deterministic: true, rule: "metadata", rule_version: 1 }), "a rule's recipe: deterministic, the rule and its version");
-  const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, reasoning: "on", answer: "PR 727" });
-  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 2 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.reasoning === "on" && modelRecipe.answer === "PR 727",
-    "the model's: its model, the question's version and hash, the reasoning it was asked with, and what it answered");
+  const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, reasoning: "on", answers: ["PR 727", "SMD-1"] });
+  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 3 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.reasoning === "on"
+      && JSON.stringify(modelRecipe.answers) === '["PR 727","SMD-1"]' && !("answer" in modelRecipe),
+    "the model's: its model, the question's version and hash, the reasoning it was asked with, and what it answered, a list since version 3");
   // Current: a rule's subject under that rule's key now, a model's under the current question by any model, with its
-  // reasoning on while the question is asked with it on (PR 4). Version 1's one rules key, the first line's version 1
-  // and the question's version 1 are out of date, and the sweep finds them again; so is a model's found with its
-  // reasoning off, while it is on. Turning it off keeps those found with it on.
+  // reasoning on while the question is asked with it on (PR 4). Version 1's one rules key, the first line's versions 1
+  // and 2 and the question's versions 1 and 2 are out of date, and the sweep finds them again; so is a model's found
+  // with its reasoning off, while it is on. Turning it off keeps those found with it on.
   const current: [string | null, string | null, boolean, boolean][] = [
-    ["metadata", "subject:metadata@r1", true, true], ["first_line", "subject:first_line@r2", true, true],
-    ["model", "subject:qwen3.8:27b@p2r", true, true], ["model", "subject:another-model@p2r", true, true], ["model", "subject:qwen3.8:27b@p2", false, true], ["model", "subject:another-model@p2", false, true],
-    ["metadata", "subject:rules@r1", false, false], ["first_line", "subject:rules@r1", false, false], ["first_line", "subject:first_line@r1", false, false], ["metadata", "subject:first_line@r2", false, false],
-    ["model", "subject:qwen3.8:27b@p1", false, false], ["model", "subject:x@p12", false, false], ["model", "subject:x@p20", false, false], ["model", "subject:x@p1r", false, false], ["model", "subject:x@p12r", false, false],
-    ["model", "subject:x@p2rr", false, false], ["model", "subject:metadata@r1", false, false], ["model", "extract:x@p2", false, false], ["model", "extract:x@p2r", false, false], ["model", null, false, false],
-    [null, "subject:metadata@r1", false, false], ["other", "subject:x@p2", false, false], ["other", "subject:x@p2r", false, false],
+    ["metadata", "subject:metadata@r1", true, true], ["first_line", "subject:first_line@r3", true, true],
+    ["model", "subject:qwen3.8:27b@p3r", true, true], ["model", "subject:another-model@p3r", true, true], ["model", "subject:qwen3.8:27b@p3", false, true], ["model", "subject:another-model@p3", false, true],
+    ["metadata", "subject:rules@r1", false, false], ["first_line", "subject:rules@r1", false, false], ["first_line", "subject:first_line@r1", false, false], ["first_line", "subject:first_line@r2", false, false],
+    ["metadata", "subject:first_line@r3", false, false],
+    ["model", "subject:qwen3.8:27b@p1", false, false], ["model", "subject:qwen3.8:27b@p2r", false, false], ["model", "subject:qwen3.8:27b@p2", false, false], ["model", "subject:x@p13", false, false],
+    ["model", "subject:x@p30", false, false], ["model", "subject:x@p1r", false, false], ["model", "subject:x@p13r", false, false],
+    ["model", "subject:x@p3rr", false, false], ["model", "subject:metadata@r1", false, false], ["model", "extract:x@p3", false, false], ["model", "extract:x@p3r", false, false], ["model", null, false, false],
+    [null, "subject:metadata@r1", false, false], ["other", "subject:x@p3", false, false], ["other", "subject:x@p3r", false, false],
   ];
   for (const [by, judge, on, off] of current) assert(subjectCurrent(by, judge, true) === on && subjectCurrent(by, judge, false) === off, `current: ${by} under ${judge} → ${on} with reasoning on, ${off} off`);
 
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
-  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}', '{"subject":"v02.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}'];
+  const answers = ['{"subjects":["PR 727"],"deliverables":[]}', '{"subjects":[],"deliverables":[]}', "not json", JSON.stringify({ subjects: [`${"x ".repeat(97)}SMD-12345 work`], deliverables: [] }),
+    '{"subjects":["SMD-123"],"deliverables":[]}', '{"subjects":["OB1 release 2.0.0"],"deliverables":[]}', '{"subjects":["PR 727"],"deliverables":[]}', '{"subjects":["v02.0.0"],"deliverables":[]}',
+    '{"subjects":["PR 727"],"deliverables":[]}',
+    '{"subjects":["SMD-1","PR 9","SMD-1\'s tests","SMD-2","SMD-3"],"deliverables":[]}', '{"subjects":["SMD-999","the dashboard review","SMD-5"],"deliverables":[]}', '{"subject":"SMD-5","deliverables":[]}',
+    '{"subjects":["smd-8 tests","SMD-8","smd-8","PR 3"],"deliverables":[]}', JSON.stringify({ subjects: [...Array.from({ length: 8 }, (_, i) => `SMD-90${i}`), "SMD-5"], deliverables: [] }),
+    '{"subjects":["smd-8 tests","SMD-9","SMD-10","SMD-11","SMD-8"],"deliverables":[]}', '{"subjects":["SMD-5","smd-5 and smd-6 merge"],"deliverables":[]}',
+    '{"subjects":["SMD-8","smd-8 and smd-99 handoff","PR 3"],"deliverables":[]}', JSON.stringify({ subjects: ["smd-5 tests", ...Array.from({ length: 7 }, (_, i) => `SMD-90${i}`), "SMD-5"], deliverables: [] }),
+    '{"subjects":["sha-256 checks for smd-5","SMD-5"],"deliverables":[]}', '{"subjects":["smd-5 then smd-6","SMD-7","SMD-8","SMD-6","SMD-5"],"deliverables":[]}'];
   const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
+  /** An answer's subjects and keys, each list comma-joined, null when none was read. */
+  const got = (a: { answers: string[] | null; keys: string[] }) => ({ answers: a.answers?.join(",") ?? null, keys: a.keys.join(",") });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
     const subject = { kind: "extraction" as const, content: sides[1].content };
     const names727 = { content: "Merged PR 727 today.", createdAt: null, metadata: {}, writer: null };
     const a = await askOwnSubject(cfg, names727, subject);
-    assert(a.answer === "PR 727" && a.key === "pr:727", `an answer read into its key, the PR one the thought names (${JSON.stringify(a)})`);
+    assert(got(a).answers === "PR 727" && got(a).keys === "pr:727", `an answer read into its key, the PR one the thought names (${JSON.stringify(a)})`);
     const b0 = bodies[0] as { model?: string; response_format?: { type?: string }; temperature?: number; messages?: { content: string }[] };
     assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(names727)[0].content,
       "asked of the judge model, JSON, at the metadata temperature, with the question");
     assert(!("reasoning_effort" in b0) && cfg.metadataReasoning.reasoning_effort === "none",
       "…with its reasoning on, the provider's default (PR 4), where extraction's knob, unset, would turn it off");
     const none = await askOwnSubject(cfg, sides[1], subject);
-    assert(none.answer === "" && none.key === null, "an empty subject: no key");
+    assert(got(none).answers === "" && got(none).keys === "", "no subjects: no key");
     const bad = await askOwnSubject(cfg, sides[1], subject);
-    assert(bad.answer === null && bad.key === null && bad.raw === "not json", "an answer that is not JSON: none, its raw text kept");
+    assert(bad.answers === null && bad.keys.length === 0 && bad.raw === "not json", "an answer that is not JSON: none, its raw text kept");
     // Review pass 1: the key was read from the subject cut at 200 code points, so a ticket across the cut read as SMD-12.
     const names12345 = { content: "The smd-12345 work, its branch's id in lower case.", createdAt: null, metadata: {}, writer: null };
     const long = await askOwnSubject(cfg, names12345, subject);
-    assert(long.key === "ticket:SMD-12345" && long.answer !== null && [...long.answer].length === 200,
-      `a ticket past the 200th code point is read whole, the thought naming it in any case; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
+    assert(got(long).keys === "ticket:SMD-12345" && long.answers?.length === 1 && [...long.answers[0]].length === 200,
+      `a ticket past the 200th code point is read whole, the thought naming it in any case; the answer a recipe keeps is cut (${long.keys}, ${long.answers?.[0]?.length})`);
     // Review pass 3: a ticket the thought never names is the model's invention, or its copy of the question's example.
     const copied = await askOwnSubject(cfg, sides[1], subject);
-    assert(copied.answer === "SMD-123" && copied.key === null, `a ticket the thought does not name is dropped from the key: here nothing is left (${JSON.stringify(copied)})`);
+    assert(got(copied).answers === "SMD-123" && got(copied).keys === "", `a ticket the thought does not name is dropped from the key: here nothing is left (${JSON.stringify(copied)})`);
     const cut = await askOwnSubject(cfg, { content: "Cut v02.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
-    assert(cut.key === "version:v2.0.0", `a release the thought names, its leading zeros aside, is its key (${cut.key})`);
+    assert(got(cut).keys === "version:v2.0.0", `a release the thought names, its leading zeros aside, is its key (${cut.keys})`);
     const partOf = await askOwnSubject(cfg, { content: "Merged PR 1727 today.", createdAt: null, metadata: {}, writer: null }, subject);
-    assert(partOf.answer === "PR 727" && partOf.key === null, `a PR's number inside a longer one is not the thought naming it (review pass 6: ${partOf.key})`);
+    assert(got(partOf).answers === "PR 727" && got(partOf).keys === "", `a PR's number inside a longer one is not the thought naming it (review pass 6: ${partOf.keys})`);
     const zeros = await askOwnSubject(cfg, { content: "Cut v2.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
-    assert(zeros.key === "version:v2.0.0", `…and an answer's release with leading zeros is the one the thought names without them (review pass 6: ${zeros.key})`);
+    assert(got(zeros).keys === "version:v2.0.0", `…and an answer's release with leading zeros is the one the thought names without them (review pass 6: ${zeros.keys})`);
     /** A thought naming references of these kinds alone. */
     const only = (...kinds: string[]): NamedIn => (kind) => kinds.includes(kind);
     assert(subjectKey("SMD-999: the dashboard review", only("pr", "version")) === "phrase:the dashboard review" && subjectKey("SMD-2 and SMD-999", (k, v) => k !== "ticket" || v === "SMD-2") === "ticket:SMD-2"
@@ -2890,12 +3120,45 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
       "…the guard drops tickets alone, a model name's id staying in the phrase, and the trim takes a symbol a dropped ticket leaves (review pass 6)");
     const off = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_SUBJECT_REASONING: "off", OB1_METADATA_REASONING: "on" });
     const offAnswer = await askOwnSubject(off, names727, subject);
-    assert(offAnswer.key === "pr:727" && (bodies[8] as { reasoning_effort?: string }).reasoning_effort === "none",
+    assert(got(offAnswer).keys === "pr:727" && (bodies[8] as { reasoning_effort?: string }).reasoning_effort === "none",
       `…and off when OB1_SUBJECT_REASONING says off, extraction's knob on: the question's own (${JSON.stringify(bodies[8]?.reasoning_effort)})`);
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
     let refused: unknown;
     try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
     assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 9, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+    // Version 3 (PR 7a-3b-2): a set. Each subject read into its key under the guard, in the answer's order, each key
+    // once, until SUBJECT_SET_MAX; the answers kept are those read, up to the one that gave the last key.
+    const several = await askOwnSubject(cfg, { content: "SMD-1, SMD-2 and SMD-3 merged in PR 9.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(several).keys === "ticket:SMD-1,pr:9,ticket:SMD-2" && got(several).answers === "SMD-1,PR 9,SMD-1's tests,SMD-2,SMD-3" && several.keys.length === SUBJECT_SET_MAX,
+      `several subjects: each one's key in order, a key twice once, at most three, every answer read on the recipe (review pass 3) (${JSON.stringify(got(several))})`);
+    const dropped = await askOwnSubject(cfg, { content: "The dashboard review for SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(dropped).keys === "phrase:the dashboard review,ticket:SMD-5" && got(dropped).answers === "SMD-999,the dashboard review,SMD-5",
+      `…a subject naming nothing the thought names dropped, the rest kept, every answer read kept (${JSON.stringify(got(dropped))})`);
+    const legacy = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(legacy).keys === "ticket:SMD-5" && got(legacy).answers === "SMD-5", `…and version 2's one subject read as a list of one (${JSON.stringify(got(legacy))})`);
+    // Review pass 1 (run-it, cold read): a phrase naming, in any case, a ticket the answer gives is that ticket again,
+    // read as it, not a second subject (review pass 2); a PR beside a ticket is its own. Only the first
+    // SUBJECT_ANSWERS_READ are read.
+    const echo = await askOwnSubject(cfg, { content: "Work on smd-8, merged in PR 3.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(echo).keys === "ticket:SMD-8,pr:3" && got(echo).answers === "smd-8 tests,SMD-8,smd-8,PR 3",
+      `…a phrase echoing a ticket of the answer read as it, its PR kept (${JSON.stringify(got(echo))})`);
+    const many = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(many).keys === "" && many.answers?.length === SUBJECT_ANSWERS_READ && SUBJECT_ANSWERS_READ === 8,
+      `…and an answer of many read to its eighth: the ninth's ticket, which the thought names, unread (${JSON.stringify(got(many))})`);
+    const pastCut = await askOwnSubject(cfg, { content: "Work on smd-8, then SMD-9, SMD-10, SMD-11.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(pastCut).keys === "ticket:SMD-8,ticket:SMD-9,ticket:SMD-10" && got(pastCut).answers === "smd-8 tests,SMD-9,SMD-10,SMD-11,SMD-8",
+      `…an echoing phrase read as its ticket where it stands: the model's first subject kept first, though its ticket was given past the cut (review pass 2: ${JSON.stringify(got(pastCut))})`);
+    const twoOf = await askOwnSubject(cfg, { content: "Merged smd-5 and smd-6 together.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(twoOf).keys === "ticket:SMD-5,phrase:smd-5 and smd-6 merge", `…a phrase naming a ticket the answer does not give too stays a phrase (review pass 2: ${JSON.stringify(got(twoOf))})`);
+    const handoff = await askOwnSubject(cfg, { content: "Work on SMD-8, then smd-99, in PR 3.", createdAt: null, metadata: {}, writer: null }, subject);
+    const pastRead = await askOwnSubject(cfg, { content: "Work on SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(handoff).keys === "ticket:SMD-8,phrase:smd-8 and smd-99 handoff,pr:3" && got(pastRead).keys === "phrase:smd-5 tests",
+      `…as with SMD-99 beside SMD-8; and a ticket given past the eighth answer, unread, makes no phrase its echo (review pass 2, mutant: ${JSON.stringify([got(handoff), got(pastRead)])})`);
+    const denied = await askOwnSubject(cfg, { content: "SHA-256 checks for SMD-5.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(denied).keys === "ticket:SMD-5", `…a denied prefix beside its ticket no other ticket: the phrase read as SMD-5 (review pass 3: ${JSON.stringify(got(denied))})`);
+    const firstOfTwo = await askOwnSubject(cfg, { content: "SMD-5, smd-6, SMD-7 and SMD-8.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(got(firstOfTwo).keys === "ticket:SMD-5,ticket:SMD-7,ticket:SMD-8",
+      `…a phrase naming two tickets the answer gives read as its first, where it stands, the cut after it (review pass 3, mutant: ${JSON.stringify(got(firstOfTwo))})`);
   } finally {
     stub.stop(true);
   }

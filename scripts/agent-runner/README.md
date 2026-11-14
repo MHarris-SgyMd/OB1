@@ -228,10 +228,19 @@ The executor runs one ticket end to end with the real clients — the capstone o
 
 The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
 
+## The publish step (`publish.ts`)
+
+On a run that passed the gate, the runner publishes as the bot (cut 3a is the logic; the live client and the schedule are 3b and 3c). Two pieces, both offline-tested (`publish-check.ts`):
+
+* **`buildPrBody`** composes the PR body from the run's own computed fields — the ticket, the diff's stat, the gate, the sessions — then the worker's report and the review's open findings as model text. Each model section is masked of claim tokens, scanned with the session hook's `scanForSecrets`, and put in a code block whose fence is longer than any run of backticks inside it, so the model output can't break out of the block, render, link or mention anyone. A flagged section is withheld with a count, not shown; the whole body stays under GitHub's 65,536-character cap, and if two model sections would pass it they are dropped whole (never cut mid-fence) with a note pointing at the run record.
+* **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push to the bot's fork, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws.
+
+The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
+
 ## Cuts still to come
 
 Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. Driving real sessions end to end needs a model (cut 2c).
 
 * **2c:** the outward steps, over the runner's own keys (SMD-4089): the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
-* **3:** publishing and reconciliation, and the launchd schedule.
+* **3:** publishing, reconciliation and the launchd schedule, in three PRs — **3a, the publish step (`publish.ts`), is built** (offline); **3b** the live GitHub client, the wiring into the live run and reconcile (needs SMD-4089's GitHub identity); **3c** the launchd schedule (needs SMD-3606).
 * **4:** the pilot and its report (SMD-4091).

@@ -273,14 +273,14 @@ const entries = sources.filter((f) => {
   // The sweep's own flags pass --subjects' check and reach the sweep, which says what it will do before it dials
   // (review pass 1: without a URL the case stopped at databaseUrl, before the check it named).
   const subjectsReached = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--dry-run", "--limit", "5", "--timeout", "9", "--retry-failed", "--switch-key");
-  ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:metadata@r1, subject:first_line@r2), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
+  ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:metadata@r1, subject:first_line@r3), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
     `--subjects rules with --dry-run, --limit, --timeout, --retry-failed and --switch-key passes --subjects' check to the sweep (exit ${subjectsReached.code}: ${subjectsReached.out.split("\n")[0].slice(0, 100)})`);
   // The model sweep's limit a call (SMD-3306 PR 4, review pass 2): --timeout reaches it, and without the flag the CLI
   // leaves it the sweep's own default, which follows the question's reasoning; the sweep says both before it dials.
   const sweepEnv = { OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "", OB1_JUDGE_MODEL: "j", OB1_SUBJECT_REASONING: "" };
   const timedSweep = runWith(sweepEnv, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run", "--timeout", "9");
   const offSweep = runWith({ ...sweepEnv, OB1_SUBJECT_REASONING: "off" }, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run");
-  ok(timedSweep.code !== 2 && /, reasoning on, at most 9 s a call \(subject:j@p2r\)$/m.test(timedSweep.out) && offSweep.code !== 2 && /, reasoning off, at most 300 s a call \(subject:j@p2\)$/m.test(offSweep.out),
+  ok(timedSweep.code !== 2 && /, reasoning on, at most 9 s a call \(subject:j@p3r\)$/m.test(timedSweep.out) && offSweep.code !== 2 && /, reasoning off, at most 300 s a call \(subject:j@p3\)$/m.test(offSweep.out),
     `--subjects passes --timeout to the sweep, and without it the sweep's own default, 300 s with reasoning off (exits ${timedSweep.code}, ${offSweep.code}: ${offSweep.out.split("\n")[0].slice(-60)})`);
   // --judge-checked, the sweep's alarm off (SMD-3306 PR 5b, review pass 3): it reaches the sweep, which says so before it
   // dials, and without --subjects the pass, which would drop it, refuses it.
@@ -290,7 +290,7 @@ const entries = sources.filter((f) => {
   const checkedRules = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--judge-checked");
   ok(checkedRules.code === 2 && /^--judge-checked turns off the judge model's garbage-judge alarm, and --subjects rules asks no judge model: drop one of them\.$/m.test(checkedRules.err),
     `--subjects rules --judge-checked is refused, not taken in silence (exit ${checkedRules.code}: ${checkedRules.err.split("\n")[0].slice(0, 120)})`);
-  ok(checkedSweep.code !== 2 && /\(subject:j@p2r\); the garbage-judge alarm off \(--judge-checked\)$/m.test(checkedSweep.out)
+  ok(checkedSweep.code !== 2 && /\(subject:j@p3r\); the garbage-judge alarm off \(--judge-checked\)$/m.test(checkedSweep.out)
       && checkedPass.code === 2 && /^extract-entities\.ts: --judge-checked goes with --subjects alone/m.test(checkedPass.err),
     `--judge-checked reaches the sweep, said, and the pass refuses it without --subjects (exits ${checkedSweep.code}, ${checkedPass.code}: ${checkedSweep.out.split("\n")[0].slice(-60)})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.

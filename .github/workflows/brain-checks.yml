@@ -298,6 +298,13 @@ jobs:
       # (record and config in subdirs so pathsProblem passes). No session, no model, no spend.
       - name: The agent runner's executor
         run: bun scripts/agent-runner/live-run.ts --self-check
+      # SMD-4087 cut 3a: the publish step's offline logic — buildPrBody (the dynamic
+      # fence the model text can't break out of, the secret withholding, the token
+      # masking and the body cap) and the publish sequence (the step-8 renew verdict,
+      # the push, the draft PR and the PR-link comment) on stubs. No key, no network,
+      # no model; the real push and the live wiring need SMD-4089's GitHub identity (cut 3b).
+      - name: The agent runner's publish step
+        run: bun scripts/agent-runner/publish-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.

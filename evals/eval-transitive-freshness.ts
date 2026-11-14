@@ -144,9 +144,11 @@
  * default_transaction_read_only on, from a one-off container on its network;
  * DATABASE_URL is built inside it from $POSTGRES_PASSWORD (never on argv). The
  * query is embedded with the brain's own model through the egress gate, as
- * db/tier.ts's replay does.
+ * db/tier.ts's replay does. The container joins the brain's networks,
+ * <project>_data and <project>_egress
+ * (open-brain_data and open-brain_egress for the default project):
  *
- *   podman run --rm --network open-brain_data --network open-brain_egress --env-file deploy/.env \
+ *   podman run --rm --network <project>_data --network <project>_egress --env-file deploy/.env \
  *     -e OB1_LLM_LOCAL=1 -e OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1 \
  *     -e OB1_EMBEDDING_MODEL=qwen3-embedding:4b \
  *     -v <worktree>:/repo -w /repo oven/bun:1.4.3-alpine \

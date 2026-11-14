@@ -23,7 +23,7 @@ import { honoPath, pathFields, readsQuery, REFUSAL_STATUS, ROUTES, type CallOpti
 
 export { REFUSAL_STATUS } from "./routes.ts";
 import { openApiDocument } from "./openapi.ts";
-import { beginRequest, endsWithStream, knowTools, logRequest, outcomeOf, requestLine, traceOf, withToolSpan, type RequestRecord } from "../telemetry.ts";
+import { beginRequest, endsWithStream, knowTools, logRequest, outcomeOf, requestLine, toolOutcome, traceOf, withToolSpan, type RequestRecord } from "../telemetry.ts";
 
 /** The codes the REST core answers on its own, before or around an operation. */
 export type TransportCode = "UNAUTHORIZED" | "REVOKED" | "BUSY" | "FORBIDDEN" | "REFUSED_INPUT" | "NO_ROUTE" | "METHOD_NOT_ALLOWED" | "FAILED" | "STORE_UNAVAILABLE";
@@ -93,7 +93,10 @@ function traced<O extends { ok: boolean }>(tool: string, faultCode: string, call
   return withToolSpan(tool, async (span) => {
     try {
       const outcome = await call();
-      span.end(outcome.ok ? "ok" : "refused", (outcome as { refusal?: { code?: string } }).refusal?.code);
+      // A refusal whose code is a fault's (the brain's own embedding provider failing, SMD-2892) ends as an error, as
+      // the request line and the MCP server's tool span count it (review pass 2).
+      const code = (outcome as { refusal?: { code?: string } }).refusal?.code;
+      span.end(toolOutcome(outcome.ok, code), code);
       return outcome;
     } catch (err) {
       span.fault(err);

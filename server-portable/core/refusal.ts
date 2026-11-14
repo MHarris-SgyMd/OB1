@@ -30,6 +30,12 @@ export type Refusal =
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
   | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }
+  // The embedding call failed where nothing could be done without it (SMD-2892): a search, capture or edit whose
+  // provider answered an error that is no outage (a credential refused, a model not there: final), or an edit whose
+  // provider did not answer (retryable; a capture lands without the vector, a search answers by its literals).
+  // `retryable` is providerDown's (embed.ts providerFault); `base`, masked, only to a key that can read (SMD-2284's
+  // rule for a capture's provider); `provider`, the provider's own capped words, to the text alone.
+  | { code: "EMBEDDING_PROVIDER_ERROR"; retryable: boolean; reason: string; detail: string; status?: number; setting: "OB1_LLM_BASE_URL"; check: string[]; base?: string; provider?: string }
   // capture_thought's shapes, refused before any model call (032, SMD-2014).
   | { code: "REFUSED_SUPERSEDES_SHAPE"; retryable: false; value: string; orNull: boolean } // `supersedes` is not a thought id (update_thought's also takes null)
   | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id
@@ -60,6 +66,7 @@ export type Refusal =
   // Work claims (115, SMD-3598): claim_work, renew_claim, release_claim. Never a token: 115 returns one only to the
   // caller who claimed, in the value, and no refusal carries one.
   | { code: "WORK_CLAIMED"; retryable: false; ticket: string; piece: string | null; heldBy: HeldClaim[] } // live claims cover the work: another key's, the same key's without its token, or the caller's own on overlapping work
+  | { code: "CLAIM_LIMIT"; retryable: false; ticket: string; piece: string | null; cap: number; held: number } // the holder already holds `held` live claims, the operator's cap (set_work_claim_cap); a new claim is refused until one ends or the cap is raised (SMD-3606)
   | { code: "CLAIM_NOT_FOUND"; retryable: false; id: string }         // no claim with that id
   | { code: "CLAIM_NOT_YOURS"; retryable: false; id: string; holder: string; forced: boolean; ownKey: boolean; expiresAt: string | null } // not this key with this token; forced: a force refused (the key is no operator named by its agent id); ownKey: the caller's own key holds it, under a token this call did not give
   | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null; takenOver: boolean; releasedBy: string | null; reason: string | null; ticketClosed: boolean } // a renewal of a claim that ended: released (by releasedBy, for reason), or taken over after it lapsed (by releasedBy); ticketClosed: board-sync released it because its ticket closed (SMD-3600)
@@ -177,6 +184,9 @@ const FACTS: Facts = {
   REFUSED_CURSOR: (r) => ({ ...(r.reason ? { reason: r.reason } : {}), ...(r.sort ? { sort: r.sort } : {}), ...(r.made ? { made: r.made } : {}) }),
   // The provider's marker word and what was matched: the endpoint and the literals are in the text.
   EMBEDDING_PROVIDER_UNAVAILABLE: (r) => ({ reason: r.reason, matched: r.matched }),
+  // The marker word, the provider's status and the setting to check: the endpoint (a reader's alone) and the
+  // provider's own words ride the text, as EMBEDDING_PROVIDER_UNAVAILABLE's endpoint does — a URL is no token.
+  EMBEDDING_PROVIDER_ERROR: (r) => ({ reason: r.reason, ...(r.status !== undefined ? { status: r.status } : {}), setting: r.setting, check: r.check }),
   REFUSED_SUPERSEDES_SHAPE: none,
   REFUSED_DERIVED_FROM_SHAPE: none,
   // Which rule, and the key, so a client reading values knows what to drop
@@ -206,6 +216,8 @@ const FACTS: Facts = {
   // The claims in the way, as values a client acts on: ids, holders (a key's name, the env's), kinds and times — the
   // piece rides the text, being another key's words (SMD-3598).
   WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey })) }),
+  // The holder's cap and how many live claims it holds, as values a client acts on; the ticket and piece ride the text (the piece is the caller's own words).
+  CLAIM_LIMIT: (r) => ({ cap: r.cap, held: r.held }),
   CLAIM_NOT_FOUND: none,
   CLAIM_NOT_YOURS: (r) => ({ forced: r.forced, ownKey: r.ownKey }),
   CLAIM_RELEASED: (r) => ({ ...(r.releasedAt ? { releasedAt: r.releasedAt } : {}), takenOver: r.takenOver, ticketClosed: r.ticketClosed }),
@@ -260,7 +272,7 @@ const FACTS: Facts = {
 
 /** A refusal as a value: its code, whether a retry can help, and its declared facts (FACTS). */
 export function refusalValue(r: Refusal): Record<string, unknown> {
-  return { code: r.code, retryable: r.retryable, ...(FACTS[r.code] as (r: Refusal) => Record<string, unknown>)(r) };
+  return { code: r.code, retryable: r.retryable, ...((FACTS[r.code] ?? none) as (r: Refusal) => Record<string, unknown>)(r) };
 }
 
 /**

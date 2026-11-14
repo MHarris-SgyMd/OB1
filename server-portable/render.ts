@@ -27,6 +27,7 @@ import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
+import { adviceFor, type EmbeddingProviderError } from "./core/provider-refusal.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
@@ -111,6 +112,18 @@ function guard(v: unknown, key = ""): unknown {
 
 /** A refusal a tool's renderer has no sentence for — a code it does not return. Not reached; said rather than thrown. */
 const unknownRefusal = (r: Refusal) => `Refused: ${r.code}`;
+
+/**
+ * An embedding call that failed where nothing could be done without it (SMD-2892): the provider, the setting to
+ * check, and — to a key that can read — where it is and its own words. `Error:` while it is away (the same call lands
+ * once it answers), `Refused:` on its other answers (an operator's to mend), as the session hook's prose rule reads them.
+ */
+function providerErrorText(r: EmbeddingProviderError, what: string): string {
+  const at = r.base ? `the embedding provider at ${r.base}` : "the brain's embedding provider";
+  if (r.retryable) return `Error: ${what} was not done — ${at} is unavailable: ${r.detail}. The same call can land once it answers.`;
+  const said = r.provider ? ` It said: ${JSON.stringify(oneLine(snipText(r.provider, 200)))}` : "";
+  return `Refused: ${what} was not done — ${at} ${r.detail.replace(/^it /, "")}. ${adviceFor(r)}${said}`;
+}
 
 /**
  * A fault an operation threw — the store down, a missing migration — said as
@@ -382,6 +395,7 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
   if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
+  if (r.code === "EMBEDDING_PROVIDER_ERROR") return providerErrorText(r, "the search");
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
   if (r.code === "REFUSED_WEIGHTS") return weightsRefusal(r);
   return unknownRefusal(r);
@@ -1547,6 +1561,7 @@ function captureRefusal(r: Refusal): string {
         : "a `derived_from` id";
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
+    case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the capture");
     default: return unknownRefusal(r);
   }
 }
@@ -1734,6 +1749,7 @@ function mutationRefusalText(r: Refusal): string {
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
     case "REFUSED_SOURCE_RESERVED": return `Refused: \`metadata_patch.source: "${r.source}"\` is the board's own label, which only its importers write. Patch without it.`;
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
+    case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the edit (its new text needs its vector)");
     case "NOT_FOUND":
       return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
     case "REFUSED_STALE_READ":
@@ -2246,6 +2262,9 @@ const fetchedMarked = (v: FetchedThought): FetchedThought => {
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
+/** The holder is at (or over) the operator's per-holder cap on live claims (SMD-3606): what holds, and the two ways out. */
+const capText = (r: Extract<Refusal, { code: "CLAIM_LIMIT" }>) =>
+  `Refused: you hold ${r.held} live claim${r.held === 1 ? "" : "s"}, ${r.held > r.cap ? "over" : "at"} the cap of ${r.cap}, so ${workText(r.ticket, r.piece)} is not claimed. Release one you have finished (list_claims shows yours), or ask an operator to raise the cap with set_work_claim_cap.`;
 /** What to do once board-sync has ended a claim because its ticket closed (SMD-3600). */
 const CLOSED_DONE = "its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.";
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why; released because its ticket closed — done if the work merged, else tell the user. */
@@ -2306,7 +2325,7 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
   v.outcome === "claimed"
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.${closedText(v)}`
     : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}${closedText(v)}`,
-(r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+(r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "CLAIM_LIMIT" ? capText(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
   : r.code === "CLAIM_RELEASED" ? endedText(r)
   : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
@@ -2367,11 +2386,19 @@ const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
     : a.closeReason === "deleted" ? `closed at ${a.closedAt}, when its item was deleted`
     : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
-  : ` The item's winner is ${statementText(v.winner)}${asked ? onOther(v.winner, asked) : ""}.`;
+  : ` The item's winner is ${statementText(v.winner)}${onOther(v.winner, asked)}.`;
+/**
+ * The statements a write closed, newest first: each its level, where it stood if not on the item named (a ticket and
+ * its own rows are one item, migration 133), and its id. Every one, not the newest alone (SMD-4238). Its callers set
+ * two or more between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read
+ * as one more item).
+ */
+const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
+  closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
     ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
@@ -2385,14 +2412,19 @@ const priorityRefusal = (r: Refusal) =>
 
 export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
   v.outcome === "unchanged"
-    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.assertion.item)}`
-    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement${onOther(v.replaced, v.assertion.item)}, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id, v.assertion.item)}`,
+    ? `Your statement on ${itemText(v.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id, v.item)}`
+    : `Set ${itemText(v.item)} to ${statementText(v.assertion)}.${
+      v.closed.length === 1 ? ` It replaces your earlier statement, ${closedList(v.closed, v.item)}, which stays in the history.`
+      : v.closed.length > 1 ? ` It replaces your ${v.closed.length} earlier statements — ${closedList(v.closed, v.item)} — which stay in the history.`
+      : ""}${winnerText(v, v.assertion.id, v.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
-  v.assertion
-    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null, v.assertion.item)}`
-    : `You have no statement open on that item: nothing to clear.${winnerText(v, null, null)}`,
+  v.closed.length === 1
+    ? `Cleared your statement on ${itemText(v.item)}, ${closedList(v.closed, v.item)}; it stays in the history.${winnerText(v, null, v.item)}`
+    : v.closed.length > 1
+    ? `Cleared your ${v.closed.length} statements on ${itemText(v.item)} — ${closedList(v.closed, v.item)} — which stay in the history.${winnerText(v, null, v.item)}`
+    : `You have no statement open on ${itemText(v.item)}: nothing to clear.${winnerText(v, null, v.item)}`,
   priorityRefusal, AS_JSON);
 
 export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>

@@ -121,19 +121,22 @@ export const PROVIDER_ERROR_CHARS = 500;
  * What a provider call can fail with, told apart without parsing messages:
  * the deadline passed (`timeout`), the provider answered with an error status
  * (`http`, with the status — a redirect among them, never followed:
- * refuseRedirect, SMD-2908), or it answered 2xx with a body that is not JSON
- * (`body`) — or the call was never made, because the egress gate refused to
- * send the text to an endpoint not declared local (`egress`, SMD-1903; no
- * status, and nothing about the provider). Anything else — a refused
- * connection, a reset — is the runtime's own error and is rethrown as it came.
+ * refuseRedirect, SMD-2908), or it answered 2xx with a body that is not JSON,
+ * or JSON holding no embedding (`body`; SMD-2892) — or the call was never
+ * made, because the egress gate refused to send the text to an endpoint not
+ * declared local (`egress`, SMD-1903; no status, and nothing about the
+ * provider). Anything else — a refused connection, a reset — is the runtime's
+ * own error and is rethrown as it came.
  */
 export class ProviderError extends Error {
   /**
    * @param body The provider's own words, capped — what refusesLength reads,
    *   kept apart from the message so the base URL in the message cannot be
    *   mistaken for them.
+   * @param noEmbedding A `body` error whose answer was JSON holding no embedding (a gateway's error object, an empty
+   *   `data`), as against one that is not JSON: told apart by this, not by the message (SMD-2892 review pass 5).
    */
-  constructor(message: string, readonly kind: "timeout" | "http" | "body" | "egress", readonly status?: number, readonly body = "") {
+  constructor(message: string, readonly kind: "timeout" | "http" | "body" | "egress", readonly status?: number, readonly body = "", readonly noEmbedding = false) {
     super(message);
     this.name = "ProviderError";
   }
@@ -179,6 +182,54 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
   if (syscall === "getaddrinfo" || UNRESOLVED_CODES.has(code)) return { reason: "provider_unreachable", detail: `its name does not resolve${code ? ` (${code})` : ""}` };
   if (UNREACHABLE_CODES.has(code)) return { reason: "provider_unreachable", detail: code === "ECONNREFUSED" || code === "ConnectionRefused" ? "the connection was refused" : `the connection failed (${code})` };
   return null;
+}
+
+/**
+ * What a 2xx answer with no embedding says of itself: its `error` (a string, or its `message`), else its `message` —
+ * never the whole answer, which an endpoint echoing the request fills with the brain's own headers, and which a deep
+ * nest makes JSON.stringify throw on (SMD-2892 review pass 4). Capped.
+ */
+export function answerWords(d: unknown): string {
+  const o = typeof d === "object" && d !== null ? (d as { error?: unknown; message?: unknown }) : {};
+  const e = o.error;
+  const said = typeof e === "string" ? e : typeof e === "object" && e !== null && typeof (e as { message?: unknown }).message === "string" ? (e as { message: string }).message
+    : typeof o.message === "string" ? o.message : "";
+  return said.slice(0, PROVIDER_ERROR_CHARS);
+}
+
+/**
+ * A provider call's failure as a caller may be told it (SMD-2892): the
+ * outages providerDown names, retryable; and the provider's other answers —
+ * an error status that is no outage (a credential refused, a model or path
+ * that is not there, an input refused), or a 2xx whose body is not JSON or
+ * holds no embedding — final, as providerDown's rule makes them (decided
+ * 2026-10-26: no rule of its own; SMD-2461's classifier takes both later).
+ * `status` is the provider's; `provider` its own capped words, which a caller
+ * that can read is shown and the server logs — never the runtime's text, nor
+ * the message, which leads with the base the caller names itself.
+ *
+ * Null for what is no provider's answer: an egress refusal (the gate's, with a
+ * code of its own), a caller's abort, and a plain Error such as the width
+ * mismatch, which stays a fault.
+ */
+export function providerFault(e: unknown): { retryable: boolean; reason: string; detail: string; status?: number; provider?: string } | null {
+  const down = providerDown(e);
+  if (down) return { retryable: true, ...down, ...(e instanceof ProviderError && e.status !== undefined ? { status: e.status } : {}) };
+  if (!(e instanceof ProviderError) || e.kind === "egress") return null;
+  const provider = e.body ? { provider: e.body } : {};
+  if (e.kind === "body") {
+    // A 2xx with no embedding in it (a gateway's error object, an empty `data`) or no JSON at all (a proxy's page).
+    const what = e.noEmbedding ? "with no embedding in its answer" : "with a body that is not JSON";
+    return { retryable: false, reason: "provider_body", detail: `it answered ${e.status ?? "2xx"} ${what}`, ...(e.status !== undefined ? { status: e.status } : {}), ...provider };
+  }
+  const s = e.status;
+  if (s === undefined) return null;
+  // Why, where the status says it: the key or the model (an operator's), a redirect never followed (where it points
+  // is the provider's words: refuseRedirect), or the request — this text, or a setting it is sent with.
+  const why = s === 401 || s === 403 ? " (its credential was refused)" : s === 402 ? " (payment is required: the account's credit)" : s === 404 ? " (the path or the model is not there)"
+    : isRedirect(s) ? " (a redirect, never followed)"
+    : s === 400 || s === 413 || s === 422 ? " (it refused the request: this text, or a setting sent with it such as the model)" : "";
+  return { retryable: false, reason: `provider_${s}`, detail: `it answered ${s}${why}`, status: s, ...provider };
 }
 
 /**
@@ -353,9 +404,12 @@ export function refuseRedirect(what: string, base: string, r: Response, opts: { 
   if (!isRedirect(r.status)) return null;
   const to = r.headers.get("location");
   void r.body?.cancel().catch(() => {});
+  // Where it points, as the message prints it, is also the error's provider words: providerFault hands those to a
+  // reader, so a refused search or capture still says where to set the base (SMD-2892; SETUP.md, SMD-2908).
+  const shown = to ? shownLocation(to, r.url || base, opts) : "";
   return new ProviderError(
-    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shownLocation(to, r.url || base, opts)}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
-    "http", r.status);
+    `${what} request to ${base} answered ${r.status}${to ? ` redirecting to ${shown}` : ""}: a redirect is never followed, since it would carry the text past the egress gate (SMD-2908); set the base to where it points`,
+    "http", r.status, shown ? `redirecting to ${shown}` : "");
 }
 
 /** How long a redirect's target may print: a hostile endpoint's `Location` lands in every log line naming it. */
@@ -990,7 +1044,11 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     }, subject, signal);
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
-      throw new Error(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`);
+      // The provider's answer, not this server's fault (SMD-2892): a gateway answering 200 with an error object, or
+      // an empty `data`. A body error, as a 2xx that is not JSON is, so a caller is refused coded rather than told the
+      // base in a raw message; its words kept (capped) for a reader. The message's phrase is reembed's and the
+      // orchestration runner's to match (deploy/orchestration/runner.ts REEMBED_PHRASES).
+      throw new ProviderError(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`, "body", 200, answerWords(d), true);
     }
 
     // Refuse a width the column cannot hold. Postgres would reject the insert

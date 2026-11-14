@@ -1326,7 +1326,7 @@ export type WorkClaim = {
   state: "live" | "lapsed" | "released";
 };
 /** The refusal codes 115's writers answer with (SMD-3597). */
-export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
+export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_LIMIT" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
 /** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). `byAgentId` (claim_work's form): the claim was made under an agent id, so 115's holder test needs that id to read it as the caller's (SMD-3705). */
 export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean; byAgentId?: boolean; issue?: string; releasedByKind?: string | null };
 export type ClaimLeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
@@ -1341,6 +1341,8 @@ export type ClaimAnswer = {
   claim: WorkClaim | null;
   heldBy: WorkClaim[];
   token: string | null;
+  cap?: number;   // CLAIM_LIMIT (SMD-3606, migration 140): the operator's per-holder cap and how many live claims the holder holds
+  held?: number;
 };
 
 /**
@@ -1372,7 +1374,7 @@ export function claimProblemOf(message: string): ClaimProblem {
 
 const CLAIM_STATES = new Set(["live", "lapsed", "released"]);
 const CLAIM_OUTCOMES = new Set(["claimed", "renewed", "released", "already_released", "refused"]);
-const CLAIM_CODES = new Set(["WORK_CLAIMED", "CLAIM_NOT_FOUND", "CLAIM_NOT_YOURS", "CLAIM_RELEASED"]);
+const CLAIM_CODES = new Set(["WORK_CLAIMED", "CLAIM_LIMIT", "CLAIM_NOT_FOUND", "CLAIM_NOT_YOURS", "CLAIM_RELEASED"]);
 const TOKEN_SHAPE = /^wc_[0-9a-f]{64}$/;
 
 /** One claim from 115's ob1_work_claim_json, or list_work_claims' row (the same names); a row that is neither throws, unprinted. */
@@ -1411,6 +1413,9 @@ export function normaliseClaimAnswer(r: unknown, what: string): ClaimAnswer {
     claim: o.claim === null || o.claim === undefined ? null : normaliseWorkClaim(o.claim, what),
     heldBy: Array.isArray(o.held_by) ? (o.held_by as unknown[]).map((c) => normaliseWorkClaim(c, what)) : [],
     token,
+    // CLAIM_LIMIT (migration 140): the cap and the holder's live-claim count, integers from 115's refusal jsonb.
+    ...(typeof o.cap === "number" ? { cap: o.cap } : {}),
+    ...(typeof o.held === "number" ? { held: o.held } : {}),
   };
 }
 
@@ -1455,6 +1460,10 @@ export type PriorityAnswer = {
   assertion: PriorityAssertion | null;
   replaced: PriorityAssertion | null;
   winner: PriorityAssertion | null;
+  /** The item named, as 116 keys it (migration 138, SMD-4238); null from a brain before 138. */
+  item: PriorityItem | null;
+  /** Every statement the call closed, newest first (migration 138); null from a brain before 138, which named the newest alone. */
+  closed: PriorityAssertion[] | null;
 };
 /**
  * One item's record, read in one statement: the rule's winner (ob1_priority_winner), its level, and every statement
@@ -1781,11 +1790,17 @@ export function normalisePriorityAnswer(r: unknown, what: string): PriorityAnswe
     throw new Error(`${what} answered no envelope this server reads`);
   }
   const one = (v: unknown) => (v === null || v === undefined ? null : normalisePriorityAssertion(v, what));
+  // 138's keys: absent from a brain before it, and any other shape a fault.
+  const item = o.item === undefined ? null : priorityItemOf(o.item);
+  if (o.item !== undefined && !item) throw new Error(`${what} answered an item this server cannot read`);
+  if (o.closed !== undefined && !Array.isArray(o.closed)) throw new Error(`${what} answered a closed list this server cannot read`);
   return {
     outcome: o.outcome as PriorityAnswer["outcome"],
     code: (o.code ?? null) as PriorityRefusalCode | null,
     message: typeof o.message === "string" ? o.message : null,
     assertion: one(o.assertion), replaced: one(o.replaced), winner: one(o.winner),
+    item,
+    closed: o.closed === undefined ? null : (o.closed as unknown[]).map((a) => normalisePriorityAssertion(a, what)),
   };
 }
 

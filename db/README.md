@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and thirty-six (136) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and forty (140) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778), 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306), 136 SMD-3711).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 140 SMD-3606, 141 SMD-4241).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2505,6 +2505,61 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 141 has an entity's priority statements follow it (SMD-4241). A
+re-extraction naming the same entity keeps its id, but extraction prunes an entity
+nothing mentions any more (the thought's next extraction drops the name), and 136's
+trigger then closed its statements as `deleted`. Extraction's prune
+(`record_thought_entities`) and the operator's broom (`prune_orphan_entities`) now
+spare an entity with an open statement, or one an open statement takes its due time
+from (`ob1_entity_has_open_priority`, served by a new partial index on the open
+statements' due references): it stays in the graph without mentions until those
+statements are cleared and the broom runs, and a later capture of the name writes
+onto it. A name a re-extraction gives another type leaves the statements on the old
+entity. A deliberate delete still closes them as `deleted`: a merge, the gate's
+refusal of a name, an operator's DELETE, and a forgetting (`rebuild_derived` with
+its input leaving, SMD-1723's, unchanged). A role without SELECT on
+`priority_assertions` prunes as before, for 136's sweep. `ob1_priority_merge_entity`,
+shared by `merge_entities` and `apply_entity_type_gate`'s retype merge, moves the
+loser's statements as 136's `merge_entities` did, and restates each open statement
+whose due reference names the loser to name the survivor (the same maker, level,
+reason, tier and `asserted_at`; a reference that would name its own item dropped),
+locking every item it touches in its pool key's order and reading the references
+again by pool under those locks (the maintainer's choices, 2026-11-13).
+`merge_entities` answers `priority_refs_moved` too; the gate answers
+`priorities_moved` and `priority_refs_moved`, each counting the restatements still
+standing. Like 136's restatement, one on another item is the newest within its tier
+there, and may outrank another maker's written after the original. Needs 016, 056,
+061, 116, 133 and 136, refusing by name without them; a re-apply is a no-op.
+test-schema [127], test-upgrade [20ce].
+
+Migration 138 has the priority writers name every statement they closed (SMD-4238).
+Since 133 a ticket and its own rows are one item to the writers, so a key's new
+statement or clear can close its statements on both, yet `assert_priority`'s
+`replaced` and `clear_priority`'s `assertion` named the newest alone. Both answers
+gain `closed`, every statement the call closed, newest first ([] when none), and
+`item`, the item named as `ob1_priority_item` keys it: a clear on a ticket that
+closed the key's statement on the ticket's row no longer reads as a clear on the
+row. `replaced` and `assertion` stay, the newest of `closed`. A statement a delete
+closed between the call's read and its write (136's trigger takes no priority lock)
+is not listed, nor named as `replaced`: `assert_priority` now locks every one of the
+key's open statements in the pool before it counts them, where 133 locked the newest
+alone, so a restatement of the one a racing delete left open is `unchanged`. Needs
+115, 116, 117, 122 and 133, refusing
+by name without any function the writers call; a re-apply is a no-op. test-schema
+[125], test-upgrade [20cc].
+
+Migration 137 orders the agenda's ties by what each item unblocks (SMD-4264).
+122's unblocks term stops at three open items blocked (+0.2 since 127), so within
+one level an item blocking 50 tied one blocking 3, and the tie fell to kind and
+key: on 2026-11-12's board the Medium gating the most work came last of eleven at
+2.2. The ten-argument agenda now sorts by the count, highest first, after the
+sooner due time and before kind and key, under both orders; the nine-argument
+wrapper and `plan_context`'s board section take it through it. No score moves,
+so search's priority blend and 127's level first are as they were, and no weight
+is added (the maintainer's choice, 2026-11-12, over a graded term). Two items at or
+past the cap (50 by default) still fall to the key. Needs 129; a re-apply is a no-op.
+test-schema [124], test-upgrade [20cb].
+
 Migration 136 closes a deleted item's priority statements (SMD-3711). Until now
 deleting a thought or an entity left its statements open: `priority_current` kept
 its winner and `priority_of` answered for an item the brain no longer held.
@@ -2523,8 +2578,9 @@ and a restatement is the survivor's newest within its tier. A statement whose du
 reference names the deleted item stays open at its own level, and the read finds no
 due time through it (the maintainer's choice, 2026-11-12). A ticket is no row of its
 own, so deleting one of its rows closes that row's statements alone. A reason's text
-stays, for SMD-1723's forgetting. SMD-4241 holds an entity's re-derivation, a retype
-merge and due references to a merged entity. Needs 016, 116 and 133. test-schema
+stays, for SMD-1723's forgetting. Migration 141 (SMD-4241) spares an entity with an
+open statement from the prunes, and moves a retype merge's statements and the due
+references to a merged entity. Needs 016, 116 and 133. test-schema
 [123], test-upgrade [20ca].
 
 Migration 135 makes a thought serve every ticket of its subject set
@@ -3007,7 +3063,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. The per-holder cap (140, SMD-3606): `claim_work` reads `work_claim_cap_settings` on every new claim, and `set_work_claim_cap` writes it, a trigger holding the write to an operator key by its agent id. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| | `work_claim_cap_settings` (140; the operator's cap, one standing row, history after — a DELETE and TRUNCATE refused by trigger, for the owner too) | `SELECT, INSERT, UPDATE` |
 | **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
 | | `work_claims` (115) | `SELECT, UPDATE` |
 | **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE); board-sync's role, which states Linear's priorities on the tickets, and an ingester's, which states its records' (SMD-3666). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
@@ -3835,21 +3892,37 @@ failed claim naming the rule, and the banner's `egress:` line says what the run
 will do before it claims anything.
 
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
-records its own subject when a rule finds it: the ticket it is filed under
-(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else a
-session summary's header ticket, when the capture hook's header lists that one
-alone and one of the session's listed prompts names it too, in any case (not its
-title, which may be the harness's own and name the branch's ticket). The
-hook's header lists the tickets a session's prompts named, and its branch's or
-directory's only when they named none: a session on a branch may have done other
-work, and a header listing several, or its full three, is the model's to choose
-among. A ticket-shaped word counts unless
-its prefix is on a fixed list of encodings, hashes, protocols, standards,
-licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
-no ticket, and a key is the same on every brain and every run. It goes through
-migration 130's `record_thought_subjects` at the text the claim read, under its
-rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
-no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
+records its own subjects when a rule finds them: the ticket it is filed under
+(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), alone;
+else a session summary's header tickets: every one when the capture hook says
+the session's asks named them (`metadata.tickets_from` `asks`, the hook from
+1.8.0), else those one of the session's listed prompts names, in any case (not
+its title, which may be the harness's own and name the branch's ticket). The
+hook's header lists the tickets a session's prompts named, from every prompt,
+and its branch's or directory's only when they named none: a session on a branch
+may have done other work. The summary lists only 12 prompts, each cut at 200
+characters, so where it shows them in part (`- … and N more`, or a prompt
+clipped) every listed ticket is keyed once a listed prompt names one, unless the
+header's own branch or project names them all, a header the branch's words may
+have given; that guess is for a summary without the hook's word, which says
+`place` for the branch's. A header listing a ticket of another team than the
+session's, its branch's first ticket, else its project's, read as the hook reads
+a place (`hotfix-2026` names none), is left to the model: the hook learns a team
+from each ticket-shaped word of a branch, so on `smd-610-bump-node-22` a
+prompt's `node-22` is a ticket to it. The hook also learns teams from the
+session's other places and a directory's whole path, which the header does not
+show; that is SMD-4291's to fix in the hook. A summary the hook's model wrote
+(`metadata.summary_model`) keys no header: its prose is never the hook's layout.
+A prompt the user ended with `…` is no clip. Since the header rule's version 3
+(SMD-3306 PR 7a-3b-2) a header listing several, its full three included, keys a
+set of one rule's (migration 130); version 2 keyed a header listing one alone,
+and left several to the model. A ticket-shaped word counts unless its prefix is
+on a fixed list of encodings, hashes, protocols, standards, licences, model
+names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names no ticket, and a
+key is the same on every brain and every run. It goes through migration 130's
+`record_thought_subjects` at the text the claim read, under its rule's key
+(`subject:metadata@r1`, `subject:first_line@r3`), and the pass asks no model for
+them. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought in its pool (migration 113, below), into which a pool's first run puts
 every thought with no current subject — none at its text (extracted before 111,
 keyed by no rule, or edited since), or one found under an older rule or question,
@@ -3857,15 +3930,20 @@ or by a model with its reasoning off while it is on — and the trigger each new
 edited one, gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`),
 the door replacing the old one. The
 model is asked the subject's own question about the thought alone
-(`server-portable/subject.ts`'s `OWN_RULES`, version 2), with its reasoning on
-unless `OB1_SUBJECT_REASONING` says off, and its
-answer is read into a key: the first ticket id in it, else the PR it is (an
+(`server-portable/subject.ts`'s `OWN_RULES`, version 3), with its reasoning on
+unless `OB1_SUBJECT_REASONING` says off, and each subject it answers is read
+into a key: the first ticket id in it, else the PR it is (an
 answer that is one PR: a PR among other numbers is none), else a release's
 version, else the answer as a lower-case phrase. A ticket or a release counts
 only when the thought itself names it, and a PR only when its number appears in
 it: one it does not name is the model's invention, or its copy of the question's
-example, and is dropped. The
-question asks for one subject: a ticket by its id alone. Version 1 read
+example, and is dropped. Version 3's question (SMD-3306 PR 7a-3b-2) asks for
+each thing the thought's own work is mainly about, at most three, the
+most-worked first and usually one, never a thing it only mentions; a ticket by
+its id alone. Of its first eight answers, the keys are a set, each once and at
+most three, a phrase whose tickets the answer also gives read as its first,
+written through 130's door; version 2 asked for one. 130 keeps a set by key, so
+the model's order is its recipe's alone. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken
@@ -3879,7 +3957,7 @@ thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
 (`OB1_METADATA_REASONING` would slow every extraction too), is on when unset, at
 about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
 summaries. A model's subject found with it off is pooled again while it is on
-(`subject:<model>@p2` under `@p2r`), its recipe naming the setting; turning it
+(`subject:<model>@p3` under `@p3r`), its recipe naming the setting; turning it
 off pools none again. An effort asked for (`low`, `high`; `none` is off) is keyed
 as on, though only the provider's default was measured. A brain that set
 `OB1_METADATA_REASONING` asked the question with that before PR 4: set
@@ -3891,8 +3969,8 @@ are asked again once for nothing. The default `--timeout` follows it: 900 s a
 call with reasoning on, where 2 of 200 such calls took over 300 s, else 300 s.
 The sweep claims
 from a pool, as the pass does (migration 113, SMD-3306 PR 5): `thought_work_claims`
-under its pool's key (`subjects:r1.2:p2r`, the rules' versions and the question's
-with its reasoning; `subjects:r1.2:p2` with it off; `subjects:r1.2` for
+under its pool's key (`subjects:r1.3:p3r`, the rules' versions and the question's
+with its reasoning; `subjects:r1.3:p3` with it off; `subjects:r1.3` for
 `--subjects rules`), named in `ob1_config.subject_pool_key`, into which 113's
 trigger puts each new or edited thought, and one whose `metadata.ticket` or
 `metadata.issue` changes. So a run costs what is in the pool, not the brain's size: before it, each
@@ -3966,9 +4044,12 @@ key the door refuses each fail the claim, the subject standing, are said, and
 exit 1, as the pass fails a malformed answer, or 3 once the judge's answers trip
 the garbage-judge alarm (below); `--retry-failed` puts the failed
 claims back in the pool. `--limit` counts the claims taken, the oldest pooled
-first. A run's summary counts the subjects it recorded in place of a standing
-one, and how many of those took a new key, and a claim no longer the run's when
-it released it. A changed judge model leaves its predecessor's
+first. A run's summary counts the thoughts it recorded subjects on, and the
+subjects it wrote unless each wrote one (a set's kept keys are not written);
+those it recorded in place of standing ones, as the door found them, a set
+widened, narrowed or changed, and how many of those took a key the set read at
+the claim did not hold; and a claim no longer the
+run's when it released it. A changed judge model leaves its predecessor's
 subjects standing, current at the same question, and is not asked the thoughts
 its predecessor named nothing for: the pool's key names whether a model is asked,
 not which. Nothing asks them again yet, but the garbage-judge alarm (below) hands

@@ -20,8 +20,8 @@ export type Step = (typeof STEPS)[number];
 export const OUTCOMES = ["published", "work-failure", "env-failure", "handed-over", "no-op"] as const;
 export type Outcome = (typeof OUTCOMES)[number];
 
-/** A step a run couldn't finish now (a release while stable is down, a `CLAIM_UNATTRIBUTED`): step 0 retries it each tick (cut 3). */
-export type OwedStep = { kind: "release" | "comment" | "label" | "move" | "capture"; why: string; at: string };
+/** A step a run couldn't finish now (a release while stable is down, a `CLAIM_UNATTRIBUTED`, a retryable renew before publishing): step 0 retries it each tick (cut 3). */
+export type OwedStep = { kind: "release" | "comment" | "label" | "move" | "capture" | "publish"; why: string; at: string };
 
 /** The gate's verdict, as the record keeps it: whether it passed and which checks failed (gate.ts computes it). */
 export type GateSummary = { pass: boolean; failed: string[]; ciCheckFiles: string[] };

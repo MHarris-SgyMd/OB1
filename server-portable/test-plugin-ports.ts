@@ -77,6 +77,10 @@ console.log(`\n[1] The migrator makes each ported plugin's tables in its own sch
 const STUB_BASE = "https://stub.invalid/v1";
 /** The embedding provider answering 503, as one that is down (agent-memory's section sets it). */
 let embedDown = false;
+/** The embedding route answering this status (SMD-2892): a provider refusing the brain's key, a model not there. */
+let embedStatus: number | null = null;
+/** A status for the embedding of this input, chosen per call (SMD-2892 review pass 3: an execute refused after its decide answered). */
+let embedStatusOn: ((input: string) => number | null) | null = null;
 /** How long the chat stub waits before it answers, in ms: agent-memory's race widens its window with it. */
 let chatDelayMs = 0;
 /** smart-ingest's vectors: a text holding the token is embedded as the vector (its section sets them). */
@@ -94,6 +98,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const sent = typeof init?.body === "string" ? (JSON.parse(init.body) as Body) : {};
     if (url.endsWith("/embeddings")) {
       if (embedDown) return new Response("down", { status: 503 });
+      if (embedStatus !== null) return new Response(`{"error":"stub answers ${embedStatus}"}`, { status: embedStatus, headers: { "Content-Type": "application/json" } });
+      const onThis = embedStatusOn?.(String(sent.input ?? ""));
+      if (onThis) return new Response(`{"error":"stub answers ${onThis}"}`, { status: onThis, headers: { "Content-Type": "application/json" } });
       if (embedFailOn?.(String(sent.input ?? ""))) return new Response("down", { status: 503 });
       // A text holding one of smart-ingest's tokens is embedded as that token says; any other, the first axis.
       const input = String(sent.input ?? "");
@@ -2963,8 +2970,21 @@ console.log("\n[readwise] its webhook: each highlight captured once, through the
   assert(misread.length === 0, `isoTime reads each of ${times.length} times as it should (${misread.join("; ") || "all"})`);
   assert(LEASE_S === 3600, "a claim whose capture never finished holds its id for an hour");
 
-  // The core's refusal, which no capture this hook sends can draw today: through a stub core, as [keepRowItem] does.
-  // One the core calls retryable is a 503 Readwise may send again, any other a 422; either way no row, and the id given back.
+  // The core's refusal: through a stub core, as [keepRowItem] does. One the core calls retryable is a 503 Readwise may
+  // send again, any other a 422; either way no row, and the id given back. The brain's embedding provider refusing
+  // the call (SMD-2892), any status, is a 503 EMBEDDING_PROVIDER_REFUSED, sent again once an operator mends it — a 400
+  // or a 422 too, which a hosted provider answers to every call for a setting it will not take (the maintainer's call,
+  // 2026-11-12).
+  for (const status of [401, 400, 422] as const) {
+    const stubCtx = {
+      call: async () => ({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, status, reason: `provider_${status}`, setting: "OB1_LLM_BASE_URL" } }),
+      db: { tx: async (fn: (sql: unknown) => Promise<unknown>) => fn(((strings: TemplateStringsArray) => Promise.resolve(strings.join("$").includes("RETURNING claimed_at") ? [{ claimed: "2026-11-05 00:00:00+00" }] : strings.join("$").includes("RETURNING id") ? [{ id: "9101" }] : [])) as unknown) },
+      secret: READWISE_SECRET, captureSeconds: 30, defer: () => undefined,
+    };
+    const answer = await manifest.hooks!.highlight.handler(stubCtx as never, { headers: {}, query: {}, body: new Uint8Array(), text: JSON.stringify(event({ id: 9101 })) });
+    assert(answer.status === 503 && answer.body?.code === "EMBEDDING_PROVIDER_REFUSED" && answer.body?.refused === "EMBEDDING_PROVIDER_ERROR" && answer.body?.retryable === true,
+      `the embedding provider answering ${status}: 503 EMBEDDING_PROVIDER_REFUSED (${JSON.stringify(answer)})`);
+  }
   for (const retryable of [true, false]) {
     const queries: string[] = [];
     const values: unknown[][] = [];
@@ -3629,6 +3649,28 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedDown = false;
   }
+  // ── The embedding provider refusing the brain's key (SMD-2892, SMD-1992's other half) ──
+  // The core refuses the search and the capture coded, final; the plugin answers each as its own coded JSON — 422, as a
+  // plugin answers a final refusal (only a 503 is retryable) — never a bare 500 or the provider's words.
+  embedStatus = 401;
+  try {
+    const refusedRecall = await am("recall", rq({ query: "am_ledger while the provider refuses its key" }), { as: KEYS.reader });
+    const sc = refusedRecall.viaMcp.result?.structuredContent;
+    assert(refusedRecall.status === 422 && refusedRecall.body.code === "CORE_REFUSED" && refusedRecall.body.refused === "EMBEDDING_PROVIDER_ERROR" && refusedRecall.body.retryable === false
+      && sc?.code === "CORE_REFUSED" && !JSON.stringify(refusedRecall.body).includes("stub answers"),
+      `recall while the provider refuses its key: 422 CORE_REFUSED naming EMBEDDING_PROVIDER_ERROR, final, on REST and on MCP (${refusedRecall.status} ${JSON.stringify(refusedRecall.body)})`);
+    const refusedWrite = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back while the provider refuses its key."] } });
+    assert(refusedWrite.status === 422 && refusedWrite.body.code === "CORE_REFUSED" && refusedWrite.body.refused === "EMBEDDING_PROVIDER_ERROR",
+      `writeback while the provider refuses its key: 422 CORE_REFUSED naming EMBEDDING_PROVIDER_ERROR (${refusedWrite.status} ${JSON.stringify(refusedWrite.body)})`);
+    assert(/an operator's to mend/.test(String(refusedRecall.body.message)), `…its message naming the provider's refusal an operator mends (${refusedRecall.body.message})`);
+    // A 400 may be the query's own (an over-long one): its message says a shorter one may land (review pass 6).
+    embedStatus = 400;
+    const recall400 = await am("recall", rq({ query: "am_ledger with a query the provider refuses" }), { as: KEYS.reader });
+    assert(recall400.status === 422 && recall400.body.refused === "EMBEDDING_PROVIDER_ERROR" && /a shorter one may land/.test(String(recall400.body.message)),
+      `recall under a 400: 422, its message saying the query may be the cause (${JSON.stringify(recall400.body)})`);
+  } finally {
+    embedStatus = null;
+  }
   // The repository's two clients of the plugin (SMD-2690 PR 2b), each client method answered on its routes, not refused:
   // the REST input is strict, so a field a client sends that the plugin does not take, or a route it no longer has, fails here.
   console.log("\n[agent-memory's clients] the OpenClaw and Hermes clients on the plugin's routes: each client method, answered");
@@ -4188,6 +4230,85 @@ console.log("\n[smart-ingest] extraction through ctx.model, decisions through se
   }
   assert(searchDown.status === 503 && searchDown.body.code === "PROVIDER_UNAVAILABLE" && (await jobOf(searchDown.body))?.status === "failed",
     `the embedding provider down while deciding: 503 PROVIDER_UNAVAILABLE, the job failed (${JSON.stringify(searchDown.body)})`);
+  // The provider refusing the brain's key while deciding (SMD-2892): the job fails once, 422 EMBEDDING_PROVIDER_REFUSED naming the
+  // code and the status, and the same text, the key mended, runs as a new job (review pass 1: every item failed and the
+  // job answered complete, so the text was held by a dead job).
+  extraction = answering([{ content: "si_k2: the user waters the tomatoes before the sun is high.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  const keyText = doc([]).text;
+  embedStatus = 401;
+  let keyless: Called;
+  try {
+    keyless = await si("extract", { text: keyText, dry_run: true });
+  } finally {
+    embedStatus = null;
+  }
+  assert(keyless.status === 422 && keyless.body.code === "EMBEDDING_PROVIDER_REFUSED" && keyless.body.refused === "EMBEDDING_PROVIDER_ERROR" && keyless.body.provider_status === 401
+      && keyless.body.reason === "provider_401" && keyless.body.setting === "OB1_LLM_BASE_URL" && (await jobOf(keyless.body))?.status === "failed",
+    `the embedding provider refusing its key while deciding: 422 EMBEDDING_PROVIDER_REFUSED, the job failed (${JSON.stringify(keyless.body)})`);
+  const mended = await si("extract", { text: keyText, dry_run: true });
+  assert(mended.status === 200 && mended.body.existing === false && mended.body.job?.status === "dry_run_complete",
+    `…and the same text, the key mended, runs as a new job (${JSON.stringify(mended.body).slice(0, 160)})`);
+  // A 400 from the provider is the job's too, as a 401's (the maintainer's call, 2026-11-12: a hosted provider answers it
+  // to every call for a setting it will not take): the job fails once, and the same text runs again once it is mended.
+  extraction = answering([{ content: "si_k4: the user keeps the spare key under the blue flowerpot.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  embedStatus = 400;
+  let refused400: Called;
+  try {
+    refused400 = await si("extract", { text: doc([]).text, dry_run: true });
+  } finally {
+    embedStatus = null;
+  }
+  const items400 = (await si("get_job", { job_id: String(refused400.body.job?.job_id) })).body.items ?? [];
+  assert(refused400.status === 422 && refused400.body.code === "EMBEDDING_PROVIDER_REFUSED" && refused400.body.provider_status === 400 && (await jobOf(refused400.body))?.status === "failed" && items400.length === 0,
+    `a 400 while deciding: the job failed once, 422 EMBEDDING_PROVIDER_REFUSED, no item kept (${JSON.stringify(refused400.body).slice(0, 160)} ${items400.length})`);
+  // The key refused while executing (review pass 2: each item failed and the job ended complete, its items lost): the
+  // job paused, a dry run's again, its items still ready, 422 EMBEDDING_PROVIDER_REFUSED; execute_job, the key mended, carries them out.
+  // A vector of its own, so the dry run decides an add (the suite's other texts share one stub vector; a token is matched
+  // by substring, so this one holds no other's, as si_k5 held si_k's).
+  vectorFor.push(["zq_train", axis(60)]);
+  extraction = answering([{ content: "zq_train: the user takes the early train on the first Monday of the month.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  const toRun = await si("extract", { text: doc([]).text, dry_run: true });
+  embedStatus = 401;
+  let keyPaused: Called;
+  try {
+    keyPaused = await si("execute_job", { job_id: String(toRun.body.job?.job_id) });
+  } finally {
+    embedStatus = null;
+  }
+  const keyPausedJob = await jobOf(keyPaused.body);
+  const keyPausedItems = (await si("get_job", { job_id: String(toRun.body.job?.job_id) })).body.items ?? [];
+  assert(keyPaused.status === 422 && keyPaused.body.code === "EMBEDDING_PROVIDER_REFUSED" && /once it is mended/.test(String(keyPaused.body.paused)) && keyPausedJob?.status === "dry_run_complete"
+    && keyPausedItems.every((i: SiItem) => i.status === "ready"),
+    `the key refused while executing: 422 EMBEDDING_PROVIDER_REFUSED, the job paused, its items ready (${JSON.stringify(keyPaused.body).slice(0, 200)} ${keyPausedJob?.status} ${JSON.stringify(keyPausedItems.map((i: SiItem) => [i.action, i.reason, i.status, i.error_message]))})`);
+  const keyResumed = await si("execute_job", { job_id: String(toRun.body.job?.job_id) });
+  assert(keyResumed.status === 200 && keyResumed.body.job?.status === "complete" && keyResumed.body.job?.added_count === 1,
+    `…and execute_job, the key mended, carries them out (${JSON.stringify(keyResumed.body).slice(0, 200)})`);
+  // The inline extract (no dry run) whose execute meets the refusal, and the same call resuming the paused job, still
+  // refused, then mended (review pass 3: these two of the five answers were unheld): each 422
+  // EMBEDDING_PROVIDER_REFUSED, the job paused; the same call, once mended, carries it out.
+  vectorFor.push(["zq_inline", axis(61)]);
+  extraction = answering([{ content: "zq_inline: the user repaints the porch every second summer.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
+  const inlineText = doc([]).text;
+  let inlineSeen = 0;
+  // The decide's search answers; every embedding of the text after it is refused.
+  embedStatusOn = (input) => (input.includes("zq_inline") && ++inlineSeen >= 2 ? 401 : null);
+  let inlinePaused: Called;
+  let resumedPaused: Called;
+  try {
+    inlinePaused = await si("extract", { text: inlineText });
+    resumedPaused = await si("extract", { text: inlineText });
+  } finally {
+    embedStatusOn = null;
+  }
+  assert(inlinePaused.status === 422 && inlinePaused.body.code === "EMBEDDING_PROVIDER_REFUSED" && /this same call, or execute_job/.test(String(inlinePaused.body.paused))
+    && (await jobOf(inlinePaused.body))?.status === "dry_run_complete",
+    `an inline extract whose execute meets the refusal: 422 EMBEDDING_PROVIDER_REFUSED, the job paused (${JSON.stringify(inlinePaused.body).slice(0, 220)})`);
+  assert(resumedPaused.status === 422 && resumedPaused.body.code === "EMBEDDING_PROVIDER_REFUSED" && /^the same call, or execute_job/.test(String(resumedPaused.body.paused))
+    && (await jobOf(resumedPaused.body))?.status === "dry_run_complete",
+    `…the same call resuming it, still refused: 422 again, still paused (${JSON.stringify(resumedPaused.body).slice(0, 220)})`);
+  const inlineDone = await si("extract", { text: inlineText });
+  assert(inlineDone.status === 200 && inlineDone.body.existing === true && inlineDone.body.job?.status === "complete" && inlineDone.body.job?.added_count === 1,
+    `…and the same call, mended, carries it out (${JSON.stringify(inlineDone.body).slice(0, 200)})`);
   extraction = answering([{ content: "si_o1: the user fixes the bike on Saturdays after the market.", importance: 3, type: "journal", tags: [], source_snippet: "" }]);
   const faultText = doc([]).text;
   await sql`ALTER TABLE thoughts RENAME TO thoughts_hidden`;
