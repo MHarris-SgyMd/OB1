@@ -369,7 +369,7 @@ export const RELAY_EASE_MS = 10_000;
 export const RELAY_EASED_MS = 5000;
 /** How long the api's asks wait for its next socket after one is lost, rather than taking its own share. */
 export const RELAY_GRACE_MS = 2000;
-/** The api's dials within its grace: a coordinator back late in it still found before it ends (a few dozen local dials). */
+/** The api's dials within its grace: a coordinator back late in it still found before it ends (twenty local dials at most). */
 export const RELAY_GRACE_RETRY_MS = 100;
 /** How long a dial may take to open before it is dropped and tried again. */
 export const RELAY_DIAL_MS = 3000;
@@ -378,7 +378,7 @@ export const RELAY_WHY_MS = 30_000;
 /** A socket to the coordinator silent this long is dropped: the api pings every third of it, the listener answers. */
 export const RELAY_SILENCE_MS = 10_000;
 
-/** A transport's state: `up`, asks sent; `away`, none to send on for now (a socket dialled again), so an ask takes its own share and asks again at the next `back`; `gone` for good (a channel closed). */
+/** A transport's state: `up`, asks sent; `away`, none to send on for now (a socket dialled again), so an ask waits for the next within the grace, else takes its own share and asks again at the next `back`; `gone` for good (a channel closed). */
 type Reach = "up" | "away" | "gone";
 
 /**
@@ -485,7 +485,8 @@ function relayCore(t: { send(m: object): void; reach(): Reach; grace(): boolean;
  * The relay client: over this process's IPC channel where the coordinator started it with one and said so
  * (OB1_SLOT_RELAY=ipc, a pass), else over a socket to the coordinator where the process asks for one (`socket`: the api
  * alone, PR 3b-2) and OB1_SLOT_RELAY_KEY is set — a script run by hand with the key in its environment dials nothing,
- * whose socket would hold it open (review pass 1 of 3b-2); null elsewhere — a pass run by hand from a checkout, an api with no key — which keeps the semaphore alone.
+ * whose socket would hold it open (review pass 1 of 3b-2); null elsewhere — a pass run by hand from a checkout, an api
+ * with no key or a bad one (relayKeyProblem) — which keeps the semaphore alone.
  */
 function relayClient(env: Record<string, string | undefined>, log: (line: string) => void, socket: boolean): RelayClient | null {
   return ipcRelayClient(env, log) ?? (socket ? socketRelayClient(env, log) : null);
@@ -525,12 +526,14 @@ function ipcRelayClient(env: Record<string, string | undefined>, log: (line: str
 /**
  * The api's (SMD-3379 PR 3b-2; docs/brain-coordinator.md, row 2): its asks over a WebSocket to the coordinator on the
  * brain's network — RELAY_URL, or OB1_SLOT_RELAY_URL — proved with OB1_SLOT_RELAY_KEY, which the coordinator holds too.
- * The frames are a pass's. Unlike a pass's channel, the socket comes back: dialled again on its loss, RELAY_RECONNECT_MS
- * apart, the coordinator recreated or not yet up. Meanwhile each ask takes this process's own share and asks again at
- * the next socket, which says `back`, and the calls running are kept — a live call, a granted one, one on its own share
- * — each counted again (`running`) on that socket, so the broker counts what runs (as the relay's `held` does, review
- * pass 1 of 3b-1). It pings every third of RELAY_SILENCE_MS and drops a socket silent for it. A loss is said at most
- * once a minute; a socket refused, by why (the key, a 401; no listener) once.
+ * The frames are a pass's. Unlike a pass's channel, the socket comes back: dialled again on its loss, every
+ * RELAY_GRACE_RETRY_MS within RELAY_GRACE_MS, then RELAY_RECONNECT_MS apart, every RELAY_EASED_MS once RELAY_EASE_MS of
+ * dials have failed. An ask meanwhile, and before the first socket, waits out the grace for the next, then takes this
+ * process's own share and asks again at the next socket, which says `back`; the calls running are kept — a live call, a
+ * granted one, one on its own share — each counted again (`running`) on that socket, so the broker counts what runs (as
+ * the relay's `held` does, review pass 1 of 3b-1), then all named (`named`), the listener giving back any other it kept.
+ * It pings every third of RELAY_SILENCE_MS, drops a socket silent for it, and says `bye` at its close. A loss is said at
+ * most once a minute; a refused socket's reason (a 401, a full listener, none listening) once each.
  */
 function socketRelayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
   const key = env.OB1_SLOT_RELAY_KEY?.trim();
@@ -549,7 +552,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   let ping: ReturnType<typeof setInterval> | null = null;
   let lostSaidAt = -Infinity;
   let lostSaid = false;
-  /** Until when (performance.now) asks wait for the next socket rather than taking the own share: RELAY_GRACE_MS from a loss. */
+  /** Until when (performance.now) asks wait for the next socket rather than taking the own share: RELAY_GRACE_MS from a loss, and from the start. */
   let graceUntil = 0;
   let graceTimer: ReturnType<typeof setTimeout> | null = null;
   /** The current dial's bound (RELAY_DIAL_MS), cleared at its open, its close and the client's. */
@@ -686,7 +689,14 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     };
     sock.onerror = () => { /* onclose follows */ };
   };
-  /** An open socket gone (closed, or dropped here): its asks answered `own`, asked again at the next socket. */
+  /** Asks wait RELAY_GRACE_MS for the next socket, parked; past it, their own share. */
+  const beginGrace = () => {
+    graceUntil = performance.now() + RELAY_GRACE_MS;
+    core.park();
+    if (graceTimer) clearTimeout(graceTimer);
+    graceTimer = setTimeout(() => { graceTimer = null; if (!up) core.answerAll(true); }, RELAY_GRACE_MS);
+  };
+  /** An open socket gone (closed, or dropped here): its asks parked for the next socket, RELAY_GRACE_MS at most, then answered `own`. */
   const lost = (sock: WebSocket, why: string) => {
     if (ws !== sock) return;
     ws = null;
@@ -696,10 +706,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     // Its asks wait RELAY_GRACE_MS for the next socket — a coordinator recreated, a link cut — asked again there; past
     // it, their own share (as the relay's GRACE_MS for the passes; review pass 2 of 3b-2: at once, each loss ran them
     // past the broker's room).
-    graceUntil = performance.now() + RELAY_GRACE_MS;
-    core.park();
-    if (graceTimer) clearTimeout(graceTimer);
-    graceTimer = setTimeout(() => { graceTimer = null; if (!up) core.answerAll(true); }, RELAY_GRACE_MS);
+    beginGrace();
     if (performance.now() - lostSaidAt >= 60_000) {
       lostSaidAt = performance.now();
       lostSaid = true;
@@ -709,8 +716,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   };
   // The first socket's dial is a grace of its own: a call made before it opens waits for it, rather than running on the
   // own share and being counted past the room once it opens (review pass 3 of 3b-2: 6 calls on 2 slots at a start).
-  graceUntil = performance.now() + RELAY_GRACE_MS;
-  graceTimer = setTimeout(() => { graceTimer = null; if (!up) core.answerAll(true); }, RELAY_GRACE_MS);
+  beginGrace();
   connect();
   return core.client;
 }
@@ -723,8 +729,9 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
  * settings' problems, said through `log`, the defaults then standing in.
  * Under `off` no hook is set, unless the coordinator's relay is in (`env`,
  * process.env unless given, says OB1_SLOT_RELAY=ipc, or holds
- * OB1_SLOT_RELAY_KEY where `relaySocket` asks for the api's socket). `maxWaitS` is
- * --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a finite number.
+ * OB1_SLOT_RELAY_KEY where `relaySocket` asks for the api's socket).
+ * `maxWaitS` is --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a
+ * finite number.
  * `connectS` bounds a connection's opening and each statement, CONNECT_S
  * unless a test asks for less.
  */
@@ -734,8 +741,8 @@ export function installBackgroundSlots(opts: { url: string; raw: string | undefi
   for (const p of setting.problems) log(p);
   const problem = setting.problems.length ? setting.problems.join("; ") : undefined;
   // The coordinator's relay, where it started this process with one (SMD-3379 PR 3b-1) or the key to its socket is
-  // here (the api, PR 3b-2): read before `off`, which holds
-  // nothing to this process's own shares but leaves the host's broker in (review pass 1: `off` dropped it unsaid).
+  // here (the api, PR 3b-2): read before `off`, which holds nothing to this process's own shares but leaves the host's
+  // broker in (review pass 1: `off` dropped it unsaid).
   const relay = relayClient(opts.env ?? process.env, log, opts.relaySocket === true);
   if (!setting.set && !setting.defaults && !relay) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
   const ended = new AbortController();

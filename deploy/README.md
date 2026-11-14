@@ -409,11 +409,12 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
   answering, and a server over its slots.
 - **The api's calls** (SMD-3379 PR 3b-2) join with `OB1_SLOT_RELAY_KEY` set
   in the same `deploy/.env` (16 printable ASCII characters or more, no
-  spaces: `openssl rand -hex 32`), then `up -d api coordinator`. The api reads the key, and so does the
-  coordinator, which hands it to no pass. The coordinator then listens at
-  `coordinator:8096`, published nowhere. The api reaches it on the brain's
-  `data` network, and the services on its `egress` network can reach the
-  port too, so it refuses any socket without the key. The api asks it for every model call:
+  spaces: `openssl rand -hex 32`), then `up -d api coordinator`. The api
+  reads the key, and so does the coordinator, which hands it to no pass. The
+  coordinator then listens at `coordinator:8096`, published nowhere. The api
+  reaches it on the brain's `data` network, and the services on its `egress`
+  network can reach the port too, so it refuses any socket without the key.
+  The api asks it for every model call:
   - **A live call** (a capture's, a search's) is counted at the broker as it
     runs and never waits.
   - **A background call** (the vector mender's, a detached job's) waits its
@@ -423,25 +424,24 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
   at its start, its waiting calls wait 2 s for the next socket and are asked
   again there, then take the api's own share. Within those 2 s the api dials
   every tenth of a second, then every second, and counts its calls still
-  running once a socket is back. A coordinator that stays keeps
-  the api's running calls counted 5 s after its socket closes, for the next
-  socket to take back. A recreated
-  coordinator leaves them counted at the broker until the api's socket is
-  back, so their slots aren't handed to another brain while they run. The
-  broker keeps them 5 s from the old coordinator's close, so this holds for a
-  recreate that brings the new one up within about 4 s. A slower one hands
-  their slots on until the api is back, within a second of the new
-  coordinator listening. With the key set and no coordinator listening, the
-  api dials every second for 10 s, then every 5 s. Without the key,
-  only each server's `reserve` keeps room for live calls.
+  running once a socket is back. A coordinator that stays keeps the api's
+  running calls counted 5 s after its socket closes, for the next socket to
+  take back. A recreated coordinator leaves them counted at the broker until
+  the api's socket is back, so their slots aren't handed to another brain
+  while they run. The broker keeps them 5 s from the old coordinator's
+  close, so this holds for a recreate that brings the new one up within
+  about 4 s. A slower one hands their slots on until the api is back, within
+  a second of the new coordinator listening. With the key set and no
+  coordinator listening, the api dials every second for 10 s, then every
+  5 s. Without the key, only each server's `reserve` keeps room for live
+  calls.
 - **Checking it.** Preflight's `slot relay` row reads the key beside the
   coordinator's row: whether the coordinator listens for the api, and since
-  when the broker has answered or been away. A key that differs between the
-  two (one of them recreated alone) is the api's to say: its log names the
-  401. `brain_info`'s tasks say the same on the
-  coordinator's line. The api's `background slots:` lines say when it reaches
-  the coordinator, loses it, or is refused (a 401, naming
-  `OB1_SLOT_RELAY_KEY`).
+  when the broker has answered or been away. `brain_info`'s tasks say the
+  same on the coordinator's line. The api's `background slots:` lines say
+  when it reaches the coordinator, loses it, or is refused: a key that
+  differs between the two (one of them recreated alone) is a 401, naming
+  `OB1_SLOT_RELAY_KEY`.
 
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's

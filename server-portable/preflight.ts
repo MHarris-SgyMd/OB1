@@ -5643,6 +5643,7 @@ if (configFailed) {
         // Read at the api's start, when its own socket is not yet open: the row's count of api sockets is not judged.
         {
           const key = env.OB1_SLOT_RELAY_KEY?.trim();
+          const keyProblem = key ? relayKeyProblem(key) : null;
           const w = facts.workers;
           const c = w?.coordinator;
           const r = c?.relay;
@@ -5651,8 +5652,8 @@ if (configFailed) {
             add("slot relay", "skip", r
               ? `off for the api: OB1_SLOT_RELAY_KEY is unset, so its model calls keep its own shares (OB1_BACKGROUND_SLOTS), while the coordinator asks the host's broker for its passes' — set the key in deploy/.env and recreate the api and the coordinator for the api's to join (${guide})`
               : "off: OB1_SLOT_RELAY_KEY is unset, so the api's model calls keep its own shares (OB1_BACKGROUND_SLOTS)");
-          } else if (relayKeyProblem(key) !== null) {
-            add("slot relay", "warn", `${relayKeyProblem(key)}, so the coordinator does not listen for the api, whose calls keep its own shares`, `Mint a key (openssl rand -hex 32), set it as OB1_SLOT_RELAY_KEY in deploy/.env, and recreate the api and the coordinator (up -d api coordinator).`);
+          } else if (keyProblem !== null) {
+            add("slot relay", "warn", `${keyProblem}, so the coordinator does not listen for the api, whose calls keep its own shares`, `Mint a key (openssl rand -hex 32), set it as OB1_SLOT_RELAY_KEY in deploy/.env, and recreate the api and the coordinator (up -d api coordinator).`);
           } else if (w === null) {
             add("slot relay", "skip", "the heartbeat rows were not read — the workers row says why; the coordinator's row says whether it listens for the api.");
           } else if (c === undefined || c.stale || c.ended) {

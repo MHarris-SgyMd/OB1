@@ -48,7 +48,7 @@ writeFileSync(CHILD, `
 import { installBackgroundSlots } from ${JSON.stringify(join(SP, "slots.ts"))};
 import { asPass, modelCall, withCallWaits } from ${JSON.stringify(join(SP, "model-call.ts"))};
 const send = (m) => process.send?.(m);
-installBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: process.argv[3] ?? "chat=1", connectS: 1, log: (l) => send({ ev: "log", line: l }), relaySocket: process.env.NO_SOCKET !== "1" });
+installBackgroundSlots({ url: "postgres://nobody@127.0.0.1:1/none", raw: process.argv[3] ?? "chat=1", connectS: 1, log: (l) => send({ ev: "log", line: l }), relaySocket: true });
 const ends = new Map();
 async function call(m) {
   const stop = m.abortAfter ? AbortSignal.timeout(m.abortAfter) : undefined;
@@ -458,7 +458,7 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
 }
 
 {
-  // Gone 2 s, under the grace: the relay finds it again inside the grace (dialling every 100 ms), and its waiting ask
+  // Gone 2 s, under the grace: the relay finds it again inside the grace (dialling every 250 ms), and its waiting ask
   // never takes its own share. The grace is 4 s here, so a slow runner's stop and timers leave margin.
   const reg = registry({ slots: 1 });
   let b = startBroker(reg, { port: 0, log: () => {} });
@@ -1083,10 +1083,9 @@ await withBroker(parseRegistry(`broker:\n  warm_s: 0\n  lease_s: 1\nservers:\n  
   listener.stop();
   ok(await until(() => !pool(b).waiting.stable && pool(b).background === 2, 1000), "the coordinator's stop withdraws its asks, its running calls left counted", b.snapshot());
   await relay.stop();
-  void w4;
 });
 {
-  // A coordinator that takes the connection and never opens the socket: dropped at 3 s and dialled again (review pass 3).
+  // A coordinator that takes the connection and never opens the socket: dropped at 3 s and dialled again (review pass 3 of 3b-2).
   const sink = Bun.listen({ port: 0, hostname: "127.0.0.1", socket: { data() {} } });
   const api = await startApi(sink.port);
   ok(await until(() => logsOf(api).some((l) => /did not open the socket within 3 s/.test(l)), 5000), "a dial not open within 3 s is dropped, said", logsOf(api));
@@ -1244,13 +1243,13 @@ await withBroker(registry({ slots: 2 }), async (b) => {
   const relayless = startRelay({ url: "ws://127.0.0.1:1/v1/slots", key: KEYS.stable, log: () => {}, graceMs: 0 });
   const downSince = relayless.state().since;
   const listener = serveRelay(relayless, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
-  // A frame past 4096 bytes that a pass's checks take — a base of 2048 non-ASCII characters — keeps the socket (review pass 1 of 3b-2).
+  // A frame past 4096 bytes that a pass's checks take — a base within its 2048-character bound, 2030 of them non-ASCII — keeps the socket (review pass 1 of 3b-2).
   const raw = new WebSocket(`ws://127.0.0.1:${listener.port}${RELAY_PATH}`, { headers: { "x-brain-key": RKEY } } as unknown as string[]);
   let rawClosed = false;
   raw.onclose = () => { rawClosed = true; };
   await until(() => raw.readyState === 1);
   raw.send(JSON.stringify({ slot: "running", id: "big", base: `http://h/${"é".repeat(2030)}`, model: "m", cls: "background" }));
-  ok(await until(() => relayless.state().own === 1, 1000) && !rawClosed, "a frame of a 2048-character non-ASCII base is taken, the socket kept", { own: relayless.state().own, rawClosed });
+  ok(await until(() => relayless.state().own === 1, 1000) && !rawClosed, "a frame past 4096 bytes, of a base within its 2048-character bound and mostly non-ASCII, is taken, the socket kept", { own: relayless.state().own, rawClosed });
   raw.close();
   const wrong = await startApi(listener.port, { OB1_SLOT_RELAY_KEY: "relay-key-of-another-brain" });
   ok(await until(() => logsOf(wrong).some((l) => /refused OB1_SLOT_RELAY_KEY \(401\)/.test(l)), 5000), "an api with another key names it (401)", logsOf(wrong));

@@ -971,8 +971,9 @@ services:
       # the api asks the broker for each model call through the coordinator,
       # over a WebSocket on the brain's network (coordinator:8096), and proves
       # itself with this key, which both read from here; no pass is handed it.
-      # 16 printable ASCII characters at least (openssl rand -hex 32). Unset, the api's calls
-      # keep their own shares (OB1_BACKGROUND_SLOTS), as before.
+      # 16 printable ASCII characters at least (openssl rand -hex 32).
+      # Unset, the api's calls keep their own shares (OB1_BACKGROUND_SLOTS),
+      # as before.
       OB1_SLOT_RELAY_KEY: ${OB1_SLOT_RELAY_KEY:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a

@@ -186,18 +186,19 @@ export const CHILDREN: Record<ChildName, Child> = {
 /** Every setting some child owns: handed to no child that does not. */
 export const OWNED: ReadonlySet<string> = new Set(Object.values(CHILDREN).flatMap((c) => c.own));
 /**
- * The coordinator's own settings, handed to no child. PORT is the server's, which no pass reads. The slot broker's URL
- * and key are the brain's own to the host's broker (SMD-3379 PR 3b-1): only the coordinator holds them, and its
- * children ask through it (docs/brain-coordinator.md, row 2).
- */
-/**
- * The longest the coordinator's first `synced` waits for the api's socket, above the api's 1 s redial. What it holds is
- * the broker's to keep: a closed coordinator's grants, KEEP_MS (5 s) from that close — so a recreate whose new relay
- * reaches the broker more than about 4 s after the old one's close hands the api's calls' slots on until the api names
- * them (review pass 2 of 3b-2).
+ * The longest the coordinator's first `synced` waits for the api to name its calls, above the api's 1 s redial. What it
+ * holds is the broker's to keep: a closed coordinator's grants, KEEP_MS (5 s) from that close — so a recreate whose new
+ * relay reaches the broker more than about 4 s after the old one's close hands the api's calls' slots on until the api
+ * names them (review pass 2 of 3b-2).
  */
 export const SYNC_WAIT_MS = 2500;
 
+/**
+ * The coordinator's own settings, handed to no child. PORT is the server's, which no pass reads. The slot broker's URL
+ * and key are the brain's own to the host's broker (SMD-3379 PR 3b-1): only the coordinator holds them, and its
+ * children ask through it (docs/brain-coordinator.md, row 2); OB1_SLOT_RELAY_KEY is its listener's and the api's
+ * (PR 3b-2), no pass's.
+ */
 export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT", "OB1_SLOT_BROKER_URL", "OB1_SLOT_BROKER_KEY", "OB1_SLOT_RELAY_KEY"];
 
 /**
@@ -388,7 +389,9 @@ export function askedPasses(raw: string | undefined): Pass[] {
  * The coordinator's row (brain-info.ts's CoordinatorValue): the passes asked
  * for, and each child it runs — its heartbeat's key, its state, and the
  * seconds since it began it and, waiting, to its next try, both counted back
- * from `now`, the stamp's own time. A child not yet started is `starting`. Pure.
+ * from `now`, the stamp's own time. A child not yet started is `starting`. Its
+ * relay, where it has one: the broker's state and for how long, and the api's
+ * sockets where it listens for them. Pure.
  */
 export function coordinatorValue(o: {
   id: string;
@@ -574,7 +577,7 @@ export function relayMark(relay: Relay | null, listener: RelayListener | null) {
 /**
  * The api's listener (SMD-3379 PR 3b-2): OB1_SLOT_RELAY_KEY set, the api asks the broker through this process too,
  * over a socket on the brain's network (slot-relay.ts's serveRelay). None — said, the api's calls on its own shares —
- * where no broker is named, the key is too short to stand, or the port is taken.
+ * where no broker is named, the key will not do (too short, or not printable ASCII), or the port is taken.
  */
 function listenForApi(relay: Relay | null, key: string, port: number, err: (line: string) => void, onChange: () => void, host?: string): RelayListener | null {
   const own = "the api's model calls keep its own shares (OB1_BACKGROUND_SLOTS)";

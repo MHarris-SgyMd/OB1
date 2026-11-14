@@ -1896,7 +1896,7 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
   ].map((v) => coord(v));
   assert(refused.every((r) => r === null) && parseCoordinator({ value: "not json", at, age_s: 1 }) === null && parseCoordinator({ value: JSON.stringify(value), at: "yesterday", age_s: 1 }) === null,
     `a coordinator row not of the shape is refused whole (${refused.map((r) => (r === null ? "·" : "KEPT")).join("")})`);
-  // Its relay's mark (SMD-3379 PR 3b): read where of the shape, the row refused whole where not; said in the coordinator's words.
+  // Its relay's mark (SMD-3379 PR 3b-2): read where of the shape, the row refused whole where not; said in the coordinator's words.
   const relayed = coord({ ...value, relay: { broker: "up", for_s: 300, sockets: 1 } });
   const passesOnly = coord({ ...value, relay: { broker: "down", for_s: 40 } });
   const badRelays = [{ broker: "away", for_s: 1 }, { broker: "up", for_s: -1 }, { broker: "up", for_s: 1, sockets: 2000 }, { broker: "up", for_s: 1, sockets: "1" }, "up", null].map((relay) => coord({ ...value, relay }));

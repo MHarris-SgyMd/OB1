@@ -298,15 +298,15 @@ if (!existsSync(composePath)) {
   // Listening, its relay's first hello holds `synced` until the api's socket is back and its calls named (review pass 1
   // of 3b-2): a stand-in broker records what the coordinator's relay sends.
   {
-    const ops: { op: string; at: number; conn: number }[] = [];
+    const ops: { op: string; conn: number }[] = [];
     let conns = 0;
     const fakeBroker = Bun.serve<{ n: number }, never>({
       port: 0, hostname: "127.0.0.1",
       fetch: (req, srv) => (srv.upgrade(req, { data: { n: ++conns } }) ? undefined : new Response("no", { status: 400 })),
       websocket: {
         open(ws) { ws.send(JSON.stringify({ op: "hello", brain: "b", boot: "x", idle_s: 10, max_waiting: 1024, servers: [{ bases: ["http://h:1/v1"] }] })); },
-        message(ws, m) { const f = JSON.parse(String(m)); ops.push({ op: f.op, at: performance.now(), conn: ws.data.n }); if (f.op === "ping") ws.send(JSON.stringify({ op: "pong", id: f.id })); },
-        close(ws) { ops.push({ op: "closed", at: performance.now(), conn: ws.data.n }); },
+        message(ws, m) { const f = JSON.parse(String(m)); ops.push({ op: f.op, conn: ws.data.n }); if (f.op === "ping") ws.send(JSON.stringify({ op: "pong", id: f.id })); },
+        close(ws) { ops.push({ op: "closed", conn: ws.data.n }); },
       },
     });
     const key = "relay-key-of-this-brain-0123";
@@ -333,7 +333,7 @@ if (!existsSync(composePath)) {
     ws.close();
     c.stop("SIGTERM");
     await Promise.race([c.done, Bun.sleep(5000)]);
-    // Its port taken, it does not listen after all: no api is coming, so the first synced goes at once (review pass 2 of 3b-2).
+    // Its port taken and no pass to run, it does not listen after all, and closes its relay: none held to the broker for no one (review pass 5 of 3b-2).
     ops.length = 0;
     const firstConns = conns;
     const taken = Bun.serve({ port: 0, fetch: () => new Response("") });
@@ -345,10 +345,10 @@ if (!existsSync(composePath)) {
     // None of its own left open: never dialled, or closed (the relay stopped before or after its dial).
     await Bun.sleep(1000);
     const openOwn = conns - firstConns - ops.filter((o) => o.op === "closed" && o.conn > firstConns).length;
-    ok(lines2.some((l) => /could not listen on/.test(l)) && openOwn === 0, `its port taken and no pass to run, it says so and holds no relay to the broker for no one (review pass 5) (${lines2.filter((l) => /listen/.test(l)).join(" | ")}; ${conns - firstConns} dialled, ${openOwn} open)`);
+    ok(lines2.some((l) => /could not listen on/.test(l)) && openOwn === 0, `its port taken and no pass to run, it says so and holds no relay to the broker for no one (review pass 5 of 3b-2) (${lines2.filter((l) => /listen/.test(l)).join(" | ")}; ${conns - firstConns} dialled, ${openOwn} open)`);
     c2.stop("SIGTERM");
     await Promise.race([c2.done, Bun.sleep(5000)]);
-    // With a pass to run, the relay stays for it, and its held synced goes at once: no api is coming.
+    // With a pass to run, the relay stays for it, and its held synced goes at once: no api is coming (review pass 2 of 3b-2).
     const before3 = conns;
     const c3 = coordinate({
       env: { PATH: process.env.PATH ?? "", PROBE_OUT: join(dir, "taken.json"), OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${fakeBroker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: key }, sql: null, asOwnUsers: false,
@@ -383,7 +383,7 @@ if (!existsSync(composePath)) {
     await w.end();
     ok(writes <= 4, `fifty changes in a tenth of a second while writes take as long: a few writes, not fifty (${writes})`);
   }
-  // Listening, with OB1_LISTEN_HOST: on that address alone.
+  // Listening, with OB1_LISTEN_HOST: on that address.
   {
     const lines: string[] = [];
     const reg2 = parseRegistry(`broker:\n  warm_s: 0\nservers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\n    reserve: 0\nbrains:\n  b:\n    key: "${hashKey("slot_k")}"\n`).registry!;
