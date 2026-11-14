@@ -2519,11 +2519,14 @@ a delete is; the operator detaches first, deleting it with
 bare orphan entity (no mention, edge, priority statement or merge record): once
 an entity's mentions are gone, whose it was can't be told. Every event of it in `thought_audit` is redacted in place
 through the log's third named amendment, `redact`: each text becomes the marker
-`[forgotten]` and each metadata object `{"forgotten": true}`, while ids,
-fingerprints, times and the actor stay. The amendment takes only a deleted
+`[forgotten]` and each metadata object `{"forgotten": true}`, the `source`
+copied from the metadata blanked, while ids, fingerprints, times and the actor
+stay. The amendment takes only a deleted
 thought's events under the forget's own setting, once. `thought_forgotten` records
 each forgetting, append-only; a capture or edit to a forgotten text is refused
-`OB005` unless `ob1.reinstate_forgotten` is on. A twin holding the same text keeps
+`OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought already
+holds that text; `ingest-records.ts` and `sync-linear.ts` count such a record as
+`forgotten` and go on. A twin holding the same text keeps
 it and is named. Thoughts derived from the forgotten one, and every page whose own log names it
 (its earlier renders, and a section once built on it whose revision keeps the
 earlier body), are listed for a person to review: prose that absorbed the text

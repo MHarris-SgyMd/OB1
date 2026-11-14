@@ -20653,7 +20653,7 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   // one on O taking its due time from T; an open item read from T, with a statement of its own; a close proposal on
   // an item from O whose evidence is T; T a deliverable of the spec O; a page section built on T; the query log
   // naming T three ways; a twin pair, one forgotten.
-  const T = await thought(`note: ${SECRET}`, { people: ["Ada"], topic: SECRET });
+  const T = await thought(`note: ${SECRET}`, { people: ["Ada"], topic: SECRET, source: `a call about the ${SECRET}` });
   await edit(T, `note, edited: ${SECRET}`);
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [ACT]);
@@ -20689,6 +20689,20 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   assert(rel.ok !== false && deliv.event !== undefined && events === 3,
     `the fixture: a relation recorded, T a deliverable, T's capture and its two edits in the log (${JSON.stringify(rel).slice(0, 60)} | ${JSON.stringify(deliv).slice(0, 80)} | ${events})`);
 
+  // Under ob1.projecting_replay rebuild_derived refuses (REPLAYING): no half forget, the refusal the answer.
+  let replaying: J = {};
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.projecting_replay', 'on', true)`);
+    await tx.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [active]);
+    replaying = (await tx.query<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [T, ACT])).rows[0].r;
+    throw new Error("roll back");
+  }).catch(() => undefined);
+  const afterReplay = await one<{ live: boolean; led: number; red: number }>(
+    `SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = $1::uuid) AS live, (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = $1::uuid) AS led,
+            (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid AND redacted_at IS NOT NULL) AS red`, [T]);
+  assert(replaying.ok === false && replaying.error === "REPLAYING" && (replaying.rebuild as J)?.ok === false && afterReplay.live && afterReplay.led === 0 && afterReplay.red === 0,
+    `under replay the forget answers rebuild_derived's REPLAYING, with its report, and nothing is forgotten (${JSON.stringify(replaying).slice(0, 80)}; ${JSON.stringify(afterReplay)})`);
+
   // Refused CITED while an active citation leans on it (the maintainer, 2026-11-13): nothing touched.
   const cited = await forget(T);
   const untouched = await one<{ live: boolean; red: number; led: number }>(
@@ -20713,6 +20727,7 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   // Nowhere holds the text.
   const text = await q<{ t: string; n: number }>(`
     SELECT 'thought_audit' AS t, count(*)::int AS n FROM thought_audit WHERE diff::text LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'thought_audit.source', count(*)::int FROM thought_audit WHERE source LIKE '%' || $1 || '%'
     UNION ALL SELECT 'thoughts', count(*)::int FROM thoughts WHERE content LIKE '%' || $1 || '%' OR metadata::text LIKE '%' || $1 || '%'
     UNION ALL SELECT 'thought_facets', count(*)::int FROM thought_facets WHERE payload::text LIKE '%' || $1 || '%'
     UNION ALL SELECT 'priority_assertions', count(*)::int FROM priority_assertions WHERE reason LIKE '%' || $1 || '%'
@@ -20795,7 +20810,8 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   // Again: FORGOTTEN with its time; an unknown id NOT_FOUND; no id refused 22023.
   const again = await forget(T), unknown = await forget("11111111-2222-4333-8444-555555555125");
   const noId = await code(`SELECT forget_thought(NULL::uuid)`);
-  assert(again.ok === false && again.error === "FORGOTTEN" && typeof again.forgotten_at === "string" && unknown.error === "NOT_FOUND" && noId === "22023",
+  assert(again.ok === false && again.error === "FORGOTTEN" && typeof again.forgotten_at === "string" && unknown.error === "NOT_FOUND"
+      && unknown.id === "11111111-2222-4333-8444-555555555125" && noId === "22023",
     `forgetting again is FORGOTTEN with its time, an unknown id NOT_FOUND, no id 22023 (${JSON.stringify(again).slice(0, 90)}, ${unknown.error}, ${noId})`);
 
   // The redact amendment refuses every change but its own; the ledger and the guards refuse the rest.
@@ -20894,6 +20910,15 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
       && (third.orphan_entities as number) >= 1 && orphansLeft.bare === 0 && orphansLeft.kept === 1
       && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten WHERE thought_id = $1::uuid`, [T])).n === 2,
     `a second forget sweeps what a racing write left — the statement, the orphan event on the item it took, the proposal, the section, the child — and writes a second ledger row; a third is FORGOTTEN, pruning a bare orphan on the way and keeping one that carries a statement (${JSON.stringify(sr)}; ${sweepLeft.n}; ${third.error}; ${JSON.stringify(orphansLeft)})`);
+
+  // Reinstated once, a text a standing thought holds is no forgotten text: a later write of it passes (review pass 4:
+  // an ingest's INSERT … ON CONFLICT over a reinstated row was refused).
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
+    await tx.query(`INSERT INTO thoughts (content, content_fingerprint) VALUES ($1, content_fingerprint_of($1))`, [`deleted first: ${SECRET}-G`]);
+  });
+  const afterReinstate = await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`deleted first: ${SECRET}-G`]);
+  assert(afterReinstate === "taken", `a text reinstated and standing is taken again without reinstating (${afterReinstate})`);
 
   // delete_thought is unchanged: a deleted thought's events keep their text, and nothing enters the ledger.
   const plain = await thought("deleted, not forgotten, 125");

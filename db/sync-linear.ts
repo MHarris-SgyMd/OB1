@@ -502,6 +502,9 @@ export type PassReport = {
   twinsMarked: number;
   noVector: number;
   errors: { identifier: string; error: string }[];
+  /** Tickets whose text was forgotten (forget_thought, migration 139): the brain refuses it on its way back (OB005),
+   *  so the pass writes nothing for them and says so, rather than an error on every pass (SMD-1723). */
+  forgotten?: string[];
   /** Pointers the database refused while chaining twins — the ticket itself landed; the chain is as it was. */
   chainRefusals: { identifier: string; refusal: string }[];
   /** Rows whose vector is the head window's, the provider having refused the whole text — reembed.ts --retry-fallbacks repairs them. */
@@ -1108,6 +1111,11 @@ export async function runPass(opts: { gql: Gql; readRows: ReadRows; writer: Writ
       if (r.chainRefusal) report.chainRefusals.push({ identifier: issue.identifier, refusal: r.chainRefusal });
       if (r.headWindow) report.headWindow++;
     } catch (e) {
+      if ((e as { errno?: string }).errno === "OB005") {
+        (report.forgotten ??= []).push(issue.identifier);
+        opts.writer.log(`  ~ ${issue.identifier}: its text was forgotten; nothing written`);
+        continue;
+      }
       report.errors.push({ identifier: issue.identifier, error: (e as Error).message });
       opts.writer.log(`  ! ${issue.identifier}: ${(e as Error).message}`);
     }
@@ -1128,6 +1136,7 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
   if (r.chainRefusals.length) lines.push(`  chain refusals: ${r.chainRefusals.length} — ${r.chainRefusals.slice(0, 5).map((c) => `${c.identifier}: ${c.refusal}`).join("; ")}`);
   if (r.headWindow) lines.push(`  head-window vectors: ${r.headWindow} row(s) the provider refused whole — reembed.ts --retry-fallbacks repairs them`);
   if (r.stopped) lines.push(`  stopped: ${r.stopped} issue(s) left for the next pass`);
+  if (r.forgotten?.length) lines.push(`  forgotten: ${r.forgotten.length} ticket(s) whose text was forgotten (forget_thought), nothing written — ${r.forgotten.slice(0, 5).join(", ")}`);
   if (r.errors.length) lines.push(`  errors: ${r.errors.length} — ${r.errors.slice(0, 5).map((e) => `${e.identifier}: ${e.error}`).join("; ")}`);
   return lines.join("\n");
 }
