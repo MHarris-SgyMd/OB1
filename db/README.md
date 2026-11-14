@@ -2515,7 +2515,9 @@ of one of its texts waits for a running forget and is refused after (`OB005`);
 another store's write that lands beside a forget is swept by a second
 `forget_thought` of the same id. A thought another cites is refused `CITED`, as
 a delete is; the operator detaches first, deleting it with
-`delete_thought(id, actor, true)`, then forgets it. Every event of it in `thought_audit` is redacted in place
+`delete_thought(id, actor, true)`, then forgets it. Each call also deletes every
+bare orphan entity (no mention, edge, priority statement or merge record): once
+an entity's mentions are gone, whose it was can't be told. Every event of it in `thought_audit` is redacted in place
 through the log's third named amendment, `redact`: each text becomes the marker
 `[forgotten]` and each metadata object `{"forgotten": true}`, while ids,
 fingerprints, times and the actor stay. The amendment takes only a deleted

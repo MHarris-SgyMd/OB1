@@ -6565,7 +6565,7 @@ console.log("\n[20cc] Migration 138: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; a re-apply a no-op (SMD-1723)");
+console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a re-apply a no-op (SMD-1723)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6635,9 +6635,29 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   assert(waitedThenRefused && cap === "OB005" && leftR.t === 0,
     `while the forget ran the capture did not settle; after it the capture of the earlier text was refused OB005, nothing written (${waitedThenRefused}; ${cap}; ${JSON.stringify(leftR)})`);
 
+  // An edit that holds the row while the forget starts (review pass 3): the forget reads the texts before the row
+  // lock, waits, and reads them again under it, so the edited text reaches the ledger and is refused after.
+  const e = String((await sql`SELECT (upsert_thought(${"upgrade 139: before the edit"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  const editor = new SQL({ url: URL_, max: 1 });
+  let forgetting: Promise<unknown> = Promise.resolve(null);
+  await editor.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    await tx`UPDATE thoughts SET content = ${"upgrade 139: after the edit"}, content_fingerprint = content_fingerprint_of(${"upgrade 139: after the edit"}) WHERE id = ${e}::uuid`;
+    forgetting = sql`SELECT forget_thought(${e}::uuid, (${ACT}::text)::jsonb) AS r`.then((x) => x);  // started now: a Bun query runs when awaited or then-ed
+    await new Promise((res) => setTimeout(res, 400));
+  });
+  await forgetting;
+  await editor.close();
+  const editedFp = String((await sql`SELECT content_fingerprint_of(${"upgrade 139: after the edit"}) AS f`)[0].f);
+  const inLedger = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM thought_forgotten WHERE thought_id = ${e}::uuid AND ${editedFp} = ANY(fingerprints)) AS x`)[0].x);
+  let editedBack = "taken";
+  try { await sql`SELECT upsert_thought(${"upgrade 139: after the edit"}, '{}'::jsonb)`; } catch (err) { editedBack = String((err as { errno?: string }).errno ?? (err as Error).message); }
+  assert(inLedger && editedBack === "OB005",
+    `an edit committed while the forget waited on the row: its text in the ledger, refused after (${inLedger}; ${editedBack})`);
+
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
   const ledger = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten`)[0].c);
-  assert(ledger === 2 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
+  assert(ledger === 3 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
   await sql.close();
 }
 

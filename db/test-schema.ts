@@ -20830,13 +20830,17 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   // A thought deleted before it is forgotten is forgotten all the same, from what the log still holds.
   const G = await thought(`deleted first: ${SECRET}-G`);
   await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [G, ACT]);
+  const gfp = (await one<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [`deleted first: ${SECRET}-G`])).f;
+  await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ($1, 'm126', $2::vector, ${EMBEDDING_DIM})`, [gfp, `[${Array(EMBEDDING_DIM).fill(0.1).join(",")}]`]);
   const gone = await forget(G);
+  const gSnap = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_embedding_snapshot WHERE content_fingerprint = $1`, [gfp])).n;
   const gLog = await one<{ n: number; red: number; text: number }>(`SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NOT NULL)::int AS red,
     count(*) FILTER (WHERE diff::text LIKE '%' || $2 || '%')::int AS text FROM thought_audit WHERE thought_id = $1::uuid`, [G, `${SECRET}-G`]);
   const gAgain = await forget(G);
   assert(gone.ok === true && gone.gone === true && (gone.removed as Record<string, number>).audit_events === 2 && gLog.n === 2 && gLog.red === 2 && gLog.text === 0
+      && (gone.rebuild as J).snapshot_rows === 1 && gSnap === 0
       && gAgain.error === "FORGOTTEN" && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`deleted first: ${SECRET}-G`]) === "OB005",
-    `a thought deleted first is forgotten all the same: gone, its capture and tombstone redacted, then FORGOTTEN, its text refused (${JSON.stringify(gLog)}, ${gAgain.error})`);
+    `a thought deleted first is forgotten all the same: gone, its snapshot vector deleted, its capture and tombstone redacted, then FORGOTTEN, its text refused (${gSnap}; ${JSON.stringify(gLog)}, ${gAgain.error})`);
 
   // Detach first, then forget (review pass 2): a thought deleted with its citations detached is forgotten, the
   // detached citations deleted; and an entity only it named, left with no mention by the delete, pruned.
@@ -20851,7 +20855,7 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
   const dLeft = await one<{ cites: number; ent: number }>(`SELECT (SELECT count(*)::int FROM thought_facets WHERE payload::text LIKE '%' || $1 || '%') AS cites,
     (SELECT count(*)::int FROM ob1_entities WHERE id = $2::uuid) AS ent`, [`${SECRET}-D`, entity]);
   assert(dCited.error === "CITED" && detached.detached === 1 && dGone.ok === true && dGone.gone === true
-      && (dGone.removed as Record<string, number>).detached_citations === 1 && ((dGone.rebuild as J).orphan_entities as number) >= 1
+      && (dGone.removed as Record<string, number>).detached_citations === 1 && (dGone.orphan_entities as number) >= 1
       && dLeft.cites === 0 && dLeft.ent === 0,
     `cited, then detached by the delete, then forgotten: the detached citation deleted, the entity only it named pruned (${dCited.error}; ${JSON.stringify(detached)}; ${JSON.stringify(dGone.removed)}; ${JSON.stringify(dLeft)})`);
 
@@ -20877,11 +20881,19 @@ console.log("\n[126] Migration 139: forget a thought — refused CITED while an 
     + (SELECT count(*)::int FROM open_item_close_proposals WHERE evidence_thought_id = $1::uuid) + (SELECT count(*)::int FROM page_sections WHERE body_md LIKE '%RACED-126%')
     + (SELECT count(*)::int FROM thoughts WHERE derived_from @> jsonb_build_array($1::text)) AS n`, [T, item]);
   const sr = sweep.removed as Record<string, number>;
+  // An entity a racing extraction left with no mention (bare) goes with the next call; one carrying a priority
+  // statement is kept (the maintainer, review pass 3: bare orphans alone).
+  const bareOrphan = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Raced Entity 126', 'raced entity 126') RETURNING id`)).id;
+  const keptOrphan = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Kept Entity 126', 'kept entity 126') RETURNING id`)).id;
+  await db.query(`SELECT assert_priority('entity', $1, 2, NULL, NULL, NULL, NULL, 'kept', false, $2::jsonb)`, [keptOrphan, ACT]);
   const third = await forget(T);
+  const orphansLeft = await one<{ bare: number; kept: number }>(`SELECT (SELECT count(*)::int FROM ob1_entities WHERE id = $1::uuid) AS bare,
+    (SELECT count(*)::int FROM ob1_entities WHERE id = $2::uuid) AS kept`, [bareOrphan, keptOrphan]);
   assert(sweep.ok === true && sweep.gone === true && sr.priority_statements === 1 && sr.item_events === 1 && sr.item_proposals === 1
       && sr.page_sections === 1 && sr.derived_refs === 1 && sweepLeft.n === 0 && third.error === "FORGOTTEN"
+      && (third.orphan_entities as number) >= 1 && orphansLeft.bare === 0 && orphansLeft.kept === 1
       && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten WHERE thought_id = $1::uuid`, [T])).n === 2,
-    `a second forget sweeps what a racing write left — the statement, the orphan event on the item it took, the proposal, the section, the child — and writes a second ledger row; a third is FORGOTTEN (${JSON.stringify(sr)}; ${sweepLeft.n}; ${third.error})`);
+    `a second forget sweeps what a racing write left — the statement, the orphan event on the item it took, the proposal, the section, the child — and writes a second ledger row; a third is FORGOTTEN, pruning a bare orphan on the way and keeping one that carries a statement (${JSON.stringify(sr)}; ${sweepLeft.n}; ${third.error}; ${JSON.stringify(orphansLeft)})`);
 
   // delete_thought is unchanged: a deleted thought's events keep their text, and nothing enters the ledger.
   const plain = await thought("deleted, not forgotten, 125");
