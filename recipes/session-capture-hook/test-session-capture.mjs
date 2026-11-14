@@ -41,7 +41,7 @@ delete process.env.OB1_BRAIN_URL;
 delete process.env.OB1_CAPTURE_KEY;
 
 const {
-  stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
+  stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, headerTickets, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
   loadBrains, useStateRoot,
@@ -1004,6 +1004,34 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(prov.code === 0 && prov.payload?.derived_from.length === 3 && prov.payload.redactions?.length === 1 && prov.payload.prompts === 3 && /\n- now push and open the PR with the key \[redacted:anthropic key\]\n/.test(prov.payload.text) && !prov.payload.text.includes("Ab1Ab1"),
     `derived_from keeps its three ids beside one redaction; the retried prompt is one line and counted once (${prov.message.slice(0, 120)})`);
   if (prov.payloadPath) unlinkSync(prov.payloadPath);
+  // SMD-3306 PR 7a-3b-2: where the header's tickets came from — the asks, else the place — rides the payload, as
+  // renderSummary chose them, so the brain's subject rule need not guess it from the text.
+  const asked = headerTickets({ named: new Set(["SMD-11", "SMD-12", "SMD-13", "SMD-14"]), cwd: "/x/ob1", branch: "smd-90-x" });
+  const placed = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "michaelharris/smd-90-x" });
+  const nowhere = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "main" });
+  assert(JSON.stringify(asked) === '{"tickets":["SMD-11","SMD-12","SMD-13"],"from":"asks"}' && JSON.stringify(placed) === '{"tickets":["SMD-90"],"from":"place"}' && JSON.stringify(nowhere) === '{"tickets":[],"from":null}',
+    `headerTickets: the asks' tickets, three at most, from the asks; else the branch's, from the place; none from nowhere (${JSON.stringify([asked, placed, nowhere])})`);
+  const placedText = renderSummary({ ...summariseTranscript(CLAUDE_T), named: new Set(), branch: "michaelharris/smd-90-x" });
+  assert(/^Session summary — SMD-90 — /.test(placedText), `…and the header renderSummary writes is its list (${placedText.split("\n")[0]})`);
+  const ownFrom = headerTickets(cleanEpisode(summariseTranscript(provT).episodes[0], "redact").ep).from;
+  assert(prov.payload.tickets_from === (ownFrom ?? undefined) && (ownFrom === null || ownFrom === "asks" || ownFrom === "place"),
+    `the payload carries its own header's origin (${prov.payload.tickets_from} beside ${ownFrom})`);
+  const askedT = join(TMP, "tickets-from.jsonl");
+  writeFileSync(askedT, claudeTranscript().replaceAll("now push and open the PR", "now push SMD-2013 and open the PR"));
+  const askedPrep = prepare({ ...base, session_id: "s-tickets-from", transcript_path: askedT });
+  assert(askedPrep.code === 0 && /^Session summary — SMD-2013 — /.test(askedPrep.payload?.text ?? "") && askedPrep.payload.tickets_from === "asks",
+    `…an ask naming its ticket: the header lists it, and the payload says the asks named it (${askedPrep.payload?.tickets_from}; ${askedPrep.payload?.text?.split("\n")[0]})`);
+  if (askedPrep.payloadPath) unlinkSync(askedPrep.payloadPath);
+  // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says
+  // `place`.
+  const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });
+  assert(JSON.stringify(placedFour) === '{"tickets":["SMD-11","SMD-12","SMD-13"],"from":"place"}', `…the place's tickets three at most (${JSON.stringify(placedFour)})`);
+  const placedT = join(TMP, "tickets-from-place.jsonl");
+  writeFileSync(placedT, [user("bump the node-22 image", { origin: { kind: "human" }, gitBranch: "michaelharris/smd-90-x" }), line({ type: "assistant", sessionId: SID, timestamp: "2026-09-22T13:20:00.000Z", cwd: "/repo/proj", gitBranch: "michaelharris/smd-90-x", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } })].join("\n"));
+  const placedPrep = prepare({ ...base, session_id: "s-tickets-from-place", transcript_path: placedT });
+  assert(placedPrep.code === 0 && /^Session summary — SMD-90 — /.test(placedPrep.payload?.text ?? "") && placedPrep.payload.tickets_from === "place",
+    `…a branch's ticket, no ask naming one: the payload says the place gave it (${placedPrep.payload?.tickets_from}; ${placedPrep.payload?.text?.split("\n")[0]})`);
+  if (placedPrep.payloadPath) unlinkSync(placedPrep.payloadPath);
   // First review pass: the gate reads each prompt on its own, as the redaction blanks them — a flag ending one prompt and a word opening the next was a refusal under either mode that no redaction could clear.
   writeFileSync(join(TMP, "join.jsonl"), [user("run psql --password", { origin: { kind: "human" } }), assistant([{ type: "text", text: "ok" }]), user("hunter2 then check the row count", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
   const jn = prepare({ ...base, session_id: "s-join", transcript_path: join(TMP, "join.jsonl") });
@@ -1486,6 +1514,15 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   received.length = 0;
   await postCapture(cfg, { text: "the model's redacted summary", harness: "claude-code", derived_from: [], summary_model: "test-model", redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] });
   assert(received[0].args.metadata?.summary_model === "test-model" && received[0].args.metadata?.redactions === 1, "a model summary that was also redacted carries both keys");
+  received.length = 0;
+  await postCapture(cfg, { text: "the model's prose, no header", harness: "claude-code", derived_from: [], summary_model: "test-model", tickets_from: "asks" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"summary_model":"test-model"}', `…and a model's summary no tickets_from: its prose has no header for the word to describe (SMD-3306 review pass 4: ${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
+  await postCapture(cfg, { text: "a session's summary", harness: "claude-code", derived_from: [], tickets_from: "asks" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"tickets_from":"asks"}', `where its header's tickets came from rides metadata.tickets_from (SMD-3306 PR 7a-3b-2: ${JSON.stringify(received[0]?.args?.metadata)})`);
+  received.length = 0;
+  await postCapture(cfg, { text: "a session's summary", harness: "claude-code", derived_from: [], tickets_from: "place" });
+  assert(JSON.stringify(received[0].args.metadata) === '{"tickets_from":"place"}', `…\`place\` as the payload says it (review pass 4, mutant: ${JSON.stringify(received[0]?.args?.metadata)})`);
   // A server that refuses the metadata key drops it and posts the summary anyway (SMD-2168): the summary is the point, the count a nicety.
   received.length = 0;
   let rm; try { rm = await postCapture(cfg, { text: "[[refuse-metadata]] a redacted summary", harness: "claude-code", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] }); } catch (e) { rm = { error: e.message }; } // a mutant that drops the mend throws; the guard turns that into a failed arm, not a crashed suite
@@ -2415,6 +2452,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
+  // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
+  assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
   const dryCp = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "auto"]);
   assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),
@@ -2440,6 +2479,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const dryEp = await run(["--dry-run", EPISODES_T]);
   assert(dryEp.code === 0 && /^--- 4 episodes — one thought each, on its own supersedes chain:\n    1\. SMD-1844 — \(michaelharris\/smd-1844-loopback\) — 2 prompt\(s\) — 2026-09-24 09:00 → 2026-09-24 09:40 — from the start — ended at a compaction\n    2\. SMD-1843, SMD-1844 — \(michaelharris\/smd-1843-env\) — 2 prompt\(s\) — 2026-09-24 10:00 → 2026-09-24 10:30 — begun after a compaction with SMD-1843 — ended when SMD-1917 was taken up\n    3\. SMD-1917 — [^\n]*— begun with SMD-1917 — ended at a compaction\n    4\. SMD-1917 — \(michaelharris\/smd-1917-fork-md\) — 2 prompt\(s\) — 2026-09-24 11:10 → 2026-09-24 11:31 — begun after a compaction — still open\n\n=== episode 1 ===\nSession summary — SMD-1844/.test(dryEp.out) && (dryEp.out.match(/^=== episode \d ===$/gm) ?? []).length === 4 && (dryEp.out.match(/^--- would send \(episode \d\): source=claude-code, derived_from=/gm) ?? []).length === 4 && (dryEp.out.match(/secret scan: clean/g) ?? []).length === 4,
     `--dry-run prints the segmentation — one line per episode with its tickets, branch, asks, span and bounds — then each episode's text and what it would send (${dryEp.out.split("\n")[1]})`);
+  // Review pass 5 (mutants: the line naming no word, or always `asks`, lived): each episode's would-send line names its
+  // word, as its payload carries it; one with no ticket in its header names none.
+  const sends = dryEp.out.split("\n").filter((l) => l.startsWith("--- would send"));
+  const sentWords = sends.map((l) => l.replace(/^.*derived_from=[0-9]+ id\(s\)(?: \[[^\]]*\])?/, ""));
+  assert(JSON.stringify(sentWords) === JSON.stringify([", metadata.tickets_from=place", ", metadata.tickets_from=asks", ", metadata.tickets_from=asks", ", metadata.tickets_from=place"]),
+    `--dry-run's would-send line names each episode's metadata.tickets_from (SMD-3306 review pass 5: ${JSON.stringify(sentWords)})`);
   const dryEpCp = await run(["--dry-run", EPISODES_T, "--event", "PreCompact", "--trigger", "manual"]);
   assert((dryEpCp.out.match(/Checkpoint: compacted/g) ?? []).length === 1 && /=== episode 4 ===[^]*Checkpoint: compacted at 2026-09-24 11:31 \(manual\)/.test(dryEpCp.out), "…with --event, the checkpoint line previews on the open episode alone");
   const dryEpSec = await spawnScript(["--dry-run", join(TMP, "episodes-secret.jsonl")], { env: { OB1_CAPTURE_ON_SECRET: "refuse" } });
