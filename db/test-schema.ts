@@ -5326,7 +5326,7 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
   assert(/INCLUDE \(canonical_agent_id, actor_kind\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(actor_context \? 'via'::text\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
     `…the kind index carrying the agent id and the kind so the census filters and groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
   assert(lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("139") && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("update_thought").startsWith("099") && lastDefinerOf("delete_thought").startsWith("060"),
-    `060 is the last definer of delete_thought and of the audit trigger (append then project, the trigger the check — [56]), 099 of update_thought (088's body — 073's, answering what it did — with an unlink taking the review lock) and 080 of upsert_thought (061's lineage envelope over 060's bodies — [57] — with the trust stamp, [66], and 080's 'keep', [71]); 139 of the refusal trigger (055's body — 046's with the payload arm, [51] — and the redact arm, [126]) (${lastDefinerOf("delete_thought")})`);
+    `060 is the last definer of delete_thought and of the audit trigger (append then project, the trigger the check — [56]), 099 of update_thought (088's body — 073's, answering what it did — with an unlink taking the review lock) and 080 of upsert_thought (061's lineage envelope over 060's bodies — [57] — with the trust stamp, [66], and 080's 'keep', [71]); 139 of the refusal trigger (055's body — 046's with the payload arm, [51] — and the redact arm, [127]) (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
   assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
@@ -8757,7 +8757,7 @@ console.log("\n[56] Migration 060: the write functions append then project — t
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
   assert(trigs.map((t) => t.n).join(",") === "priority_close_on_thought_delete,thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_refuse_forgotten,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
-    `nineteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), 139 the refusal of a forgotten text ([126]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+    `nineteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), 139 the refusal of a forgotten text ([127]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -16525,6 +16525,8 @@ console.log("\n[103] Migration 115: work claims — a ticket or one piece of it 
   const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
   const ones = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
   assert(after === before && ones.every((n) => n === 1), `115 applied again changes nothing: ${after} claims stand, one of each call (${ones.join(",")})`);
+  // 140 redefines claim_work: this section re-applied 115's above, so restore 140's — the last definer — for [126] and any later section, as every section re-applying an older definer must (SMD-3778).
+  await restoreShipped("claim_work");
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);
@@ -20611,7 +20613,173 @@ console.log("\n[125] Migration 138: a priority write names every statement it cl
     `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
-console.log("\n[126] Migration 139: forget a thought — refused CITED while an active citation leans on it, nothing touched; then forgotten: no row anywhere holds its text or its id (the log's events redacted in place, kept with their actor; the child's derived_from stripped and the child listed; the relation facet targeting it, the expired citation of it, the page section built on it with the page re-rendered, the priority statements on it, on its open item and taking a due time from it, the item with its events and a close proposal citing it, its deliverable's events, the query log's references), each counted in the evidence; the projections without drift; the ledger's row; the same text refused OB005 on capture and on edit unless reinstated; a twin's text kept and named; forgetting again FORGOTTEN, an unknown id NOT_FOUND; the redact amendment refusing each unlawful change; the guards refusing an unrelated delete; delete_thought unchanged; the shape; a re-apply a no-op (SMD-1723)");
+console.log("\n[126] Migration 140: the per-holder cap on live work claims, operator-settable — work_claim_cap_settings one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_work_claim_cap_builtin() 50; ob1_work_claim_cap_refusal at the range's edges; ob1_work_claim_cap() the builtin under the standing setting; set_work_claim_cap an operator key's alone, by its agent id, refusing a bad cap, writing nothing for the cap standing, NULL clearing; claim_work refusing a NEW claim past the holder's cap CLAIM_LIMIT, counting live claims by agent id or by name, a renewal and a lapsed claim exempt, a release freeing a slot; a stored cap the refusal names failing every new claim 22000 while a renewal is still taken, work_claim_cap_setting() saying it without raising; claim_work 140's; a re-apply a no-op (SMD-3606)");
+{
+  const file = files.find((f) => /^\d{3}_work_claim_cap\.sql$/.test(f)) ?? "no NNN_work_claim_cap.sql";
+  // [103] re-applies 115's claim_work for its idempotency check, then restores 140's (SMD-3778); this restore is the backstop so this section holds 140's.
+  await restoreShipped("claim_work");
+  type Claim = { id: string; issue: string; holder: string; holder_agent_id: string | null; state: string; expires_at: string };
+  type Answer = { outcome: string; code: string | null; message: string | null; claim: Claim | null; held_by: Claim[]; token: string | null; cap?: number; held?: number };
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: null, message: null, claim: null, held_by: [], token: null }; }
+  };
+  const claim = (issue: string, actor: object | null, token: string | null = null, lease = 14400) =>
+    ans(`SELECT claim_work($1, NULL, NULL, $3, $2, $4::jsonb) AS r`, [issue, token, lease, actor === null ? null : JSON.stringify(actor)]);
+  const release = (id: string, token: string, actor: object) =>
+    ans(`SELECT release_work_claim($1::uuid, $2, 'done', false, $3::jsonb) AS r`, [id, token, JSON.stringify(actor)]);
+  const setCap = async (cap: number | null, actor: unknown) => (await one<{ r: Record<string, unknown> }>(`SELECT set_work_claim_cap($1, $2::jsonb) AS r`, [cap, actor === null ? null : JSON.stringify(actor)])).r;
+  const capNow = async () => Number((await one<{ c: number }>(`SELECT ob1_work_claim_cap() AS c`)).c);
+  const settingNow = async () => (await one<{ r: Record<string, unknown> }>(`SELECT work_claim_cap_setting() AS r`)).r;
+  const refusal = async (c: number | null) => (await one<{ r: string | null }>(`SELECT ob1_work_claim_cap_refusal($1) AS r`, [c])).r;
+  // Both columns back by five hours (over the default four-hour lease), so the claim has lapsed (expires_at < now) while the lease interval, which work_claims_lease checks positive, stands (as [103]'s age does).
+  const age = (id: string) => db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [id]);
+  const liveFor = async (name: string) => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = $1 AND released_at IS NULL AND expires_at > now()`, [name])).n;
+  const rows = async () => q<{ id: string; cap: number; set_by: string; ended_by: string | null; standing: boolean }>(
+    `SELECT id::text AS id, cap, set_by, ended_by, ended_at IS NULL AS standing FROM work_claim_cap_settings ORDER BY id`);
+
+  await db.exec(`SELECT set_agent_kind('[126] op', 'operator'); SELECT set_agent_kind('[126] h', 'agent'); SELECT set_agent_kind('[126] h2', 'agent'); INSERT INTO ob1_agents (label) VALUES ('[126] plain') ON CONFLICT DO NOTHING`);
+  const idOf = async (label: string) => (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).id;
+  const OP = { name: "[126] op", agent_id: await idOf("[126] op") };
+  const H = { name: "[126] h", agent_id: await idOf("[126] h") };
+
+  // The shape: the table, its key and one-standing index, two triggers; eight functions commented by 140, the reads STABLE,
+  // the builtin and refusal IMMUTABLE, the setter, the guard and the lock VOLATILE, none SECURITY DEFINER; 140 the last
+  // definer of each, and of claim_work.
+  const cols = (await q<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
+      FROM pg_attribute WHERE attrelid = 'work_claim_cap_settings'::regclass AND attnum > 0 AND NOT attisdropped`))[0].c;
+  const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('work_claim_cap_settings_one_standing')) AS d`)).d ?? "";
+  const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'work_claim_cap_settings'::regclass AND NOT tgisinternal`)).t;
+  const FNS = ["ob1_work_claim_cap_builtin()", "ob1_work_claim_cap_refusal(integer)", "ob1_work_claim_cap_settings_guard()", "ob1_work_claim_cap()", "set_work_claim_cap(integer, jsonb)", "work_claim_cap_setting()", "ob1_work_claim_holder_lock(text, uuid)", "ob1_work_claim_holder_live_count(text, uuid, timestamptz)"];
+  const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
+    `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
+  const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
+  assert(cols === "id bigint not null, cap integer not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
+         && /UNIQUE INDEX work_claim_cap_settings_one_standing ON public\.work_claim_cap_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
+         && trig === "work_claim_cap_settings_history:31 work_claim_cap_settings_no_truncate:34"
+         && fns.length === 8 && fns.every((f) => !f.d && /[Mm]igration 140 \/ SMD-3606/.test(f.c ?? ""))
+         && vol["ob1_work_claim_cap()"] === "s" && vol["work_claim_cap_setting()"] === "s" && vol["ob1_work_claim_holder_live_count(text,uuid,timestamp with time zone)"] === "s"
+         && vol["ob1_work_claim_cap_builtin()"] === "i" && vol["ob1_work_claim_cap_refusal(integer)"] === "i"
+         && vol["set_work_claim_cap(integer,jsonb)"] === "v" && vol["ob1_work_claim_cap_settings_guard()"] === "v" && vol["ob1_work_claim_holder_lock(text,uuid)"] === "v"
+         && ["ob1_work_claim_cap_builtin", "ob1_work_claim_cap_refusal", "ob1_work_claim_cap_settings_guard", "ob1_work_claim_cap", "set_work_claim_cap", "work_claim_cap_setting", "ob1_work_claim_holder_lock", "ob1_work_claim_holder_live_count", "claim_work"].every((f) => lastDefinerOf(f) === file),
+    `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; eight functions commented by 140 with the right volatilities, none SECURITY DEFINER, 140 the last definer of each and of claim_work (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+
+  // No setting: the cap is the built-in 50; the setting says so.
+  const none = { c: await capNow(), s: await settingNow(), b: Number((await one<{ b: number }>(`SELECT ob1_work_claim_cap_builtin() AS b`)).b) };
+  assert(none.c === 50 && none.b === 50 && none.s.cap === 50 && none.s.source === "builtin" && (await rows()).length === 0,
+    `with no setting the cap is the built-in 50, and work_claim_cap_setting() says source builtin (${JSON.stringify(none.s)})`);
+
+  // The refusal at the range's edges: NULL, below 1, above 100000 refused; 1, 50, 100000 taken.
+  const probes: [number | null, boolean][] = [[null, true], [0, true], [-5, true], [1, false], [2, false], [50, false], [100000, false], [100001, true], [999999, true]];
+  const refs = await Promise.all(probes.map(([c]) => refusal(c)));
+  assert(probes.every(([, bad], i) => (refs[i] !== null) === bad) && /a cap is required/.test(refs[0] ?? "") && /a cap below 1 \(0\)/.test(refs[1] ?? "") && /a cap above 100000 \(100001\)/.test(refs[7] ?? ""),
+    `ob1_work_claim_cap_refusal refuses NULL, below 1 and above 100000, takes 1, 50 and 100000 (${probes.map(([c], i) => `${c}:${refs[i] === null ? "ok" : "no"}`).join(" ")})`);
+
+  // Who may set: an operator key by its agent id; a name alone, an agent's key, an unclassified key refused saying what it is; no envelope raises; a bad cap BAD_CAP.
+  const refusedBy = [await setCap(10, { name: "[126] op" }), await setCap(10, { name: "[126] h", agent_id: H.agent_id }), await setCap(10, { name: "[126] plain", agent_id: await idOf("[126] plain") })];
+  const noEnvelope = await failure(`SELECT set_work_claim_cap(10)`);
+  const badCap = [await setCap(0, OP), await setCap(100001, OP)];
+  assert(refusedBy.every((r) => r.ok === false && r.error === "NOT_OPERATOR") && refusedBy[0].kind === null && /named by its name alone$/.test(String(refusedBy[0].message))
+         && refusedBy[1].kind === "agent" && refusedBy[2].kind === null && /is unclassified$/.test(String(refusedBy[2].message))
+         && /needs a holder: no actor envelope names one/.test(noEnvelope)
+         && badCap.every((r) => r.ok === false && r.error === "BAD_CAP") && /a cap below 1/.test(String(badCap[0].message)) && /a cap above 100000/.test(String(badCap[1].message))
+         && (await rows()).length === 0,
+    `only an operator key by its agent id sets the cap; a name alone, an agent's and an unclassified key answer NOT_OPERATOR, no envelope raises, a bad cap BAD_CAP, nothing written (${refusedBy.map((r) => `${r.error}:${r.kind}`).join(", ")}; ${noEnvelope.slice(0, 40)})`);
+
+  // Set a low cap, and the cap bites: two claims taken, the third refused CLAIM_LIMIT naming the cap and the count; a
+  // renewal of the holder's own claim is exempt even at the cap; a release frees a slot; a lapsed claim does not count.
+  const set2 = await setCap(2, OP);
+  const setSame = await setCap(2, OP);  // the cap already standing: nothing written, changed false (132's no-op)
+  const c1 = await claim("SMD-8601", H);
+  const c2 = await claim("SMD-8602", H);
+  const c3 = await claim("SMD-8603", H);
+  const renewAtCap = await claim("SMD-8601", H, c1.token);  // the holder's own, with its token: renewed, never capped
+  assert(set2.ok === true && set2.changed === true && setSame.ok === true && setSame.changed === false && (await rows()).filter((r) => r.standing).length === 1 && (await capNow()) === 2
+         && c1.outcome === "claimed" && c2.outcome === "claimed"
+         && c3.outcome === "refused" && c3.code === "CLAIM_LIMIT" && c3.cap === 2 && c3.held === 2 && c3.claim === null && c3.token === null
+         && /^\[126\] h holds 2 live claims, the cap of 2; release one/.test(c3.message ?? "")
+         && renewAtCap.outcome === "renewed",
+    `at a cap of 2 the holder's first two claims are taken, the third refused CLAIM_LIMIT naming the cap and the count, and its own renewal is exempt (${c1.outcome}, ${c2.outcome}, ${c3.outcome}:${c3.code}:${c3.cap}/${c3.held}, renew ${renewAtCap.outcome})`);
+
+  const rel = await release(c1.claim!.id, c1.token!, H);
+  const c3b = await claim("SMD-8603", H);  // a slot freed by the release
+  const c4 = await claim("SMD-8604", H);   // at the cap again
+  await age(c2.claim!.id);                  // c2 lapses: it counts as free
+  const c4b = await claim("SMD-8604", H);  // c3b + c4b = 2 live, c2 lapsed uncounted
+  assert(rel.outcome === "released" && c3b.outcome === "claimed" && c4.outcome === "refused" && c4.code === "CLAIM_LIMIT"
+         && c4b.outcome === "claimed" && (await liveFor("[126] h")) === 2,
+    `a release frees a slot (the next claim taken), the cap bites again, and a lapsed claim does not count so a new claim is taken (${c3b.outcome}, ${c4.outcome}, ${c4b.outcome})`);
+
+  // The operator raises the cap, and more claims pass; clearing it returns to the built-in 50.
+  const raise = await setCap(5, OP);
+  const capAtFive = await capNow();
+  const more = [await claim("SMD-8605", H), await claim("SMD-8606", H), await claim("SMD-8607", H)];  // 2 live + 3 = 5, then the 6th refused
+  const sixth = await claim("SMD-8608", H);
+  const cleared = await setCap(null, OP);
+  const capAfterClear = await capNow();
+  assert(raise.changed === true && capAtFive === 5 && more.filter((r) => r.outcome === "claimed").length === 3 && sixth.code === "CLAIM_LIMIT"
+         && cleared.ok === true && cleared.changed === true && capAfterClear === 50 && (await settingNow()).source === "builtin",
+    `the operator raises the cap to 5 (three more taken, the sixth refused), and clearing returns to the built-in 50 (${more.map((r) => r.outcome).join(",")}, ${sixth.code}, cleared ${capAfterClear})`);
+
+  // The holder is the agent id when it has one, the name alone when it does not: a name-only key is capped by its name,
+  // apart from another name-only key.
+  await setCap(1, OP);
+  const N1 = { name: "[126] nameonly" }, N2 = { name: "[126] nameonly-two" };
+  const n1a = await claim("SMD-8631", N1);
+  const n1b = await claim("SMD-8632", N1);  // the same name at the cap of 1: refused
+  const n2a = await claim("SMD-8633", N2);  // a different name: its own count
+  assert(n1a.outcome === "claimed" && n1a.claim!.holder_agent_id === null && n1b.code === "CLAIM_LIMIT" && n2a.outcome === "claimed",
+    `a name-only key is capped by its name, apart from another name-only key (${n1a.outcome}:${n1a.claim?.holder_agent_id}, ${n1b.code}, ${n2a.outcome})`);
+  await setCap(null, OP);
+
+  // History: a row changes only to end, once; a DELETE, a TRUNCATE refused; a raw row with a bad cap, a second standing row, a non-operator maker refused; one standing.
+  await setCap(7, OP);
+  const hist = [
+    await failure(`UPDATE work_claim_cap_settings SET cap = 9 WHERE ended_at IS NULL`),
+    await failure(`UPDATE work_claim_cap_settings SET ended_by = 'x' WHERE ended_at IS NOT NULL`),
+    await failure(`DELETE FROM work_claim_cap_settings WHERE ended_at IS NOT NULL`),
+    await failure(`TRUNCATE work_claim_cap_settings`),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (200000, 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (9, 'x', $1::uuid, now())`, [OP.agent_id]),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (9, 'x', gen_random_uuid(), now())`),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at) VALUES (9, 'x', $1::uuid, now())`, [H.agent_id]),
+    await failure(`INSERT INTO work_claim_cap_settings (cap, set_by, set_by_agent_id, set_at, ended_at, ended_by, ended_by_agent_id) VALUES (9, 'x', $1::uuid, now(), now(), 'x', $1::uuid)`, [OP.agent_id]),
+    await failure(`UPDATE work_claim_cap_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [H.agent_id]),
+  ];
+  assert(/^23001 work_claim_cap_settings is history: a row changes only to end, once/.test(hist[0]) && /^23001 .* a row changes only to end, once/.test(hist[1])
+         && /^23001 work_claim_cap_settings is history: DELETE refused/.test(hist[2]) && /^23001 work_claim_cap_settings is history: TRUNCATE refused/.test(hist[3])
+         && /^22023 a cap above 100000/.test(hist[4]) && /^23505 .*work_claim_cap_settings_one_standing/.test(hist[5])
+         && /^42501 work_claim_cap_settings: set_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[6]) && /^42501 work_claim_cap_settings: set_by_agent_id /.test(hist[7])
+         && /^23001 work_claim_cap_settings: a setting stands when written/.test(hist[8]) && /^42501 work_claim_cap_settings: ended_by_agent_id \S+ is no key the registry classifies operator$/.test(hist[9])
+         && (await rows()).filter((r) => r.standing).length === 1,
+    `history: an UPDATE of a standing row and of an ended row refused, a DELETE and a TRUNCATE refused; a raw row with a bad cap, a second standing row, an unknown or an agent's maker, one written already ended, and an end by an agent's key all refused; one standing (${hist.map((h) => h.slice(0, 36)).join(" | ")})`);
+
+  // A stored cap the refusal names (the trigger off, as a later migration narrowing the range would leave one): every new
+  // claim fails 22000 naming the setting, a renewal is still taken, work_claim_cap_setting() says it without raising; a clear mends it.
+  const e1 = await claim("SMD-8611", H, null, 14400);  // a live claim with a token to renew later
+  await db.exec(`ALTER TABLE work_claim_cap_settings DISABLE TRIGGER work_claim_cap_settings_history; UPDATE work_claim_cap_settings SET cap = 200000 WHERE ended_at IS NULL; ALTER TABLE work_claim_cap_settings ENABLE TRIGGER work_claim_cap_settings_history`);
+  const brokenClaim = await claim("SMD-8612", H);
+  const brokenRenew = await claim("SMD-8611", H, e1.token);
+  const said = await settingNow();
+  const capRaise = await failure(`SELECT ob1_work_claim_cap()`);
+  const mend = await setCap(null, OP);
+  assert(/^raised: /.test(brokenClaim.outcome) && /the operator's work-claim cap .* is refused/.test(brokenClaim.outcome) && brokenRenew.outcome === "renewed"
+         && said.source === "operator" && said.cap === 200000 && /a cap above 100000/.test(String(said.refused))
+         && /^22000 /.test(capRaise) && mend.changed === true && (await capNow()) === 50,
+    `a stored cap the refusal names fails every new claim 22000 naming it, a renewal is still taken, the setting says it without raising, and a clear mends it (${brokenClaim.outcome.slice(0, 50)}; renew ${brokenRenew.outcome}; ${JSON.stringify(said).slice(0, 70)})`);
+
+  // A re-apply is a no-op: the cap and the reader answer as before.
+  await reapply(file.slice(0, 4));
+  assert((await capNow()) === 50 && lastDefinerOf("claim_work") === file && (await claim("SMD-8621", H)).outcome === "claimed",
+    `a re-apply is a no-op: the built-in cap stands, 140 is still claim_work's last definer, and a claim is taken (${await capNow()})`);
+}
+
+console.log("\n[127] Migration 139: forget a thought — refused CITED while an active citation leans on it, nothing touched; then forgotten: no row anywhere holds its text or its id (the log's events redacted in place, kept with their actor; the child's derived_from stripped and the child listed; the relation facet targeting it, the expired citation of it, the page section built on it with the page re-rendered, the priority statements on it, on its open item and taking a due time from it, the item with its events and a close proposal citing it, its deliverable's events, the query log's references), each counted in the evidence; the projections without drift; the ledger's row; the same text refused OB005 on capture and on edit unless reinstated; a twin's text kept and named; forgetting again FORGOTTEN, an unknown id NOT_FOUND; the redact amendment refusing each unlawful change; the guards refusing an unrelated delete; delete_thought unchanged; the shape; a re-apply a no-op (SMD-1723)");
 {
   const file = files.find((f) => /^\d{3}_forget_thought\.sql$/.test(f)) ?? "no NNN_forget_thought.sql";
   // Earlier sections re-applied 055's gate and 116's, 117's and 134's guards: put 139's back first.

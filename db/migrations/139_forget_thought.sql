@@ -139,7 +139,7 @@
 --   holds. Each role able to write thoughts is granted
 --   SELECT on the ledger: after 139 a capture reads it, so a role without it
 --   cannot write a thought at all. MINOR under the version rules.
---   test-schema [126], test-upgrade [20cd].
+--   test-schema [127], test-upgrade [20ce].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 034 (query_log), 042 (citations), 055 (the

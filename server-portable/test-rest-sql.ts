@@ -3360,6 +3360,35 @@ console.log("\n[21] Deliverables through both doors (SMD-1715 PR 2, migration 13
     `the key's own thought of the same text, derived from no spec, is not a leftover: refused OUTPUT_EXISTS (${onOwnPlain.status} ${onOwnPlain.body.code})`);
 }
 
+console.log("\n[22] The per-holder claim cap through both doors (SMD-3606, migration 140): with the cap set to 1 (an operator, through the SQL function — the MCP/REST operation is PR 1b), a holder's first claim is taken and its second refused CLAIM_LIMIT — 409 over REST with the cap and the count in the body and no token, the words over MCP — while a renewal of its own claim is never capped; the cap is cleared after, so the built-in default stands");
+{
+  type Claim = { id: string };
+  // The writer is the operator (as [10] left it; re-set so the section stands alone); the holder is a fresh write key.
+  await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('fresh', 'agent')`;
+  const opId = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'writer'`)[0].id);
+  const OP = { name: "writer", agent_id: opId };
+  // The holder starts clean, so its count is exactly what this section claims.
+  await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[22] reset' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  const set1 = (await sql`SELECT set_work_claim_cap(1, ${OP}::jsonb) AS r`)[0].r as { ok: boolean; cap: number | null };
+  try {
+    const first = await rest("POST", "/v1/claims", { ticket: "SMD-9350" }, KEYS.fresh);
+    const firstToken = String(first.body.token ?? "");
+    const second = await rest("POST", "/v1/claims", { ticket: "SMD-9351" }, KEYS.fresh);
+    const secondMcp = await mcp("claim_work", { ticket: "SMD-9352" }, KEYS.fresh);
+    const renew = await rest("POST", `/v1/claims/${(first.body.claim as Claim)?.id}/renew`, { token: firstToken }, KEYS.fresh);
+    assert(set1.ok === true && set1.cap === 1
+        && first.status === 200 && first.body.outcome === "claimed"
+        && second.status === 409 && second.body.code === "CLAIM_LIMIT" && second.body.cap === 1 && second.body.held === 1 && !("token" in second.body) && !JSON.stringify(second.body).includes(firstToken)
+        && secondMcp.isError && secondMcp.sc.code === "CLAIM_LIMIT" && secondMcp.sc.cap === 1 && secondMcp.sc.held === 1
+        && /^Refused: you hold 1 live claim, at the cap of 1, so SMD-9352 is not claimed\. Release one you have finished \(list_claims shows yours\), or ask an operator to raise the cap with set_work_claim_cap\.$/.test(secondMcp.text)
+        && renew.status === 200 && (renew.body.claim as Claim)?.id === (first.body.claim as Claim)?.id && !("token" in renew.body),
+      `the cap of 1: the holder's first claim taken, its second refused 409 CLAIM_LIMIT (cap 1, held 1, no token) over REST and in words over MCP, its own renewal taken (${first.status} ${second.status}/${second.body.code} ${secondMcp.sc.code} renew ${renew.status})`);
+  } finally {
+    await sql`SELECT set_work_claim_cap(NULL, ${OP}::jsonb)`;
+    await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[22]' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

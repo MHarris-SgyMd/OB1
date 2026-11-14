@@ -772,12 +772,17 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // log's redact amendment in 055's gate, the refusal of a forgotten text on
   // thoughts, 116's, 117's and 134's guards admitting the forget's deletes,
   // and forget_thought — refusing by name without 016, 034, 055, 060, 064,
-  // 067, 116, 117, 123 or 134 ([20cd]) — all recorded by the
+  // 067, 116, 117, 123 or 134 ([20ce]);
+  // 140 adds the per-holder claim cap — a table, two
+  // refusing triggers and eight functions, claim_work redefined to count a
+  // holder's live claims under a per-holder lock and refuse CLAIM_LIMIT past the
+  // operator-settable cap — refusing by name without 046, 061 or 115 ([20cd]) —
+  // all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 110, `030 is among the last one hundred and ten migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 111, `030 is among the last one hundred and eleven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5302,8 +5307,8 @@ console.log("\n[20bg] Migration 115: onto a populated brain at the file before i
   assert((await rows()) === before && (await audits()) === auditBefore && claimed.outcome === "claimed" && claimed.claim?.holder === "laptop" && other.outcome === "refused" && other.code === "WORK_CLAIMED",
     `applied, the file moves no thought nor audit row; a claim is taken under the envelope's key, and another holder's piece of it refused (${claimed.outcome}, ${other.code})`);
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["claims"] });
-  assert(grants.length === 1 && /^GRANT SELECT, INSERT, UPDATE ON work_claims TO "ob1_upgrade_probe";$/.test(grants[0]),
-    `--grant's claims group is SELECT, INSERT and UPDATE on work_claims, no DELETE (${grants.join("; ")})`);
+  assert(grants.length === 2 && /^GRANT SELECT, INSERT, UPDATE ON work_claims TO "ob1_upgrade_probe";$/.test(grants[0]) && /^GRANT SELECT, INSERT, UPDATE ON work_claim_cap_settings TO "ob1_upgrade_probe";$/.test(grants[1]),
+    `--grant's claims group is SELECT, INSERT and UPDATE on work_claims and 140's work_claim_cap_settings, no DELETE (${grants.join("; ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the115 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9201'])`)[0].n);
   assert((await rows()) === before && kept === 1, `a re-apply is a no-op: the thoughts as they were, the claim kept (${kept})`);
@@ -6565,7 +6570,79 @@ console.log("\n[20cc] Migration 138: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a re-apply a no-op (SMD-1723)");
+console.log("\n[20cd] Migration 140: onto a populated brain at the file before it — refused by name without 115's ob1_work_claims_in_the_way, nothing made; then applied: the built-in cap 50, an operator sets a cap of 1, a holder's second live claim refused CLAIM_LIMIT while its renewal is taken; two new claims by one holder racing under the per-holder lock, only one taken; a re-apply a no-op (SMD-3606)");
+{
+  const the140 = MIGRATIONS.find((f) => /^\d{3}_work_claim_cap\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the140 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('cap-op', 'operator'), ('cap-holder', 'agent')`;
+  const idOf = async (label: string) => String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = ${label}`)[0].id);
+  // The actor envelope carries the key's agent id, as the server resolves and passes it (050): the operator check and the
+  // per-holder count both read it, never the client's word.
+  const OP = JSON.stringify({ name: "cap-op", agent_id: await idOf("cap-op"), via: "open-brain", scope: "write" });
+  const H = JSON.stringify({ name: "cap-holder", agent_id: await idOf("cap-holder") });
+  type Ans = { outcome: string; code: string | null; cap?: number; held?: number; claim: { id: string } | null; token: string | null };
+  const claim = async (issue: string, actor: string, token: string | null = null): Promise<Ans> =>
+    ((await sql`SELECT claim_work(${issue}, NULL, NULL, 14400, ${token}, (${actor}::text)::jsonb) AS r`)[0] as { r: Ans }).r;
+  const setCap = async (cap: number | null) => ((await sql`SELECT set_work_claim_cap(${cap}, (${OP}::text)::jsonb) AS r`)[0] as { r: { ok: boolean; cap: number | null } }).r;
+  const capNow = async () => Number((await sql`SELECT ob1_work_claim_cap() AS c`)[0].c);
+
+  // Without 115's ob1_work_claims_in_the_way: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_work_claims_in_the_way(text, text, uuid, timestamp with time zone) RENAME TO ob1_work_claims_in_the_way_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the140 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claims_in_the_way_away(text, text, uuid, timestamp with time zone) RENAME TO ob1_work_claims_in_the_way`;
+  const made = async () => (await sql`SELECT to_regprocedure('ob1_work_claim_cap()') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 140 needs 115 \(ob1_work_claims_in_the_way\); this schema lacks it/.test(without) && !(await made()),
+    `without 115's ob1_work_claims_in_the_way the file is refused by name; nothing made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the140 });
+  // The built-in 50; an operator sets 1; a second live claim refused, the renewal taken.
+  const builtIn = await capNow();
+  const set1 = await setCap(1);
+  const c1 = await claim("SMD-7001", H);
+  const c2 = await claim("SMD-7002", H);
+  const renew = await claim("SMD-7001", H, c1.token);
+  assert(builtIn === 50 && set1.ok === true && (await capNow()) === 1 && c1.outcome === "claimed" && c2.outcome === "refused" && c2.code === "CLAIM_LIMIT" && c2.cap === 1 && c2.held === 1 && renew.outcome === "renewed",
+    `applied: the built-in cap 50, an operator sets 1, the holder's second live claim refused CLAIM_LIMIT and its own renewal taken (${builtIn}, set ${set1.ok}, ${c2.code}, renew ${renew.outcome})`);
+
+  // Two NEW claims by one holder racing under the per-holder lock: the first, in an open transaction, holds the lock; the
+  // second waits on it, and once the first commits (a claim taken, at the cap) the second counts it and is refused
+  // CLAIM_LIMIT. Without the lock both would read one below the cap and both insert. Probed only once the second waits on
+  // the advisory lock in its own session (sql, one connection, whose backend pid it reads), never on a guess at timing.
+  await setCap(2);  // room for one more over the single live claim (SMD-7001), so the race is at the boundary
+  const racePid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
+  const other = new SQL({ url: URL_, max: 1 });
+  let second: Promise<Ans> = Promise.resolve({ outcome: "never ran", code: null, claim: null, token: null });
+  let firstOutcome = "never ran";
+  try {
+    await other.begin(async (tx) => {
+      const first = ((await tx`SELECT claim_work('SMD-7003', NULL, NULL, 14400, NULL, (${H}::text)::jsonb) AS r`)[0] as { r: Ans }).r;
+      firstOutcome = first.outcome;  // claimed, but uncommitted: it holds the per-holder advisory lock
+      second = claim("SMD-7004", H).catch((e: Error): Ans => ({ outcome: `raised: ${e.message.split("\n")[0]}`, code: null, claim: null, token: null }));
+      let waiting = false;
+      for (let i = 0; i < 200 && !waiting; i++) {
+        waiting = Number((await tx`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${racePid} AND locktype = 'advisory'`)[0].n) > 0;
+        if (!waiting) await Bun.sleep(50);
+      }
+      if (!waiting) throw new Error(`[20cd] the second claim never waited on the per-holder advisory lock within 10 s`);
+    });  // the first commits here, releasing the lock; the second then counts it and is refused
+  } finally {
+    await other.close();
+  }
+  const secondAns = await second;
+  assert(firstOutcome === "claimed" && secondAns.outcome === "refused" && secondAns.code === "CLAIM_LIMIT",
+    `two new claims by one holder race under the per-holder lock: the first taken (at the cap of 2), the second, waiting on the lock, refused CLAIM_LIMIT once the first commits (${firstOutcome}, ${secondAns.outcome}:${secondAns.code})`);
+
+  // A re-apply is a no-op: a clear leaves the built-in cap, and a claim is taken.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the140 });
+  await setCap(null);
+  assert((await capNow()) === 50 && (await claim("SMD-7005", H)).outcome === "claimed",
+    `a re-apply is a no-op: clearing the setting leaves the built-in cap 50 and a claim is taken (${await capNow()})`);
+  await sql.close();
+}
+
+console.log("\n[20ce] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a re-apply a no-op (SMD-1723)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6609,7 +6686,7 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
 
   // A race, on two connections (review pass 1): while a forget of R runs, a capture of R's earlier text waits on the
   // fingerprint lock the forget holds; after the commit it is refused OB005, nothing written. (Another store's racing
-  // write is swept by a second forget: test-schema [126].)
+  // write is swept by a second forget: test-schema [127].)
   const r = String((await sql`SELECT (upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb)->>'id') AS id`)[0].id);
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
