@@ -78,8 +78,7 @@
  * ── What it is not ──────────────────────────────────────────────────────────
  * Not the whole brain: thought_audit, the sources, facets, claims, relations,
  * the plugins' schemas and the rest are not here. `pg_dump` is the whole-brain
- * backup (recipes/brain-backup/README.md says how). Nor a restore: nothing
- * here reads the files back into a brain.
+ * backup (recipes/brain-backup/README.md says how).
  *
  * statement_timeout is 60 s a statement by default (--statement-timeout; the
  * recipe's FETCH_TIMEOUT_MS was its per-page bound): a page past it fails the
@@ -93,17 +92,17 @@
  * A page of thoughts is 100 rows, of the other tables 1,000, each written with
  * one write; the run holds about three times a page's JSON (a thoughts page of
  * 1 MB rows: about 300 MB). Thoughts are read in key order, at random through
- * the heap: measured (pass 4 of the review) at about 6.5 minutes and 18 GB of
+ * the heap: measured on a scratch brain at about 6.5 minutes and 18 GB of
  * files a million thoughts with their graph, so hours at 100 million and days
  * at a billion, the locks and the snapshot held throughout. A large brain's
  * backup is pg_dump.
  *
  * Not during an upgrade. A migration that alters a table the run reads
- * (thoughts, most often) asks for ACCESS EXCLUSIVE, waits behind the run's lock, and
- * every read and write of that table waits behind it until the migrator's
- * 10 s lock timeout, when the upgrade fails (exit 1; run it again once the
- * backup is done). pg_dump does the same. One run at a time in a process: the
- * pending files and RUN_ID are the module's.
+ * (thoughts, most often) asks for ACCESS EXCLUSIVE, waits behind the run's
+ * lock, and every read and write of that table waits behind it until the
+ * migrator's 10 s lock timeout, when the upgrade fails (exit 1; run it again
+ * once the backup is done). pg_dump does the same. One run at a time in a
+ * process: the pending files and RUN_ID are the module's.
  */
 
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
@@ -135,10 +134,10 @@ export const BACKUP_TABLES: readonly BackupTable[] = [
 ];
 
 /** Rows per page. */
-export const PAGE_SIZE = 1000;
+const PAGE_SIZE = 1000;
 
 /** The per-statement bound by default, in seconds. */
-export const STATEMENT_TIMEOUT_S = 60;
+const STATEMENT_TIMEOUT_S = 60;
 
 export interface BackupOptions {
   /**
@@ -175,7 +174,7 @@ export interface TableResult {
  * relation of its name that is not a table with exactly `t.key` as its
  * primary key. Resolved as the page query's unqualified name is.
  */
-export async function companionProblem(tx: SQL, t: BackupTable): Promise<string | null> {
+async function companionProblem(tx: SQL, t: BackupTable): Promise<string | null> {
   const [row] = (await tx.unsafe(
     `SELECT c.relkind::text AS kind, n.nspname AS schema,
             (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_index i
@@ -195,13 +194,13 @@ export async function companionProblem(tx: SQL, t: BackupTable): Promise<string 
 export const RUN_ID = `${process.pid}.${randomBytes(4).toString("hex")}`;
 
 /** The client_connection_check_interval a run sets on its session first, where the server's platform has it. */
-export const CONNECTION_CHECK = "10s";
+const CONNECTION_CHECK = "10s";
 
 /** This process's files not yet renamed into place: removed on a failed run and on SIGINT, SIGTERM and SIGHUP. */
 export const pendingFiles = new Set<string>();
 
 /** Remove every pending file; what cannot be removed is left. */
-export function removePending(): void {
+function removePending(): void {
   for (const f of pendingFiles) {
     try { unlinkSync(f); } catch { /* gone already */ }
     pendingFiles.delete(f);
@@ -219,7 +218,7 @@ export function installSignalCleanup(): void {
 }
 
 /** `n` bytes for people. */
-export function humanSize(n: number): string {
+function humanSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
@@ -231,7 +230,7 @@ export function humanSize(n: number): string {
  * the first page), each as Postgres's JSON text beside its key columns as text.
  * The names are this file's constants, never input.
  */
-export function pageQuery(t: BackupTable, first: boolean): string {
+function pageQuery(t: BackupTable, first: boolean): string {
   const cols = t.key.map((c) => `r.${c}`).join(", ");
   const keys = t.key.map((c, i) => `r.${c}::text AS k${i}`).join(", ");
   const after = first ? "" : ` WHERE (${cols}) > (${t.key.map((_, i) => `$${i + 1}`).join(", ")})`;
@@ -268,7 +267,7 @@ async function writeTable(tx: SQL, t: BackupTable, path: string, pageSize: numbe
 
 /** The SQLSTATE and message of a database error, else the message. */
 function reasonOf(e: unknown): string {
-  const err = e as { errno?: unknown; code?: unknown; message?: unknown };
+  const err = e as { errno?: unknown; message?: unknown };
   const state = typeof err?.errno === "string" && /^[0-9A-Z]{5}$/.test(err.errno) ? `${err.errno} ` : "";
   return `${state}${String(err?.message ?? e).split("\n")[0]}`;
 }
@@ -282,7 +281,6 @@ function reasonOf(e: unknown): string {
 export async function run(opts: BackupOptions): Promise<number> {
   const w = opts.writer ?? consoleWriter;
   const date = opts.date ?? new Date().toISOString().slice(0, 10);
-
   const out = resolve(opts.out);
   const results: TableResult[] = [];
   try {
