@@ -2262,6 +2262,9 @@ const fetchedMarked = (v: FetchedThought): FetchedThought => {
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
+/** The holder is at (or over) the operator's per-holder cap on live claims (SMD-3606): what holds, and the two ways out. */
+const capText = (r: Extract<Refusal, { code: "CLAIM_LIMIT" }>) =>
+  `Refused: you hold ${r.held} live claim${r.held === 1 ? "" : "s"}, ${r.held > r.cap ? "over" : "at"} the cap of ${r.cap}, so ${workText(r.ticket, r.piece)} is not claimed. Release one you have finished (list_claims shows yours), or ask an operator to raise the cap with set_work_claim_cap.`;
 /** What to do once board-sync has ended a claim because its ticket closed (SMD-3600). */
 const CLOSED_DONE = "its ticket is closed. If your work under it merged, the release is done: delete the token file and any marker beside it. If not, the ticket closed under you: stop and tell the user, who reopens it or files the rest as a ticket of its own.";
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why; released because its ticket closed — done if the work merged, else tell the user. */
@@ -2322,7 +2325,7 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
   v.outcome === "claimed"
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.${closedText(v)}`
     : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}${closedText(v)}`,
-(r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+(r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "CLAIM_LIMIT" ? capText(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
   : r.code === "CLAIM_RELEASED" ? endedText(r)
   : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)

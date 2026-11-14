@@ -33,7 +33,7 @@ export type ClaimLapse = { at: string | null; claimedSince: (HeldClaim & { renew
 const SINCE_MAX = 10;
 /** claim_work's value: the claim, and on `claimed` the token that proves it — shown this once. `ticketClosed` when the brain records its ticket as closed: board-sync releases the claim at its next pass (SMD-3600). */
 export type ClaimWorkResult = { outcome: "claimed" | "renewed"; claim: WorkClaim; token?: string; lapsed?: ClaimLapse; ticketClosed?: ClosedTicket };
-export type ClaimWorkCode = "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "REFUSED_CLAIM_KEY" | "CLAIM_RELEASED" | "CLAIM_UNATTRIBUTED";
+export type ClaimWorkCode = "WORK_CLAIMED" | "CLAIM_LIMIT" | "REFUSED_CLAIM_INPUT" | "REFUSED_CLAIM_KEY" | "CLAIM_RELEASED" | "CLAIM_UNATTRIBUTED";
 export type RenewClaimResult = { claim: WorkClaim; lapsed?: ClaimLapse; ticketClosed?: ClosedTicket };
 export type RenewClaimCode = "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED" | "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "CLAIM_UNATTRIBUTED";
 export type ReleaseClaimResult = { outcome: "released" | "already_released"; claim: WorkClaim };
@@ -169,6 +169,11 @@ export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"cl
   if (a.outcome === "refused" && a.code === "WORK_CLAIMED") {
     // The ticket as 115 keyed it (cleaned, upper-cased), read off the claims in the way; the piece is the caller's own.
     return refuse({ code: "WORK_CLAIMED", retryable: false, ticket: a.heldBy[0]?.issue ?? input.ticket.trim().toUpperCase(), piece: input.piece ?? null, heldBy: a.heldBy.map(held(principal)) });
+  }
+  // The holder already holds its cap of live claims (SMD-3606, migration 140): a new claim is refused until one ends or
+  // the operator raises the cap. 140 answers with no claim and no held_by, the cap and the count beside the code.
+  if (a.outcome === "refused" && a.code === "CLAIM_LIMIT") {
+    return refuse({ code: "CLAIM_LIMIT", retryable: false, ticket: input.ticket.trim().toUpperCase(), piece: input.piece ?? null, cap: a.cap ?? 0, held: a.held ?? 0 });
   }
   // A claim is answered with the token that proves it; a `claimed` without one would leave a claim nobody can prove.
   if (a.outcome === "claimed" && a.claim && a.token) {
