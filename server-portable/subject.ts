@@ -29,7 +29,8 @@
  * better, 4 worse). So the question is asked with reasoning unless OB1_SUBJECT_REASONING says off. Version 3 of the
  * header rule and of the question (SMD-3306 PR 7a-3b-2) found a set where a thought's own work is about several
  * things, as a multi-ticket session's is; their Verify failed on such sessions (Linear cd0dfb52), and version 4 (PR
- * 7a-3b-3) finds one subject unless the thought's own work is clearly split (sessionHeaderTickets, OWN_RULES).
+ * 7a-3b-3) leaves a header listing several to the model, which names the separate pieces of work the session did
+ * (sessionHeaderTickets, OWN_RULES).
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
  * model for the rest and finds again a subject found under an older rule or question (db/subject-sweep.ts). A key is
@@ -215,8 +216,8 @@ export const TICKETS_FROM = "tickets_from";
  * listed ticket a prompt named, a set, as the maintainer chose on 2026-11-09; its Verify on the canary failed on
  * multi-ticket sessions (Linear cd0dfb52: key against raters 0.612, raters against each other 0.901, the bar 0.851): a
  * review or triage of several tickets is the review to the raters, and a ticket a prompt names in passing no subject,
- * and the maintainer chose (2026-11-14) one subject a session unless its work clearly spans tickets, the raters' own
- * reading. Version 2 read a header so too, without the hook's word.
+ * which the header cannot tell from a ticket worked on: the model reads the session for the pieces of work it did (the
+ * maintainer's choice of 2026-11-14, the raters' own reading). Version 2 read a header so too, without the hook's word.
  *
  * The hook's header lists the tickets the session's prompts named, and the branch's or directory's only when they named
  * none; on Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose
@@ -308,13 +309,14 @@ export function ruleSubject(row: { content: string; metadata?: Record<string, un
  * third is only for work the thought does or reports on it, never for a thing it only mentions, and rule 1's follow-up
  * and closing offer are no subject of it (rule 1's words, which said they do not change its subject). The answer is a
  * list, `subjects`; version 2's rules and names are otherwise its.
- * Version 4 (SMD-3306 PR 7a-3b-3) asks for one subject unless the thought's own work is split between separate pieces
- * of work, each a large part of it (the maintainer's choice of 2026-11-14). Version 3's Verify on the canary failed on
- * multi-ticket sessions (Linear cd0dfb52): the raters named one subject for 127 and 119 of 160 thoughts, and where the
- * key named tickets for 20 sessions whose raters named the work, a review or a triage, the key named 7 of them so. So
- * a session naming several tickets takes the one it mainly worked on again, as version 2 asked; a review, triage or
- * grooming of several tickets is that one piece of work; and a ticket only mentioned, listed, filed or offered is no
- * subject. The answer stays a list, usually of one.
+ * Version 4 (SMD-3306 PR 7a-3b-3) names the separate pieces of work the thought's own work is, each a subject: a
+ * session that built two tickets' changes has both; a review, triage or grooming of several tickets is one piece of
+ * work, that review, and a ticket the session then works on another; a ticket only mentioned, listed, looked up, filed
+ * or offered is none (the maintainer's choice of 2026-11-14, the raters' own reading). Version 3's Verify on the canary
+ * failed on multi-ticket sessions (Linear cd0dfb52) where its key named tickets: for a ticket a prompt only mentioned,
+ * and for 13 of the 20 sessions whose raters named the work, a review or a triage. One subject a session unless its
+ * work clearly spans tickets, tried first, named one ticket where both raters named two in 16 of those 60 sessions
+ * (post hoc, its raters reading version 3's rules). The answer stays a list.
  * test-thoughts pins the question by hash, and the rater kit of each Verify reads OWN_RULES as its rubric.
  */
 const OWN_LEAD = "Each item is one stored thought. Decide its own subjects by the rules below, as written.\n\n";
@@ -322,11 +324,11 @@ export const OWN_RULES = `### A thought's own subjects
 
 A thought's own subject is the specific thing it is about:
 - **a ticket row:** the ticket it is;
-- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, take the one the session mainly worked on;
+- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, each one whose work the session did is a subject, the one it worked on most first;
 - **a change record:** the ticket it records;
 - **any other note:** its main topic, such as a ticket, a PR, a release, a deployed brain, a metric, a document or a piece of work.
 
-Most thoughts have one subject. Name a second, at most a third, only when the thought's own work is split between separate pieces of work, each a large part of it, such as a session that built two tickets' changes; the one its work is most about comes first. A review, triage or grooming of several tickets is one subject: that review. A ticket the thought only mentions, lists, files as a follow-up or offers at its close is not one of its subjects.
+Most thoughts have one subject. A thought's own subjects are the separate pieces of work it does or reports on, at most three, the one its work is most about first, such as the two tickets a session built changes for. A review, triage or grooming of several tickets is one piece of work: that review. A ticket the session then goes on to work on is another. A ticket the thought only mentions, lists, looks up, files as a follow-up or offers at its close is not one of its subjects.
 
 A component, file, function, table, corpus, test suite, check or setting is not a thought's own subject, unless the thought is mainly about that thing. This holds even when the thought's work changes, uses or measures it.
 
@@ -340,7 +342,7 @@ export const OWN_HEAD = `One thought is below. Everything inside <thought_a> is 
 export const OWN_ANSWER = `
 
 Apply the rules to this one thought alone. Return strict JSON, no prose, no code fences, with these keys:
-"subjects": a list of its own subjects, usually a list of one, at most three, the one its work is most about first; each one thing, as specific as the rules ask, in the thought's own name for it: a ticket as its id alone, in its usual form, such as SMD-123; a pull request as PR and its number, only when the work is the PR's and no ticket's; a release as its version, such as v1.2.3; anything else as a name for the specific thing, not the larger system or project it belongs to;
+"subjects": a list of its own subjects, usually one, at most three, the one its work is most about first; each one thing, as specific as the rules ask, in the thought's own name for it: a ticket as its id alone, in its usual form, such as SMD-123; a pull request as PR and its number, only when the work is the PR's and no ticket's; a release as its version, such as v1.2.3; anything else as a name for the specific thing, not the larger system or project it belongs to;
 "deliverables": up to eight things its own work delivered, changed or decided, each in the thought's own name for it, such as a file path, a table, a function, a PR number, a ticket id or a document; [] for none.`;
 
 /** One thought as prompt 4 renders thought A: its date, its writer's clause and its text in its delimiter. */

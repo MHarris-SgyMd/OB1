@@ -3872,7 +3872,7 @@ names it, in any case (not its title, which may be the harness's own and name
 the branch's ticket). The hook's header lists the tickets a session's prompts
 named, from every prompt, and its branch's or directory's only when they named
 none: a session on a branch may have done other work. A header listing several
-is left to the model, which takes the one the session mainly worked on. A header
+is left to the model, which names each whose work the session did. A header
 listing a ticket of another team than the session's, its branch's first ticket,
 else its project's, read as the hook reads a place (`hotfix-2026` names none),
 is left to the model too: the hook learns a team from each ticket-shaped word of
@@ -3906,12 +3906,13 @@ version, else the answer as a lower-case phrase. A ticket or a release counts
 only when the thought itself names it, and a PR only when its number appears in
 it: one it does not name is the model's invention, or its copy of the question's
 example, and is dropped. Version 4's question (SMD-3306 PR 7a-3b-3) asks for
-one subject, a second or third only when the thought's own work is split between
-separate pieces of work, each a large part of it, the most-worked first; a
-review or triage of several tickets is one subject, and a ticket only mentioned,
-listed, filed as a follow-up or offered is none; a ticket by its id alone.
-Version 3 asked for each thing the thought's own work is mainly about, and
-version 2 for one. Of its first eight answers, the keys are a set, each once and
+the separate pieces of work the thought does or reports on, at most three, the
+most-worked first and usually one: a session that built two tickets' changes has
+both; a review or triage of several tickets is one, that review, and a ticket
+the session then works on another; a ticket only mentioned, listed, looked up,
+filed as a follow-up or offered is none; a ticket by its id alone. Version 3
+asked for each thing the thought's own work is mainly about, and version 2 for
+one. Of its first eight answers, the keys are a set, each once and
 at most three, a phrase whose tickets the answer also gives read as its first,
 written through 130's door. 130 keeps a set by key, so
 the model's order is its recipe's alone. Version 1 read

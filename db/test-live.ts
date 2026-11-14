@@ -9700,7 +9700,7 @@ if (want("10h")) {
           && (await standingOn(sweptAsked)).every((x) => x.recipe?.tickets_from === "asks"),
         `the sweep reads the hook's word off the thought's metadata too (exit ${sweptRun.code}: ${tally(sweptRun)})`);
       await sql`DELETE FROM thoughts WHERE id = ${sweptAsked}::uuid`;
-      // The sweep: a header listing two, the model's, which names the one the session mainly worked on; a header's
+      // The sweep: a header listing two, the model's, which names the work the session did, here one; a header's
       // ticket version 2 keyed, found again under version 4, the same key, a replacement with no new key; and a note the
       // model names four tickets for, one of them twice: the first three keys in its order, each once, the answers read
       // kept on each subject's recipe. Two questions asked.
@@ -9754,8 +9754,8 @@ if (want("10h")) {
         `…one under an older question written again beside the new key: two written (${tally(rejudgedRun)})`);
       await sql`DELETE FROM thoughts WHERE id IN (${widen}::uuid, ${rejudged}::uuid)`;
       // The upgrade's own path: version 3's header rule keyed both tickets of a two-ticket session; version 4 leaves the
-      // header to the model, which names the one the session mainly worked on: a replacement, the set narrowed to it, its
-      // one key written again under the model's pass key.
+      // header to the model, which names the one ticket whose work the session did: a replacement, the set narrowed to
+      // it, its one key written again under the model's pass key.
       owns.push(["SMD-68 then SMD-69", '{"subjects":["SMD-69"],"deliverables":[]}']);
       const upgraded = await seed(twoTickets("SMD-68", "SMD-69"));
       await sql`SELECT record_thought_subjects(${upgraded}::uuid, ARRAY['ticket:SMD-68', 'ticket:SMD-69'], 'first_line', 'subject:first_line@r3', NULL, ${await fpOf(upgraded)}, NULL)`;

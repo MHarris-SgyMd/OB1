@@ -2984,19 +2984,20 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   // hash under the same version passed). Version 1 is SMD-3299's round 4 own question, PR 2's. Version 2's were set
   // again before it shipped: when review pass 2 had it ask for one subject, and when review pass 5 gave a closing
   // message's ticket its words, with two more that review pass 6 took back on the 27B's answers. Version 3 is SMD-3306
-  // PR 7a-3b-2's, a set; version 4 PR 7a-3b-3's, one unless the thought's own work is clearly split.
+  // PR 7a-3b-2's, a set; version 4 PR 7a-3b-3's, the separate pieces of work, a review one, its pins set again before
+  // it shipped when the maintainer chose that over one subject a session.
   const PINNED: Record<number, string[]> = {
     1: ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"],
     2: ["6230109e71743caad2c3536ad7b6b8532b8c36f5ea9782a268c9d84e890d62ca", "16fe05607579a76d8fe1a44682506c045e2a6ef16f2c760302ba6ec760893d2c", "32b152d4ea475087133e8aad17a9fe49dc5216c9336bda452c5ef3bc8c8c8077"],
     3: ["6653075a38b474a366fc3449a86fe9a157559831207d368b5c53efeb2ebfabaf", "7c6ce3f25f393bb4c99c26fe631cffea1289343e26f125d560fde0eaa2459507", "c1ebe990a2c9d666600948c0e0d68124235dac0328f2368a19d0ba3d0f1424c8"],
-    4: ["5f4045f48ba3768de786dd5f809381118bbc4f88f384dd6721e4d43ad3267469", "3f54ff05657205d1cd78dc83915448c4b9269eeda8f8ecc68e2edff5230d1ed9", "7fc2eebf1e93a82d905da4e346c1c402c2985221e5ae8414aa479fccfc750573"],
+    4: ["30205553513d89829db40f1e2f2df459a5165ec595791511598f4f08cba601f1", "bcea48ff79d255d2501da822b0ba6dd5ae83839feba9f583d86a4d4d1e98c0cd", "d0273ca9f8b5ca0a44f2d9070580a084efa60e98514772c65e0a63a887f999ac"],
   };
   assert(SUBJECT_PROMPT_VERSION === Math.max(...Object.keys(PINNED).map(Number)), `the question's version is the newest pinned (${SUBJECT_PROMPT_VERSION})`);
   sides.forEach((s, i) => {
     const m = ownSubjectMessages(s);
     assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === PINNED[SUBJECT_PROMPT_VERSION]?.[i], `the question is version ${SUBJECT_PROMPT_VERSION}'s, word for word (thought ${i + 1})`);
   });
-  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "ae905ae9917a5c1889e9a1cdcc2f5ecf42ce7d3d7ac4248befe60f66496237b8", "…and the fixed text a recipe's prompt_hash names");
+  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "efe73ad5eb16c2c43de6547fe3c2c9deb71d10568e42ce560c95702b85aabe23", "…and the fixed text a recipe's prompt_hash names");
   const q = ownSubjectMessages(sides[0])[0].content;
   assert(q.includes(OWN_RULES) && OWN_RULES.includes("**a session summary:** the work the session did, which its prompts and its outcome show together") && OWN_RULES.includes("A follow-up the session files while working on its header's ticket is not one of its subjects")
       && OWN_RULES.includes("**A thought is mainly about a component") && !q.includes("Step 2") && !q.includes("third subject") && !MEDIATED_TEST.includes("A follow-up the session files"),
@@ -3006,12 +3007,13 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "…and neither a session's last message nor a note reporting several things has any: with them the 27B passed over a ticket only a session's outcome named, and named a column for a note's own ticket (review pass 6)");
   assert(OWN_ANSWER.includes("each one thing") && OWN_ANSWER.includes("a ticket as its id alone, in its usual form") && OWN_ANSWER.includes("only when the work is the PR's and no ticket's") && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"),
     "the answer's shape: each subject one thing, a ticket by its id alone, a PR only for no ticket's work; the prompt's fixed text, which the recipe hashes, holds no thought");
-  assert(OWN_ANSWER.includes('"subjects": a list of its own subjects, usually a list of one, at most three, the one its work is most about first') && OWN_HEAD.includes('{"subjects":[],"deliverables":[]}')
-      && OWN_RULES.includes("Most thoughts have one subject. Name a second, at most a third, only when the thought's own work is split between separate pieces of work, each a large part of it")
-      && OWN_RULES.includes("A review, triage or grooming of several tickets is one subject: that review.")
-      && OWN_RULES.includes("A ticket the thought only mentions, lists, files as a follow-up or offers at its close is not one of its subjects.")
-      && OWN_RULES.includes("If the header names several, take the one the session mainly worked on;") && !OWN_RULES.includes("each one the session worked on is a subject"),
-    "version 4 (PR 7a-3b-3): one subject unless the thought's own work is split between large separate pieces; a review of several tickets one; a ticket only mentioned, listed, filed or offered none; a session naming several takes the one it mainly worked on, as version 2 did");
+  assert(OWN_ANSWER.includes('"subjects": a list of its own subjects, usually one, at most three, the one its work is most about first') && OWN_HEAD.includes('{"subjects":[],"deliverables":[]}')
+      && OWN_RULES.includes("A thought's own subjects are the separate pieces of work it does or reports on, at most three")
+      && OWN_RULES.includes("A review, triage or grooming of several tickets is one piece of work: that review. A ticket the session then goes on to work on is another.")
+      && OWN_RULES.includes("A ticket the thought only mentions, lists, looks up, files as a follow-up or offers at its close is not one of its subjects.")
+      && OWN_RULES.includes("If the header names several, each one whose work the session did is a subject, the one it worked on most first;")
+      && !OWN_RULES.includes("take the one the session mainly worked on") && !OWN_RULES.includes("each one the session worked on is a subject"),
+    "version 4 (PR 7a-3b-3): the separate pieces of work the thought's own work is; a review of several tickets one, a ticket worked on after it another; a ticket only mentioned, listed, looked up, filed or offered none; each ticket of a header whose work the session did");
 
   // The answer's subjects (version 3): each one line, at most 200 characters, in the answer's order, those naming
   // nothing left out; null when the answer gives no subjects.
