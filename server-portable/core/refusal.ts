@@ -66,6 +66,7 @@ export type Refusal =
   // Work claims (115, SMD-3598): claim_work, renew_claim, release_claim. Never a token: 115 returns one only to the
   // caller who claimed, in the value, and no refusal carries one.
   | { code: "WORK_CLAIMED"; retryable: false; ticket: string; piece: string | null; heldBy: HeldClaim[] } // live claims cover the work: another key's, the same key's without its token, or the caller's own on overlapping work
+  | { code: "CLAIM_LIMIT"; retryable: false; ticket: string; piece: string | null; cap: number; held: number } // the holder already holds `held` live claims, the operator's cap (set_work_claim_cap); a new claim is refused until one ends or the cap is raised (SMD-3606)
   | { code: "CLAIM_NOT_FOUND"; retryable: false; id: string }         // no claim with that id
   | { code: "CLAIM_NOT_YOURS"; retryable: false; id: string; holder: string; forced: boolean; ownKey: boolean; expiresAt: string | null } // not this key with this token; forced: a force refused (the key is no operator named by its agent id); ownKey: the caller's own key holds it, under a token this call did not give
   | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null; takenOver: boolean; releasedBy: string | null; reason: string | null; ticketClosed: boolean } // a renewal of a claim that ended: released (by releasedBy, for reason), or taken over after it lapsed (by releasedBy); ticketClosed: board-sync released it because its ticket closed (SMD-3600)
@@ -215,6 +216,8 @@ const FACTS: Facts = {
   // The claims in the way, as values a client acts on: ids, holders (a key's name, the env's), kinds and times — the
   // piece rides the text, being another key's words (SMD-3598).
   WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey })) }),
+  // The holder's cap and how many live claims it holds, as values a client acts on; the ticket and piece ride the text (the piece is the caller's own words).
+  CLAIM_LIMIT: (r) => ({ cap: r.cap, held: r.held }),
   CLAIM_NOT_FOUND: none,
   CLAIM_NOT_YOURS: (r) => ({ forced: r.forced, ownKey: r.ownKey }),
   CLAIM_RELEASED: (r) => ({ ...(r.releasedAt ? { releasedAt: r.releasedAt } : {}), takenOver: r.takenOver, ticketClosed: r.ticketClosed }),
