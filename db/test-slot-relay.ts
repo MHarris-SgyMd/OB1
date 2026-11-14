@@ -458,7 +458,7 @@ section("[9] live calls counted whatever the broker's state; dials that hang; a 
 }
 
 {
-  // Gone 2 s, under the grace: the relay finds it again inside the grace (dialling every 250 ms), and its waiting ask
+  // Gone 2 s, under the grace: the relay finds it again inside the grace (dialling every 100 ms), and its waiting ask
   // never takes its own share. The grace is 4 s here, so a slow runner's stop and timers leave margin.
   const reg = registry({ slots: 1 });
   let b = startBroker(reg, { port: 0, log: () => {} });
@@ -895,6 +895,24 @@ await withBroker(parseRegistry(`broker:\n  warm_s: 0\n  lease_s: 1\nservers:\n  
   ok(pool(b).background === 0 && relay.state().own === 0, "and the call taken back is not counted again", { pool: pool(b), relay: relay.state() });
   api.cmd({ cmd: "end", id: "k2" });
   await api.wait("ended", "k2");
+  // A lapse while the api is away and its port kept: its re-sent `running` crosses the `lapsed` held for it, and is not
+  // counted again (review pass 4 of 3b-2).
+  const klink = linkTo(port);
+  const api2 = await startApi(klink.port);
+  await until(() => listener.sockets() === 2);
+  api2.cmd({ cmd: "call", id: "k3" });
+  ok(await api2.wait("run", "k3") && await until(() => pool(b).background === 1), "a grant through a link", b.snapshot());
+  klink.refuse(true);
+  klink.cut();
+  ok(await until(() => pool(b).background === 0 && relay.state().grants === 0, 4000), "taken back at the lease while the api is away, its port kept", { pool: pool(b), relay: relay.state() });
+  klink.refuse(false);
+  ok(await until(() => listener.sockets() === 2, 3000), "the api back within the keeping");
+  await sleep(400);
+  ok(pool(b).background === 0 && relay.state().own === 0, "its running frame crossing the lapse is not counted again", { pool: pool(b), relay: relay.state() });
+  api2.cmd({ cmd: "end", id: "k3" });
+  await api2.wait("ended", "k3");
+  await kill(api2);
+  klink.stop();
   await kill(api);
   listener.stop({ detach: true });
   await relay.stop();
@@ -1077,7 +1095,7 @@ await withBroker(parseRegistry(`broker:\n  warm_s: 0\n  lease_s: 1\nservers:\n  
 }
 await withBroker(registry({ slots: 1 }), async (b) => {
   // At the api's start, and within a grace after a loss (review pass 3 of 3b-2): a call made before the socket opens waits
-  // for it, and a coordinator back within the grace is found by a dial every 250 ms, its parked asks not on the own share.
+  // for it, and a coordinator back within the grace is found by a dial every 100 ms, its parked asks not on the own share.
   const relay = relayTo(b, KEYS.stable);
   await upOf(relay);
   const listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {} });
@@ -1118,6 +1136,47 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   ok(await until(() => frames.some((f) => f.slot === "done" && f.id === "b999"), 3000), "a go for no call waiting is answered done", frames);
   await kill(api);
   void stub.stop(true);
+}
+{
+  // A dead api socket the relay keeps telling things — a `back` at each new broker socket — is dropped at the listener's
+  // own idle bound all the same, by what it hears, and its call given back past the keeping (review pass 4 of 3b-2).
+  const bport = 19_200 + Math.floor(Math.random() * 300);
+  let bk = startBroker(registry({ slots: 2 }), { port: bport, log: () => {} });
+  const relay = startRelay({ url: `ws://127.0.0.1:${bport}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 } });
+  await upOf(relay);
+  const listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {}, idleS: 4, keepMs: 1000 });
+  let upgraded = false;
+  const raw = await Bun.connect({ hostname: "127.0.0.1", port: listener.port, socket: { data(_s, d) { if (/^HTTP\/1\.1 101/.test(String(d))) upgraded = true; } } });
+  raw.write(`GET ${RELAY_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nx-brain-key: ${RKEY}\r\nx-relay-client: dead-api-0001\r\n\r\n`);
+  ok(await until(() => upgraded && listener.sockets() === 1), "a socket taken");
+  // A client frame, masked as a client's must be: `running` for one call.
+  const frame = (text: string) => {
+    const body = new TextEncoder().encode(text);
+    const mask = new Uint8Array([1, 2, 3, 4]);
+    const head = body.length < 126 ? new Uint8Array([0x81, 0x80 | body.length]) : new Uint8Array([0x81, 0x80 | 126, body.length >> 8, body.length & 255]);
+    const out = new Uint8Array(head.length + 4 + body.length);
+    out.set(head); out.set(mask, head.length);
+    body.forEach((x, i) => { out[head.length + 4 + i] = x ^ mask[i % 4]; });
+    return out;
+  };
+  raw.write(frame(JSON.stringify({ slot: "running", id: "d1", base: BASE, model: "m", cls: "background" })));
+  ok(await until(() => pool(bk).background === 1), "its call counted", bk.snapshot());
+  // Then nothing from it, while the broker restarts every 1.5 s: each new socket's hello says `back` to every port.
+  const t0 = performance.now();
+  let dropped = 0;
+  while (performance.now() - t0 < 7500) {
+    await sleep(1500);
+    await bk.stop();
+    bk = startBroker(registry({ slots: 2 }), { port: bport, log: () => {} });
+    await upOf(relay);
+    if (!dropped && listener.sockets() === 0) dropped = performance.now() - t0;
+  }
+  ok(dropped > 0 && dropped < 6500, "the silent socket dropped near its 4 s bound, the relay's frames to it notwithstanding", Math.round(dropped));
+  ok(await until(() => (pool(bk).background ?? 0) === 0 && relay.state().own === 0, 3000), "and its call given back past the keeping", { pool: pool(bk), relay: relay.state() });
+  raw.end();
+  listener.stop({ detach: true });
+  await relay.stop();
+  await bk.stop();
 }
 {
   // The api's own refusals: another key (named), no coordinator listening (said), a key too short (never dialled).

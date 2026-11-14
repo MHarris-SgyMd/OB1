@@ -317,10 +317,15 @@ if (!existsSync(composePath)) {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/relay`, { headers: { "x-brain-key": key } } as unknown as string[]);
     let openedAt = 0;
     ws.onopen = () => { openedAt = performance.now(); ws.send(JSON.stringify({ slot: "running", id: "r1", base: "http://h:1/v1", model: "m", cls: "background" })); };
-    for (let i = 0; i < 40 && !ops.some((o) => o.op === "synced"); i++) await Bun.sleep(50);
+    for (let i = 0; i < 40 && openedAt === 0; i++) await Bun.sleep(25);
+    // Open, its call sent, but not yet its `named`: still held (review pass 4 of 3b-2: a timer after the open, not its word).
+    await Bun.sleep(400);
+    const beforeNamed = ops.filter((o) => o.op === "synced").length;
+    ws.send(JSON.stringify({ slot: "named", id: "" }));
+    for (let i = 0; i < 20 && !ops.some((o) => o.op === "synced"); i++) await Bun.sleep(25);
     const held = ops.findIndex((o) => o.op === "held"), synced = ops.findIndex((o) => o.op === "synced");
-    ok(before === 0 && openedAt > 0 && held >= 0 && synced > held,
-      `listening, the first hello's synced waits for the api's socket and follows its calls' held (${before} before; ${ops.map((o) => o.op).join(", ")})`);
+    ok(before === 0 && beforeNamed === 0 && openedAt > 0 && held >= 0 && synced > held,
+      `listening, the first hello's synced waits for the api's socket and its named, after its calls' held (${before} before, ${beforeNamed} before named; ${ops.map((o) => o.op).join(", ")})`);
     ws.close();
     c.stop("SIGTERM");
     await Promise.race([c.done, Bun.sleep(5000)]);

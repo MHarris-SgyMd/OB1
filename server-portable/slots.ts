@@ -542,6 +542,8 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
   /** Until when (performance.now) asks wait for the next socket rather than taking the own share: RELAY_GRACE_MS from a loss. */
   let graceUntil = 0;
   let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The current dial's bound (RELAY_DIAL_MS), cleared at its open, its close and the client's. */
+  let dialing: ReturnType<typeof setTimeout> | null = null;
   /** This process's id to the listener, so a socket after a lost one takes back the calls it kept counted. */
   const clientId = crypto.randomUUID();
   /** When dials began failing (performance.now), or null while a socket is open: past RELAY_EASE_MS, the dials ease. */
@@ -560,6 +562,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       if (retry) clearTimeout(retry);
       if (ping) clearInterval(ping);
       if (graceTimer) clearTimeout(graceTimer);
+      if (dialing) clearTimeout(dialing);
       const sock = ws;
       ws = null;
       // Its calls end with it: said, so the coordinator keeps none for a socket that will not come.
@@ -606,7 +609,8 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     let heard = performance.now();
     // A dial not open within RELAY_DIAL_MS is dropped and tried again (review pass 3 of 3b-2: a coordinator that takes the
     // connection and never answers the upgrade held it for good, as the relay's HELLO_MS found of the broker's).
-    const dialing = setTimeout(() => {
+    if (dialing) clearTimeout(dialing);
+    dialing = setTimeout(() => {
       if (opened || ws !== sock) return;
       try { (sock as unknown as { terminate?: () => void }).terminate?.() ?? sock.close(); } catch { /* gone */ }
       ws = null;
@@ -615,7 +619,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       again();
     }, RELAY_DIAL_MS);
     sock.onopen = () => {
-      clearTimeout(dialing);
+      if (dialing) clearTimeout(dialing);
       opened = true;
       up = true;
       wait = RELAY_RECONNECT_MS.first;
@@ -651,7 +655,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       core.heard(m);
     };
     sock.onclose = (ev) => {
-      clearTimeout(dialing);
+      if (dialing) clearTimeout(dialing);
       if (ws !== sock) return;
       if (opened) return lost(sock, `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`);
       ws = null;

@@ -85,11 +85,9 @@ export type Relay = {
   port(child: string): RelayPort;
   state(): RelayState;
   stop(): Promise<void>;
-  /** An api's socket opened (serveRelay): a `synced` held for the api's calls is sent once they are named. */
+  /** An api has named every call it runs (its `named`, serveRelay), or none is coming: a `synced` held for them is sent. */
   apiBack?(): void;
 };
-/** How long after an api's socket opens its `running` frames are taken as named: they follow its open at once. */
-export const API_NAMED_MS = 200;
 
 type Entry = {
   child: string;
@@ -134,6 +132,9 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
   const entries = new Map<string, Entry>();
   /** Each child's ids, its own to the relay's. */
   const byChild = new Map<string, Map<string, string>>();
+  /** Each child's ids the broker took back (`lapsed`), until the child says `done`: a `running` crossing the `lapsed` on
+   *  its way (an api re-naming its calls at a new socket) is not counted again (review pass 4 of 3b-2). */
+  const lapsedBy = new Map<string, Set<string>>();
   const senders = new Map<string, (m: RelayFrame) => void>();
   let ws: WebSocket | null = null;
   let open = false;
@@ -358,7 +359,12 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       if (m.op === "queued") { if (e.kind === "ask" && !e.told) { e.told = true; tell(e, "queued"); } return; }
       // Its child told, for a grant and for a call it re-named (`held`): neither is counted again at a later socket
       // (review pass 2 of 3b-2: an api call re-named after a recreate, taken back, was counted again at the next).
-      if (m.op === "lapsed") { forget(m.id); if (e.kind === "grant" || e.kind === "own") tell(e, "lapsed"); feed(); return; }
+      if (m.op === "lapsed") {
+        forget(m.id);
+        if (e.kind === "grant" || e.kind === "own") { tell(e, "lapsed"); lapsedBy.get(e.child)?.add(e.childId); }
+        feed();
+        return;
+      }
       if (m.op === "no") {
         if (e.kind === "ask" && m.why === "limit") {
           atBroker--;
@@ -407,6 +413,8 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     port(child: string): RelayPort {
       const mine = new Map<string, string>();
       byChild.set(child, mine);
+      const lapsed = new Set<string>();
+      lapsedBy.set(child, lapsed);
       return {
         onMessage(m: unknown) {
           const f = childFrame(m);
@@ -419,6 +427,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
             return;
           }
           if (f.slot === "done") {
+            lapsed.delete(f.id);
             const relayId = mine.get(f.id);
             if (relayId === undefined) return;
             const e = entries.get(relayId)!;
@@ -441,6 +450,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           const relayId = `${nonce}:${child}:${++next}`;
           const e: Entry = { child, childId: f.id, kind: "parked", base: f.base, model: f.model ?? null, cls: f.cls, first: f.slot === "ask" && f.first === true, maxWaitS: f.slot === "ask" ? f.max_wait_s : undefined, at: performance.now() - (f.slot === "ask" && f.waited_s ? f.waited_s * 1000 : 0), on: -1, askedAt: 0, told: false };
           if (f.slot === "running") {
+            if (lapsed.has(f.id)) return;
             e.kind = "own";
             entries.set(relayId, e);
             mine.set(f.id, relayId);
@@ -473,12 +483,14 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
             if (known) toBroker({ op: "done", id: relayId });
           }
           mine.clear();
+          lapsed.clear();
           feed();
         },
         withdrawAsks() {
           for (const relayId of [...mine.values()]) {
             const e = entries.get(relayId);
-            if (!e || (e.kind !== "ask" && e.kind !== "parked")) continue;
+            // A live call runs already, its ask only awaiting the broker's `go`: kept, counted (review pass 4 of 3b-2).
+            if (!e || (e.kind !== "ask" && e.kind !== "parked") || e.cls === "live") continue;
             const known = e.kind === "ask" && e.on === epoch;
             forget(relayId);
             if (known) toBroker({ op: "done", id: relayId });
@@ -486,6 +498,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
           feed();
         },
         retain(ids) {
+          for (const id of [...lapsed]) if (!ids.has(id)) lapsed.delete(id);
           for (const [childId, relayId] of [...mine]) {
             if (ids.has(childId)) continue;
             const e = entries.get(relayId);
@@ -504,8 +517,9 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     },
     apiBack() {
       apiSeen = true;
-      const sock = syncPending;
-      if (sock) { if (syncTimer) clearTimeout(syncTimer); syncTimer = setTimeout(() => sendSynced(sock), Math.max(0, Math.min(API_NAMED_MS, syncBy - performance.now()))); }
+      // At the api's own word that its calls are named, not a time after its open (review pass 4 of 3b-2: an api stalled
+      // past it, or opened just before the hello, its frames still on their way).
+      if (syncPending) sendSynced(syncPending);
     },
     async stop() {
       stopped = true;
@@ -563,7 +577,7 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
   const free = Array.from({ length: max }, (_, i) => `api#${i + 1}`);
   const take = () => free.sort((a, b) => Number(a.slice(4)) - Number(b.slice(4))).shift();
   /** A socket's: its name, its port, the api process it is (`x-relay-client`), the ids it has named since it opened (until its `named`), and whether a newer socket of its api took its port. */
-  type Data = { name: string; port: RelayPort | null; client: string | null; named: Set<string> | null; fresh: boolean; replaced: boolean; bye: boolean };
+  type Data = { name: string; port: RelayPort | null; client: string | null; named: Set<string> | null; fresh: boolean; replaced: boolean; bye: boolean; heardAt: number };
   type Sock = import("bun").ServerWebSocket<Data>;
   const open = new Set<Sock>();
   /** Each api process's open socket, and its port kept after a close, by its id. */
@@ -576,6 +590,33 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
   let stopping = false;
   let detaching = false;
   const release = (name: string, port: RelayPort) => { port.detach(); free.push(name); };
+  /** A socket's end, once: Bun's close, or the listener's own drop of a socket silent past its bound. */
+  const ended = (ws: Sock) => {
+    if (!open.delete(ws)) return;
+    const c = ws.data.client;
+    if (c !== null && liveBy.get(c) === ws) liveBy.delete(c);
+    const port = ws.data.port;
+    ws.data.port = null;
+    // A socket closed by the coordinator's stop leaves the api's calls as they are — still running there, and kept
+    // counted at the broker by the relay's own close for the next coordinator to have named (review pass 1 of 3b-2: a
+    // recreate's stop said each `done`, and their slots went to another brain while they ran).
+    // Its asks withdrawn all the same: no slot granted, through the stop's last seconds, into a socket that is gone
+    // (review pass 3 of 3b-2).
+    if (!port || stopping) { port?.withdrawAsks?.(); opts.onChange?.(); return; }
+    if (c === null || detaching || ws.data.bye) release(ws.data.name, port);
+    else {
+      // An api's socket closed under a coordinator that stays (a link cut, an api stalled past the idle bound): its
+      // asks withdrawn — the api parks them, and asks again on its next socket — its running calls kept counted
+      // API_KEEP_MS for that socket to take back, then done (review pass 2 of 3b-2: each `done` at once, the slots
+      // went to another brain while the calls ran, 7 calls on 2 slots).
+      port.withdrawAsks?.();
+      const name = ws.data.name;
+      const held: RelayFrame[] = [];
+      port.attach((m) => { held.push(m); if (held.length > HELD_FRAMES) held.shift(); });
+      kept.set(c, { name, port, held, timer: setTimeout(() => { if (kept.get(c)?.port === port) { kept.delete(c); release(name, port); opts.onChange?.(); } }, keepMs) });
+    }
+    opts.onChange?.();
+  };
   const server = Bun.serve<Data, never>({
     port: opts.port ?? RELAY_PORT,
     ...(opts.hostname ? { hostname: opts.hostname } : {}),
@@ -593,7 +634,7 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
       if (resumed === undefined && (open.size >= max || !free.length)) return new Response("too many sockets\n", { status: 503 });
       if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("a WebSocket, at this path\n", { status: 426 });
       const name = resumed ?? take()!;
-      if (srv.upgrade(req, { data: { name, port: null, client, named: new Set(), fresh: resumed === undefined, replaced: false, bye: false } })) return undefined;
+      if (srv.upgrade(req, { data: { name, port: null, client, named: new Set(), fresh: resumed === undefined, replaced: false, bye: false, heardAt: performance.now() } })) return undefined;
       if (resumed === undefined) free.push(name);
       return new Response("upgrade failed\n", { status: 400 });
     },
@@ -634,10 +675,10 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
         ws.data.port = port;
         port.attach((m) => { ws.send(JSON.stringify(m)); });
         for (const m of held) ws.send(JSON.stringify(m));
-        relay.apiBack?.();
         opts.onChange?.();
       },
       message(ws, msg) {
+        ws.data.heardAt = performance.now();
         let m: unknown;
         try { m = JSON.parse(typeof msg === "string" ? msg : new TextDecoder().decode(msg)); } catch { return; }
         const slot = (m as { slot?: unknown } | null)?.slot;
@@ -646,43 +687,28 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
         if (slot === "bye") { ws.data.bye = true; return; }
         // The api has named every call it runs and asks for: any other its port holds — one that ended while it was away
         // — is done (review pass 2 of 3b-2).
-        if (slot === "named") { if (ws.data.named) { ws.data.port?.retain?.(ws.data.named); ws.data.named = null; } return; }
+        if (slot === "named") { if (ws.data.named) { ws.data.port?.retain?.(ws.data.named); ws.data.named = null; } relay.apiBack?.(); return; }
         const id = (m as { id?: unknown } | null)?.id;
         if (ws.data.named && typeof id === "string" && (slot === "ask" || slot === "running")) ws.data.named.add(id);
         ws.data.port?.onMessage(m);
       },
-      close(ws) {
-        if (!open.delete(ws)) return;
-        const c = ws.data.client;
-        if (c !== null && liveBy.get(c) === ws) liveBy.delete(c);
-        const port = ws.data.port;
-        ws.data.port = null;
-        // A socket closed by the coordinator's stop leaves the api's calls as they are — still running there, and kept
-        // counted at the broker by the relay's own close for the next coordinator to have named (review pass 1 of 3b-2: a
-        // recreate's stop said each `done`, and their slots went to another brain while they ran).
-        // Its asks withdrawn all the same: no slot granted, through the stop's last seconds, into a socket that is gone
-        // (review pass 3 of 3b-2).
-        if (!port || stopping) { port?.withdrawAsks?.(); opts.onChange?.(); return; }
-        if (c === null || detaching || ws.data.bye) release(ws.data.name, port);
-        else {
-          // An api's socket closed under a coordinator that stays (a link cut, an api stalled past the idle bound): its
-          // asks withdrawn — the api parks them, and asks again on its next socket — its running calls kept counted
-          // API_KEEP_MS for that socket to take back, then done (review pass 2 of 3b-2: each `done` at once, the slots
-          // went to another brain while the calls ran, 7 calls on 2 slots).
-          port.withdrawAsks?.();
-          const name = ws.data.name;
-          const held: RelayFrame[] = [];
-          port.attach((m) => { held.push(m); if (held.length > HELD_FRAMES) held.shift(); });
-          kept.set(c, { name, port, held, timer: setTimeout(() => { if (kept.get(c)?.port === port) { kept.delete(c); release(name, port); opts.onChange?.(); } }, keepMs) });
-        }
-        opts.onChange?.();
-      },
+      close(ws) { ended(ws); },
     },
   });
+  // Its own liveness, by what it hears: Bun's idle clock is reset by each frame sent, so a dead api the relay keeps
+  // telling things (a `back` at each broker socket, a `go`) was never dropped, its calls counted for good (review pass 4
+  // of 3b-2: 50 s through broker restarts). The api pings every 3.3 s; a socket heard nothing from for the idle bound ends.
+  const idleMs = (opts.idleS ?? RELAY_IDLE_S) * 1000;
+  const liveness = setInterval(() => {
+    const now = performance.now();
+    for (const ws of [...open]) if (now - ws.data.heardAt > idleMs) { ended(ws); try { ws.terminate(); } catch { /* gone */ } }
+  }, Math.max(100, Math.min(1000, idleMs / 4)));
+  (liveness as unknown as { unref?: () => void }).unref?.();
   return {
     port: server.port as number,
     sockets: () => open.size,
     stop(o) {
+      clearInterval(liveness);
       detaching = o?.detach === true;
       stopping = !detaching;
       for (const ws of [...open]) { try { ws.close(1001, "the coordinator is stopping"); } catch { /* gone */ } }

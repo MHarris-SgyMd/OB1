@@ -410,9 +410,10 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
 - **The api's calls** (SMD-3379 PR 3b-2) join with `OB1_SLOT_RELAY_KEY` set
   in the same `deploy/.env` (any 16 characters or more: `openssl rand -hex
   32`), then `up -d api coordinator`. The api reads the key, and so does the
-  coordinator, which hands it to no pass. The coordinator then listens on the
-  brain's own network (`coordinator:8096`, published nowhere) and refuses a
-  socket without the key. The api asks it for every model call:
+  coordinator, which hands it to no pass. The coordinator then listens at
+  `coordinator:8096`, published nowhere. The api reaches it on the brain's
+  `data` network, and the services on its `egress` network can reach the
+  port too, so it refuses any socket without the key. The api asks it for every model call:
   - **A live call** (a capture's, a search's) is counted at the broker as it
     runs and never waits.
   - **A background call** (the vector mender's, a detached job's) waits its

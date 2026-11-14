@@ -1519,8 +1519,8 @@ services:
     extra_hosts: *host-alias
     # Postgres on `data`; the model provider and Linear's API on `egress`
     # (SMD-2583). The api reaches its slot relay on `data` (coordinator:8096,
-    # SMD-3379 PR 3b-2): published nowhere, and refused without
-    # OB1_SLOT_RELAY_KEY.
+    # SMD-3379 PR 3b-2), which listens on both networks: published nowhere,
+    # and refused without OB1_SLOT_RELAY_KEY.
     networks: [data, egress]
     # Its own, not the server image's HEALTHCHECK, which asks :8000/health,
     # which this serves not (podman's OCI builds drop that instruction, so it
