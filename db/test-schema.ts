@@ -207,7 +207,10 @@ function definedIn(file: string): string[] {
  * on supersession_proposals [74] reads, and 111 last defines
  * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
  * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
- * whose door and thread functions it does not define. 137 is 129's
+ * whose door and thread functions it does not define. 139 carries 055's
+ * audit gate with the redact arm (SMD-1723), and 055, whose diff rule,
+ * capture payload and backfill it does not define; a re-apply of 046 reverts
+ * them ([51]). 137 is 129's
  * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
  * carries 129, whose nine-argument wrapper it does not define and whose
  * agenda it needs ([110] drops both). 141 is 061's record_thought_entities
@@ -218,7 +221,7 @@ function definedIn(file: string): string[] {
  * merge_entities it also carries, are not carried: 056 runs the gate over the
  * rows at each apply.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "141": ["061"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -5328,8 +5331,8 @@ console.log("\n[43] Migration 046: the event shape at the write boundary — who
     `three partial indexes and no more: the rows still waiting for a kind or a trust, by name, for a door, and (055) for their payload — the census, the backfills and the gate read them; none on actor_kind, trust or origin until a read exists (${idx.map((i) => i.indexname).join(", ")})`);
   assert(/INCLUDE \(canonical_agent_id, actor_kind\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_kind_idx")?.indexdef ?? "") && /WHERE \(\(origin IS NULL\) AND \(actor_context \? 'via'::text\) AND \(ob1_door_of\(actor_context\) IS NOT NULL\)\)/.test(idx.find((i) => i.indexname === "thought_audit_awaiting_door_idx")?.indexdef ?? ""),
     `…the kind index carrying the agent id and the kind so the census filters and groups without the heap, the door index holding only rows whose via IS a door, by the one reading (seventh review pass; ${idx.map((i) => i.indexdef.replace(/.*USING btree /, "")).join(" | ")})`);
-  assert(lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("055") && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("update_thought").startsWith("099") && lastDefinerOf("delete_thought").startsWith("060"),
-    `060 is the last definer of delete_thought and of the audit trigger (append then project, the trigger the check — [56]), 099 of update_thought (088's body — 073's, answering what it did — with an unlink taking the review lock) and 080 of upsert_thought (061's lineage envelope over 060's bodies — [57] — with the trust stamp, [66], and 080's 'keep', [71]); 055 of the refusal trigger (046's body with the payload arm — [51]) (${lastDefinerOf("delete_thought")})`);
+  assert(lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("thought_audit_refuse_mutation").startsWith("139") && lastDefinerOf("upsert_thought").startsWith("080") && lastDefinerOf("update_thought").startsWith("099") && lastDefinerOf("delete_thought").startsWith("060"),
+    `060 is the last definer of delete_thought and of the audit trigger (append then project, the trigger the check — [56]), 099 of update_thought (088's body — 073's, answering what it did — with an unlink taking the review lock) and 080 of upsert_thought (061's lineage envelope over 060's bodies — [57] — with the trust stamp, [66], and 080's 'keep', [71]); 139 of the refusal trigger (055's body — 046's with the payload arm, [51] — and the redact arm, [128]) (${lastDefinerOf("delete_thought")})`);
   const tbl = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_audit"])).c ?? "";
   assert(/RANGE on created_at by month/.test(tbl) && /not applied/.test(tbl) && /SMD-1697/.test(tbl), "the table's comment states the partition key chosen and not applied, and what decides when");
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
@@ -7689,8 +7692,16 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
     await edit(c1.id, null, { source: "web", reviewed: true }, ACTOR);
     await edit(c1.id, null, null, { name: "op-key", via: "test-door", claimed: { trust: "operator" } });
     await db.exec(`UPDATE thoughts SET metadata = metadata || '{"hand": true}'::jsonb WHERE id = '${RAW}'`);  // a raw metadata touch: an update event with no content
-    await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [c1.id, JSON.stringify(ACTOR)]);
-    await db.query(`SELECT delete_thought($1::uuid, $2::jsonb, false)`, [RAW, JSON.stringify(ACTOR)]);
+    // The deletes as raw statements under the actor: the trigger under test writes the tombstone. delete_thought
+    // since 060 appends its own, so under 046's trigger it would write two; which body an earlier section's restore
+    // left installed is not this differential's to depend on (SMD-1723: 139 carries 055, so that restore now
+    // re-applies 060).
+    for (const id of [c1.id, RAW]) {
+      await db.transaction(async (tx) => {
+        await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(ACTOR)]);
+        await tx.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [id]);
+      });
+    }
     const rows = await q<Ev & { thought_id: string }>(`SELECT thought_id, ${EV} FROM thought_audit WHERE thought_id IN ($1::uuid, $2::uuid) AND seq > $3::bigint ORDER BY created_at, seq`, [c1.id, RAW, since]);
     return { events: comparable(rows, names), captureDiff: rows[0]?.diff ?? {} };
   };
@@ -7706,7 +7717,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 9 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 10 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm) and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -7937,8 +7948,9 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   // last defines, so 055 re-applied alone puts 055's back — the state the
   // restore below repairs and preflight's audit events check names. Nor are
   // the stamp trigger and its two arms, which 073 last defines (SMD-1724):
-  // the same restore puts 073's back.
-  const bodiesBefore = JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('thought_audit_refuse_mutation', 'ob1_thought_diff', 'ob1_append_thought_event', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`));
+  // the same restore puts 073's back. Nor is the refusal trigger, which 139
+  // last defines with its redact arm (SMD-1723): the restore puts 139's back.
+  const bodiesBefore = JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('ob1_thought_diff', 'ob1_append_thought_event', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`));
   // An index under the name with an earlier revision's predicate — pass 4's,
   // two clauses — is what the re-apply replaces (sixth review pass's drop,
   // the seventh's test); one already carrying this file's is left standing.
@@ -7947,10 +7959,10 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   await reapply("055");
   const pidxAfter = (await one<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'thought_audit_awaiting_payload_idx'`))?.d ?? "";
   assert(/jsonb_typeof\(COALESCE\(diff, '\{\}'::jsonb\)\) = 'object'::text/.test(pidxAfter) && /\(created_at, seq\)/.test(pidxAfter), `re-applying 055 over an index carrying an earlier revision's two-clause predicate replaces it with this file's three-clause one, and the index stands after (${pidxAfter})`);
-  assert(JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('thought_audit_refuse_mutation', 'ob1_thought_diff', 'ob1_append_thought_event', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`)) === bodiesBefore
+  assert(JSON.stringify(await q<{ f: string; s: string }>(`SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS f, p.prosrc AS s FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace WHERE ns.nspname = 'public' AND p.proname IN ('ob1_thought_diff', 'ob1_append_thought_event', 'ob1_capture_payload', 'backfill_thought_payloads') ORDER BY 1`)) === bodiesBefore
     && (await audits()) === n && (await waiting()) === strangers + 2, "re-applying 055 keeps every body it last defines byte for byte, writes no audit row, and its own backfill call finds nothing to fill");
   assert(!/ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), "…while it puts 055's audit trigger back over 060's — the last definer's restore below repairs it, and a hand re-apply of 055 is a state preflight names (SMD-2116)");
-  await restoreShipped("thoughts_write_audit");
+  await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
   // 073's stamp functions come back too: 088 carries 073's body, and the
   // helper restores 073 beside it (review pass 5 of SMD-2744 PR 2: without
   // that, the sections after this ran on 055's stamp bodies).
@@ -8750,8 +8762,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "priority_close_on_thought_delete,thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
-    `eighteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "priority_close_on_thought_delete,thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_refuse_forgotten,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
+    `nineteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), 136 the priority statements' close after a delete ([123]), 139 the refusal of a forgotten text ([128]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -21020,6 +21032,347 @@ console.log("\n[127] Migration 141: an entity's priority statements follow it �
   const before = await closedCount();
   await reapply(file.slice(0, 4));
   assert(await closedCount() === before && await drift() === 0, `a re-apply closes nothing`);
+}
+
+console.log("\n[128] Migration 139: forget a thought — refused CITED while an active citation leans on it, nothing touched; then forgotten: no row anywhere holds its text or its id (the log's events redacted in place, kept with their actor; the child's derived_from stripped and the child listed; the relation facet targeting it, the expired citation of it, the page section built on it with the page re-rendered, the priority statements on it, on its open item and taking a due time from it, the item with its events and a close proposal citing it, its deliverable's events, the query log's references), each counted in the evidence; the projections without drift; the ledger's row; the same text refused OB005 on capture and on edit unless reinstated; a twin's text kept and named; forgetting again FORGOTTEN, an unknown id NOT_FOUND; the redact amendment refusing each unlawful change; the guards refusing an unrelated delete; delete_thought unchanged; the shape; a re-apply a no-op (SMD-1723)");
+{
+  const file = files.find((f) => /^\d{3}_forget_thought\.sql$/.test(f)) ?? "no NNN_forget_thought.sql";
+  // Earlier sections re-applied 055's gate and 116's, 117's and 134's guards: put 139's back first.
+  await reapply(file.slice(0, 4));
+  type J = Record<string, unknown>;
+  const q = async <T = J>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T = J>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const code = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  const SECRET = "vault code 4417-ALPHA-125";
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('fg125-op', 'operator')`);
+  const OP = { name: "fg125-op", scope: "write" };
+  const ACT = JSON.stringify(OP);
+  const thought = async (content: string, meta: J = {}) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [ACT]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES ($1, $2::jsonb, content_fingerprint_of($1)) RETURNING id`,
+        [content, JSON.stringify(meta)])).rows[0].id;
+    });
+    return id;
+  };
+  const edit = async (id: string, content: string) => db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [ACT]);
+    await tx.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [id, content]);
+  });
+  const forget = async (id: string | null) => (await one<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [id, ACT])).r;
+
+  // The shape: forget_thought and the ledger; the gate carries the redact arm's sentinel beside the other two.
+  const fn = await one<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description(p.oid, 'pg_proc')) AS c FROM pg_proc p WHERE p.proname = 'forget_thought'`);
+  const gate = await one<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE proname = 'thought_audit_refuse_mutation'`);
+  const lcols = (await q<{ c: string }>(`SELECT column_name AS c FROM information_schema.columns WHERE table_name = 'thought_forgotten' ORDER BY ordinal_position`)).map((r) => r.c).join(",");
+  assert(fn.n === 1 && /migration 139 \/ SMD-1723/i.test(fn.c ?? "") && /ob1:audit-amend-redacts-forgotten-only/.test(gate.src)
+      && /ob1:audit-amend-fills-payload-only/.test(gate.src) && /ob1:audit-amend-fills-null-only/.test(gate.src)
+      && lcols === "id,thought_id,forgotten_at,actor_name,actor_agent_id,fingerprints,evidence",
+    `forget_thought and its comment; the gate's three named amendments; the ledger's seven columns (${lcols})`);
+
+  // The fixture. T, edited once; a child derived from it; O, another thought, with a relation facet targeting T, an
+  // expired citation of T and, for the refusal, an active one; a priority statement on T with the text in its reason,
+  // one on O taking its due time from T; an open item read from T, with a statement of its own; a close proposal on
+  // an item from O whose evidence is T; T a deliverable of the spec O; a page section built on T; the query log
+  // naming T three ways; a twin pair, one forgotten.
+  const T = await thought(`note: ${SECRET}`, { people: ["Ada"], topic: SECRET, source: `a call about the ${SECRET}` });
+  await edit(T, `note, edited: ${SECRET}`);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [ACT]);
+    await tx.query(`UPDATE thoughts SET metadata = metadata || $2::jsonb WHERE id = $1::uuid`, [T, JSON.stringify({ note: `edited for ${SECRET}` })]);
+  });
+  const C = await thought("a summary built on the note");
+  await db.query(`UPDATE thoughts SET derived_from = $2::jsonb WHERE id = $1::uuid`, [C, JSON.stringify([T])]);
+  const O = await thought("another thought, which stays");
+  const rel = (await one<{ r: { ok?: boolean; id?: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.6, 'consolidate:t@p4', NULL, 'a', 'b', NULL) AS r`, [O, T])).r;
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload, valid_until) VALUES ($1::uuid, 'citation', jsonb_build_object('text', $3::text, 'stance', 'stated', 'source_id', $2::text), now() - interval '1 day')`, [O, T, `as it said: ${SECRET}`]);
+  const active = (await one<{ id: string }>(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', 'leans on it', 'stance', 'stated', 'source_id', $2::text)) RETURNING id`, [O, T])).id;
+  await db.query(`SELECT assert_priority('thought', $1, 4, NULL, NULL, NULL, NULL, $2, false, $3::jsonb)`, [T, `because ${SECRET}`, ACT]);
+  await db.query(`SELECT assert_priority('thought', $1, 2, NULL, NULL, 'thought', $2, 'due when T is', false, $3::jsonb)`, [O, T, ACT]);
+  const item = (await one<{ r: { item: { id: string } } }>(`SELECT open_item($1, NULL, NULL, $2::uuid, NULL, false, $3::jsonb) AS r`, [`call about ${SECRET}`, T, ACT])).r.item.id;
+  await db.query(`SELECT assert_priority('item', $1, 3, NULL, NULL, NULL, NULL, $2, false, $3::jsonb)`, [item, `item reason ${SECRET}`, ACT]);
+  await db.query(`SELECT assert_priority('thought', $1, 1, NULL, NULL, 'item', $2, 'due when the item is', false, $3::jsonb)`, [C, item, ACT]);
+  const itemO = (await one<{ r: { item: { id: string } } }>(`SELECT open_item('an item of O', NULL, NULL, $1::uuid, NULL, false, $2::jsonb) AS r`, [O, ACT])).r.item.id;
+  await db.query(`SELECT propose_item_close($1, 'done', $2::uuid, NULL, $3, $4::jsonb)`, [itemO, T, `done, per ${SECRET}`, ACT]);
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('fg127-decider', 'operator')`);
+  const acceptedId = (await one<{ id: string }>(`SELECT id FROM open_item_close_proposals WHERE item_id = $1::uuid AND evidence_thought_id = $2::uuid`, [itemO, T])).id;
+  const accepted = (await one<{ r: J }>(`SELECT decide_item_close($1::uuid, true, NULL, $2::jsonb) AS r`, [acceptedId, JSON.stringify({ name: "fg127-decider", scope: "write" })])).r;
+  await db.query(`SELECT propose_item_close($1, 'done', $2::uuid, NULL, 'per O, not T', $3::jsonb)`, [item, O, ACT]);
+  const tEntity = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Vault T Entity 127', 'vault t entity 127') RETURNING id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p0')`, [T, tEntity]);
+  const tfp = (await one<{ f: string }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [T])).f;
+  await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ($1, 'm127', $2::vector, ${EMBEDDING_DIM})`, [tfp, `[${Array(EMBEDDING_DIM).fill(0.2).join(",")}]`]);
+  const deliv = (await one<{ r: { event?: J } }>(`SELECT record_deliverable($1, $2, 'v1', $3::jsonb) AS r`, [T, O, ACT])).r;
+  await db.query(`SELECT upsert_page('forget-125', 'Forget 125', 'topic', '{}'::jsonb, 'fg125-op', NULL)`);
+  const page = (await one<{ id: string }>(`SELECT id FROM pages WHERE slug = 'forget-125'`)).id;
+  await db.query(`SELECT write_page_section($1::uuid, 'facts', $2, 'generated', NULL, '{}'::jsonb, $3::uuid[], NULL, 'fg125-op')`, [page, "Ada said SECTION-125", [T]]);
+  await db.query(`SELECT write_page_section($1::uuid, 'context', 'about O', 'generated', NULL, '{}'::jsonb, $2::uuid[], NULL, 'fg125-op')`, [page, [O]]);
+  await db.query(`UPDATE page_sections SET pending_body_md = 'PENDING-126 draft', pending_at = now(), pending_evidence_thought_ids = $2::uuid[] WHERE page_id = $1::uuid AND section_key = 'context'`, [page, [T]]);
+  await db.query(`SELECT upsert_page('forget-126-old', 'Forget 126 old', 'topic', '{}'::jsonb, 'fg125-op', NULL)`);
+  const page2 = (await one<{ id: string }>(`SELECT id FROM pages WHERE slug = 'forget-126-old'`)).id;
+  await db.query(`SELECT write_page_section($1::uuid, 'facts', 'HIST-126 built on T', 'generated', NULL, '{}'::jsonb, $2::uuid[], NULL, 'fg125-op')`, [page2, [T]]);
+  await db.query(`SELECT write_page_section($1::uuid, 'facts', 'rewritten on O', 'generated', NULL, '{}'::jsonb, $2::uuid[], NULL, 'fg125-op')`, [page2, [O]]);
+  await db.query(`INSERT INTO query_log (kind, tool, query, result_ids, result_scores) VALUES ('search', 'search', 'vault', ARRAY[$1::uuid, $2::uuid], ARRAY[0.9, 0.8]::real[])`, [T, O]);
+  await db.query(`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'update_thought', $1::uuid)`, [T]);
+  await db.query(`INSERT INTO query_log (kind, tool, result_items) VALUES ('agenda', 'agenda', $1::jsonb)`, [JSON.stringify([{ kind: "item", key: O }, { kind: "item", key: T }, { kind: "ticket", key: "FG-126" }])]);
+  const events = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [T])).n;
+  assert(rel.ok !== false && deliv.event !== undefined && events === 3,
+    `the fixture: a relation recorded, T a deliverable, T's capture and its two edits in the log (${JSON.stringify(rel).slice(0, 60)} | ${JSON.stringify(deliv).slice(0, 80)} | ${events})`);
+
+  // Under ob1.projecting_replay rebuild_derived refuses (REPLAYING): no half forget, the refusal the answer.
+  let replaying: J = {};
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.projecting_replay', 'on', true)`);
+    await tx.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [active]);
+    replaying = (await tx.query<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [T, ACT])).rows[0].r;
+    throw new Error("roll back");
+  }).catch(() => undefined);
+  const afterReplay = await one<{ live: boolean; led: number; red: number }>(
+    `SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = $1::uuid) AS live, (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = $1::uuid) AS led,
+            (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid AND redacted_at IS NOT NULL) AS red`, [T]);
+  assert(replaying.ok === false && replaying.error === "REPLAYING" && (replaying.rebuild as J)?.ok === false && afterReplay.live && afterReplay.led === 0 && afterReplay.red === 0,
+    `under replay the forget answers rebuild_derived's REPLAYING, with its report, and nothing is forgotten (${JSON.stringify(replaying).slice(0, 80)}; ${JSON.stringify(afterReplay)})`);
+
+  // Refused CITED while an active citation leans on it (the maintainer, 2026-11-13): nothing touched.
+  const cited = await forget(T);
+  const untouched = await one<{ live: boolean; red: number; led: number }>(
+    `SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = $1::uuid) AS live,
+            (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid AND redacted_at IS NOT NULL) AS red,
+            (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = $1::uuid) AS led`, [T]);
+  assert(cited.ok === false && cited.error === "CITED" && cited.cited_by === 1 && (cited.citations as J[])[0]?.id === active
+      && untouched.live && untouched.red === 0 && untouched.led === 0,
+    `an active citation refuses the forget, CITED with the citing row, as delete_thought; the thought, its log and the ledger untouched (${JSON.stringify(cited).slice(0, 120)})`);
+  await db.query(`DELETE FROM thought_facets WHERE id = $1::uuid`, [active]);
+
+  // Forgotten.
+  const copied = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM open_item_events WHERE item_id = $1::uuid AND proposal_id = $2::uuid AND reason LIKE '%' || $3 || '%'`, [itemO, acceptedId, SECRET])).n;
+  assert(copied === 1, `the fixture: the proposal citing T accepted by a second key, its reason copied onto O's item's status event (${copied}; ${JSON.stringify(accepted).slice(0, 80)})`);
+  const ans = await forget(T);
+  const removed = ans.removed as Record<string, number>;
+  // rebuild_derived on a live thought: its entity mention and the entity only it named, and its snapshot vector; the
+  // ledger holds the same counts the answer gave (review pass 5: none of these was held).
+  const live = await one<{ ent: number; snap: number; ledger: J }>(`SELECT (SELECT count(*)::int FROM ob1_entities WHERE id = $1::uuid) AS ent,
+    (SELECT count(*)::int FROM ob1_embedding_snapshot WHERE content_fingerprint = $2) AS snap,
+    (SELECT evidence->'removed' FROM thought_forgotten WHERE thought_id = $3::uuid) AS ledger`, [tEntity, tfp, T]);
+  assert(live.ent === 0 && live.snap === 0 && JSON.stringify(live.ledger) === JSON.stringify(ans.removed),
+    `rebuild_derived reached the live thought's entity and snapshot vector, and the ledger holds the answer's counts (${JSON.stringify(live).slice(0, 160)})`);
+  assert(ans.ok === true && removed.relations === 1 && removed.inactive_citations === 1 && removed.derived_refs === 2
+      && removed.page_sections === 2 && removed.priority_statements === 4 && removed.item_proposals === 2 && removed.item_reasons === 1 && removed.items === 1
+      && removed.item_events >= 1 && removed.query_log_rows === 3 && removed.deliverable_events >= 1 && removed.audit_events === events + 1
+      && JSON.stringify(ans.irreproducible) === JSON.stringify([C, page].sort()) && JSON.stringify(ans.pages) === JSON.stringify([page, page2].sort()) && ans.gone === false
+      && JSON.stringify(ans.twins) === "[]" && Array.isArray(ans.outside) && (ans.outside as string[]).length === 4,
+    `forgotten: each store's count in the evidence, the child and the page (whose derived_from is its sections' evidence) listed for review, and the page whose section was once built on it, no twin, the copies outside named (${JSON.stringify(removed)} | ${JSON.stringify(ans.irreproducible)} | ${JSON.stringify(ans.pages)})`);
+
+  // Nowhere holds the text.
+  const text = await q<{ t: string; n: number }>(`
+    SELECT 'thought_audit' AS t, count(*)::int AS n FROM thought_audit WHERE diff::text LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'thought_audit.source', count(*)::int FROM thought_audit WHERE source LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'thoughts', count(*)::int FROM thoughts WHERE content LIKE '%' || $1 || '%' OR metadata::text LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'thought_facets', count(*)::int FROM thought_facets WHERE payload::text LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'priority_assertions', count(*)::int FROM priority_assertions WHERE reason LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'open_item_events', count(*)::int FROM open_item_events WHERE text LIKE '%' || $1 || '%' OR reason LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'open_items', count(*)::int FROM open_items WHERE text LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'open_item_close_proposals', count(*)::int FROM open_item_close_proposals WHERE reason LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'page_sections', count(*)::int FROM page_sections WHERE body_md LIKE '%' || $1 || '%' OR COALESCE(pending_body_md, '') LIKE '%' || $1 || '%'
+    UNION ALL SELECT 'page_section_revisions', count(*)::int FROM page_section_revisions WHERE body_md LIKE '%' || $1 || '%'`, [SECRET]);
+  // The section built on it is gone with its revisions, and the page re-rendered without it; the page thought's own
+  // log keeps its earlier render — another thought's history, the limit named: the page is listed for review.
+  const section = await one<{ now: boolean; secs: number; revs: number; log: number; pend: number; hist: number }>(
+    `SELECT (SELECT content LIKE '%SECTION-125%' FROM thoughts WHERE id = $1::uuid) AS now,
+            (SELECT count(*)::int FROM page_sections WHERE COALESCE(pending_body_md, '') LIKE '%PENDING-126%') AS pend,
+            (SELECT count(*)::int FROM page_section_revisions WHERE body_md LIKE '%HIST-126%') AS hist,
+            (SELECT count(*)::int FROM page_sections WHERE body_md LIKE '%SECTION-125%') AS secs,
+            (SELECT count(*)::int FROM page_section_revisions WHERE body_md LIKE '%SECTION-125%') AS revs,
+            (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid AND diff::text LIKE '%SECTION-125%') AS log`, [page]);
+  assert(text.every((r) => r.n === 0) && section.now === false && section.secs === 0 && section.revs === 0 && section.log > 0 && section.pend === 0 && section.hist > 0,
+    `no table holds the text; the section built on it gone with its revisions and the page re-rendered without it, a section holding it only as pending evidence gone too; the page's own log keeping the earlier render, and the other page's revision its earlier body, as named (${text.filter((r) => r.n > 0).map((r) => `${r.t}=${r.n}`).join(", ") || "none"}; ${JSON.stringify(section)})`);
+
+  // Nowhere holds the id, but the log's own events (kept, redacted) and the ledger.
+  const ids = await q<{ t: string; n: number }>(`
+    SELECT 'thoughts' AS t, count(*)::int AS n FROM thoughts WHERE id = $1::uuid OR derived_from @> jsonb_build_array($1::text)
+    UNION ALL SELECT 'thought_facets', count(*)::int FROM thought_facets WHERE payload->>'target' = $1::text OR payload->>'source_id' = $1::text OR thought_id = $1::uuid
+    UNION ALL SELECT 'priority_assertions', count(*)::int FROM priority_assertions WHERE item_key = $1::text OR due_ref_key = $1::text OR item_key = $2::text OR due_ref_key = $2::text
+    UNION ALL SELECT 'priority_current', count(*)::int FROM priority_current WHERE item_key IN ($1::text, $2::text)
+    UNION ALL SELECT 'open_item_events', count(*)::int FROM open_item_events WHERE origin_thought_id = $1::uuid OR item_id::text = $2::text
+    UNION ALL SELECT 'open_item_close_proposals', count(*)::int FROM open_item_close_proposals WHERE evidence_thought_id = $1::uuid
+    UNION ALL SELECT 'deliverable_events', count(*)::int FROM deliverable_events WHERE thought_id = $1::uuid
+    UNION ALL SELECT 'page_sections', count(*)::int FROM page_sections WHERE $1::uuid = ANY(evidence_thought_ids)
+    UNION ALL SELECT 'query_log', count(*)::int FROM query_log WHERE $1::uuid = ANY(result_ids) OR target_id = $1::uuid OR result_items::text LIKE '%' || $1::text || '%'`, [T, item]);
+  const kept = await one<{ n: number; red: number; actors: number }>(
+    `SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NOT NULL)::int AS red, count(*) FILTER (WHERE actor_name = 'fg125-op')::int AS actors
+       FROM thought_audit WHERE thought_id = $1::uuid`, [T]);
+  const otherSearch = await one<{ ids: string[]; sc: number[] }>(`SELECT result_ids::text[] AS ids, result_scores AS sc FROM query_log WHERE kind = 'search' AND query = 'vault'`);
+  const agendaRow = await one<{ k: string }>(`SELECT (SELECT string_agg(e->>'key', ',' ORDER BY o) FROM jsonb_array_elements(result_items) WITH ORDINALITY x(e, o)) AS k FROM query_log WHERE kind = 'agenda' AND tool = 'agenda' AND result_items::text LIKE '%FG-126%'`);
+  assert(ids.every((r) => r.n === 0) && kept.n === events + 1 && kept.red === kept.n && kept.actors === kept.n
+      && JSON.stringify(otherSearch.ids) === JSON.stringify([O]) && JSON.stringify(otherSearch.sc.map((x) => Math.round(x * 10) / 10)) === "[0.8]"
+      && agendaRow.k === `${O},FG-126`,
+    `no table holds the id; the log keeps every event of it, redacted, with its actor; the search row keeps the other result with its own score, the agenda row its other items (${agendaRow.k}; ${ids.filter((r) => r.n > 0).map((r) => `${r.t}=${r.n}`).join(", ") || "none"}; ${JSON.stringify(kept)})`);
+
+  // The projections: no drift, and T's priority unknown.
+  const drift = await one<{ p: number; i: number; d: number; lvl: number | null }>(
+    `SELECT (SELECT count(*)::int FROM ob1_priority_projection_drift()) AS p, (SELECT count(*)::int FROM ob1_item_projection_drift()) AS i,
+            (SELECT count(*)::int FROM ob1_deliverable_projection_drift()) AS d,
+            (SELECT level FROM priority_of(jsonb_build_array(jsonb_build_object('kind', 'thought', 'key', $1::text)))) AS lvl`, [T]);
+  assert(drift.p === 0 && drift.i === 0 && drift.d === 0 && drift.lvl === null,
+    `no projection drifts, and priority_of answers unknown for the forgotten thought (${JSON.stringify(drift)})`);
+
+  // The ledger, and the text refused on its way back — on capture and on edit — unless reinstated.
+  const led = await one<{ n: number; fps: string[]; who: string | null }>(`SELECT count(*)::int AS n, max(fingerprints::text)::text[] AS fps, max(actor_name) AS who FROM thought_forgotten WHERE thought_id = $1::uuid`, [T]);
+  const fpNow = (await one<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [`note, edited: ${SECRET}`])).f;
+  const fpFirst = (await one<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [`note: ${SECRET}`])).f;
+  const recapture = await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]);
+  const reedit = await code(`UPDATE thoughts SET content = $2 WHERE id = $1::uuid`, [O, `note, edited: ${SECRET}`]);
+  let reinstated = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
+      await tx.query(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]);
+      reinstated = "taken";
+      throw new Error("roll back");
+    });
+  } catch { /* rolled back on purpose */ }
+  assert(led.n === 1 && led.who === "fg125-op" && led.fps.includes(fpNow) && led.fps.includes(fpFirst)
+      && recapture === "OB005" && reedit === "OB005" && reinstated === "taken",
+    `one ledger row by the key, holding both texts' fingerprints; the first text refused OB005 on capture, the last on an edit of another thought; reinstated it is taken (${recapture}, ${reedit}, ${reinstated})`);
+
+  // A twin keeps its text: forgetting one of two thoughts holding the same text leaves the fingerprint out of the
+  // ledger, names the twin, and the text can still be captured.
+  // The twin holds the text under a NULL key, as 018 leaves a second holder (003's unique index admits one).
+  const twinA = await thought("twin text 125");
+  const twinB = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('twin text 125') RETURNING id`)).id;
+  const tw = await forget(twinA);
+  const twFps = (await one<{ f: string[] }>(`SELECT fingerprints AS f FROM thought_forgotten WHERE thought_id = $1::uuid`, [twinA])).f;
+  const twinRecapture = await code(`INSERT INTO thoughts (content) VALUES ('twin text 125')`);
+  assert(tw.ok === true && JSON.stringify(tw.twins) === JSON.stringify([twinB]) && twFps.length === 0 && twinRecapture === "taken",
+    `a twin keeps the text: named in twins, its fingerprint left out of the ledger, the text still taken (${JSON.stringify(tw.twins)}, ${JSON.stringify(twFps)}, ${twinRecapture})`);
+
+  // Again: FORGOTTEN with its time; an unknown id NOT_FOUND; no id refused 22023.
+  const again = await forget(T), unknown = await forget("11111111-2222-4333-8444-555555555125");
+  const noId = await code(`SELECT forget_thought(NULL::uuid)`);
+  assert(again.ok === false && again.error === "FORGOTTEN" && typeof again.forgotten_at === "string" && unknown.error === "NOT_FOUND"
+      && unknown.id === "11111111-2222-4333-8444-555555555125" && noId === "22023",
+    `forgetting again is FORGOTTEN with its time, an unknown id NOT_FOUND, no id 22023 (${JSON.stringify(again).slice(0, 90)}, ${unknown.error}, ${noId})`);
+
+  // The redact amendment refuses every change but its own; the ledger and the guards refuse the rest.
+  const victim = await thought("a thought nobody is forgetting");
+  const amend = (sets: string, forgetting: string) => code(
+    `DO $t$ BEGIN PERFORM set_config('ob1.audit_amend', 'redact', true); PERFORM set_config('ob1.forgetting', '${forgetting}', true);
+       UPDATE thought_audit SET ${sets} WHERE thought_id = '${victim}'; END $t$`);
+  const standing = await amend(`diff = ob1_audit_redacted_diff(diff, action), redacted_at = now()`, victim);
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [victim, ACT]);
+  const refusals = [
+    standing,
+    await amend(`diff = ob1_audit_redacted_diff(diff, action), redacted_at = now()`, ""),
+    await amend(`diff = ob1_audit_redacted_diff(diff, action), redacted_at = now()`, T),
+    await amend(`diff = '{"content": "something else"}'::jsonb, redacted_at = now()`, victim),
+    await amend(`diff = ob1_audit_redacted_diff(diff, action), redacted_at = now(), actor_name = 'someone'`, victim),
+    await amend(`diff = ob1_audit_redacted_diff(diff, action)`, victim),
+    await code(`UPDATE thought_audit SET redacted_at = now() WHERE thought_id = $1::uuid`, [T]),
+    await code(`DELETE FROM thought_audit WHERE thought_id = $1::uuid`, [T]),
+    await code(`DELETE FROM thought_forgotten WHERE thought_id = $1::uuid`, [T]),
+    await code(`UPDATE thought_forgotten SET evidence = '{}'::jsonb WHERE thought_id = $1::uuid`, [T]),
+  ];
+  const lawful = await amend(`diff = ob1_audit_redacted_diff(diff, action), redacted_at = now()`, victim);
+  const twice = await amend(`diff = ob1_audit_redacted_diff(diff, action), redacted_at = now()`, victim);
+  // The guards: under the forget's setting, a statement on a thought it isn't forgetting is still kept.
+  await db.query(`SELECT assert_priority('thought', $1, 2, NULL, NULL, NULL, NULL, 'kept', false, $2::jsonb)`, [O, ACT]);
+  const guarded = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${T}', true); DELETE FROM priority_assertions WHERE item_key = '${O}'; END $t$`);
+  const livingGuarded = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${O}', true); DELETE FROM priority_assertions WHERE item_key = '${O}'; END $t$`);
+  const itemGuarded = await code(`DO $t$ BEGIN PERFORM set_config('ob1.forgetting', '${T}', true); DELETE FROM open_item_events WHERE item_id = '${itemO}'; END $t$`);
+  assert(refusals.every((r) => r !== "taken") && lawful === "taken" && twice !== "taken" && guarded !== "taken" && itemGuarded !== "taken" && livingGuarded !== "taken",
+    `the redact amendment takes only a deleted thought's events under the forget's setting naming it, only to the redacted diff with its stamp, once; the log refuses a DELETE; the ledger an UPDATE and a DELETE; the guards an unrelated delete under the forget, and a living thought's own under a setting naming it (${refusals.join(",")} | ${lawful}, ${twice} | ${guarded}, ${itemGuarded}, ${livingGuarded})`);
+
+  // A thought deleted before it is forgotten is forgotten all the same, from what the log still holds.
+  const G = await thought(`deleted first: ${SECRET}-G`);
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [G, ACT]);
+  const gfp = (await one<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [`deleted first: ${SECRET}-G`])).f;
+  await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ($1, 'm126', $2::vector, ${EMBEDDING_DIM})`, [gfp, `[${Array(EMBEDDING_DIM).fill(0.1).join(",")}]`]);
+  const gone = await forget(G);
+  const gSnap = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_embedding_snapshot WHERE content_fingerprint = $1`, [gfp])).n;
+  const gLog = await one<{ n: number; red: number; text: number }>(`SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NOT NULL)::int AS red,
+    count(*) FILTER (WHERE diff::text LIKE '%' || $2 || '%')::int AS text FROM thought_audit WHERE thought_id = $1::uuid`, [G, `${SECRET}-G`]);
+  const gAgain = await forget(G);
+  assert(gone.ok === true && gone.gone === true && (gone.removed as Record<string, number>).audit_events === 2 && gLog.n === 2 && gLog.red === 2 && gLog.text === 0
+      && (gone.rebuild as J).snapshot_rows === 1 && gSnap === 0
+      && gAgain.error === "FORGOTTEN" && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`deleted first: ${SECRET}-G`]) === "OB005",
+    `a thought deleted first is forgotten all the same: gone, its snapshot vector deleted, its capture and tombstone redacted, then FORGOTTEN, its text refused (${gSnap}; ${JSON.stringify(gLog)}, ${gAgain.error})`);
+
+  // Detach first, then forget (review pass 2): a thought deleted with its citations detached is forgotten, the
+  // detached citations deleted; and an entity only it named, left with no mention by the delete, pruned.
+  const D = await thought(`cited, then detached: ${SECRET}-D`);
+  const citer = await thought("a thought that cites D");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', $3::text, 'stance', 'stated', 'source_id', $2::text))`, [citer, D, `per D: ${SECRET}-D`]);
+  const entity = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Vault D Entity 126', 'vault d entity 126') RETURNING id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:m@p0')`, [D, entity]);
+  const dCited = await forget(D);
+  const detached = (await one<{ r: J }>(`SELECT delete_thought($1::uuid, $2::jsonb, true) AS r`, [D, ACT])).r;
+  const dGone = await forget(D);
+  const dLeft = await one<{ cites: number; ent: number }>(`SELECT (SELECT count(*)::int FROM thought_facets WHERE payload::text LIKE '%' || $1 || '%') AS cites,
+    (SELECT count(*)::int FROM ob1_entities WHERE id = $2::uuid) AS ent`, [`${SECRET}-D`, entity]);
+  assert(dCited.error === "CITED" && detached.detached === 1 && dGone.ok === true && dGone.gone === true
+      && (dGone.removed as Record<string, number>).detached_citations === 1 && (dGone.orphan_entities as number) >= 1
+      && dLeft.cites === 0 && dLeft.ent === 0,
+    `cited, then detached by the delete, then forgotten: the detached citation deleted, the entity only it named pruned (${dCited.error}; ${JSON.stringify(detached)}; ${JSON.stringify(dGone.removed)}; ${JSON.stringify(dLeft)})`);
+
+  // A write that raced the forget (the maintainer, review pass 2: a second forget sweeps it): planted after T's
+  // forget — a statement on T, an orphan event on the item it took, a close proposal citing it, a page section built
+  // on it, a thought derived from it — the second call takes each and writes a ledger row; a third is FORGOTTEN.
+  await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, reason, maker_name, maker_source, tier, asserted_at)
+    VALUES ('thought', $1, 3, $2, 'fg125-op', false, 2, now())`, [T, `raced reason ${SECRET}`]);
+  await db.query(`INSERT INTO open_item_events (item_id, event, status, text, actor_name, actor_proved, at)
+    VALUES ($1::uuid, 'updated', 'open', $2, 'fg125-op', true, now())`, [item, `raced edit ${SECRET}`]);
+  const itemO2 = (await one<{ r: { item: { id: string } } }>(`SELECT open_item('another item of O', NULL, NULL, $1::uuid, NULL, false, $2::jsonb) AS r`, [O, ACT])).r.item.id;
+  // Planted raw: after the forget the writers refuse to name T, as they should; these stand for writes that landed
+  // during it.
+  await db.query(`INSERT INTO open_item_close_proposals (item_id, status, evidence_thought_id, reason, proposer_name, proposed_at)
+    VALUES ($1::uuid, 'done', $2::uuid, $3, 'fg125-op', now())`, [itemO2, T, `raced: ${SECRET}`]);
+  await db.query(`SELECT write_page_section($1::uuid, 'raced', 'RACED-126 body', 'generated', NULL, '{}'::jsonb, $2::uuid[], NULL, 'fg125-op')`, [page, [O]]);
+  await db.query(`UPDATE page_sections SET evidence_thought_ids = $2::uuid[] WHERE page_id = $1::uuid AND section_key = 'raced'`, [page, [T]]);
+  const raceChild = await thought("a summary that raced the forget");
+  await db.query(`UPDATE thoughts SET derived_from = $2::jsonb WHERE id = $1::uuid`, [raceChild, JSON.stringify([T])]);
+  const sweep = await forget(T);
+  const sweepLeft = await one<{ n: number }>(`SELECT
+      (SELECT count(*)::int FROM priority_assertions WHERE item_key = $1) + (SELECT count(*)::int FROM open_item_events WHERE item_id = $2::uuid)
+    + (SELECT count(*)::int FROM open_item_close_proposals WHERE evidence_thought_id = $1::uuid) + (SELECT count(*)::int FROM page_sections WHERE body_md LIKE '%RACED-126%')
+    + (SELECT count(*)::int FROM thoughts WHERE derived_from @> jsonb_build_array($1::text)) AS n`, [T, item]);
+  const sr = sweep.removed as Record<string, number>;
+  // An entity a racing extraction left with no mention (bare) goes with the next call; one carrying a priority
+  // statement is kept (the maintainer, review pass 3: bare orphans alone).
+  const bareOrphan = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Raced Entity 126', 'raced entity 126') RETURNING id`)).id;
+  const keptOrphan = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('topic', 'Kept Entity 126', 'kept entity 126') RETURNING id`)).id;
+  await db.query(`SELECT assert_priority('entity', $1, 2, NULL, NULL, NULL, NULL, 'kept', false, $2::jsonb)`, [keptOrphan, ACT]);
+  const third = await forget(T);
+  const orphansLeft = await one<{ bare: number; kept: number }>(`SELECT (SELECT count(*)::int FROM ob1_entities WHERE id = $1::uuid) AS bare,
+    (SELECT count(*)::int FROM ob1_entities WHERE id = $2::uuid) AS kept`, [bareOrphan, keptOrphan]);
+  assert(sweep.ok === true && sweep.gone === true && sr.priority_statements === 1 && sr.item_events === 1 && sr.item_proposals === 1
+      && sr.page_sections === 1 && sr.derived_refs === 1 && sweepLeft.n === 0 && third.error === "FORGOTTEN"
+      && (third.orphan_entities as number) >= 1 && orphansLeft.bare === 0 && orphansLeft.kept === 1
+      && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten WHERE thought_id = $1::uuid`, [T])).n === 2,
+    `a second forget sweeps what a racing write left — the statement, the orphan event on the item it took, the proposal, the section, the child — and writes a second ledger row; a third is FORGOTTEN, pruning a bare orphan on the way and keeping one that carries a statement (${JSON.stringify(sr)}; ${sweepLeft.n}; ${third.error}; ${JSON.stringify(orphansLeft)})`);
+
+  // Reinstated once, a text a standing thought holds is no forgotten text: a later write of it passes (review pass 4:
+  // an ingest's INSERT … ON CONFLICT over a reinstated row was refused).
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
+    await tx.query(`INSERT INTO thoughts (content, content_fingerprint) VALUES ($1, content_fingerprint_of($1))`, [`deleted first: ${SECRET}-G`]);
+  });
+  const afterReinstate = await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`deleted first: ${SECRET}-G`]);
+  assert(afterReinstate === "taken", `a text reinstated and standing is taken again without reinstating (${afterReinstate})`);
+
+  // delete_thought is unchanged: a deleted thought's events keep their text, and nothing enters the ledger.
+  const plain = await thought("deleted, not forgotten, 125");
+  const del = (await one<{ r: J }>(`SELECT delete_thought($1::uuid, $2::jsonb) AS r`, [plain, ACT])).r;
+  const plainLog = await one<{ n: number; l: number }>(`SELECT count(*) FILTER (WHERE diff::text LIKE '%deleted, not forgotten, 125%')::int AS n,
+    (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = $1::uuid) AS l FROM thought_audit WHERE thought_id = $1::uuid`, [plain]);
+  assert(del.ok === true && plainLog.n === 2 && plainLog.l === 0,
+    `delete_thought keeps its events' text and writes no ledger row (${JSON.stringify(plainLog)})`);
+
+  // A re-apply is a no-op: the ledger kept, the refusal still standing.
+  await reapply(file.slice(0, 4));
+  const ledAfter = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten`)).n;
+  assert(ledAfter === 5 && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]) === "OB005",
+    `a re-apply keeps the ledger and the refusal (${ledAfter})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

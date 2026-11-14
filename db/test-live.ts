@@ -20147,6 +20147,14 @@ if (want("19")) {
   assert(patched.outcome === "patched" && (await sql`SELECT metadata->>'file' AS f FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].f === "test-note-a", `a record whose text stands and whose metadata gained a key is 'patched' (${patched.outcome})`);
   assert((await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } })).outcome === "unchanged", "…and the same record again is 'unchanged' — a key already held is not a patch");
 
+  // 139 (SMD-1723): a record whose text was forgotten is 'forgotten' — counted and named, nothing written — not an
+  // error that ends the run (review pass 4: every later run ended at it too).
+  const forgottenDoc = mk("fork", "1139", "a record forgotten later, SMD-1723");
+  const firstGo = (await upsertRecord(sql, forgottenDoc)).outcome;
+  await sql`SELECT forget_thought(${forgottenDoc.id}::uuid)`;
+  const secondGo = (await upsertRecord(sql, forgottenDoc)).outcome;
+  assert(firstGo === "inserted" && secondGo === "forgotten", `a record whose text was forgotten comes back 'forgotten', not a crash (${firstGo}, ${secondGo})`);
+
   // A different record whose content is byte-identical to one already stored
   // collides on the partial-unique content_fingerprint index → skipped, not a crash.
   const twin = mk("fork", "1000", docs[1].content);

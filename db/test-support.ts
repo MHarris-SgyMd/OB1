@@ -98,6 +98,10 @@ const TABLES = [
   // place is free. Its CASCADE takes the helpers whose arguments or result are
   // its row type, and its triggers.
   "deliverable_events",
+  // 139's ledger of forgotten thoughts (SMD-1723): no foreign key either way —
+  // it records thoughts that are gone — so its place is free. Its CASCADE takes
+  // its triggers.
+  "thought_forgotten",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -556,6 +560,15 @@ const FUNCTIONS = [
   "deliverable_history(text)",
   "ob1_deliverable_projection_drift()",
   "ob1_rebuild_deliverable_projection()",
+  // 139 (SMD-1723): forgetting — the redaction's diff, the forget's setting,
+  // the ledger's guard, the refusal on thoughts, the item test and the call.
+  "ob1_audit_redacted_diff(jsonb, text)",
+  "ob1_forgetting()",
+  "ob1_forgotten_guard()",
+  "ob1_refuse_forgotten_text()",
+  "ob1_forgetting_item(text)",
+  "ob1_forget_fingerprints(uuid)",
+  "forget_thought(uuid, jsonb)",
 ];
 
 /**

@@ -434,8 +434,8 @@ export function commitDocs(since: string, cwd: string = REPO_ROOT): Doc[] {
 // Write path — bare rows, idempotent by id, safe on a duplicate-content record.
 // ---------------------------------------------------------------------------
 
-/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. stale: the row carries a newer watermark than the record — an older dump over a brain kept current — nothing written. */
-export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped" | "held" | "stale";
+/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. forgotten: the text was forgotten (forget_thought, migration 139: refused OB005), nothing written. stale: the row carries a newer watermark than the record — an older dump over a brain kept current — nothing written. */
+export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped" | "held" | "stale" | "forgotten";
 
 function isFingerprintCollision(e: unknown): boolean {
   // Bun's PostgresError carries the SQLSTATE in `errno` (`code` is the generic
@@ -638,6 +638,9 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
     // real second writer (the board sync's row for a ticket — db/README.md,
     // "Two writers of one identity"), reported, not taken over.
     if (e instanceof IdentityHeld) return { outcome: "held", heldBy: e.heldBy };
+    // 139 (SMD-1723): the record's text was forgotten, and the brain refuses it on its way back. Counted and named,
+    // as a held record is, rather than ending the run (review pass 4: every later run ended there too).
+    if ((e as { errno?: string }).errno === "OB005") return { outcome: "forgotten" };
     throw e;
   }
 }
@@ -987,7 +990,7 @@ async function main(): Promise<void> {
 
   const sql = openSql(url);
   const run = runName();
-  const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0, stale: 0 };
+  const tally: Record<UpsertResult, number> = { inserted: 0, updated: 0, patched: 0, unchanged: 0, skipped: 0, held: 0, stale: 0, forgotten: 0 };
   const structure = { canonical: { inserted: 0, updated: 0, unchanged: 0 } as Record<string, number>, links: { added: 0, closed: 0, kept: 0, dropped: 0 }, mentions: 0, records: 0 };
   const heldBy = new Map<string, number>();
   // The records' priorities (SMD-3666), when the brain has 116's writers and this role may run them; else said once.
@@ -999,7 +1002,7 @@ async function main(): Promise<void> {
   if (priorityProblem) console.error(`  priority: ${docsWithPriority} record(s) state or clear a priority, and none is: ${priorityProblem}`);
   const priorityTally = new Map<string, number>();
   /** Why an item wrote nothing, in the emitter's terms (held names the holder inline). */
-  const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken" } as const;
+  const ITEM_OUTCOME_WHY = { skipped: "another row already holds this text", stale: "the row carries a newer watermark, or the same one written after this view was taken", forgotten: "its text was forgotten (forget_thought)" } as const;
   try {
     for (const doc of docs) {
       const r = await upsertRecord(sql, doc, run, actor, priorities);
@@ -1010,7 +1013,8 @@ async function main(): Promise<void> {
       }
       if (r.outcome === "held") heldBy.set(doc.source, (heldBy.get(doc.source) ?? 0) + 1);
       // An item counted but not named is a line the emitter cannot find (fifth review pass, run-it).
-      if (itemIds.has(doc.id) && (r.outcome === "skipped" || r.outcome === "stale" || r.outcome === "held")) {
+      if (r.outcome === "forgotten") console.error(`  forgotten: ${name(doc)}'s text was forgotten; nothing written for it`);
+      if (itemIds.has(doc.id) && (r.outcome === "skipped" || r.outcome === "stale" || r.outcome === "held" || r.outcome === "forgotten")) {
         const why = r.outcome === "held" ? `thought ${r.heldBy} already is this item` : ITEM_OUTCOME_WHY[r.outcome];
         note("items", `${name(doc)} ${r.outcome} — ${why}; nothing written for it`);
       }
