@@ -193,8 +193,11 @@ written since the row's enqueue; with 030 recorded and skipped, any
 acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed.
 
-**Stop the server and any re-embed or extraction worker first, and connect
-directly, not through a transaction-mode pooler:** the migrator sets session
+**Stop the server and any re-embed or extraction worker first, let any backup
+(`db/backup.ts`, `pg_dump`) finish — its lock keeps a migration that alters a
+table it reads waiting, and the brain's reads and writes of that table behind
+it, until the 10 s lock timeout fails the run — and connect directly, not
+through a transaction-mode pooler:** the migrator sets session
 state (the lock timeout, the pgvector search path) and takes locks across
 statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
@@ -5660,6 +5663,63 @@ the pass before it began, and a stop is a stop however a pass then ends, unless 
 
 test-live [38] drives it against a stub model, and [38r] its re-embed first
 on a stub of its own (SMD-3392).
+
+## A JSON export of the brain (SMD-3318)
+
+### `backup.ts`
+
+```bash
+bun backup.ts --url postgres://… --out /srv/brain-backups   # <out>/<table>-YYYY-MM-DD.json
+bun backup.ts --url …                                       # ./backup under the working directory (ignored by git here and at the root)
+#   --statement-timeout SECONDS (60; 0: none) — per page; the count(*)s run unbounded
+#   exits 0 written · 1 nothing renamed into place (the reason, and the table it was reading), or a rename failed (the files it replaced named) · 2 usage, the URL, or the connection reached another database than the URL names (PGDATABASE) · 130/143/129 SIGINT/SIGTERM/SIGHUP, the run's files removed
+```
+
+The brain's `thoughts` and its entity graph (`ob1_entities`,
+`thought_entities`, `ob1_entity_edges`) as one JSON array per table, and the
+companion tables `entities`, `edges`, `ingestion_jobs` and `ingestion_items`
+when the brain has them as tables with their schema's key (another relation
+under the name is named and passed over), read in one REPEATABLE READ, READ
+ONLY transaction whose first statement locks every table it reads (ACCESS
+SHARE, before the snapshot, as pg_dump does), so the files agree and no
+TRUNCATE or rename lands under the run. Each row is Postgres's own
+`to_jsonb(row)`: timestamps keep their microseconds and the vector its text,
+and `jsonb_populate_record` reads a row back into the same values. Pages
+follow each table's primary key, and each table's rows are compared with
+its `count(*)` in the same snapshot. Every file is written new to a
+`.<run id>.tmp` of its own (the pid and a random part; never through an
+existing path) and renamed only once all are, so a run that fails first renames
+nothing and removes its files; a directory it made once the tables were locked stays.
+SIGINT, SIGTERM and SIGHUP remove the run's files too; a run killed outright
+leaves them. A page of thoughts is 100 rows (the others 1,000), and the run
+holds about three times a page's JSON. Thoughts are read in key order, at
+random through the heap: about 6.5 minutes and 18 GB a million thoughts with
+their graph (measured), so hours at 100 million and days at a billion, the
+locks and the snapshot held throughout; a large brain's backup is pg_dump. Not
+during an upgrade: a migration that alters a table the run reads waits behind
+its lock, the brain's reads and writes of that table wait behind the migration,
+and at the migrator's 10 s lock timeout the upgrade fails (run it again once the
+backup is done); pg_dump does the same. A companion's file an earlier run wrote the same date, when this
+run did not write one, stays and is named. The session's `client_connection_check_interval` (10 s, where the
+server's platform has it) ends a stopped run's statement on the server. SELECT
+on the tables is enough. A page is held in memory whole, and the snapshot holds
+back vacuum's horizon for the run's length, as pg_dump's does.
+
+It is the `db/` home of `recipes/brain-backup`'s export (SMD-2144), which
+leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
+`pg_dump` is (`deploy/README.md`, the `postgres` service row). test-live
+[50] (in the sweep shard) holds the round trip, a companion table present,
+one named absent and a view and a keyless table under companions' names passed
+over, a page of three across composite keys, an empty table and an earlier
+run's companion file named, the one snapshot under a write between tables and
+a TRUNCATE kept waiting by the lock, the failures of a role that may not read a
+table and of a planted path, the refusal of another database, the statement bound on the
+session and put back after a count, the lock taken before the snapshot, a run
+failing mid-read leaving no file of its own, a SIGTERM while the run waits on its lock
+(the statement ended on the server), the signal cleanup itself (130, 143, 129),
+a brain with no companion table, the CLI's defaults, and a failed rename. Loaded back into a brain the rows pass through its triggers and lack
+what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
+brings a brain back.
 
 ## Extensions
 

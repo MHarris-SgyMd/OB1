@@ -134,7 +134,7 @@ fails CI"):**
 
 Thirty scripts in twenty-one recipes reached the brain as PostgREST clients at the decision
 (twenty in thirteen remain — `obsidian-vault-import`'s and `local-ollama-embeddings`'
-retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim, SMD-2144,
+retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim, SMD-2144 — `brain-backup`'s since `db/backup.ts`, SMD-3318 —
 `thought-enrichment`'s three, SMD-2139, `weekly-digest`'s retired, SMD-2239, and
 `brain-smoke-test`'s, SMD-2103, and `ob-graph`'s with the recipe, SMD-2920, their rows kept as the record) —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
@@ -191,7 +191,8 @@ actor a JSON object naming the script; a `CITED` answer arrives as `data.ok === 
 `error`, and each ticket says whether a cited row stays or `p_detach` goes. The key variable
 (`SUPABASE_SERVICE_ROLE_KEY`, `OPEN_BRAIN_SERVICE_KEY`) is read and ignored by the shim, so a
 script may stop requiring it. The first two ports landed with SMD-2144 — `brain-backup` and
-`lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres; the first
+`lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres (`brain-backup`'s
+export has since moved to `db/backup.ts`, driven in [50], SMD-3318); the first
 writers with SMD-2139 — `thought-enrichment`'s three backfills, `type`, `sensitivity_tier` and
 metadata through `.update().eq()`, never content or vector, driven in [29]; `weekly-digest`,
 the third read-only script at the decision, left the class: a sink posting thought text to Telegram,
@@ -232,7 +233,7 @@ nothing.
 |---|---|---|---|---|
 | `atomizer` | `audit-gmail-pipeline.mjs` (2), `lib/entity-resolver.mjs` (2), `re-atomize-gmail-thought.mjs` (2); `backfill-gmail-correspondents.mjs` through the lib | `thoughts`, `entities`, `thought_entities` (016's on a migrated brain — above), `thought_edges` | a REST-core client (SMD-3216; was onto the shim); thought writes through `upsert_thought` / `delete_thought` | SMD-2140 |
 | `authorship-edges` | `lib/author-edges.mjs` (2); `backfill-authorship.mjs` through the lib | `thoughts`, `entities`, `thought_entities` (016's on a migrated brain — above) | a REST-core client (SMD-3216; was onto the shim) | SMD-2141 |
-| `brain-backup` | `backup-brain.mjs` (0; was 1) | `thoughts` and five optional companion tables (read) | on the shim since SMD-2144; read-only — `SUPABASE_URL` a `postgres://` string, the key ignored, a missing table 42P01; `pg_dump` named as the whole-brain backup | SMD-2144 |
+| `brain-backup` | none (was `backup-brain.mjs`, 1) | — | moved to `db/backup.ts` (SMD-3318): the core's `thoughts` and three entity tables, and the companion tables when present, from one read-only snapshot, the script gone and the README a pointer; on the shim SMD-2144 → SMD-3318; `pg_dump` named as the whole-brain backup | SMD-2144, SMD-3318 |
 | `brain-smoke-test` | `smoke-all.js` (gone) | `thoughts`, `graph_*`, `ingestion_jobs`, four RPCs | **retired**: `deploy/smoke.sh` absorbed what applied (check 1 refuses a wrong key in-protocol); the directory and its check 24 entry are gone | SMD-2103 ✅ |
 | `chatgpt-conversation-import` | `import-chatgpt.py` (3) | `thoughts` (raw POST with a vector), `match_thoughts`, `chatgpt_conversations` | port onto the ingestion contract; SMD-2147 decides its `match_thoughts` dedup and `chatgpt_conversations` sidecar | SMD-2147 |
 | `email-history-import` | `pull-gmail.ts` (2) | `thoughts` (raw POST with a vector) | a REST-core client (SMD-3216; was onto the ingestion contract) | SMD-2021 |
@@ -416,7 +417,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `atomizer` | keep + audited → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2140) | Standalone LLM compound→atomic splitter + Gmail re-atomization tooling; writes through the core capture path. |
 | `authorship-edges` | keep + audited → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2141) | Standalone speaker-attribution recipe writing `thought_entities` author edges (no LLM, no hardcoded ids); consumes existing entity tables. |
 | `auto-capture` | keep + audited | Workflow-guidance recipe paired with the reusable auto-capture skill. |
-| `brain-backup` | keep + audited → **on the shim (SMD-2144)** | Standalone export-to-JSON backup utility (`backup-brain.mjs`), read-only; its README names `pg_dump` as the whole-brain backup. |
+| `brain-backup` | keep + audited → on the shim (SMD-2144) → **moved to `db/backup.ts` (SMD-3318)** | Standalone export-to-JSON backup utility, read-only; the script is gone and the README a pointer to the `db/` script, which names `pg_dump` as the whole-brain backup. |
 | `brain-health-monitoring` | keep + audited | Ops SQL views + runbook (`ops-views.sql`, no core clobber); optionally reads the kept `entity-extraction` tables (its view over `smart-ingest`'s jobs retired with that schema, SMD-2690). |
 | `brain-smoke-test` | ~~keep + audited → **SMD-2126**: SMD-2103~~ → **retired (SMD-2103)** *(no-parity posture; SMD-2126 → SMD-2103)* | Was the fresh-install smoke harness (`smoke-all.js`), seven categories against a Supabase project. Three needed what Daemonic Brain lacks: PostgREST and a service-role key for DB Schema and Access Key Enforcement, an anon key for Row-Level Security. REST API pointed at `open-brain-rest`, since retired (SMD-1931). The rest was covered already: `deploy/smoke.sh` checks 5–6 for MCP Server; the server's start gate, `server-portable/preflight.ts`, for the schema; the suites for capture, since smoke.sh is read-only; `server-portable/test-auth.ts` for `?key=`. The one Auth check it lacked, a wrong key refused in-protocol, is now smoke.sh's check 1, which also reads the body for -32001 instead of trusting the 200. |
 | `bring-your-own-context` | ~~keep + audited~~ → **retired (SMD-2920)** *(no-parity posture)* | Was the portable context workflow (extraction prompts + Work Operating Model flow + remote MCP deploy). Its step 4 deployed work-operating-model-activation's server, so it retired with it and `skills/work-operating-model`. |

@@ -1,23 +1,23 @@
 {
   "name": "Brain Backup and Export",
-  "description": "Export the Daemonic Brain tables to local JSON files for offline backup and data safety; pg_dump is the whole-brain backup.",
+  "description": "Moved to db/ in Daemonic Brain (SMD-3318): the dated JSON export of the brain's thoughts and entity graph is db/backup.ts, one snapshot on Bun's Postgres client. This directory is a pointer; backup-brain.mjs is gone. pg_dump is the whole-brain backup.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",
     "github": "alanshurafa"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
     "services": [],
     "tools": ["Bun 1.4+"],
     "env": {
-      "required": ["SUPABASE_URL"],
-      "optional": ["FETCH_TIMEOUT_MS"],
-      "ignored": ["SUPABASE_SERVICE_ROLE_KEY"]
+      "required": [],
+      "optional": ["DATABASE_URL"]
     }
   },
-  "tags": ["backup", "export", "data-safety"],
+  "tags": ["backup", "export", "data-safety", "retired"],
   "difficulty": "beginner",
-  "estimated_time": "10 minutes"
+  "estimated_time": "5 minutes",
+  "updated": "2026-11-13"
 }

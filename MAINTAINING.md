@@ -516,10 +516,11 @@ Deliberate. Recorded so nobody assumes they were missed.
   credentials (Gmail, Slack). The shim itself is tested against
   real Postgres, and CI checks every banner-carrying file still parses and that
   the codemod round-trips byte-for-byte — but exercise the ones you actually run
-  before trusting them. The hand ports (`recipes/brain-backup` and
-  `recipes/lint-sweep`, SMD-2144; `recipes/thought-enrichment`'s three scripts,
-  SMD-2139) carry no banner and are driven instead, as deployed, by
-  `db/test-live.ts` [26] and [29].
+  before trusting them. The hand ports (`recipes/lint-sweep`, SMD-2144;
+  `recipes/thought-enrichment`'s three scripts, SMD-2139) carry no banner and
+  are driven instead, as deployed, by `db/test-live.ts` [26] and [29].
+  `recipes/brain-backup`'s was the third, until it moved to `db/backup.ts`
+  (SMD-3318, [50]).
 - **No file imports supabase-js at runtime any more.** The six servers that
   used resource embedding and nested `.or()` moved with SMD-1798; the
   dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check
