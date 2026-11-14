@@ -32,9 +32,13 @@
  *
  * One snapshot. Every table is read in one REPEATABLE READ, READ ONLY
  * transaction, so the files agree with each other — a mention never names a
- * thought the thoughts file lacks — and a run never writes. A role with SELECT
- * on the tables is enough. The snapshot holds back vacuum's horizon for the
- * run's length, as pg_dump's does.
+ * thought the thoughts file lacks — and a run never writes. Its first
+ * statement takes ACCESS SHARE on every table it will read, before the
+ * snapshot, as pg_dump does: a TRUNCATE, DROP or rename waits for the run
+ * rather than landing under it (and a run waits, to its statement bound, for
+ * one already holding a table). A role with SELECT on the tables is enough.
+ * The snapshot holds back vacuum's horizon for the run's length, as pg_dump's
+ * does.
  *
  * Postgres's own JSON. Each row is `to_jsonb(row)`, written as Postgres
  * renders it: timestamps keep their microseconds and offset, numerics are JSON
@@ -61,7 +65,14 @@
  * SIGINT, SIGTERM and SIGHUP remove them too (exit 130, 143, 129); a run
  * killed outright (SIGKILL, the OOM killer) leaves them, each a whole table, to
  * be removed by hand. A signal that lands after the renames exits with its
- * code over a backup in place.
+ * code over a backup in place. A companion an earlier run wrote the same date
+ * and this one did not (since dropped) keeps its file, which the run names.
+ *
+ * Loading the files back into a brain is not a restore: the rows pass through
+ * its triggers, so each thought gets a new capture event dated at the load and
+ * loses its actor marks, and what the export leaves out (thought_chunks, the
+ * lineage rows, the audit log, the companions' sequences) is not there.
+ * pg_dump brings a brain back.
  *
  * ── What it is not ──────────────────────────────────────────────────────────
  * Not the whole brain: thought_audit, the sources, facets, claims, relations,
@@ -124,8 +135,8 @@ export interface BackupOptions {
   /** The per-statement bound the client's session carries, in seconds (0: none); the counts lift it and put it back. */
   statementTimeoutS?: number;
   writer?: Writer;
-  /** Awaited after each table is written and counted, inside the snapshot: the live suite's door to write between tables ([50]). */
-  afterTable?: (t: TableResult) => Promise<void>;
+  /** Awaited after each table is written and counted, inside the snapshot, with the run's transaction: the live suite's door to act between tables ([50]). */
+  afterTable?: (t: TableResult, tx: SQL) => Promise<void>;
 }
 
 /** One table's outcome: written (rows, bytes, the page queries it took), or a companion not exported and why. */
@@ -174,6 +185,16 @@ export function removePending(): void {
   for (const f of pendingFiles) {
     try { unlinkSync(f); } catch { /* gone already */ }
     pendingFiles.delete(f);
+  }
+}
+
+/** SIGINT, SIGTERM and SIGHUP remove this process's pending files, then exit 130, 143 and 129. */
+export function installSignalCleanup(): void {
+  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
+    process.on(sig, () => {
+      removePending();
+      process.exit(code);
+    });
   }
 }
 
@@ -249,12 +270,25 @@ export async function run(opts: BackupOptions): Promise<number> {
     // A server whose platform cannot watch the socket refuses the setting (and would refuse it in a startup packet,
     // the connection with it): set here, best effort, before the snapshot. The one connection a CLI run holds keeps it.
     await opts.sql.unsafe(`SET client_connection_check_interval = '${CONNECTION_CHECK}'`).catch(() => {});
+    // Before the transaction, so that its first statement can lock: the database reached, and which companions are
+    // tables to export.
+    const [{ db }] = (await opts.sql.unsafe("SELECT pg_catalog.current_database() AS db")) as { db: string }[];
+    if (opts.url !== undefined) {
+      const refusal = await reachedDatabaseRefusal(opts.sql, opts.url);
+      if (refusal !== null) throw Object.assign(new Error(refusal), { refused: true });
+    }
+    const found = new Map<string, string | null>();
+    for (const t of BACKUP_TABLES) if (t.optional) found.set(t.name, await companionProblem(opts.sql, t));
+    const toLock = BACKUP_TABLES.filter((t) => !t.optional || found.get(t.name) === null).map((t) => t.name);
     await opts.sql.begin("ISOLATION LEVEL REPEATABLE READ READ ONLY", async (txn) => {
       const tx = txn as unknown as SQL;
-      const [{ db }] = (await tx.unsafe("SELECT pg_catalog.current_database() AS db")) as { db: string }[];
-      if (opts.url !== undefined) {
-        const refusal = await reachedDatabaseRefusal(tx, opts.url);
-        if (refusal !== null) throw Object.assign(new Error(refusal), { refused: true });
+      // pg_dump's lock: ACCESS SHARE on every table to export, taken before the snapshot (a REPEATABLE READ
+      // transaction's snapshot is its first query's; LOCK is none), so no TRUNCATE, DROP, rename or other change of
+      // shape lands between the snapshot and a table's read. A missing core table fails here (42P01).
+      try {
+        await tx.unsafe(`LOCK TABLE ${toLock.join(", ")} IN ACCESS SHARE MODE`);
+      } catch (e) {
+        throw new Error(`locking ${toLock.join(", ")}: ${reasonOf(e)}`);
       }
       if (!existsSync(out)) mkdirSync(out, { recursive: true, mode: 0o700 });
       w.out(`Brain backup — ${date}, database ${db}, to ${out}`);
@@ -262,7 +296,8 @@ export async function run(opts: BackupOptions): Promise<number> {
         const file = join(out, `${t.name}-${date}.json`);
         try {
           if (t.optional) {
-            const problem = await companionProblem(tx, t);
+            // Locked as found, or absent then and passed over now: read again under the lock, in the snapshot.
+            const problem = found.get(t.name) === null ? await companionProblem(tx, t) : found.get(t.name)!;
             if (problem !== null) {
               results.push({ table: t.name, rows: 0, bytes: 0, pages: 0, file, skipped: problem });
               w.out(`  ${t.name}: ${problem === "absent" ? "not on this brain" : `not exported — ${problem} stands under the name`}`);
@@ -279,7 +314,7 @@ export async function run(opts: BackupOptions): Promise<number> {
           const result = { table: t.name, rows, bytes: statSync(tmp).size, pages, file };
           results.push(result);
           w.out(`  ${t.name}: ${rows} row(s)`);
-          await opts.afterTable?.(result);
+          await opts.afterTable?.(result, tx);
         } catch (e) {
           throw new Error(`${t.name}: ${reasonOf(e)}`);
         }
@@ -316,6 +351,10 @@ export async function run(opts: BackupOptions): Promise<number> {
   const absent = results.filter((r) => r.skipped === "absent").map((r) => r.table);
   const passed = results.filter((r) => r.skipped !== undefined && r.skipped !== "absent").map((r) => r.table);
   w.out(`Done: ${written.length} table(s) from one snapshot, in ${out}.${absent.length ? ` Not on this brain: ${absent.join(", ")}.` : ""}${passed.length ? ` Passed over, another relation under the name: ${passed.join(", ")}.` : ""}`);
+  // A companion this run did not write, whose file of this date an earlier run did: not this snapshot's, and not
+  // removed (it is the earlier run's backup), but said.
+  const stale = results.filter((r) => r.skipped !== undefined && existsSync(r.file)).map((r) => r.file);
+  if (stale.length) w.out(`An earlier run's file of this date stands beside these, from another snapshot: ${stale.join(", ")}.`);
   return 0;
 }
 
@@ -331,12 +370,7 @@ if (import.meta.main) {
   const timeout = cli.int("statement-timeout", { absent: STATEMENT_TIMEOUT_S, min: 0, max: 2147483 });
   const out = cli.value("out") ?? "backup";
   // A stop mid-run takes this run's unfinished files with it.
-  for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
-    process.on(sig, () => {
-      removePending();
-      process.exit(code);
-    });
-  }
+  installSignalCleanup();
   const sql = openSql(url, { max: 1, session: { statement_timeout: `${timeout}s` } });
   await closeThenExit(sql, async () => {
     return run({ sql, out, url, statementTimeoutS: timeout });

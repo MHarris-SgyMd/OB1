@@ -5648,7 +5648,9 @@ The brain's `thoughts` and its entity graph (`ob1_entities`,
 companion tables `entities`, `edges`, `ingestion_jobs` and `ingestion_items`
 when the brain has them as tables with their schema's key (another relation
 under the name is named and passed over), read in one REPEATABLE READ, READ
-ONLY transaction, so the files agree. Each row is Postgres's own
+ONLY transaction whose first statement locks every table it reads (ACCESS
+SHARE, before the snapshot, as pg_dump does), so the files agree and no
+TRUNCATE or rename lands under the run. Each row is Postgres's own
 `to_jsonb(row)`: timestamps keep their microseconds and the vector its text,
 and `jsonb_populate_record` reads a row back into the same values. Pages of
 1,000 follow each table's primary key, and each table's rows are compared with
@@ -5657,7 +5659,8 @@ its `count(*)` in the same snapshot. Every file is written new to a
 existing path) and renamed only once all are, so a run that fails first renames
 nothing and removes its files; a directory it made once connected stays.
 SIGINT, SIGTERM and SIGHUP remove the run's files too; a run killed outright
-leaves them. The session's `client_connection_check_interval` (10 s, where the
+leaves them. A companion's file an earlier run wrote the same date, when this
+run did not write one, stays and is named. The session's `client_connection_check_interval` (10 s, where the
 server's platform has it) ends a stopped run's statement on the server. SELECT
 on the tables is enough. A page is held in memory whole, and the snapshot holds
 back vacuum's horizon for the run's length, as pg_dump's does.
@@ -5665,13 +5668,17 @@ back vacuum's horizon for the run's length, as pg_dump's does.
 It is the `db/` home of `recipes/brain-backup`'s export (SMD-2144), which
 leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
 `pg_dump` is (`deploy/README.md`, the `postgres` service row). test-live
-[50] holds the round trip, a companion table present, the others named absent
-and a view under one's name passed over, a page of three across composite
-keys, an empty table, the one snapshot under a write between tables, the
-refusals of a role that may not read a table, of a planted path and of
-another database, the page bound on the session and after a count, a SIGTERM
-mid-page (the files removed, the statement ended on the server), and a failed
-rename.
+[50] (in the sweep shard) holds the round trip, a companion table present,
+one named absent and a view and a keyless table under companions' names passed
+over, a page of three across composite keys, an empty table and an earlier
+run's companion file named, the one snapshot under a write between tables and
+a TRUNCATE kept waiting by the lock, the refusals of a role that may not read a
+table, of a planted path and of another database, the statement bound on the
+session and put back after a count, a SIGTERM while the run waits on its lock
+(the statement ended on the server), the signal cleanup itself, and a failed
+rename. Loaded back into a brain the rows pass through its triggers and lack
+what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
+brings a brain back.
 
 ## Extensions
 

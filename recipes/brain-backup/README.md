@@ -38,7 +38,9 @@ cd ~/brain-backup && bun /path/to/checkout/db/backup.ts --out ~/brain-backups
   `backup FAILED — Failed to connect`.
 - **Where the files go.** `--out`, or `./backup` under the directory the run
   starts from. One JSON array per table, named `<table>-<UTC date>.json`, as the
-  recipe named them; a second run the same day replaces them. Give `--out` a
+  recipe named them; a second run the same day replaces them (a companion
+  table's file from an earlier run that day, when this run did not write one,
+  stays and is named). Give `--out` a
   directory outside the checkout: the files hold every thought's text. (The
   checkout's `.gitignore` covers `backup/` at its root, in `db/` and in
   `recipes/brain-backup/`, where the old script's cron job ran.)
@@ -73,7 +75,9 @@ cd ~/brain-backup && bun /path/to/checkout/db/backup.ts --out ~/brain-backups
   table) is named and passed over. The smart-ingest plugin's tables, in its own
   schema `plugin_smart_ingest`, are not exported: `pg_dump` has them.
 - **One snapshot.** Every table is read in one read-only transaction, so the
-  files agree with each other.
+  files agree with each other. As `pg_dump` does, the run locks every table it
+  reads before the snapshot (ACCESS SHARE: writes go on), so a `TRUNCATE`, drop
+  or rename waits for the run rather than landing under it.
 - **The JSON is Postgres's.** Each row is `to_jsonb(row)`. Downstream tooling
   will see three differences from the recipe's files:
   - timestamps keep their microseconds and offset (`2026-11-13T22:16:04.116303+00:00`), where the recipe wrote milliseconds and `Z`;
@@ -99,6 +103,12 @@ cd ~/brain-backup && bun /path/to/checkout/db/backup.ts --out ~/brain-backups
 ## The whole brain
 
 The export is the brain's portable, readable form, not its restore path.
+Loaded back into a brain (`INSERT … SELECT * FROM jsonb_populate_recordset(…)`),
+the rows pass through its triggers: each thought gets a new capture event dated
+at the load and loses its `actor_*` marks, and what the export leaves out is
+not there — long thoughts' chunk windows (semantic search finds them again only
+once `db/reembed.ts` rebuilds them), the lineage rows, the audit log, and the
+companion tables' sequences.
 **`pg_dump` of the stack's database is the whole-brain backup**:
 
 ```bash
