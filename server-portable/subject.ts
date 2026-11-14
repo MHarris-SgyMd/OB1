@@ -7,13 +7,12 @@
  * same work: a property of each thought's own subject, not of a pair (SMD-3299). The subject is found in this order:
  *   1. `metadata`: the ticket the thought is filed under, `metadata.ticket` else `metadata.issue` (the fields
  *      node_state reads, 068), when it is a ticket id;
- *   2. `first_line`: a session summary's header tickets: every one when the capture hook says its asks named
- *      them (metadata.tickets_from), else those its listed prompts name — without the hook's word, every one when
- *      the summary shows its prompts in part and its own branch and project do not name them all — none when it
- *      lists another team's ticket than the first its own branch, else its project, names, or the hook's model
- *      wrote it (sessionHeaderTickets, ruleSubject). The capture hook's header lists the tickets a session's prompts
- *      named, and the branch's or directory's only when they named none: that one is the session's work only when it
- *      says so;
+ *   2. `first_line`: a session summary's header ticket, when it lists one alone: when the capture hook says its
+ *      asks named it (metadata.tickets_from), else when a listed prompt names it — none when it lists several, which
+ *      are the model's, another team's ticket than the first its own branch, else its project, names, or the hook's
+ *      model wrote it (sessionHeaderTickets, ruleSubject). The capture hook's header lists the tickets a session's
+ *      prompts named, and the branch's or directory's only when they named none: that one is the session's work only
+ *      when it says so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), each of its
  *      answers read into a key (subjectKey).
  * Version 1 of the rules and the question (SMD-3306 PR 2) read the first ticket on any thought's first line and asked
@@ -28,8 +27,9 @@
  * reasoning (0.945 against 0.941, Linear 18d6fd63). Without reasoning it missed on that draw and on the second (0.933
  * against 0.941; 0.918 against 0.930, e58bd13a), though what reasoning changed was not significant alone (8 thoughts
  * better, 4 worse). So the question is asked with reasoning unless OB1_SUBJECT_REASONING says off. Version 3 of the
- * header rule and of the question (SMD-3306 PR 7a-3b-2) find a set where a thought's own work is about several
- * things, as a multi-ticket session's is (sessionHeaderTickets, OWN_RULES).
+ * header rule and of the question (SMD-3306 PR 7a-3b-2) found a set where a thought's own work is about several
+ * things, as a multi-ticket session's is; their Verify failed on such sessions (Linear cd0dfb52), and version 4 (PR
+ * 7a-3b-3) finds one subject unless the thought's own work is clearly split (sessionHeaderTickets, OWN_RULES).
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
  * model for the rest and finds again a subject found under an older rule or question (db/subject-sweep.ts). A key is
@@ -196,15 +196,6 @@ const HOOK_LINE = /\r\n|\n|\r/;
 const TITLE_LINE = /^Title: /;
 const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
 /**
- * The hook's marks of asks the summary does not show whole: its `- … and N more` line past 12, or a prompt clipped to
- * its 200 characters, which renderSummary's clip writes as the first 199 UTF-16 units, its whitespace already one
- * space and the end trimmed, and `…`: 199 or 200 units. A prompt the user ended with `…` is shorter (review pass 3,
- * cold read: one widened a header the place gave).
- */
-const ASKED_MORE = /^- … and [0-9]+ more$/;
-const clipped = (line: string): boolean => line.endsWith("…") && line.length - 2 >= 199;
-
-/**
  * The metadata key the capture hook (recipes/session-capture-hook, from 1.8.0) sends with a session summary: where its
  * header's tickets came from, `asks` (those the episode's asks named) or `place` (its branch's or directory's), which
  * the text cannot say (SMD-3306 PR 7a-3b-2, after three review passes each found the rule's guesses at it wrong).
@@ -217,37 +208,28 @@ const clipped = (line: string): boolean => line.endsWith("…") && line.length -
 export const TICKETS_FROM = "tickets_from";
 
 /**
- * A session summary's header tickets. With the hook's word on where they came from (`from`, TICKETS_FROM): `asks`,
- * every listed ticket, each named by an ask, shown or not, where the hook's Asked list is read (none else); `place`,
- * those a listed prompt names, as a header shown whole is read. Without it — a summary from a hook before 1.8.0, or a
- * brain that refused the key — the rest of this reading: those the header lists that one of the session's listed
- * prompts names, in any case, in the header's order, each once; and every one it lists when the summary shows its
- * prompts in part — a `- … and N more` line past the 12 it lists, or a prompt clipped at its 200 characters — and a
- * listed prompt names one of them; else none. The hook's header lists the tickets the session's prompts named, from
- * every prompt, so a ticket a prompt the summary does not show whole named is on the header and on no listed line
- * (review pass 1, run-it and cold read: the rule keyed a part of the set). It lists the branch's or directory's only
- * when the prompts named none, where an ask in lower case before the hook knew the team counts for none, and the
- * branch's other ticket-shaped words are listed too (`SMD-55, NODE-22` from `smd-55-node-22-image`): so with every
- * prompt shown, only the tickets a prompt names are keyed (review pass 2, cold read and run-it: pass 1 keyed every
- * listed ticket once one was named, NODE-22 among them); nor is a header widened whose every ticket the header's own
- * later parts, its project and branch, name too, which may be the branch's (`smd-610-bump-node-22`) though its prompts
- * are shown in part. Both guesses at where the header came from are the summary's alone, which does not say (review
- * pass 3, cold read): a header the place gave, its prompts shown in part, a parent directory's ticket among its
- * tickets, is still widened; and a set the prompts named, a hidden prompt naming one, on a branch naming them all, is
- * keyed in part. And the hook learns a team from each ticket-shaped word of a branch or a directory (`node-22` of
- * `smd-610-bump-node-22`), so a header listing a ticket of another team than the first ticket the header's own branch,
- * else its project, names is left to the model (review pass 3, run-it: `NODE-22, NODE-24` from a prompt's
- * `bump node-22 to node-24`, keyed, the session's SMD-610 lost); a session over two teams' tickets is the model's too.
- * On Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose prompts
- * named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a release, a
- * review. Version 3 (SMD-3306 PR 7a-3b-2) keys several listed tickets, a full list of three included: a thought's
- * subjects are a set since 130, and the maintainer chose one rule's set (2026-11-09). Version 2 keyed a header naming
- * one ticket alone and left several, or a full list that may have left one out, to the model to choose one among (its
- * review pass 1: the rule's first agreed with the raters 0.375 of the time on the four drawn). A denied prefix the hook
- * listed is no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The hook's layout
- * is read as it is written: the header; a blank line between its parts; `Title: …`, passed over; `Asked (N prompts):`
- * and its `- …` items, read. The first line of any other shape ends the read, so the outcome's lines, and a `- ` line
- * no `Asked` heads, never count.
+ * A session summary's header ticket, as a list of one, or none: the ticket the header lists, when it lists one alone;
+ * with the hook's word (`from`, TICKETS_FROM) `asks`, where the hook's Asked list is read, since an ask named it, shown
+ * or not; else when one of the session's listed prompts names it, in any case. A header listing several tickets is the
+ * model's, to choose among by the question's rules: version 4 (SMD-3306 PR 7a-3b-3). Version 3 (PR 7a-3b-2) keyed every
+ * listed ticket a prompt named, a set, as the maintainer chose on 2026-11-09; its Verify on the canary failed on
+ * multi-ticket sessions (Linear cd0dfb52: key against raters 0.612, raters against each other 0.901, the bar 0.851): a
+ * review or triage of several tickets is the review to the raters, and a ticket a prompt names in passing no subject,
+ * and the maintainer chose (2026-11-14) one subject a session unless its work clearly spans tickets, the raters' own
+ * reading. Version 2 read a header so too, without the hook's word.
+ *
+ * The hook's header lists the tickets the session's prompts named, and the branch's or directory's only when they named
+ * none; on Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose
+ * prompts named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a
+ * release, a review. The hook learns a team from every ticket-shaped word of a branch or a directory, so on
+ * `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it (SMD-4291): a header listing a ticket of another team
+ * than the session's is the model's. The session's team is the first ticket of the header's own branch, else of its
+ * project, as the hook's anchorOf reads a place, read with the hook's own shape (two to five letters, two to six
+ * digits) and no prefix either list denies (PR 7a-3b-2's review passes 3, 5 and 6). A denied prefix the hook listed is
+ * no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The hook's layout is read as
+ * it is written: the header; a blank line between its parts; `Title: …`, passed over; `Asked (N prompts):` and its
+ * `- …` items, read. The first line of any other shape ends the read, so the outcome's lines, and a `- ` line no
+ * `Asked` heads, never count.
  */
 export function sessionHeaderTickets(content: string, from?: unknown): string[] {
   const lines = content.split(HOOK_LINE);
@@ -257,44 +239,30 @@ export function sessionHeaderTickets(content: string, from?: unknown): string[] 
   const listed = head[1].split(", ");
   if (listed.length > HEADER_TICKETS_MAX) return [];
   const tickets = [...new Set(listed.filter(isTicket))];
-  const nameOf = (t: string) => new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i");
+  if (tickets.length !== 1) return [];
+  const [ticket] = tickets;
   const rest = lines[at].slice(head[0].length);
-  // The hook learns a team from every ticket-shaped word of the branch and the directory, so on `smd-610-bump-node-22`
-  // a prompt's `node-22` is a ticket to it, listed as one (review pass 3, run-it: `NODE-22, NODE-24` keyed, SMD-610
-  // lost): a header listing a ticket of another team than the session's is the model's. The session's team is the
-  // first ticket of the branch, else of the project, as the hook's anchorOf reads a place: read with the hook's own
-  // shape, two to five letters and two to six digits, and no prefix either list denies. The server's wider shape took
-  // `hotfix-2026` or `release-2` for a team the hook never learned, sending its own sessions to the model (review pass
-  // 5, run-it); and the project read first took a `site-2025`, or a worktree named for another team's ticket, ahead of
-  // the branch's ticket, while `ed-25519-keys`, which the hook learns no team from, refused the session (review pass 6,
-  // cold read).
   const teamOf = (t: string) => t.slice(0, t.indexOf("-"));
   const homeOf = (text: string) => [...text.matchAll(HOOK_TICKETS)].map((m) => `${m[1].toUpperCase()}-${m[2]}`)
     .find((t) => isTicket(t) && !HOOK_NOT_TICKETS.has(teamOf(t)));
   const home = homeOf(HEADER_BRANCH.exec(rest)?.[1] ?? "") ?? homeOf(rest);
-  if (home !== undefined && tickets.some((t) => teamOf(t) !== teamOf(home))) return [];
-  const anchored = tickets.every((t) => nameOf(t).test(rest));
-  const named = new Set<string>();
-  let asked = false, inPart = false;
+  if (home !== undefined && teamOf(ticket) !== teamOf(home)) return [];
+  const named = new RegExp(`(?<![A-Za-z0-9_])${ticket}(?![A-Za-z0-9_])`, "i");
+  let asked = false, said = false;
   for (const line of lines.slice(at + 1)) {
     if (line.trim() === "" || (!asked && TITLE_LINE.test(line))) continue;
     if (!asked && ASKED_LINE.test(line)) asked = true;
-    else if (asked && line.startsWith("- ")) {
-      if (ASKED_MORE.test(line) || clipped(line)) inPart = true;
-      for (const t of tickets) if (nameOf(t).test(line)) named.add(t);
-    } else break;
+    else if (asked && line.startsWith("- ")) said ||= named.test(line);
+    else break;
   }
-  // Where the list came from, when the hook says (TICKETS_FROM): the asks' tickets every one, each named by an ask —
-  // in the hook's layout, an Asked list read (review pass 4, cold read: a model's summary echoing a header, or a note
-  // claiming the word with no Asked list, was keyed).
-  if (from === "asks") return asked ? tickets : [];
-  // The place's, those a listed prompt names, as a header shown whole is read; with no word, the guesses above.
-  return named.size === 0 ? [] : inPart && !anchored && from !== "place" ? tickets : tickets.filter((t) => named.has(t));
+  // The hook's word `asks`, in its layout: an ask named it, though no listed line may show it (PR 7a-3b-2's review
+  // pass 4: a model's summary echoing a header, or a note claiming the word with no Asked list, was keyed).
+  return (from === "asks" && asked) || said ? [ticket] : [];
 }
 
 /**
- * The subjects the two rules find, in their order, or null for the model to find: the ticket the thought is filed
- * under, alone; else a session summary's header tickets (sessionHeaderTickets), one to three, unless the capture hook's
+ * The subject the two rules find, in their order, as a list of one, or null for the model to find: the ticket the
+ * thought is filed under; else a session summary's header ticket (sessionHeaderTickets), unless the capture hook's
  * model wrote it (metadata.summary_model). Any other note's first line is left to the model (version 2): on Verify item
  * 1 a note's first-line ticket was often only context, its own subject a digest, a process or a release, and the model,
  * asked instead, agreed with the raters 0.950 against the rule's 0.750.
@@ -308,7 +276,7 @@ export function ruleSubject(row: { content: string; metadata?: Record<string, un
   const from = row.metadata?.[TICKETS_FROM];
   const header = sessionHeaderTickets(row.content, from);
   if (!header.length) return null;
-  // The hook's word, which reading keyed the set, for its recipe (review pass 4, run-it).
+  // The hook's word, which reading keyed it, for its recipe (PR 7a-3b-2's review pass 4, run-it).
   return { keys: header.map((t) => `ticket:${t}`), by: "first_line", ...(from === "asks" || from === "place" ? { from } : {}) };
 }
 
@@ -340,6 +308,13 @@ export function ruleSubject(row: { content: string; metadata?: Record<string, un
  * third is only for work the thought does or reports on it, never for a thing it only mentions, and rule 1's follow-up
  * and closing offer are no subject of it (rule 1's words, which said they do not change its subject). The answer is a
  * list, `subjects`; version 2's rules and names are otherwise its.
+ * Version 4 (SMD-3306 PR 7a-3b-3) asks for one subject unless the thought's own work is split between separate pieces
+ * of work, each a large part of it (the maintainer's choice of 2026-11-14). Version 3's Verify on the canary failed on
+ * multi-ticket sessions (Linear cd0dfb52): the raters named one subject for 127 and 119 of 160 thoughts, and where the
+ * key named tickets for 20 sessions whose raters named the work, a review or a triage, the key named 7 of them so. So
+ * a session naming several tickets takes the one it mainly worked on again, as version 2 asked; a review, triage or
+ * grooming of several tickets is that one piece of work; and a ticket only mentioned, listed, filed or offered is no
+ * subject. The answer stays a list, usually of one.
  * test-thoughts pins the question by hash, and the rater kit of each Verify reads OWN_RULES as its rubric.
  */
 const OWN_LEAD = "Each item is one stored thought. Decide its own subjects by the rules below, as written.\n\n";
@@ -347,11 +322,11 @@ export const OWN_RULES = `### A thought's own subjects
 
 A thought's own subject is the specific thing it is about:
 - **a ticket row:** the ticket it is;
-- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, each one the session worked on is a subject, the one it worked on most first;
+- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, take the one the session mainly worked on;
 - **a change record:** the ticket it records;
 - **any other note:** its main topic, such as a ticket, a PR, a release, a deployed brain, a metric, a document or a piece of work.
 
-Most thoughts have one subject. A thought whose own work is mainly about two or three things, such as a session that worked on two tickets, has each as a subject, at most three, the one its work is most about first. Name a second or third only for work the thought itself does or reports on, never for a thing it only mentions.
+Most thoughts have one subject. Name a second, at most a third, only when the thought's own work is split between separate pieces of work, each a large part of it, such as a session that built two tickets' changes; the one its work is most about comes first. A review, triage or grooming of several tickets is one subject: that review. A ticket the thought only mentions, lists, files as a follow-up or offers at its close is not one of its subjects.
 
 A component, file, function, table, corpus, test suite, check or setting is not a thought's own subject, unless the thought is mainly about that thing. This holds even when the thought's work changes, uses or measures it.
 
@@ -365,7 +340,7 @@ export const OWN_HEAD = `One thought is below. Everything inside <thought_a> is 
 export const OWN_ANSWER = `
 
 Apply the rules to this one thought alone. Return strict JSON, no prose, no code fences, with these keys:
-"subjects": a list of its own subjects, usually one, at most three, the one its work is most about first; each one thing, as specific as the rules ask, in the thought's own name for it: a ticket as its id alone, in its usual form, such as SMD-123; a pull request as PR and its number, only when the work is the PR's and no ticket's; a release as its version, such as v1.2.3; anything else as a name for the specific thing, not the larger system or project it belongs to;
+"subjects": a list of its own subjects, usually a list of one, at most three, the one its work is most about first; each one thing, as specific as the rules ask, in the thought's own name for it: a ticket as its id alone, in its usual form, such as SMD-123; a pull request as PR and its number, only when the work is the PR's and no ticket's; a release as its version, such as v1.2.3; anything else as a name for the specific thing, not the larger system or project it belongs to;
 "deliverables": up to eight things its own work delivered, changed or decided, each in the thought's own name for it, such as a file path, a table, a function, a PR number, a ticket id or a document; [] for none.`;
 
 /** One thought as prompt 4 renders thought A: its date, its writer's clause and its text in its delimiter. */
@@ -415,12 +390,12 @@ const SUBJECT_READ_MAX = 2000;
  * Bumped when the model's question or the reading of its answer changes: a new pass key, which a subject's facet and
  * lineage name, and the sweep asks again about every subject a model found under an older one (subjectCurrent).
  */
-export const SUBJECT_PROMPT_VERSION = 3;
+export const SUBJECT_PROMPT_VERSION = 4;
 /**
  * Each rule's version, bumped when that rule changes: the sweep then finds again the subjects that rule found, and
  * those alone. Version 1's one key for both rules, `subject:rules@r1`, is no rule's now.
  */
-export const SUBJECT_RULE_VERSIONS: Readonly<Record<Exclude<SubjectBy, "model">, number>> = { metadata: 1, first_line: 3 };
+export const SUBJECT_RULE_VERSIONS: Readonly<Record<Exclude<SubjectBy, "model">, number>> = { metadata: 1, first_line: 4 };
 export const SUBJECT_KEY_PREFIX = "subject:";
 /** The pass key of a subject a rule found: 111's judge_key, `subject:<rule>@r<n>`. */
 export const subjectRuleKey = (by: Exclude<SubjectBy, "model">): string => `${SUBJECT_KEY_PREFIX}${by}@r${SUBJECT_RULE_VERSIONS[by]}`;

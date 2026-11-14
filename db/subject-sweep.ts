@@ -86,7 +86,7 @@
  * oldest pooled first, need not.
  *
  * The extraction pass records the rules' subjects with each thought's entities (extract-entities.ts's processRow), so
- * a thought filed under a ticket, or a session summary whose asks name its header's tickets, has its subjects once
+ * a thought filed under a ticket, or a session summary whose asks name its header's one ticket, has its subject once
  * it is extracted, and the sweep finishes it unasked. 111's door replaces a subject found under another pass key, so a
  * changed rule finds again the subjects it found, and those alone; version 1's one key for both rules is taken whole,
  * once, its filed tickets found again unchanged under the metadata rule's own key (review pass 5). Two sweeps, or a
