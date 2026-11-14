@@ -622,7 +622,8 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
     // A dial not open within RELAY_DIAL_MS is dropped and tried again (review pass 3 of 3b-2: a coordinator that takes the
     // connection and never answers the upgrade held it for good, as the relay's HELLO_MS found of the broker's).
     if (dialing) clearTimeout(dialing);
-    dialing = setTimeout(() => {
+    // This dial's own bound: a late open or close of an earlier dial clears nothing of it, and is ignored.
+    const bound = setTimeout(() => {
       if (opened || ws !== sock) return;
       try { (sock as unknown as { terminate?: () => void }).terminate?.() ?? sock.close(); } catch { /* gone */ }
       ws = null;
@@ -630,8 +631,11 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       once("dial", `background slots: the coordinator at ${url} took the connection but did not open the socket within ${RELAY_DIAL_MS / 1000} s — dialled again; said once`);
       again();
     }, RELAY_DIAL_MS);
+    dialing = bound;
     sock.onopen = () => {
-      if (dialing) clearTimeout(dialing);
+      clearTimeout(bound);
+      // An earlier dial's socket opening late: not this client's any more.
+      if (ws !== sock) { try { sock.close(); } catch { /* gone */ } return; }
       opened = true;
       up = true;
       wait = RELAY_RECONNECT_MS.first;
@@ -667,7 +671,7 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       core.heard(m);
     };
     sock.onclose = (ev) => {
-      if (dialing) clearTimeout(dialing);
+      clearTimeout(bound);
       if (ws !== sock) return;
       if (opened) return lost(sock, `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`);
       ws = null;
