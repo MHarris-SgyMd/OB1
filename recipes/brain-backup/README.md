@@ -96,6 +96,15 @@ cd ~/brain-backup && bun /path/to/checkout/db/backup.ts --out ~/brain-backups
   table's text, to be removed by hand.
 - **The timeout.** `--statement-timeout SECONDS` (60; 0 for none) bounds each
   page, as `FETCH_TIMEOUT_MS` did. The counts run unbounded.
+- **Not during an upgrade.** While the run holds its locks, a migration that
+  alters a table it reads (most alter `thoughts`) waits, the brain's reads and
+  writes of that table wait behind the migration, and after the migrator's 10 s
+  lock timeout the upgrade fails: run it again once the backup is done.
+  Schedule backups apart from upgrades; `pg_dump` behaves the same.
+- **Size and time.** About 6.5 minutes and 18 GB of files a million thoughts
+  with their graph (the embedding's text is most of a thought's row), so hours
+  at 100 million and days at a billion, the locks and the snapshot held
+  throughout. A large brain's backup is `pg_dump`.
 - **The wrong database.** With `PGDATABASE` exported, Bun's client connects to
   that database rather than the URL's. The run refuses with exit 2, and its
   first line names the database it reads.

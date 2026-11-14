@@ -16,7 +16,7 @@
  *   entities, edges                                               when present (schemas/entity-extraction)
  *   ingestion_jobs, ingestion_items                               when present (the retired smart-ingest schema's, in public)
  *
- * A core table missing is a brain not migrated, and the run refuses. A
+ * A core table missing is a brain not migrated, and the run fails (exit 1). A
  * companion is exported only when a table of its name is there with the key
  * its schema gives it; anything else of that name — a view, a sequence,
  * another tool's table — is named and passed over. The smart-ingest plugin's
@@ -59,8 +59,8 @@
  * table is written and counted. A run that fails before that point renames
  * nothing and removes its own files, so an earlier backup of the same date
  * stands; it exits 1 with the reason (the table it was reading, when it was
- * reading one). The directory is made, when absent, only once the connection
- * is up, and is left made. A rename that fails after that point is said,
+ * reading one). The directory is made, when absent, only once the tables are
+ * locked, and is left made. A rename that fails after that point is said,
  * naming the files already replaced; the rest of the run's files are removed.
  * SIGINT, SIGTERM and SIGHUP remove them too (exit 130, 143, 129); a run
  * killed outright (SIGKILL, the OOM killer) leaves them, each a whole table, to
@@ -83,10 +83,26 @@
  * statement_timeout is 60 s a statement by default (--statement-timeout; the
  * recipe's FETCH_TIMEOUT_MS was its per-page bound): a page past it fails the
  * run, and the server cancels the query. The count(*)s run unbounded — on a
- * large brain a count is longer than a page — and client_connection_check_interval
- * (10 s, set where the server's platform has it) has the server cancel a statement whose client has gone, so a stopped
- * run's count does not hold its snapshot to the end. A page is held in memory
- * whole: 1,000 rows, so about a gigabyte for 1 MB thoughts.
+ * large brain a count is longer than a page — and the bound the session had is
+ * put back after each. client_connection_check_interval (10 s, set where the
+ * server's platform has it) has the server cancel a statement whose client has
+ * gone, so a stopped run's statement does not hold its snapshot to the end.
+ *
+ * ── Size and time ───────────────────────────────────────────────────────────
+ * A page of thoughts is 100 rows, of the other tables 1,000, each written with
+ * one write; the run holds about three times a page's JSON (a thoughts page of
+ * 1 MB rows: about 300 MB). Thoughts are read in key order, at random through
+ * the heap: measured (pass 4 of the review) at about 6.5 minutes and 18 GB of
+ * files a million thoughts with their graph, so hours at 100 million and days
+ * at a billion, the locks and the snapshot held throughout. A large brain's
+ * backup is pg_dump.
+ *
+ * Not during an upgrade. A migration that alters a table the run reads (most
+ * alter thoughts) asks for ACCESS EXCLUSIVE, waits behind the run's lock, and
+ * every read and write of that table waits behind it until the migrator's
+ * 10 s lock timeout, when the upgrade fails (exit 1; run it again once the
+ * backup is done). pg_dump does the same. One run at a time in a process: the
+ * pending files and RUN_ID are the module's.
  */
 
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
@@ -96,16 +112,18 @@ import type { SQL } from "bun";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, openSql, reachedDatabaseRefusal } from "./connect.ts";
 
-/** A table the backup writes, its primary key in order (the keyset's columns), and whether a brain may lack it. */
+/** A table the backup writes, its primary key in order (the keyset's columns), its page, and whether a brain may lack it. */
 export interface BackupTable {
   readonly name: string;
   readonly key: readonly string[];
+  /** Rows per page; PAGE_SIZE when not given. Thoughts are large: a page is held in memory whole. */
+  readonly pageSize?: number;
   readonly optional?: true;
 }
 
 /** The tables, in the order they are read and summarised. */
 export const BACKUP_TABLES: readonly BackupTable[] = [
-  { name: "thoughts", key: ["id"] },
+  { name: "thoughts", key: ["id"], pageSize: 100 },
   { name: "ob1_entities", key: ["id"] },
   { name: "thought_entities", key: ["thought_id", "entity_id"] },
   { name: "ob1_entity_edges", key: ["thought_id", "from_entity_id", "to_entity_id", "relation"] },
@@ -122,7 +140,10 @@ export const PAGE_SIZE = 1000;
 export const STATEMENT_TIMEOUT_S = 60;
 
 export interface BackupOptions {
-  /** A client on the brain; one connection is enough, and the run holds it in one transaction. */
+  /**
+   * A client on the brain, of one connection (the CLI's): the run's session setting
+   * (client_connection_check_interval) and its checks go on it before the transaction, and stay on it after.
+   */
   sql: SQL;
   /** The directory the files go to; made if absent. */
   out: string;
@@ -130,10 +151,8 @@ export interface BackupOptions {
   url?: string;
   /** The UTC date in the file names; today's by default. */
   date?: string;
-  /** Rows per page; PAGE_SIZE by default (the live suite pages small to cross a page). */
+  /** Rows per page for every table, over each table's own (the live suite pages small to cross a page). */
   pageSize?: number;
-  /** The per-statement bound the client's session carries, in seconds (0: none); the counts lift it and put it back. */
-  statementTimeoutS?: number;
   writer?: Writer;
   /** Awaited after each table is written and counted, inside the snapshot, with the run's transaction: the live suite's door to act between tables ([50]). */
   afterTable?: (t: TableResult, tx: SQL) => Promise<void>;
@@ -231,9 +250,9 @@ async function writeTable(tx: SQL, t: BackupTable, path: string, pageSize: numbe
     for (;;) {
       const page = (await tx.unsafe(pageQuery(t, after === null), after === null ? [pageSize] : [...after, pageSize])) as Record<string, string>[];
       pages++;
-      for (const r of page) {
-        writeSync(fd, `${rows === 0 ? "\n" : ",\n"}${r.j}`);
-        rows++;
+      if (page.length > 0) {
+        writeSync(fd, `${rows === 0 ? "\n" : ",\n"}${page.map((r) => r.j).join(",\n")}`);
+        rows += page.length;
       }
       if (page.length < pageSize) break;
       const last = page[page.length - 1];
@@ -262,8 +281,7 @@ function reasonOf(e: unknown): string {
 export async function run(opts: BackupOptions): Promise<number> {
   const w = opts.writer ?? consoleWriter;
   const date = opts.date ?? new Date().toISOString().slice(0, 10);
-  const pageSize = opts.pageSize ?? PAGE_SIZE;
-  const timeout = opts.statementTimeoutS ?? STATEMENT_TIMEOUT_S;
+
   const out = resolve(opts.out);
   const results: TableResult[] = [];
   try {
@@ -290,7 +308,9 @@ export async function run(opts: BackupOptions): Promise<number> {
       } catch (e) {
         throw new Error(`locking ${toLock.join(", ")}: ${reasonOf(e)}`);
       }
-      if (!existsSync(out)) mkdirSync(out, { recursive: true, mode: 0o700 });
+      mkdirSync(out, { recursive: true, mode: 0o700 });
+      // The bound the session carries (the CLI's --statement-timeout), put back after each unbounded count.
+      const [{ bound }] = (await tx.unsafe("SELECT pg_catalog.current_setting('statement_timeout') AS bound")) as { bound: string }[];
       w.out(`Brain backup — ${date}, database ${db}, to ${out}`);
       for (const t of BACKUP_TABLES) {
         const file = join(out, `${t.name}-${date}.json`);
@@ -305,11 +325,11 @@ export async function run(opts: BackupOptions): Promise<number> {
             }
           }
           const tmp = `${file}.${RUN_ID}.tmp`;
-          const { rows, pages } = await writeTable(tx, t, tmp, pageSize);
-          // The count reads the whole table: unbounded, then the page bound back.
+          const { rows, pages } = await writeTable(tx, t, tmp, opts.pageSize ?? t.pageSize ?? PAGE_SIZE);
+          // The count reads the whole table: unbounded, then the session's bound back.
           await tx.unsafe("SET LOCAL statement_timeout = 0");
           const [{ n }] = (await tx.unsafe(`SELECT count(*)::bigint::text AS n FROM ${t.name}`)) as { n: string }[];
-          await tx.unsafe(`SET LOCAL statement_timeout = '${timeout}s'`);
+          await tx.unsafe("SELECT pg_catalog.set_config('statement_timeout', $1, true)", [bound]);
           if (String(rows) !== n) throw new Error(`wrote ${rows} row(s) of ${n} — the pages missed or repeated rows`);
           const result = { table: t.name, rows, bytes: statSync(tmp).size, pages, file };
           results.push(result);
@@ -373,6 +393,6 @@ if (import.meta.main) {
   installSignalCleanup();
   const sql = openSql(url, { max: 1, session: { statement_timeout: `${timeout}s` } });
   await closeThenExit(sql, async () => {
-    return run({ sql, out, url, statementTimeoutS: timeout });
+    return run({ sql, out, url });
   });
 }

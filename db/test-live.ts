@@ -32348,7 +32348,7 @@ if (want("49")) {
 }
 
 if (want("50")) {
-  console.log("\n[50] db/backup.ts on a real Postgres: the core's four tables and a companion table present, a view under a companion's name passed over, from one snapshot, every row once past a page, each read back unchanged; a table the role may not read or a planted .tmp renames nothing, an earlier backup of the date kept; every table locked before the snapshot, so a TRUNCATE waits; the statement bound on the session and put back after each count; a SIGTERM removes the run's files and its statement ends on the server; a rename that fails says what it replaced; another database than the URL's is refused (SMD-3318)");
+  console.log("\n[50] db/backup.ts on a real Postgres: the core's four tables and a companion table present, a view under a companion's name passed over, from one snapshot, every row once past a page, each read back unchanged; a table the role may not read or a planted .tmp renames nothing, an earlier backup of the date kept; every table locked before the snapshot, so a TRUNCATE waits; the lock taken before the snapshot; the session's statement bound put back after each count; a run failing mid-read leaves no file of its own; a SIGTERM removes the run's files and its statement ends on the server; a rename that fails says what it replaced; another database than the URL's is refused (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
     // The retired recipe's export (recipes/brain-backup, [26] until SMD-3318) as the db/ script: driven as deployed — `bun
@@ -32443,14 +32443,15 @@ if (want("50")) {
       // missing a key column loses a row — and a thought and its mention written by another session after the thoughts
       // file: the snapshot leaves both out, so no mention names a thought the thoughts file lacks. Another session's
       // TRUNCATE of a table still to read waits on the run's lock (here it gives up at its lock_timeout), and the
-      // run's statement bound, 7 s here, is back in force after thoughts' unbounded count.
+      // session's statement bound, 7 s on this client, is back in force after thoughts' unbounded count.
       const pageDir = join(scratch, "paged");
       let late = "";
       const lines: string[] = [];
       const pagesOf: Record<string, number> = {};
       let truncated = "not tried", boundAfterCount = "";
+      const sevenSql = new SQL({ url: URL_, max: 1, connection: { statement_timeout: "7s" } });
       const paged = await runBackup({
-        sql, out: pageDir, date: "2026-01-02", pageSize: 3, statementTimeoutS: 7, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) },
+        sql: sevenSql, out: pageDir, date: "2026-01-02", pageSize: 3, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) },
         afterTable: async (t, tx) => {
           pagesOf[t.table] = t.pages;
           if (t.table !== "thoughts") return;
@@ -32469,14 +32470,65 @@ if (want("50")) {
           }
         },
       });
+      await sevenSql.close();
       // A run that failed before the hook wrote nothing to take back.
       if (late !== "") await sql`DELETE FROM thoughts WHERE id = ${late}::uuid`;
       const pagedFiles = await Promise.all(PRESENT.map((t) => held(pageDir, t.name, "2026-01-02")));
-      const fileThoughts = new Set((JSON.parse(pagedFiles[0]?.text ?? "[]") as { id: string }[]).map((r) => r.id));
-      const mentions = JSON.parse(pagedFiles[2]?.text ?? "[]") as { thought_id: string }[];
+      // A file that is not JSON fails the row below (exact's read), not the suite.
+      const parsed = <T,>(text: string | undefined): T[] => { try { return JSON.parse(text ?? "[]") as T[]; } catch { return []; } };
+      const fileThoughts = new Set(parsed<{ id: string }>(pagedFiles[0]?.text).map((r) => r.id));
+      const mentions = parsed<{ thought_id: string }>(pagedFiles[2]?.text);
       assert(paged === 0 && late !== "" && pagedFiles.every(exact) && mentions.length === 5 && mentions.every((m) => fileThoughts.has(m.thought_id))
              && pagesOf.thought_entities === 2 && pagesOf.ob1_entity_edges === 5 && truncated === "55P03" && boundAfterCount === "7s",
-        `…three rows a page, a thought and its mention written by another session between the tables: exit 0, each file every row once and unchanged, the mentions over 2 pages and the edges over 5, the late mention left out with its thought, a TRUNCATE of the edges kept waiting on the run's lock (55P03), the 7 s bound back after the count — one snapshot (exit ${paged}: ${pagedFiles.map(brief).join("; ")}; ${mentions.length} mention(s); pages ${JSON.stringify(pagesOf)}; truncate ${truncated}; bound ${boundAfterCount}; ${lines.find((l) => /FAILED/.test(l)) ?? ""})`);
+        `…three rows a page, a thought and its mention written by another session between the tables: exit 0, each file every row once and unchanged, the mentions over 2 pages and the edges over 5, the late mention left out with its thought, a TRUNCATE of the edges kept waiting on the run's lock (55P03), the session's 7 s bound back after the count — one snapshot (exit ${paged}: ${pagedFiles.map(brief).join("; ")}; ${mentions.length} mention(s); pages ${JSON.stringify(pagesOf)}; truncate ${truncated}; bound ${boundAfterCount}; ${lines.find((l) => /FAILED/.test(l)) ?? ""})`);
+
+      // The lock comes before the snapshot: a run that waits on its lock behind another session's ACCESS EXCLUSIVE on
+      // ob1_entities reads, once let in, what that session committed — a snapshot taken before the lock would not.
+      {
+        const holder = new SQL({ url: URL_, max: 1 });
+        let commit = () => {};
+        const go = new Promise<void>((r) => (commit = r));
+        let held2 = () => {};
+        const holding2 = new Promise<void>((r) => (held2 = r));
+        const holderTx = holder.begin(async (tx) => {
+          await tx`LOCK TABLE ob1_entities IN ACCESS EXCLUSIVE MODE`;
+          await tx`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Dora', 'dora')`;
+          held2();
+          await go;
+        });
+        await holding2;
+        const orderDir = join(scratch, "order");
+        const ordered = runBackup({ sql, out: orderDir, date: "2026-01-07", writer: { out: () => {}, err: () => {} } });
+        const waitedOnLock = await pollUntil(async () => ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE query LIKE 'LOCK TABLE thoughts, %' AND wait_event_type = 'Lock'`)[0] as { n: number }).n === 1, 8000);
+        commit();
+        await holderTx;
+        await holder.close();
+        const orderedCode = await ordered;
+        const orderedEntities = await held(orderDir, "ob1_entities", "2026-01-07");
+        assert(waitedOnLock && orderedCode === 0 && exact(orderedEntities) && orderedEntities?.rows === 4 && /"normalized_name": "dora"/.test(orderedEntities?.text ?? ""),
+          `…the lock before the snapshot: a run that waited on its lock reads the entity the holder committed meanwhile (waited ${waitedOnLock}, exit ${orderedCode}: ${brief(orderedEntities)})`);
+        await sql`DELETE FROM ob1_entities WHERE normalized_name = 'dora'`;
+      }
+
+      // A run failing mid-read — here its hook, once thoughts is written — renames nothing and removes its own file,
+      // the date's earlier file kept.
+      {
+        const midDir = join(scratch, "mid");
+        mkdirSync(midDir);
+        writeFileSync(join(midDir, "thoughts-2026-01-08.json"), "[\"an earlier backup\"]\n");
+        const midLines: string[] = [];
+        let tmpSeen = false;
+        const mid = await runBackup({
+          sql, out: midDir, date: "2026-01-08", writer: { out: () => {}, err: (l) => midLines.push(l) },
+          afterTable: async (t) => {
+            tmpSeen = readdirSync(midDir).some((f) => f.endsWith(".tmp"));
+            throw new Error(`stopped after ${t.table}`);
+          },
+        });
+        assert(mid === 1 && tmpSeen && /backup FAILED — thoughts: stopped after thoughts\. No file was renamed into place, and this run's own files are removed\./.test(midLines.join(" "))
+               && readdirSync(midDir).join(" ") === "thoughts-2026-01-08.json" && readFileSync(join(midDir, "thoughts-2026-01-08.json"), "utf8") === "[\"an earlier backup\"]\n",
+          `…a run failing once thoughts is written: exit 1, its .tmp removed, the date's earlier file kept (exit ${mid}: tmp seen ${tmpSeen}; ${readdirSync(midDir).join(" ")}; ${midLines[0]?.slice(0, 120)})`);
+      }
 
       // A table the role may not read: exit 1 naming it, nothing written, the date's earlier file untouched; with SELECT
       // on the four, the same role's run succeeds. [26]'s guards: a role needs CREATE ROLE and credentials to swap.
@@ -32497,7 +32549,7 @@ if (want("50")) {
         const denied = await backup(deniedDir, { DATABASE_URL: probeUrl });
         assert(denied.code === 1 && /backup FAILED — locking thoughts, ob1_entities, thought_entities, ob1_entity_edges, entities: 42501 permission denied for table ob1_entities\. No file was renamed into place, and this run's own files are removed\./.test(denied.stderr)
                && existsSync(earlier) && readFileSync(earlier, "utf8") === "[\"an earlier backup\"]\n" && readdirSync(deniedDir).join(" ") === `thoughts-${date}.json`,
-          `…a role with SELECT on thoughts alone: exit 1 at the lock, naming 42501 on ob1_entities, no file and no .tmp left, the date's earlier thoughts file as it was (exit ${denied.code}: ${denied.stderr.split("\n")[0]}; ${readdirSync(deniedDir).join(" ")})`);
+          `…a role with SELECT on thoughts alone: exit 1 at the lock, naming 42501 on ob1_entities, no file made, the date's earlier thoughts file as it was (exit ${denied.code}: ${denied.stderr.split("\n")[0]}; ${readdirSync(deniedDir).join(" ")})`);
         // Into a directory not there yet: the lock fails first, so none is made.
         const freshDir = join(scratch, "denied-fresh");
         const deniedFresh = await backup(freshDir, { DATABASE_URL: probeUrl });

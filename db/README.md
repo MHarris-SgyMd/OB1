@@ -193,8 +193,11 @@ written since the row's enqueue; with 030 recorded and skipped, any
 acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed.
 
-**Stop the server and any re-embed or extraction worker first, and connect
-directly, not through a transaction-mode pooler:** the migrator sets session
+**Stop the server and any re-embed or extraction worker first, let any backup
+(`db/backup.ts`, `pg_dump`) finish — its lock keeps a migration that alters a
+table it reads waiting, and the brain's reads and writes of that table behind
+it, until the 10 s lock timeout fails the run — and connect directly, not
+through a transaction-mode pooler:** the migrator sets session
 state (the lock timeout, the pgvector search path) and takes locks across
 statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
@@ -5659,7 +5662,15 @@ its `count(*)` in the same snapshot. Every file is written new to a
 existing path) and renamed only once all are, so a run that fails first renames
 nothing and removes its files; a directory it made once connected stays.
 SIGINT, SIGTERM and SIGHUP remove the run's files too; a run killed outright
-leaves them. A companion's file an earlier run wrote the same date, when this
+leaves them. A page of thoughts is 100 rows (the others 1,000), and the run
+holds about three times a page's JSON. Thoughts are read in key order, at
+random through the heap: about 6.5 minutes and 18 GB a million thoughts with
+their graph (measured), so hours at 100 million and days at a billion, the
+locks and the snapshot held throughout; a large brain's backup is pg_dump. Not
+during an upgrade: a migration that alters a table the run reads waits behind
+its lock, the brain's reads and writes of that table wait behind the migration,
+and at the migrator's 10 s lock timeout the upgrade fails (run it again once the
+backup is done); pg_dump does the same. A companion's file an earlier run wrote the same date, when this
 run did not write one, stays and is named. The session's `client_connection_check_interval` (10 s, where the
 server's platform has it) ends a stopped run's statement on the server. SELECT
 on the tables is enough. A page is held in memory whole, and the snapshot holds
@@ -5674,7 +5685,8 @@ over, a page of three across composite keys, an empty table and an earlier
 run's companion file named, the one snapshot under a write between tables and
 a TRUNCATE kept waiting by the lock, the refusals of a role that may not read a
 table, of a planted path and of another database, the statement bound on the
-session and put back after a count, a SIGTERM while the run waits on its lock
+session and put back after a count, the lock taken before the snapshot, a run
+failing mid-read leaving no file of its own, a SIGTERM while the run waits on its lock
 (the statement ended on the server), the signal cleanup itself, and a failed
 rename. Loaded back into a brain the rows pass through its triggers and lack
 what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
