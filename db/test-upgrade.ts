@@ -6561,7 +6561,7 @@ console.log("\n[20cc] Migration 138: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 136's ob1_priority_can_close, nothing made; then applied: an extraction's prune spares an entity with an open statement (at 138 the same prune closed one as deleted); a merge waits on the lock of an item whose due reference names the loser while another session writes there, then restates both statements to name the survivor, and on a ticket's pool restates one written on its other row; a re-apply a no-op (SMD-4241)");
+console.log("\n[20cd] Migration 139: onto a populated brain at the file before it — refused by name without 136's ob1_priority_can_close, nothing made; then applied: an extraction's prune spares an entity with an open statement (at 138 the same prune closed one as deleted); a merge waits on the lock of an item whose due reference names the loser while another session writes there, then restates both statements to name the survivor, and on a ticket's pool restates one written on its other row; a merge with nothing to move takes no advisory lock; a re-apply a no-op (SMD-4241)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_entity_priorities_follow\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6677,6 +6677,20 @@ console.log("\n[20cd] Migration 139: onto a populated brain at the file before i
   assert(pools.a === "ticket:SMD-9995" && pools.b === pools.a && answer2.ok === true && answer2.priority_refs_moved === 2
          && onRow2.length === 1 && onRow2[0].due_ref_key === S2 && row2Current === 0,
     `a statement written on another row of a locked ticket's pool while the merge waits is restated too, read again by pool, and its item re-projected (${pools.a}; ${JSON.stringify(answer2)})`);
+
+  // A merge with nothing to move takes no advisory lock (review pass 3: the gate's merges share one transaction, and
+  // their locks piled up one per entity until the shared lock table ran out); one with a statement to move takes them.
+  // Counted on Postgres, in the merge's own transaction (PGlite's pg_locks lists none).
+  const ent = async (name: string) => String((await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', ${name}, ${name.toLowerCase()}) RETURNING id`)[0].id);
+  const sBare = await ent("Upgrade survivor bare"), lBare = await ent("Upgrade loser bare");
+  const sHeld = await ent("Upgrade survivor held"), lHeld = await ent("Upgrade loser held");
+  await put("entity", lHeld, 2, OP);
+  const advisoryAfter = async (s: string, l: string) => Number(await sql.begin(async (tx) => {
+    await tx`SELECT merge_entities(${s}::uuid, ${l}::uuid)`;
+    return (await tx`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()`)[0].n;
+  }));
+  const bareLocks = await advisoryAfter(sBare, lBare), heldLocks = await advisoryAfter(sHeld, lHeld);
+  assert(bareLocks === 0 && heldLocks >= 2, `a merge with nothing to move takes no advisory lock; one moving a statement locks both entities (${bareLocks}, ${heldLocks})`);
 
   // A re-apply is a no-op: the prune still spares the entity.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });

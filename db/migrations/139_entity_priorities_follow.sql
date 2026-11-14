@@ -60,7 +60,11 @@
 --     ob1_priority_lock_key, the order the rebuild takes); the references
 --     are read again under the locks, by pool, so a statement written on
 --     another row of a locked ticket's pool meanwhile is restated too
---     (review pass 1); every item touched is re-projected after. A
+--     (review pass 1); every item touched is re-projected after. A merge
+--     with nothing to move (no open statement on the loser, none taking its
+--     due time from it) returns before any lock (review pass 3: the gate's
+--     merges share one transaction, and their locks piled up one per entity
+--     until the shared lock table ran out). A
 --     restatement is the newest written within its tier on its item, so it
 --     may outrank another maker's statement written there after
 --     the original: 136 kept that for the survivor (merges being an
@@ -573,23 +577,41 @@ BEGIN
     RETURN;
   END IF;
 
+  -- Nothing to move, nothing locked (review pass 3): with no open statement
+  -- on the loser and none taking its due time from it, return before any
+  -- lock or projection. Nearly every merge is such, and the gate's merges
+  -- share one transaction, whose advisory locks would otherwise pile up, one
+  -- per entity merged, until the shared lock table ran out. A statement
+  -- written on the loser after this read is closed as deleted with it
+  -- (136's trigger); one naming it is left naming it (NOT CHANGED).
+  IF NOT EXISTS (SELECT 1 FROM priority_assertions a
+                  WHERE a.closed_at IS NULL AND a.item_kind = 'entity' AND a.item_key = p_loser::text)
+     AND NOT EXISTS (SELECT 1 FROM priority_assertions a
+                      WHERE a.closed_at IS NULL AND a.due_ref_kind = 'entity' AND a.due_ref_key = p_loser::text) THEN
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
   -- The items to lock: both entities, and every item holding an open
-  -- statement whose due reference names the loser. Each lock taken in the
-  -- order of its pool's key, the order the rebuild takes them (133), so two
-  -- holders of several never wait on each other. A statement naming the
-  -- loser written after this read, on an item not in it, is left naming the
-  -- loser (NOT CHANGED, in the header).
-  SELECT array_agg(s.kind ORDER BY ob1_priority_lock_key(s.kind, s.key), s.kind, s.key),
-         array_agg(s.key  ORDER BY ob1_priority_lock_key(s.kind, s.key), s.kind, s.key)
-    INTO v_kinds, v_keys
-    FROM (SELECT 'entity' AS kind, p_survivor::text AS key
-          UNION SELECT 'entity', p_loser::text
-          UNION SELECT a.item_kind, a.item_key FROM priority_assertions a
-                 WHERE a.closed_at IS NULL AND a.due_ref_kind = 'entity' AND a.due_ref_key = p_loser::text) s;
-  FOR i IN 1 .. cardinality(v_kinds) LOOP
-    PERFORM ob1_priority_lock(v_kinds[i], v_keys[i]);
+  -- statement whose due reference names the loser. Each item's pool key is
+  -- read once (review pass 3: read again after the locks, a thought that
+  -- became a ticket's row meanwhile named a pool never locked), and each
+  -- pool locked as 133's ob1_priority_lock locks it, in the keys' order, the
+  -- order the rebuild takes them, so two holders of several never wait on
+  -- each other. A statement naming the loser written after this read, on an
+  -- item not in it, is left naming the loser (NOT CHANGED, in the header).
+  SELECT array_agg(s.kind ORDER BY s.lk, s.kind, s.key),
+         array_agg(s.key  ORDER BY s.lk, s.kind, s.key),
+         array_agg(DISTINCT s.lk ORDER BY s.lk)
+    INTO v_kinds, v_keys, v_pools
+    FROM (SELECT u.kind, u.key, ob1_priority_lock_key(u.kind, u.key) AS lk
+            FROM (SELECT 'entity' AS kind, p_survivor::text AS key
+                  UNION SELECT 'entity', p_loser::text
+                  UNION SELECT a.item_kind, a.item_key FROM priority_assertions a
+                         WHERE a.closed_at IS NULL AND a.due_ref_kind = 'entity' AND a.due_ref_key = p_loser::text) u) s;
+  FOR i IN 1 .. cardinality(v_pools) LOOP
+    PERFORM pg_advisory_xact_lock(hashtextextended('ob1:priority:' || v_pools[i], 0));
   END LOOP;
-  v_pools := ARRAY(SELECT DISTINCT ob1_priority_lock_key(k, y) FROM unnest(v_kinds, v_keys) AS u(k, y));
   v_now := clock_timestamp();
 
   -- The due references naming the loser, on the pools locked, in the order
@@ -680,7 +702,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_merge_entity(uuid, uuid) IS
-  'A merge''s priority statements, moved (merge_entities and apply_entity_type_gate''s merge call it before deleting the loser): each open statement on another item whose due reference names the loser is restated with the reference naming the survivor (dropped where that would name the survivor itself, which 116''s CHECK refuses), and each open statement on the loser is restated on the survivor by its maker (136''s rule: the maker''s later word on the survivor stands). Every item touched is locked first, in its pool key''s order, and re-projected. Returns restated and repointed, the ids of the restatements written (the caller counts those still standing); empty for a role that could not restate or a transaction above READ COMMITTED. Migration 139 / SMD-4241.';
+  'A merge''s priority statements, moved (merge_entities and apply_entity_type_gate''s merge call it before deleting the loser): each open statement on another item whose due reference names the loser is restated with the reference naming the survivor (dropped where that would name the survivor itself, which 116''s CHECK refuses), and each open statement on the loser is restated on the survivor by its maker (136''s rule: the maker''s later word on the survivor stands). Every item touched is locked first, in its pool key''s order, and re-projected; a merge with nothing to move takes no lock. Returns restated and repointed, the ids of the restatements written (the caller counts those still standing); empty for a role that could not restate or a transaction above READ COMMITTED. Migration 139 / SMD-4241.';
 
 -- ---------------------------------------------------------------------------
 -- merge_entities — 136's, its priority step the shared helper's
