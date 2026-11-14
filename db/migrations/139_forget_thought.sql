@@ -112,7 +112,8 @@
 --   * delete_thought: forgetting is the exception; a delete keeps its events.
 --   * Outside the database: the sleep dumps (OB1_SLEEP_DUMP_DIR), Linear
 --     comments already posted with a proposal's reason (087), the weekly
---     digest's files and extraction dumps. The ledger names them.
+--     digest's files, extraction dumps and backups taken before the forget
+--     (backup.ts's exports, pg_dump). The ledger names them.
 --   * An entity a surviving thought still mentions keeps its name and
 --     aliases, even where the forgotten text gave them.
 --   * Ids in the log: other thoughts' events keep the id they named, and the
@@ -1126,7 +1127,8 @@ BEGIN
       'item_ids', to_jsonb(COALESCE(v_items, '{}'::text[])),
       'proposal_ids', to_jsonb(COALESCE(v_props, '{}'::uuid[])),
       'outside', jsonb_build_array('the sleep dumps (OB1_SLEEP_DUMP_DIR)', 'Linear comments already posted with a proposal''s reason (board_findings_posted)',
-                                   'the weekly digest''s files', 'extraction dumps (extract-entities.ts --dump)'));
+                                   'the weekly digest''s files', 'extraction dumps (extract-entities.ts --dump)',
+                                   'backups taken before the forget (backup.ts exports, pg_dump)'));
     INSERT INTO thought_forgotten (thought_id, actor_name, actor_agent_id, fingerprints, evidence)
     VALUES (p_id, v_actor->>'name',
             CASE WHEN pg_input_is_valid(v_actor->>'agent_id', 'uuid') THEN (v_actor->>'agent_id')::uuid END,

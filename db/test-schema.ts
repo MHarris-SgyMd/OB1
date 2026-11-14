@@ -21173,7 +21173,7 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
       && removed.page_sections === 2 && removed.priority_statements === 4 && removed.item_proposals === 2 && removed.item_reasons === 1 && removed.items === 1
       && removed.item_events >= 1 && removed.query_log_rows === 3 && removed.deliverable_events >= 1 && removed.audit_events === events + 1
       && JSON.stringify(ans.irreproducible) === JSON.stringify([C, page].sort()) && JSON.stringify(ans.pages) === JSON.stringify([page, page2].sort()) && ans.gone === false
-      && JSON.stringify(ans.twins) === "[]" && Array.isArray(ans.outside) && (ans.outside as string[]).length === 4,
+      && JSON.stringify(ans.twins) === "[]" && Array.isArray(ans.outside) && (ans.outside as string[]).length === 5,
     `forgotten: each store's count in the evidence, the child and the page (whose derived_from is its sections' evidence) listed for review, and the page whose section was once built on it, no twin, the copies outside named (${JSON.stringify(removed)} | ${JSON.stringify(ans.irreproducible)} | ${JSON.stringify(ans.pages)})`);
 
   // The record it was ingested as, in the answer and the ledger, so a sync leaves it out (review pass 7); the ledger's

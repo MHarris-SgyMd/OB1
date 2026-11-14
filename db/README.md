@@ -2565,7 +2565,7 @@ it and is named. Thoughts derived from the forgotten one, and every page whose o
 (its earlier renders, and a section once built on it whose revision keeps the
 earlier body), are listed for a person to review: prose that absorbed the text
 can't be removed mechanically. Copies outside the brain (sleep
-dumps, posted Linear comments, digest files, extraction dumps) are named, not
+dumps, posted Linear comments, digest files, extraction dumps, earlier backups) are named, not
 reached. Each role that writes thoughts is granted SELECT on the ledger. The
 operation over REST and MCP is PR 2; the other brains, PR 3. Needs 016, 034, 055,
 060, 064, 067, 116, 117, 123 and 134; a re-apply keeps the ledger. test-schema
