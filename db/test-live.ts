@@ -8714,12 +8714,12 @@ if (want("10h")) {
     assert(first.code === 0 && /7 extracted, 0 failed/.test(first.stdout) && /; recorded 2 thought\(s\)' own subjects by their tickets\n/.test(first.stdout) && ownCalls === 0 && extractCalls === 7,
       `the pass extracts the seven and records the two subjects a rule finds, asking no own question (exit ${first.code}, ${ownCalls} own question(s): ${first.stdout.split("\n").find((l) => /wrote /.test(l))?.trim()})`);
     const byFiled = s.find((x) => x.thought === filed), bySession = s.find((x) => x.thought === session);
-    const ruleKeyOf = (by: string) => (by === "metadata" ? "subject:metadata@r1" : "subject:first_line@r3");
+    const ruleKeyOf = (by: string) => (by === "metadata" ? "subject:metadata@r1" : "subject:first_line@r4");
     assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === ruleKeyOf(x.by)),
       `the ticket filed under, and the session header's its prompt names: standing, each under its rule's key (${JSON.stringify(s.map((x) => [x.key, x.by, x.judge]))})`);
     assert(!s.some((x) => x.thought === utf || x.thought === none || x.thought === garbled),
       "a first line's UTF-8 and GPT-4, denied prefixes, a session whose prompts name no ticket, and a note's first-line ticket: each left to the model");
-    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === ruleKeyOf(x.by) && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rule_version === (x.by === "metadata" ? 1 : 3) && x.agent === agent.id),
+    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === ruleKeyOf(x.by) && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rule_version === (x.by === "metadata" ? 1 : 4) && x.agent === agent.id),
       "…each with its lineage row: the text read, its rule's key and recipe, the worker's agent");
 
     // An edit: 016's trigger re-queues it, and the next pass finds its subject again at the new text.
@@ -8732,7 +8732,7 @@ if (want("10h")) {
 
     // The sweep (migration 113, SMD-3306 PR 5): from a pool, as the pass. A dry run names no pool and pools, asks and
     // writes nothing; it counts what a run would take: every thought with no current subject, its pool not named yet.
-    const POOL = "subjects:r1.3:p3r";
+    const POOL = "subjects:r1.4:p4r";
     const named = async () => ((await sql`SELECT value FROM ob1_config WHERE key = 'subject_pool_key'`)[0] as { value: string } | undefined)?.value ?? null;
     /** A pool named and its pooling finished, as a run under the key leaves them: what a brain holds before a key's change. */
     const setNamed = (key: string) => sql`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${key}), ('subject_pool_filled', ${key}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
@@ -8847,7 +8847,7 @@ if (want("10h")) {
     }
     let asked = ownCalls;
     const dry = await sweep({ dryRun: true });
-    assert(dry.code === 0 && /^ {2}pool subjects:r1\.3:p3r: not named \(none was named\): a run names it and pools the 5 thought\(s\) with no current subject$/m.test(dry.stdout)
+    assert(dry.code === 0 && /^ {2}pool subjects:r1\.4:p4r: not named \(none was named\): a run names it and pools the 5 thought\(s\) with no current subject$/m.test(dry.stdout)
         && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written, pooled or asked\./.test(dry.stdout)
         && ownCalls === asked && (await subjects()).length === 3 && (await named()) === null && (await poolOf()).pending === 0,
       `--subjects --dry-run counts the five no rule keys and names, pools, asks and writes nothing (exit ${dry.code}: ${dry.stdout.trim().split("\n").slice(-1)[0]})`);
@@ -8856,9 +8856,9 @@ if (want("10h")) {
     assert(dryStopped.code === 0 && /would: of 5 thought\(s\)/.test(dryStopped.stdout), `…and reads on under an aborted signal, as the pass's dry run does (exit ${dryStopped.code})`);
     // The rules alone have a pool of their own: a run with the model pools again what they left.
     const rulesAlone = await sweep({ model: false });
-    assert(rulesAlone.code === 0 && /^ {2}pool subjects:r1\.3: named \(none was named\), and the 5 thought\(s\) with no current subject pooled; new and edited thoughts join it from here on$/m.test(rulesAlone.stdout)
+    assert(rulesAlone.code === 0 && /^ {2}pool subjects:r1\.4: named \(none was named\), and the 5 thought\(s\) with no current subject pooled; new and edited thoughts join it from here on$/m.test(rulesAlone.stdout)
         && tally(rulesAlone) === "0 subject(s) recorded; 5 keyed by no rule, no model asked (--subjects rules)" && ownCalls === asked && !/egress:/.test(rulesAlone.stdout)
-        && (await named()) === "subjects:r1.3" && (await poolOf("subjects:r1.3")).succeeded === 5,
+        && (await named()) === "subjects:r1.4" && (await poolOf("subjects:r1.4")).succeeded === 5,
       `--subjects rules names its own pool, asks no model and leaves the five, exit 0 (exit ${rulesAlone.code}: ${tally(rulesAlone)})`);
 
     // Another pool named — the rules' — and a run under the model's without --switch-key: refused before any naming or
@@ -8869,9 +8869,9 @@ if (want("10h")) {
     const unswitchedHeard: StartResult[] = [], unswitchedDryHeard: StartResult[] = [];
     const unswitched = await sweep({ onStart: (r) => unswitchedHeard.push(r) });
     const unswitchedDry = await sweep({ dryRun: true, onStart: (r) => unswitchedDryHeard.push(r) });
-    assert(unswitched.code === 2 && /Refusing to sweep under a pool other than the one ob1_config names without --switch-key: the subject pool is subjects:r1\.3; this run's is subjects:r1\.3:p3r/.test(unswitched.stderr)
-        && (await named()) === "subjects:r1.3" && ownCalls === asked
-        && /A run would be refused: the subject pool is subjects:r1\.3; this run's is subjects:r1\.3:p3r .*, and it needs --switch-key\./.test(unswitchedDry.stdout),
+    assert(unswitched.code === 2 && /Refusing to sweep under a pool other than the one ob1_config names without --switch-key: the subject pool is subjects:r1\.4; this run's is subjects:r1\.4:p4r/.test(unswitched.stderr)
+        && (await named()) === "subjects:r1.4" && ownCalls === asked
+        && /A run would be refused: the subject pool is subjects:r1\.4; this run's is subjects:r1\.4:p4r .*, and it needs --switch-key\./.test(unswitchedDry.stdout),
       `a run under another pool's key without --switch-key is refused, nothing named or asked, and a dry run says so (exit ${unswitched.code}: ${unswitched.stderr.trim().split("\n")[1]?.slice(0, 120)})`);
     assert(JSON.stringify(unswitchedHeard) === JSON.stringify([{ ok: false, refused: "key" }]) && unswitchedDryHeard.length === 0,
       `…its refusal heard by its kind, key, and the dry run's not heard (${JSON.stringify(unswitchedHeard)}, ${JSON.stringify(unswitchedDryHeard)})`);
@@ -8893,7 +8893,7 @@ if (want("10h")) {
     };
     const stopped = await sweep({ signal: stop.signal, switchKey: true }).finally(() => { onOwn = null; });
     const afterStop = await poolOf();
-    assert(stopped.code === 130 && /^ {2}pool subjects:r1\.3:p3r: named \(subjects:r1\.3 was\), and the 5 thought\(s\) with no current subject pooled/m.test(stopped.stdout)
+    assert(stopped.code === 130 && /^ {2}pool subjects:r1\.4:p4r: named \(subjects:r1\.4 was\), and the 5 thought\(s\) with no current subject pooled/m.test(stopped.stdout)
         && /stopped after \d+ thought\(s\): what it held is back in the pool, and the next sweep takes up the rest/.test(stopped.stderr)
         && ownCalls === callsAtStop && /^1 subject\(s\) recorded \(1 by stub-judge\)/.test(tally(stopped)) && !/unanswered/.test(tally(stopped))
         && inHand !== null && (await standingOf(inHand))?.by === "model" && afterStop.claimed === 0 && afterStop.pending >= 1,
@@ -8910,7 +8910,7 @@ if (want("10h")) {
     const full = await sweep();
     s = await subjects();
     const rel = s.find((x) => x.thought === release && x.standing), pull = s.find((x) => x.thought === pr && x.standing);
-    assert(rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p3r" && x.produced_by === "subject:stub-judge@p3r" && x.fp === x.current && x.agent === agent.id),
+    assert(rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p4r" && x.produced_by === "subject:stub-judge@p4r" && x.fp === x.current && x.agent === agent.id),
       `the sweep records the model's subjects, read into their keys, under the model's pass key, its reasoning on by default (exit ${full.code}: ${rel?.key}, ${pull?.key})`);
     assert(rel?.recipe?.deterministic === false && rel.recipe.model === "stub-judge" && JSON.stringify(rel.recipe.answers) === JSON.stringify(["OB1 release 2.0.0"]) && JSON.stringify(pull?.recipe?.answers) === JSON.stringify(["PR 727"]) && rel.recipe.prompt_hash === promptHash(subjectPrompt()) && rel.recipe.reasoning === "on",
       "…its recipe the model, the question's hash, the reasoning it was asked with and the subjects it answered");
@@ -8928,7 +8928,7 @@ if (want("10h")) {
     // for --retry-failed, which asks it again.
     asked = ownCalls;
     const again = await sweep();
-    assert(again.code === 0 && ownCalls === asked && /^ {2}pool subjects:r1\.3:p3r: 0 pending, 1 failed \(--retry-failed asks them again\)$/m.test(again.stdout) && tally(again) === "0 subject(s) recorded",
+    assert(again.code === 0 && ownCalls === asked && /^ {2}pool subjects:r1\.4:p4r: 0 pending, 1 failed \(--retry-failed asks them again\)$/m.test(again.stdout) && tally(again) === "0 subject(s) recorded",
       `a second sweep asks nothing: what the model named nothing for is not asked again (exit ${again.code}, ${ownCalls - asked} asked: ${tally(again)})`);
     // A dry run with --retry-failed counts the failed claim among those a run would take, and puts nothing back.
     const retryDry = await sweep({ dryRun: true, retryFailed: true });
@@ -9050,7 +9050,7 @@ if (want("10h")) {
     // What version 1's pool would have been named.
     await setNamed("subjects:r1.1:p1");
     const reDry = await sweep({ dryRun: true });
-    assert(reDry.code === 0 && /^ {2}pool subjects:r1\.3:p3r: not named \(subjects:r1\.1:p1 was\): a run names it and pools the 5 thought\(s\) with no current subject$/m.test(reDry.stdout)
+    assert(reDry.code === 0 && /^ {2}pool subjects:r1\.4:p4r: not named \(subjects:r1\.1:p1 was\): a run names it and pools the 5 thought\(s\) with no current subject$/m.test(reDry.stdout)
         && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject, 1 with a new key\); ask stub-judge about 4 \(2 with an out-of-date subject\)\./.test(reDry.stdout),
       `a dry run counts them as a run would: the filed ticket found again in place of version 1's, the rest the model's (exit ${reDry.code}: ${reDry.stdout.trim().split("\n").slice(-1)[0]})`);
     // A pooling that breaks off leaves the pool named and its pooling marked unfinished, so the next run pools again
@@ -9064,18 +9064,18 @@ if (want("10h")) {
     } finally {
       await sql`ALTER FUNCTION requeue_thought_work_away(text, uuid) RENAME TO requeue_thought_work`;
     }
-    assert(broken.code === 1 && /Pooling the thoughts with no current subject broke off \(.*requeue_thought_work.*\): pool subjects:r1\.3:p3r is named, and the next run pools them; run it again\./.test(broken.stderr)
+    assert(broken.code === 1 && /Pooling the thoughts with no current subject broke off \(.*requeue_thought_work.*\): pool subjects:r1\.4:p4r is named, and the next run pools them; run it again\./.test(broken.stderr)
         && (await named()) === POOL && (await filledKey()) === "" && ownCalls === asked,
       `a pooling that breaks off leaves the pool named, its pooling unfinished, nothing asked, exit 1 (exit ${broken.code}: ${broken.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 140)})`);
     const brokenDry = await sweep({ dryRun: true });
     // …and the claims the pool holds, which a run takes (review pass 4: the dry run hid them).
-    assert(/^ {2}pool subjects:r1\.3:p3r: named, its pooling unfinished: a run pools the 5 thought\(s\) with no current subject$/m.test(brokenDry.stdout)
-        && /^ {2}pool subjects:r1\.3:p3r: \d+ pending/m.test(brokenDry.stdout),
+    assert(/^ {2}pool subjects:r1\.4:p4r: named, its pooling unfinished: a run pools the 5 thought\(s\) with no current subject$/m.test(brokenDry.stdout)
+        && /^ {2}pool subjects:r1\.4:p4r: \d+ pending/m.test(brokenDry.stdout),
       `…a dry run then says it is named, its pooling unfinished (review pass 2: one said it was not named), and what it holds (${brokenDry.stdout.split("\n").filter((l) => /pool subjects/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
     // A thought deleted under the pooling fails its claim's key (23503), and the pooling is made again (review pass 2: a
     // pooling without the retry broke off), as after a deadlock the server broke (40P01; review pass 5, mutant: a retry
     // on 23503 alone lived): one of each, raised by a trigger of the test's own on the first row of two tries.
-    await sql.unsafe(`CREATE SEQUENCE zz_pool_once; CREATE FUNCTION zz_pool_once() RETURNS trigger LANGUAGE plpgsql AS $zz$ DECLARE v bigint; BEGIN IF NEW.work_type = 'subjects:r1.3:p3r' THEN v := nextval('zz_pool_once'); IF v = 1 THEN RAISE EXCEPTION USING ERRCODE = 'foreign_key_violation', MESSAGE = 'zz: a thought gone under the pooling'; ELSIF v = 2 THEN RAISE EXCEPTION USING ERRCODE = 'deadlock_detected', MESSAGE = 'zz: a deadlock the server broke'; END IF; END IF; RETURN NEW; END $zz$; CREATE TRIGGER zz_pool_once BEFORE INSERT ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_pool_once()`);
+    await sql.unsafe(`CREATE SEQUENCE zz_pool_once; CREATE FUNCTION zz_pool_once() RETURNS trigger LANGUAGE plpgsql AS $zz$ DECLARE v bigint; BEGIN IF NEW.work_type = 'subjects:r1.4:p4r' THEN v := nextval('zz_pool_once'); IF v = 1 THEN RAISE EXCEPTION USING ERRCODE = 'foreign_key_violation', MESSAGE = 'zz: a thought gone under the pooling'; ELSIF v = 2 THEN RAISE EXCEPTION USING ERRCODE = 'deadlock_detected', MESSAGE = 'zz: a deadlock the server broke'; END IF; END IF; RETURN NEW; END $zz$; CREATE TRIGGER zz_pool_once BEFORE INSERT ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_pool_once()`);
     let reRun: SweepRun, retriedPooling = false;
     try {
       reRun = await sweep();
@@ -9085,10 +9085,10 @@ if (want("10h")) {
     }
     assert(retriedPooling, "…the pooling refused once for a thought gone under it, and once for a deadlock, is made again");
     const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!;
-    assert(/^ {2}pool subjects:r1\.3:p3r: named, its pooling broken off before: the 5 thought\(s\) with no current subject pooled now$/m.test(reRun.stdout) && (await filledKey()) === POOL,
+    assert(/^ {2}pool subjects:r1\.4:p4r: named, its pooling broken off before: the 5 thought\(s\) with no current subject pooled now$/m.test(reRun.stdout) && (await filledKey()) === POOL,
       `…and the next run pools them, its pooling marked finished (${reRun.stdout.split("\n").find((l) => /pool subjects/.test(l))?.trim().slice(0, 120)})`);
     assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one (1 with a new key); 2 the model named nothing for (1 out-of-date subject(s) closed), 1 answered not as JSON of the expected shape"
-        && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p3r" && ownCalls === asked + 4,
+        && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p4r" && ownCalls === asked + 4,
       `the sweep pools version 1's subjects again and finds them under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
     assert((await standingOf(none)) === undefined && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || x.judge === "subject:rules@r1")),
       "…and the out-of-date one the model now names nothing for is closed, being the one read; none of version 1's stands");
@@ -9140,7 +9140,7 @@ if (want("10h")) {
       `a close while the door's lock is held waits for it, its facet free meanwhile, its subject standing (${lockWait}, facet ${facetFree ? "free" : "held"}${probedWaiting ? "" : ", probed with no close waiting"})`);
     // Another model's subject under the current question is current: a pooling leaves it out (review pass 1: [10h] held
     // only stub-judge's, so a query keyed to the configured model passed).
-    const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p3r");
+    const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p4r");
     await setNamed("subjects:r1.1:p1");
     const anotherDry = await sweep({ dryRun: true });
     await setNamed(POOL);
@@ -9191,7 +9191,7 @@ if (want("10h")) {
     const staleRun = await sweep().finally(() => { onOwn = null; });
     const prAfterStale = (await standingOf(pr))!;
     assert(staleRun.code === 0 && tally(staleRun) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (0 with a new key); 1 edited mid-sweep" && ownCalls === asked + 2
-        && prAfterStale.judge === "subject:stub-judge@p3r" && prAfterStale.fp === prAfterStale.current,
+        && prAfterStale.judge === "subject:stub-judge@p4r" && prAfterStale.fp === prAfterStale.current,
       `a write refused as stale: the edit pools the thought again, and the run takes it again at its new text (exit ${staleRun.code}, ${ownCalls - asked} asked: ${tally(staleRun)})`);
 
     // The spawned CLI prints what the sweep in this process does (masked seconds), each run from the model's pool, so
@@ -9201,7 +9201,7 @@ if (want("10h")) {
     await setNamed(POOL);
     const inProcess = await sweep({ model: false, switchKey: true, retryFailed: true });
     await setNamed(POOL);
-    assert(same(untimed(spawned), untimed(inProcess)) && /named \(subjects:r1\.3:p3r was\), and the 3 thought\(s\)/.test(inProcess.stdout) && /^ {2}--retry-failed: \d+ failed claim\(s\) returned to the pool$/m.test(spawned.stdout),
+    assert(same(untimed(spawned), untimed(inProcess)) && /named \(subjects:r1\.4:p4r was\), and the 3 thought\(s\)/.test(inProcess.stdout) && /^ {2}--retry-failed: \d+ failed claim\(s\) returned to the pool$/m.test(spawned.stdout),
       `the CLI's --subjects rules --switch-key prints what the sweep in this process does, stream by stream (exit ${spawned.code}: ${spawned.stdout.trim().split("\n").slice(-1)[0]})`);
     // Two runs at a key's change: one names the pool and pools, the other, waiting on the pool's lock, finds it pooled,
     // and between them each pooled thought is asked once (review pass 1: both pooled, the second requeueing what the
@@ -9220,12 +9220,12 @@ if (want("10h")) {
     asked = ownCalls;
     // Another pool named first, so a refusal moved below the naming would show (review pass 1: the pool already was the
     // run's, and the case held nothing).
-    await setNamed("subjects:r1.3");
+    await setNamed("subjects:r1.4");
     const gatedEnv = { ...env, OB1_LLM_LOCAL: "", OB1_CHAT_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "" };
     const gatedHeard: StartResult[] = [];
     const gated = await sweep({ switchKey: true, onStart: (r) => gatedHeard.push(r) }, gatedEnv);
     assert(gated.code === 2 && /Nothing would be asked for its subject: .* Or run --subjects rules, which asks no model, from a pool of its own \(with --switch-key while another is named\)\./.test(gated.stderr)
-        && ownCalls === asked && (await named()) === "subjects:r1.3",
+        && ownCalls === asked && (await named()) === "subjects:r1.4",
       `a policy that refuses every row: refused before any question or naming, the pool named left as it was, exit 2 (exit ${gated.code})`);
     assert(JSON.stringify(gatedHeard) === JSON.stringify([{ ok: false, refused: "egress" }]), `…heard by its kind, egress (PR 6b-1): ${JSON.stringify(gatedHeard)}`);
     const gatedRules = await sweep({ model: false }, gatedEnv);
@@ -9333,12 +9333,12 @@ if (want("10h")) {
     await sql`INSERT INTO thought_work_claims (thought_id, work_type) VALUES (${release}::uuid, 'subjects:r0')`;
     const rebuildPools = await runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, "--status"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
     await sql`DELETE FROM thought_work_claims WHERE thought_id = ${release}::uuid AND work_type = 'subjects:r0'`;
-    assert(rebuildPools.code === 0 && rebuildPools.out.includes("    subjects:r1.3:p3r  →  bun db/extract-entities.ts --url <url> --subjects\n")
+    assert(rebuildPools.code === 0 && rebuildPools.out.includes("    subjects:r1.4:p4r  →  bun db/extract-entities.ts --url <url> --subjects\n")
         && rebuildPools.out.includes("    subjects:r0  →  (not the subject pool ob1_config.subject_pool_key names: no run takes it)\n"),
       `rebuild.ts --status names --subjects as the named subject pool's drainer, and another subject pool as one no run takes (${rebuildPools.out.split("\n").filter((l) => /subjects:r[01]/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     // …each named one by its key's question: the rules' none, reasoning off for one without its `r`.
-    const drains = [drainer("subjects:r1.3", "subjects:r1.3"), drainer("subjects:r1.3:p3", "subjects:r1.3:p3"), drainer("subjects:r1.3:p3r", "subjects:r1.3:p3r"), drainer("subjects:r1.3:p3", "subjects:r1.3:p3r"),
-      drainer("subjects:r1.3:p10r", "subjects:r1.3:p10r"), drainer("subjects:r1.3:p10", "subjects:r1.3:p10")];
+    const drains = [drainer("subjects:r1.4", "subjects:r1.4"), drainer("subjects:r1.4:p4", "subjects:r1.4:p4"), drainer("subjects:r1.4:p4r", "subjects:r1.4:p4r"), drainer("subjects:r1.4:p4", "subjects:r1.4:p4r"),
+      drainer("subjects:r1.4:p10r", "subjects:r1.4:p10r"), drainer("subjects:r1.4:p10", "subjects:r1.4:p10")];
     assert(drains[0] === "bun db/extract-entities.ts --url <url> --subjects rules" && drains[1] === "OB1_SUBJECT_REASONING=off bun db/extract-entities.ts --url <url> --subjects"
         && drains[2] === "bun db/extract-entities.ts --url <url> --subjects" && drains[3].startsWith("(not the subject pool")
         && drains[4] === drains[2] && drains[5] === drains[1],
@@ -9453,7 +9453,7 @@ if (want("10h")) {
         const timedKept = await named();
         await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
         for (const k of timedWas) await sql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
-        assert(timedOut?.code === 1 && /Naming pool subjects:r1\.3 broke off \(canceling statement due to statement timeout\): pool subjects:r0 is named as it was; run it again\./.test(timedOut.stderr)
+        assert(timedOut?.code === 1 && /Naming pool subjects:r1\.4 broke off \(canceling statement due to statement timeout\): pool subjects:r0 is named as it was; run it again\./.test(timedOut.stderr)
             && !/stopped before/.test(timedOut.stderr) && timedKept === "subjects:r0",
           `a naming's write the role's statement_timeout cancels ends the run in words, exit 1, the pool as it was (exit ${timedOut?.code}: ${timedOut?.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         // …where a scheduler's (`session`), its budget, is thrown, as a claim pass's is, for the scheduler to read as its
@@ -9511,7 +9511,7 @@ if (want("10h")) {
     const sameRun = await sweep({ model: false, switchKey: true });
     const sessionNow = (await standingOf(session))!, filedAgain = (await standingOf(filed))!, freshNow = (await standingOf(fresh))!;
     assert(/^3 subject\(s\) recorded \(2 by the ticket filed under, 1 by the session header's tickets\), 2 in place of a standing one \(0 with a new key\)/.test(tally(sameRun))
-        && sessionNow.key === "ticket:SMD-81" && sessionNow.judge === "subject:first_line@r3" && filedAgain.judge === "subject:metadata@r1" && freshNow.judge === "subject:metadata@r1",
+        && sessionNow.key === "ticket:SMD-81" && sessionNow.judge === "subject:first_line@r4" && filedAgain.judge === "subject:metadata@r1" && freshNow.judge === "subject:metadata@r1",
       `--subjects rules records each under its rule's key now, the session's under the first line's, and adds the one never found (exit ${sameRun.code}: ${tally(sameRun)})`);
     const afterDry = await sweep({ dryRun: true, model: false });
     assert(/record none by the rules/.test(afterDry.stdout), `…and a dry run after takes none of them, each finished (exit ${afterDry.code}: ${afterDry.stdout.trim().split("\n").slice(-1)[0]})`);
@@ -9520,7 +9520,7 @@ if (want("10h")) {
     const beforeX = await sweep({ dryRun: true });
     await asV1(pr, "pr:727", "model", "extract:x@p3r");
     const withX = await sweep({ dryRun: true });
-    await asV1(pr, "pr:727", "model", "subject:another-judge@p3r");
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p4r");
     assert(asks(withX) === asks(beforeX) + 1, `a model's subject under extract's key is pooled, as no current subject (${asks(beforeX)} → ${asks(withX)})`);
 
     // SMD-3306 PR 4: the question's own reasoning (OB1_SUBJECT_REASONING, on when unset), named in the pass key, the
@@ -9528,23 +9528,23 @@ if (want("10h")) {
     // again with it; turning it off pools none found with it on, and asks with no reasoning pass, under the key without
     // the `r`.
     const offEnv = { ...env, OB1_SUBJECT_REASONING: "off" }, lowEnv = { ...env, OB1_SUBJECT_REASONING: "low" };
-    await asV1(pr, "pr:727", "model", "subject:another-judge@p3");
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p4");
     const onDry = await sweep({ dryRun: true }), offDry = await sweep({ dryRun: true }, offEnv), lowDry = await sweep({ dryRun: true }, lowEnv);
     assert(asks(onDry) === asks(beforeX) + 1 && asks(offDry) === asks(beforeX) && asks(lowDry) === asks(onDry)
-        && /, reasoning on, at most 900 s a call \(subject:stub-judge@p3r\)$/m.test(onDry.stdout) && /, reasoning off, at most 300 s a call \(subject:stub-judge@p3\)$/m.test(offDry.stdout)
-        && /, reasoning low, at most 900 s a call \(subject:stub-judge@p3r\)$/m.test(lowDry.stdout)
-        && /^ {2}pool subjects:r1\.3:p3: not named/m.test(offDry.stdout) && /^ {2}pool subjects:r1\.3:p3r: not named/m.test(lowDry.stdout),
+        && /, reasoning on, at most 900 s a call \(subject:stub-judge@p4r\)$/m.test(onDry.stdout) && /, reasoning off, at most 300 s a call \(subject:stub-judge@p4\)$/m.test(offDry.stdout)
+        && /, reasoning low, at most 900 s a call \(subject:stub-judge@p4r\)$/m.test(lowDry.stdout)
+        && /^ {2}pool subjects:r1\.4:p4: not named/m.test(offDry.stdout) && /^ {2}pool subjects:r1\.4:p4r: not named/m.test(lowDry.stdout),
       `a model's subject found with its reasoning off is pooled while it is on, at any effort, not while it is off, each run naming its reasoning, its limit a call, its key and its pool (${asks(beforeX)} → ${asks(onDry)} on, ${asks(lowDry)} low, ${asks(offDry)} off)`);
     // The limit a call follows the reasoning (review pass 1: two of 200 reasoning calls took over 300 s); --timeout is
     // over it, and the CLI without the flag leaves the sweep its own.
     const timed = await sweep({ dryRun: true, timeout: 42 });
     const spawnedDry = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "--dry-run"], { env: env as Record<string, string>, cwd: HERE });
-    assert(/, reasoning on, at most 42 s a call \(/m.test(timed.stdout) && spawnedDry.code === 0 && /, reasoning on, at most 900 s a call \(subject:stub-judge@p3r\)$/m.test(spawnedDry.stdout),
+    assert(/, reasoning on, at most 42 s a call \(/m.test(timed.stdout) && spawnedDry.code === 0 && /, reasoning on, at most 900 s a call \(subject:stub-judge@p4r\)$/m.test(spawnedDry.stdout),
       `--timeout over the default, and the CLI without it leaving the sweep its own (exit ${spawnedDry.code}: ${spawnedDry.stdout.split("\n").find((l) => /subjects:/.test(l))?.trim().slice(-60)})`);
     asked = ownCalls;
     const onRun = await sweep({ switchKey: true });
     const prOn = (await standingOf(pr))!;
-    assert(prOn.key === "pr:727" && prOn.judge === "subject:stub-judge@p3r" && prOn.recipe?.reasoning === "on" && ownCalls - asked === asks(onDry) && ownEfforts.slice(asked).every((e) => e === "unsent")
+    assert(prOn.key === "pr:727" && prOn.judge === "subject:stub-judge@p4r" && prOn.recipe?.reasoning === "on" && ownCalls - asked === asks(onDry) && ownEfforts.slice(asked).every((e) => e === "unsent")
         && /\(1 by stub-judge\), 1 in place of a standing one \(0 with a new key\)/.test(tally(onRun)),
       `…asked again with its reasoning on, the provider's default (no effort sent), and found again under the key with the \`r\`, its recipe naming it (exit ${onRun.code}: ${tally(onRun)})`);
     // An effort is sent as asked, keyed as on, and named in the recipe (review pass 1: only a dry run held it); its pool
@@ -9554,17 +9554,17 @@ if (want("10h")) {
     asked = ownCalls;
     const lowRun = await sweep({}, lowEnv);
     const prLow = (await standingOf(pr))!;
-    assert(prLow.key === "pr:727" && prLow.judge === "subject:stub-judge@p3r" && prLow.recipe?.reasoning === "low" && ownCalls - asked === 1 && ownEfforts.slice(asked).every((e) => e === "low"),
+    assert(prLow.key === "pr:727" && prLow.judge === "subject:stub-judge@p4r" && prLow.recipe?.reasoning === "low" && ownCalls - asked === 1 && ownEfforts.slice(asked).every((e) => e === "low"),
       `…an effort asked for is sent as asked, the subject found under the key with the \`r\`, its recipe naming the effort (exit ${lowRun.code}: ${tally(lowRun)})`);
     await asV1(pr, "pr:727", "model", "subject:stub-judge@p1");
     asked = ownCalls;
     const offRun = await sweep({ switchKey: true }, offEnv);
     const prOff = (await standingOf(pr))!;
-    assert(prOff.key === "pr:727" && prOff.judge === "subject:stub-judge@p3" && prOff.recipe?.reasoning === "off" && ownCalls - asked === asks(beforeX) + 1 && ownEfforts.slice(asked).every((e) => e === "none"),
+    assert(prOff.key === "pr:727" && prOff.judge === "subject:stub-judge@p4" && prOff.recipe?.reasoning === "off" && ownCalls - asked === asks(beforeX) + 1 && ownEfforts.slice(asked).every((e) => e === "none"),
       `…and with it off, its pool named, the release note's subject found with it on is not pooled, and one out of date is asked with no reasoning pass and found under the key without the \`r\`, its recipe naming it (exit ${offRun.code}, ${ownCalls - asked} asked: ${tally(offRun)})`);
     // A key that runs past the current suffix is no pass's (review pass 1: held in TypeScript alone, so a SQL match
     // anywhere in the key passed): pooled under either setting.
-    await asV1(pr, "pr:727", "model", "subject:stub-judge@p3rr");
+    await asV1(pr, "pr:727", "model", "subject:stub-judge@p4rr");
     await setNamed("subjects:r0");
     const rrOn = await sweep({ dryRun: true }), rrOff = await sweep({ dryRun: true }, offEnv);
     assert(asks(rrOn) === asks(beforeX) + 1 && asks(rrOff) === asks(beforeX) + 1,
@@ -9653,7 +9653,7 @@ if (want("10h")) {
     // the model names PR 727 alone, so the door keeps pr:727 and closes the phrase (`closed`), counted a replacement and
     // no new key (review pass 1: no case reached the arm, and a narrowed set was counted with a new key).
     const narrow = (await sql`INSERT INTO thoughts (content, metadata) VALUES (${"[10h] a merged pull request 727, reviewed before its notes"}, '{}'::jsonb) RETURNING id::text AS id`)[0].id as string;
-    await sql`SELECT record_thought_subjects(${narrow}::uuid, ARRAY['pr:727', 'phrase:a review before its notes'], 'model', 'subject:stub-judge@p3r', NULL,
+    await sql`SELECT record_thought_subjects(${narrow}::uuid, ARRAY['pr:727', 'phrase:a review before its notes'], 'model', 'subject:stub-judge@p4r', NULL,
       (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${narrow}::uuid), NULL)`;
     await sql`SELECT update_thought(${narrow}::uuid, ${"[10h] a merged pull request 727, reviewed, its notes since"})`;
     asked = ownCalls;
@@ -9663,8 +9663,9 @@ if (want("10h")) {
         && narrowLeft === "pr:727" && ownCalls === asked + 1,
       `a set narrowed to the key the model names: pr:727 kept, the phrase closed, counted one replacement and no new key (exit ${narrowed.code}, ${ownCalls - asked} asked: ${tally(narrowed)}; standing ${narrowLeft})`);
     await sql`DELETE FROM thoughts WHERE id = ${narrow}::uuid`;
-    // Sets found (SMD-3306 PR 7a-3b-2): the header rule's version 3 keying a session's several tickets, with the hook's
-    // word and without, and the judge's question, version 3, answering several subjects. In a function of its own
+    // Sets (SMD-3306 PRs 7a-3b-2 and 7a-3b-3): the header rule's version 4 keying a header that lists one ticket, with
+    // the hook's word and without, and leaving one that lists several to the model; the judge's question answering
+    // several subjects; and the sweep's counts of the sets the door keeps, adds and closes. In a function of its own
     // (TS2563).
     await (async () => {
       /** A session summary on `a`'s branch whose header lists `a` and `b` and whose two prompts name them. */
@@ -9673,38 +9674,40 @@ if (want("10h")) {
         "Brain: no thoughts read or written this session."].join("\n\n");
       /** The subjects standing on a thought: its set. */
       const standingOn = async (id: string) => (await subjects()).filter((x) => x.thought === id && x.standing);
-      // The pass records the header rule's set with the thought's entities, each key under the rule's version 3.
-      const passSet = await seed(twoTickets("SMD-75", "SMD-76"));
+      // The pass records a header's one ticket under the rule's version 4, and none for a header listing two, which
+      // are the model's (version 3 keyed both, a set: its Verify failed on such sessions).
+      const passOne = await seed(summary("SMD-75", "start smd-75", "Done, the pass's."));
+      const passTwo = await seed(twoTickets("SMD-75", "SMD-76"));
       const passSetRun = await extractRun();
-      const passSetLeft = await standingOn(passSet);
+      const [passOneLeft, passTwoLeft] = [await standingOn(passOne), await standingOn(passTwo)];
       assert(passSetRun.code === 0 && /; recorded 1 thought\(s\)' own subjects by their tickets[,\n]/.test(passSetRun.stdout)
-          && JSON.stringify(passSetLeft.map((x) => x.key).sort()) === JSON.stringify(["ticket:SMD-75", "ticket:SMD-76"])
-          && passSetLeft.every((x) => x.by === "first_line" && x.judge === "subject:first_line@r3" && x.recipe?.rule_version === 3),
-        `the pass records a session header's two tickets its prompts name as one rule's set (exit ${passSetRun.code}: ${JSON.stringify(passSetLeft.map((x) => [x.key, x.judge, x.recipe?.rule_version]))}; ${passSetRun.stdout.split("\n").find((l) => /wrote /.test(l))?.trim().slice(-160)})`);
-      await sql`DELETE FROM thoughts WHERE id = ${passSet}::uuid`;
-      // The hook's word, read off the thought's metadata by the pass: a header whose listed prompt names one of its two
-      // tickets, the other named by an ask the summary does not list, keyed whole (metadata.tickets_from `asks`).
-      const oneShown = twoTickets("SMD-86", "SMD-87").replace("\n- and SMD-87 after it", "");
-      const askedSet = await seed(oneShown, { tickets_from: "asks" });
-      const shownOnly = await seed(oneShown.replace("Both done.", "Both done, the other way."));
+          && passOneLeft.map((x) => x.key).join() === "ticket:SMD-75" && passOneLeft.every((x) => x.by === "first_line" && x.judge === "subject:first_line@r4" && x.recipe?.rule_version === 4)
+          && passTwoLeft.length === 0,
+        `the pass records a session header's one ticket, and none of a header listing two (exit ${passSetRun.code}: ${JSON.stringify([passOneLeft, passTwoLeft].map((l) => l.map((x) => [x.key, x.judge, x.recipe?.rule_version])))}; ${passSetRun.stdout.split("\n").find((l) => /wrote /.test(l))?.trim().slice(-160)})`);
+      await sql`DELETE FROM thoughts WHERE id IN (${passOne}::uuid, ${passTwo}::uuid)`;
+      // The hook's word, read off the thought's metadata by the pass: a header's one ticket that no listed prompt names,
+      // named by an ask the summary does not list, keyed (metadata.tickets_from `asks`); without the word, not.
+      const askedOne = await seed(summary("SMD-86", "look around", "Done, asked."), { tickets_from: "asks" });
+      const shownNone = await seed(summary("SMD-86", "look around", "Done, not asked."));
       const askedRun = await extractRun();
-      assert(askedRun.code === 0 && (await standingOn(askedSet)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87"
-          && (await standingOn(shownOnly)).map((x) => x.key).join() === "ticket:SMD-86"
-          && (await standingOn(askedSet)).every((x) => x.recipe?.tickets_from === "asks") && (await standingOn(shownOnly)).every((x) => x.recipe?.tickets_from === undefined),
-        `the hook's word that the asks named the header's tickets keys them all; without it, those a listed prompt names (exit ${askedRun.code})`);
-      await sql`DELETE FROM thoughts WHERE id IN (${askedSet}::uuid, ${shownOnly}::uuid)`;
-      // Review pass 4 (mutant: the sweep reading no word lived): the sweep reads the hook's word off the metadata too.
-      const sweptAsked = await seed(oneShown.replace("Both done.", "Both done, swept."), { tickets_from: "asks" });
+      assert(askedRun.code === 0 && (await standingOn(askedOne)).map((x) => x.key).join() === "ticket:SMD-86" && (await standingOn(shownNone)).length === 0
+          && (await standingOn(askedOne)).every((x) => x.recipe?.tickets_from === "asks"),
+        `the hook's word that the asks named the header's ticket keys it; without it, a ticket no listed prompt names is the model's (exit ${askedRun.code})`);
+      await sql`DELETE FROM thoughts WHERE id IN (${askedOne}::uuid, ${shownNone}::uuid)`;
+      // PR 7a-3b-2's review pass 4 (mutant: the sweep reading no word lived): the sweep reads the hook's word off the
+      // metadata too.
+      const sweptAsked = await seed(summary("SMD-86", "look around", "Done, swept."), { tickets_from: "asks" });
       const sweptRun = await sweep({ limit: 5 });
-      assert(sweptRun.code === 0 && (await standingOn(sweptAsked)).map((x) => x.key).sort().join() === "ticket:SMD-86,ticket:SMD-87"
+      assert(sweptRun.code === 0 && (await standingOn(sweptAsked)).map((x) => x.key).join() === "ticket:SMD-86"
           && (await standingOn(sweptAsked)).every((x) => x.recipe?.tickets_from === "asks"),
         `the sweep reads the hook's word off the thought's metadata too (exit ${sweptRun.code}: ${tally(sweptRun)})`);
       await sql`DELETE FROM thoughts WHERE id = ${sweptAsked}::uuid`;
-      // The sweep: a header's two tickets by the rule; a header's ticket version 2 keyed, found again under version 3,
-      // the same key, a replacement with no new key; and a note the model names four tickets for, one of them twice:
-      // the first three keys in its order, each once, the answers read kept on each subject's recipe. One question
-      // asked.
-      owns.push(["four tickets reviewed", '{"subjects":["SMD-71","SMD-72","SMD-71\'s tests","SMD-73","SMD-74"],"deliverables":[]}']);
+      // The sweep: a header listing two, the model's, which names the work the session did, here one; a header's
+      // ticket version 2 keyed, found again under version 4, the same key, a replacement with no new key; and a note the
+      // model names four tickets for, one of them twice: the first three keys in its order, each once, the answers read
+      // kept on each subject's recipe. Two questions asked.
+      owns.push(["four tickets reviewed", '{"subjects":["SMD-71","SMD-72","SMD-71\'s tests","SMD-73","SMD-74"],"deliverables":[]}'],
+        ["SMD-78 then SMD-79", '{"subjects":["SMD-79"],"deliverables":[]}']);
       const header = await seed(twoTickets("SMD-78", "SMD-79"));
       const old = await seed(summary("SMD-77", "start smd-77"));
       await sql`SELECT record_thought_subjects(${old}::uuid, ARRAY['ticket:SMD-77'], 'first_line', 'subject:first_line@r2', NULL, ${await fpOf(old)}, NULL)`;
@@ -9714,61 +9717,61 @@ if (want("10h")) {
       const setsRun = await sweep({ limit: 4 });
       const [headerLeft, oldLeft, manyLeft] = [await standingOn(header), await standingOn(old), await standingOn(many)];
       const setsWould = setsDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
-      assert(/^would: of 3 thought\(s\), record 2 by its session header's tickets \(1 in place of a standing subject, 0 with a new key\); ask stub-judge about 1\./.test(setsWould)
-          && setsRun.code === 0 && tally(setsRun) === "3 thought(s)' subjects recorded (2 by the session header's tickets, 1 by stub-judge; 6 subject(s) written), 1 in place of a standing one (0 with a new key)"
-          && ownCalls === asked + 1,
-        `a header's set, a version 2 header subject and a model's set: the thoughts recorded, and the subjects written on them (exit ${setsRun.code}, ${ownCalls - asked} asked: ${tally(setsRun)}; dry: ${setsWould.slice(0, 200)})`);
-      assert(JSON.stringify(headerLeft.map((x) => x.key).sort()) === JSON.stringify(["ticket:SMD-78", "ticket:SMD-79"]) && headerLeft.every((x) => x.by === "first_line" && x.judge === "subject:first_line@r3")
-          && oldLeft.length === 1 && oldLeft[0].key === "ticket:SMD-77" && oldLeft[0].judge === "subject:first_line@r3",
-        `the header's two tickets one rule's set; the version 2 subject found again under version 3 (${JSON.stringify([headerLeft, oldLeft].map((l) => l.map((x) => [x.key, x.judge])))})`);
+      assert(/^would: of 3 thought\(s\), record 1 by its session header's tickets \(1 in place of a standing subject, 0 with a new key\); ask stub-judge about 2\./.test(setsWould)
+          && setsRun.code === 0 && tally(setsRun) === "3 thought(s)' subjects recorded (1 by the session header's tickets, 2 by stub-judge; 5 subject(s) written), 1 in place of a standing one (0 with a new key)"
+          && ownCalls === asked + 2,
+        `a header listing two, a version 2 header subject and a model's set: the thoughts recorded, and the subjects written on them (exit ${setsRun.code}, ${ownCalls - asked} asked: ${tally(setsRun)}; dry: ${setsWould.slice(0, 200)})`);
+      assert(headerLeft.map((x) => x.key).join() === "ticket:SMD-79" && headerLeft.every((x) => x.by === "model" && x.judge === "subject:stub-judge@p4r")
+          && oldLeft.length === 1 && oldLeft[0].key === "ticket:SMD-77" && oldLeft[0].judge === "subject:first_line@r4",
+        `the header listing two the model's, its one answer keyed; the version 2 subject found again under version 4 (${JSON.stringify([headerLeft, oldLeft].map((l) => l.map((x) => [x.key, x.judge])))})`);
       assert(JSON.stringify(manyLeft.map((x) => x.key).sort()) === JSON.stringify(["ticket:SMD-71", "ticket:SMD-72", "ticket:SMD-73"])
-          && manyLeft.every((x) => x.by === "model" && x.judge === "subject:stub-judge@p3r" && x.recipe?.prompt_version === 3 && JSON.stringify(x.recipe?.answers) === JSON.stringify(["SMD-71", "SMD-72", "SMD-71's tests", "SMD-73", "SMD-74"])),
+          && manyLeft.every((x) => x.by === "model" && x.judge === "subject:stub-judge@p4r" && x.recipe?.prompt_version === 4 && JSON.stringify(x.recipe?.answers) === JSON.stringify(["SMD-71", "SMD-72", "SMD-71's tests", "SMD-73", "SMD-74"])),
         `the model's set: its first three keys, each once, every answer read on each recipe (${JSON.stringify(manyLeft.map((x) => [x.key, x.recipe?.answers]))})`);
       await sql`DELETE FROM thoughts WHERE id IN (${header}::uuid, ${old}::uuid, ${many}::uuid)`;
-      // A set widened at the same rule and pass: the header's one ticket standing, current, at a text whose header now
-      // lists two. The door keeps it and writes the other (`added`, beside a standing set): the run counts a
-      // replacement with a new key, one subject written, as the dry run does (review pass 1, cold read: the run counted
-      // neither).
+      // A set widened: the model's one key under the current question at the text before an edit, which it now answers
+      // two for. The door keeps the one and writes the other (`added`, beside a standing set): the run counts a
+      // replacement with a new key, one subject written (PR 7a-3b-2's review pass 1, cold read: the run counted neither;
+      // mutant: the new key counted only when every key was new lived). One standing under an older question is
+      // written again, its key judged anew: two written.
+      owns.push(["SMD-80 then SMD-81", '{"subjects":["SMD-80","SMD-81"],"deliverables":[]}']);
       const widen = await seed(twoTickets("SMD-80", "SMD-81"));
-      await sql`SELECT record_thought_subjects(${widen}::uuid, ARRAY['ticket:SMD-80'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${await fpOf(widen)}, NULL)`;
-      const widenDry = await sweep({ dryRun: true });
+      await sql`SELECT record_thought_subjects(${widen}::uuid, ARRAY['ticket:SMD-80'], 'model', 'subject:stub-judge@p4r', NULL, ${await fpOf(widen)}, NULL)`;
+      await sql`SELECT update_thought(${widen}::uuid, ${twoTickets("SMD-80", "SMD-81") + "\n\nEdited."})`;
       asked = ownCalls;
       const widenRun = await sweep({ limit: 3 });
-      const widenWould = widenDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim() ?? "";
       const widenLeft = (await standingOn(widen)).map((x) => x.key).sort();
-      assert(/^would: of 1 thought\(s\), record 1 by its session header's tickets \(1 in place of a standing subject, 1 with a new key\);/.test(widenWould)
-          && widenRun.code === 0 && tally(widenRun) === "1 subject(s) recorded (1 by the session header's tickets), 1 in place of a standing one (1 with a new key)"
-          && JSON.stringify(widenLeft) === JSON.stringify(["ticket:SMD-80", "ticket:SMD-81"]) && ownCalls === asked,
-        `a set widened at the same rule: a replacement with a new key, its one subject written counted, the dry run and the run alike (exit ${widenRun.code}: ${tally(widenRun)}; dry: ${widenWould.slice(0, 160)})`);
-      // …pooled again at the same text, its set current: finished as current, not written again (review pass 1, mutant:
-      // rulesAgree on the first key alone lived).
+      assert(widenRun.code === 0 && tally(widenRun) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (1 with a new key)"
+          && JSON.stringify(widenLeft) === JSON.stringify(["ticket:SMD-80", "ticket:SMD-81"]) && ownCalls === asked + 1,
+        `a set widened: a replacement with a new key, its one subject written counted (exit ${widenRun.code}: ${tally(widenRun)})`);
+      // …pooled again at the same text, its set current: finished as current, not asked or written again.
       await sql`SELECT requeue_thought_work(${POOL}, ${widen}::uuid)`;
+      asked = ownCalls;
       const widenAgain = await sweep({ limit: 1 });
-      assert(tally(widenAgain) === "0 subject(s) recorded; 1 already current", `a current set pooled again is finished as current (${tally(widenAgain)})`);
-      // …and at a moved text the rule finding the same set: kept, by a dry run and a run, no subject counted recorded
-      // (review pass 1, mutant: the dry run's kept on the first key alone lived).
-      await sql`SELECT update_thought(${widen}::uuid, ${twoTickets("SMD-80", "SMD-81") + "\n\nEdited."})`;
-      const keptDry = await sweep({ dryRun: true });
-      const keptRun = await sweep({ limit: 1 });
-      assert(/would: of 1 thought\(s\), record none by the rules, keep 1 found the same way at the text read now/.test(keptDry.stdout)
-          && tally(keptRun) === "0 subject(s) recorded; 1 kept, at the text read now" && (await standingOn(widen)).length === 2,
-        `a set the rule finds again at a moved text is kept, run and dry run alike (${tally(keptRun)}; dry: ${keptDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
-      await sql`DELETE FROM thoughts WHERE id = ${widen}::uuid`;
-      // The upgrade's own path: version 2's model keyed one ticket of a two-ticket session; version 3's header rule
-      // finds both, no model asked — a replacement with a new key, two subjects written on one thought, the key held
-      // among them (review pass 1, mutant: the new key counted only when every key was new lived).
+      assert(tally(widenAgain) === "0 subject(s) recorded; 1 already current" && ownCalls === asked, `a current set pooled again is finished as current (${tally(widenAgain)})`);
+      const rejudged = await seed(twoTickets("SMD-80", "SMD-81").replace("Both done.", "Both done, judged before."));
+      await sql`SELECT record_thought_subjects(${rejudged}::uuid, ARRAY['ticket:SMD-80'], 'model', 'subject:stub-judge@p3r', NULL, ${await fpOf(rejudged)}, NULL)`;
+      const rejudgedRun = await sweep({ limit: 1 });
+      assert(tally(rejudgedRun) === "1 thought(s)' subjects recorded (1 by stub-judge; 2 subject(s) written), 1 in place of a standing one (1 with a new key)"
+          && (await standingOn(rejudged)).every((x) => x.judge === "subject:stub-judge@p4r") && (await standingOn(rejudged)).length === 2,
+        `…one under an older question written again beside the new key: two written (${tally(rejudgedRun)})`);
+      await sql`DELETE FROM thoughts WHERE id IN (${widen}::uuid, ${rejudged}::uuid)`;
+      // The upgrade's own path: version 3's header rule keyed both tickets of a two-ticket session; version 4 leaves the
+      // header to the model, which names the one ticket whose work the session did: a replacement, the set narrowed to
+      // it, its one key written again under the model's pass key.
+      owns.push(["SMD-68 then SMD-69", '{"subjects":["SMD-69"],"deliverables":[]}']);
       const upgraded = await seed(twoTickets("SMD-68", "SMD-69"));
-      await sql`SELECT record_thought_subjects(${upgraded}::uuid, ARRAY['ticket:SMD-68'], 'model', 'subject:stub-judge@p2r', NULL, ${await fpOf(upgraded)}, NULL)`;
+      await sql`SELECT record_thought_subjects(${upgraded}::uuid, ARRAY['ticket:SMD-68', 'ticket:SMD-69'], 'first_line', 'subject:first_line@r3', NULL, ${await fpOf(upgraded)}, NULL)`;
       const upgradedDry = await sweep({ dryRun: true });
       asked = ownCalls;
       const upgradedRun = await sweep({ limit: 1 });
-      assert(/record 1 by its session header's tickets \(1 in place of a standing subject, 1 with a new key\)/.test(upgradedDry.stdout)
-          && tally(upgradedRun) === "1 thought(s)' subjects recorded (1 by the session header's tickets; 2 subject(s) written), 1 in place of a standing one (1 with a new key)" && ownCalls === asked,
-        `a model's one key replaced by the header rule's two: a new key, run and dry run alike (${tally(upgradedRun)}; dry: ${upgradedDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
+      assert(/would: of 1 thought\(s\), record none by the rules; ask stub-judge about 1 \(1 with an out-of-date subject\)\./.test(upgradedDry.stdout)
+          && tally(upgradedRun) === "1 subject(s) recorded (1 by stub-judge), 1 in place of a standing one (0 with a new key)" && ownCalls === asked + 1
+          && (await standingOn(upgraded)).map((x) => `${x.key} ${x.judge}`).join() === "ticket:SMD-69 subject:stub-judge@p4r",
+        `version 3's header set found again under version 4: the model asked, the set narrowed to its one answer (${tally(upgradedRun)}; dry: ${upgradedDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
       await sql`DELETE FROM thoughts WHERE id = ${upgraded}::uuid`;
-      // What stood is the door's to say (review pass 2, cold read, run-it): a set another writer closes while the model
-      // is asked is no replacement, and one it writes meanwhile is. Each its own run: in one, the claim-time read's two
-      // errors cancel.
+      // What stood is the door's to say (PR 7a-3b-2's review pass 2, cold read, run-it): a set another writer closes
+      // while the model is asked is no replacement, and one it writes meanwhile is. Each its own run: in one, the
+      // claim-time read's two errors cancel.
       const raceGone = await seed("[10h] a raced close, merged pull request 727");
       await sql`SELECT record_thought_subjects(${raceGone}::uuid, ARRAY['phrase:raced old'], 'model', 'subject:stub-judge@p1', NULL, ${await fpOf(raceGone)}, NULL)`;
       onOwn = (t) => (t.includes("a raced close") ? sql`UPDATE thought_facets SET valid_until = now() WHERE thought_id = ${raceGone}::uuid AND kind = 'subject' AND valid_until IS NULL` : undefined);
@@ -9782,15 +9785,36 @@ if (want("10h")) {
           && (await standingOn(raceGone)).map((x) => x.key).join() === "pr:727" && (await standingOn(raceCame)).map((x) => x.key).join() === "pr:727",
         `a set closed meanwhile is no replacement, one written meanwhile is (${tally(goneRun)} | ${tally(cameRun)})`);
       await sql`DELETE FROM thoughts WHERE id IN (${raceGone}::uuid, ${raceCame}::uuid)`;
-      // A narrowed set, none written, beside a new set of two, two written: equal totals, but not one subject a thought
-      // (review pass 2, cold read, run-it: they read as one each).
-      const narrowed2 = await seed(twoTickets("SMD-82", "SMD-83").replace("\n- and SMD-83 after it", "\n- and more after it"));
+      // A set the rule narrows, none written, beside a new set of two, two written: equal totals, but not one subject a
+      // thought (PR 7a-3b-2's review pass 2, cold read, run-it: they read as one each). The narrowed set stands under
+      // the rule's current key at the text read: the rule finding one of its keys is no agreement (its review pass 1,
+      // mutant: rulesAgree on the first key alone lived).
+      owns.push(["SMD-84 then SMD-85", '{"subjects":["SMD-84","SMD-85"],"deliverables":[]}']);
+      const narrowed2 = await seed(summary("SMD-82", "start smd-82", "Done, narrowed."));
       await sql`SELECT record_thought_subjects(${narrowed2}::uuid, ARRAY['ticket:SMD-82', 'ticket:SMD-83'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${await fpOf(narrowed2)}, NULL)`;
       const pair = await seed(twoTickets("SMD-84", "SMD-85"));
       const mixRun = await sweep({ limit: 2 });
-      assert(tally(mixRun) === "2 thought(s)' subjects recorded (2 by the session header's tickets; 2 subject(s) written), 1 in place of a standing one (0 with a new key)"
+      assert(tally(mixRun) === "2 thought(s)' subjects recorded (1 by the session header's tickets, 1 by stub-judge; 2 subject(s) written), 1 in place of a standing one (0 with a new key)"
           && (await standingOn(narrowed2)).map((x) => x.key).join() === "ticket:SMD-82" && (await standingOn(pair)).length === 2,
         `a narrowed set and a new set of two: the thoughts recorded, and the subjects written, though their totals agree (${tally(mixRun)})`);
+      // …and at a moved text the rule finding the same key: kept, by a dry run and a run, no subject counted recorded
+      // (PR 7a-3b-2's review pass 1, mutant: the dry run's kept on the first key alone lived).
+      await sql`SELECT update_thought(${narrowed2}::uuid, ${summary("SMD-82", "start smd-82", "Done, narrowed.") + "\n\nEdited."})`;
+      const keptDry = await sweep({ dryRun: true });
+      const keptRun = await sweep({ limit: 1 });
+      assert(/would: of 1 thought\(s\), record none by the rules, keep 1 found the same way at the text read now/.test(keptDry.stdout)
+          && tally(keptRun) === "0 subject(s) recorded; 1 kept, at the text read now" && (await standingOn(narrowed2)).length === 1,
+        `a subject the rule finds again at a moved text is kept, run and dry run alike (${tally(keptRun)}; dry: ${keptDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
+      // …but a set standing at an older text, of which the rule finds one key, is no keep: narrowed, run and dry run
+      // alike.
+      await sql`SELECT record_thought_subjects(${narrowed2}::uuid, ARRAY['ticket:SMD-82', 'ticket:SMD-83'], 'first_line', ${subjectRuleKey("first_line")}, NULL, ${await fpOf(narrowed2)}, NULL)`;
+      await sql`SELECT update_thought(${narrowed2}::uuid, ${summary("SMD-82", "start smd-82", "Done, narrowed.") + "\n\nEdited twice."})`;
+      const notKeptDry = await sweep({ dryRun: true });
+      const notKeptRun = await sweep({ limit: 1 });
+      assert(/would: of 1 thought\(s\), record 1 by its session header's tickets \(1 in place of a standing subject, 0 with a new key\)/.test(notKeptDry.stdout)
+          && tally(notKeptRun) === "1 thought(s)' subjects recorded (1 by the session header's tickets; 0 subject(s) written), 1 in place of a standing one (0 with a new key)"
+          && (await standingOn(narrowed2)).map((x) => x.key).join() === "ticket:SMD-82",
+        `…a set at an older text the rule finds one key of is narrowed, not kept (${tally(notKeptRun)}; dry: ${notKeptDry.stdout.split("\n").find((l) => /would:/.test(l))?.trim().slice(0, 160)})`);
       await sql`DELETE FROM thoughts WHERE id IN (${narrowed2}::uuid, ${pair}::uuid)`;
     })();
     // In a function of its own: test-live's module body is past the size TypeScript's control flow analysis takes
@@ -9933,7 +9957,7 @@ if (want("10h")) {
     const goneDry = await sweep({ dryRun: true });
     garbledAnswers = false;
     const goneRun = await sweep().finally(() => { garbledAnswers = true; });
-    assert(/^ {2}pool subjects:r1\.3:p3r: 0 pending, 1 leased \(1 run out, taken again\)/m.test(goneDry.stdout) && /would: of 1 thought\(s\)/.test(goneDry.stdout)
+    assert(/^ {2}pool subjects:r1\.4:p4r: 0 pending, 1 leased \(1 run out, taken again\)/m.test(goneDry.stdout) && /would: of 1 thought\(s\)/.test(goneDry.stdout)
         && goneRun.code === 0 && tally(goneRun) === "0 subject(s) recorded; 1 the model named nothing for" && (await claimOf(garbled))?.status === "succeeded",
       `a gone worker's lease run out is counted, taken and finished (exit ${goneRun.code}: ${tally(goneRun)})`);
     // …and one run out at its last attempt: the pool line counts it, and the run's claim fails it, said, exit 1 (review
@@ -9943,7 +9967,7 @@ if (want("10h")) {
     await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-gone', claimed_at = now() - interval '2 hours', ttl_expires_at = now() - interval '1 hour', attempt_count = 3, finished_at = NULL WHERE thought_id = ${utf}::uuid AND work_type = ${POOL}`;
     await sql`SELECT requeue_thought_work(${POOL}, ${filed}::uuid)`;
     const spentRun = await sweep();
-    assert(spentRun.code === 1 && /^ {2}pool subjects:r1\.3:p3r: 1 pending, 1 leased \(1 run out at their last attempt, failed by the next claim\)/m.test(spentRun.stdout)
+    assert(spentRun.code === 1 && /^ {2}pool subjects:r1\.4:p4r: 1 pending, 1 leased \(1 run out at their last attempt, failed by the next claim\)/m.test(spentRun.stdout)
         && /^ {2}1 thought\(s\) in /m.test(spentRun.stdout) && /1 claim\(s\) whose lease ran out at its last attempt failed while this run claimed/.test(spentRun.stderr) && (await claimOf(utf))?.status === "failed" && (await claimOf(filed))?.status === "succeeded",
       `a lease run out at its last attempt is counted, failed by the run's first claim, said after its next, exit 1 (exit ${spentRun.code}: ${spentRun.stderr.trim().split("\n")[0]?.slice(0, 120)}; ${tally(spentRun)})`);
     // …and one spent mid-run, by the run's next claim after another's question: counted over the run's window, where the
@@ -9955,7 +9979,7 @@ if (want("10h")) {
     onOwn = (t) => (t.includes("a garbled answer comes back") ? sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-gone', claimed_at = now() - interval '2 hours', ttl_expires_at = now() - interval '1 hour', attempt_count = 3, finished_at = NULL WHERE thought_id = ${release}::uuid AND work_type = ${POOL}` : undefined);
     const midSpent = await sweep().finally(() => { onOwn = null; garbledAnswers = true; });
     const releaseClaim = await claimOf(release);
-    assert(midSpent.code === 1 && /^ {2}pool subjects:r1\.3:p3r: 2 pending/m.test(midSpent.stdout) && !/run out at their last attempt/.test(midSpent.stdout)
+    assert(midSpent.code === 1 && /^ {2}pool subjects:r1\.4:p4r: 2 pending/m.test(midSpent.stdout) && !/run out at their last attempt/.test(midSpent.stdout)
         && /1 claim\(s\) whose lease ran out at its last attempt failed while this run claimed/.test(midSpent.stderr)
         && releaseClaim?.status === "failed" && /^lease expired/.test(releaseClaim.last_error ?? ""),
       `a lease spent mid-run, by the run's next claim, is said, exit 1, the pool's line at the start having counted none (exit ${midSpent.code}: ${midSpent.stderr.trim().split("\n")[0]?.slice(0, 120)}; ${tally(midSpent)})`);
@@ -9995,7 +10019,7 @@ if (want("10h")) {
       back = await sweep({ switchKey: true });
     };
     const heldRun = await sweep().finally(() => { onOwn = null; garbledAnswers = true; });
-    assert(heldAsks === 1 && back !== null && /^ {2}pool subjects:r1\.3:p3r: named \(subjects:r0 was\)/m.test(back.stdout) && (await claimOf(heldT))?.status === "succeeded" && heldRun.code === 0,
+    assert(heldAsks === 1 && back !== null && /^ {2}pool subjects:r1\.4:p4r: named \(subjects:r0 was\)/m.test(back.stdout) && (await claimOf(heldT))?.status === "succeeded" && heldRun.code === 0,
       `a naming at a key's switch back leaves a claim a live run holds to it: the thought asked once (${heldAsks} asked; exit ${heldRun.code}; ${back === null ? "no naming" : back.stdout.split("\n").find((l) => /pool subjects/.test(l))?.trim().slice(0, 100)})`);
     // …and a subject another run wrote while the model was asked, under another key, which the answer naming nothing
     // said nothing of: no claim finishes over it — the thought goes back in the pool, and the run reads what stands when
@@ -10012,7 +10036,7 @@ if (want("10h")) {
     onOwn = async (t) => {
       const which = t.includes("Meanwhile, none:") ? "none" : t.includes("Meanwhile, older:") ? "older" : null;
       if (which === null || ++meanAsks[which] > 1) return;
-      await asOther(which === "none" ? meanNone : meanOld, "phrase:an older question", "subject:stub-judge@p3");
+      await asOther(which === "none" ? meanNone : meanOld, "phrase:an older question", "subject:stub-judge@p4");
     };
     const meanRun = await sweep().finally(() => { onOwn = null; });
     assert(meanAsks.none === 2 && meanAsks.older === 2 && (await standingOf(meanNone)) === undefined && (await standingOf(meanOld)) === undefined
@@ -10027,7 +10051,7 @@ if (want("10h")) {
     onOwn = async (t) => {
       if (!t.includes("Leased:") || ++leasedAsks > 1) return;
       await sql`UPDATE thought_work_claims SET worker_id = 'subjects-other', claimed_at = now(), ttl_expires_at = now() + interval '600 seconds' WHERE thought_id = ${leasedT}::uuid AND work_type = ${POOL}`;
-      await asOther(leasedT, "phrase:a note taken elsewhere", "subject:stub-judge@p3r");
+      await asOther(leasedT, "phrase:a note taken elsewhere", "subject:stub-judge@p4r");
     };
     const leasedRun = await sweep().finally(() => { onOwn = null; });
     const [leasedClaim] = (await sql`SELECT status, worker_id FROM thought_work_claims WHERE thought_id = ${leasedT}::uuid AND work_type = ${POOL}`) as { status: string; worker_id: string | null }[];
@@ -10051,7 +10075,7 @@ if (want("10h")) {
         await between`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${lockedT}::uuid::text, 0))`;
         betweenDone = (async () => {
           await untilAdvisoryWait();
-          await between`SELECT record_thought_subject(${lockedT}::uuid, ${"phrase:a note given its subject between"}, 'model', 'subject:stub-judge@p3r', NULL, ${fp}, ${subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "on", answers: ["{}"] })}::jsonb)`;
+          await between`SELECT record_thought_subject(${lockedT}::uuid, ${"phrase:a note given its subject between"}, 'model', 'subject:stub-judge@p4r', NULL, ${fp}, ${subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "on", answers: ["{}"] })}::jsonb)`;
           await between`COMMIT`;
         })();
       };
@@ -10186,7 +10210,7 @@ if (want("10h")) {
     assert(pastWait !== null && pastWait.code === 0
         && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) writing thoughts as the pool was named, so the pooling sees what they capture \\(pid ${latePid}\\); a stop leaves the pooling to the next run$`, "m").test(pastWait.stdout)
         && new RegExp(`^ {2}still waiting, after \\d+ s, for 1 transaction\\(s\\) writing thoughts .*\\(pid ${latePid}\\)`, "m").test(pastWait.stdout)
-        && (await filledKey()) === "subjects:r1.3" && (await standingOf(lateT))?.key === "ticket:SMD-83",
+        && (await filledKey()) === "subjects:r1.4" && (await standingOf(lateT))?.key === "ticket:SMD-83",
       `a capture open long across the naming is waited for, its pid said and said again, and pooled and read in the same run (exit ${pastWait?.code}: ${pastWait === null ? "no run" : pastWait.stdout.split("\n").filter((l) => /waiting/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
     // A stop during that wait ends the run there, 130, the pool named, its pooling unfinished and nothing pooled; the
     // next run pools what the writer captured (review pass 7: an in-process stop waited out the wait and the pooling).
@@ -10212,10 +10236,10 @@ if (want("10h")) {
     } finally {
       await stopHolder.close({ timeout: 5 });
     }
-    const stopUnfinished = await filledKey(), stopClaim = await claimOf(stopT, "subjects:r1.3");
+    const stopUnfinished = await filledKey(), stopClaim = await claimOf(stopT, "subjects:r1.4");
     const afterNamingStop = await sweep({ model: false });
-    assert(stoppedNaming?.code === 130 && stopMs < 2000 && /stopped before pool subjects:r1\.3 was pooled: the caller's signal was aborted; the pool is named, its pooling unfinished, nothing claimed, and the next run pools it/.test(stoppedNaming.stderr)
-        && stopUnfinished === "" && stopClaim === undefined && /^ {2}pool subjects:r1\.3: named, its pooling broken off before/m.test(afterNamingStop.stdout) && (await standingOf(stopT))?.key === "ticket:SMD-85",
+    assert(stoppedNaming?.code === 130 && stopMs < 2000 && /stopped before pool subjects:r1\.4 was pooled: the caller's signal was aborted; the pool is named, its pooling unfinished, nothing claimed, and the next run pools it/.test(stoppedNaming.stderr)
+        && stopUnfinished === "" && stopClaim === undefined && /^ {2}pool subjects:r1\.4: named, its pooling broken off before/m.test(afterNamingStop.stdout) && (await standingOf(stopT))?.key === "ticket:SMD-85",
       `a stop during the naming's wait ends the run there, 130, nothing pooled, and the next run pools the writer's capture (exit ${stoppedNaming?.code} after ${stopMs} ms; filled ${JSON.stringify(stopUnfinished)}; ${stopClaim?.status ?? "no claim"})`);
     // …and one while another run holds the pool's lock, nothing named (review pass 7: pg_advisory_lock waited on the
     // server, which no stop reached).
@@ -10282,7 +10306,7 @@ if (want("10h")) {
     }
     assert(lockWaited?.code === 0 && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the pooling waits on \\(pid ${editPid}\\); a stop leaves the pooling to the next run$`, "m").test(lockWaited.stdout)
         && new RegExp(`^ {2}still waiting, after \\d+ s, for 1 transaction\\(s\\) the pooling waits on \\(pid ${editPid}\\)`, "m").test(lockWaited.stdout)
-        && (await filledKey()) === "subjects:r1.3" && (await standingOf(editedT))?.key === "ticket:SMD-87",
+        && (await filledKey()) === "subjects:r1.4" && (await standingOf(editedT))?.key === "ticket:SMD-87",
       `a pooling held up by an edit's open claim waits for it, says its pid, and pools and reads the thought once it ends (exit ${lockWaited?.code}: ${lockWaited === null ? "no run" : lockWaited.stdout.split("\n").filter((l) => /waiting/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     // A reader's transaction open across a naming, one holding an xid, is not waited for: it writes no thought a
     // trigger read the pool for (review pass 7, run-it: a lock read of any mode on thoughts lived); nor one holding the
@@ -10307,7 +10331,7 @@ if (want("10h")) {
       await readHolder.close({ timeout: 5 });
       await emptyHolder.close({ timeout: 5 });
     }
-    assert(readerRun?.code === 0 && !/waiting for/.test(readerRun.stdout) && (await filledKey()) === "subjects:r1.3",
+    assert(readerRun?.code === 0 && !/waiting for/.test(readerRun.stdout) && (await filledKey()) === "subjects:r1.4",
       `a reader open across a naming, and a transaction holding the thoughts' write lock with no xid, are not waited for (exit ${readerRun?.code}: ${readerRun?.stdout.split("\n").find((l) => /waiting/.test(l))?.trim().slice(0, 90) ?? "no wait"})`);
     // A lock request queued ahead of the pooling — DDL waiting on a reader of thoughts — holds it up with no lock of its
     // own granted: the watcher names it, as the server counts it, and a stop cancels the pooling, 130, at once (review
@@ -10345,7 +10369,7 @@ if (want("10h")) {
       await queueDdl.close({ timeout: 5 });
     }
     assert(queued?.code === 130 && queueMs < 2000 && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the pooling waits on \\(pid ${ddlPid}\\); a stop leaves the pooling to the next run$`, "m").test(queued.stdout)
-        && /stopped before pool subjects:r1\.3 was pooled/.test(queued.stderr) && (await filledKey()) === "",
+        && /stopped before pool subjects:r1\.4 was pooled/.test(queued.stderr) && (await filledKey()) === "",
       `a lock request queued ahead of the pooling is named, and a stop cancels the pooling at once (exit ${queued?.code} after ${queueMs} ms: ${queued === null ? "no run" : queued.stdout.split("\n").filter((l) => /waiting/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ") || "no wait said"})`);
     // The naming's write of the name waits for each write in flight under the pool named, which locks the name FOR
     // SHARE: watched, it names that write's pid, and a stop cancels it, nothing named (review pass 8, cold read: it
@@ -10387,8 +10411,8 @@ if (want("10h")) {
     const keptFilled = await filledKey();
     // One stop, said once, nothing pooled (review pass 9, run-it: a run that went on past the naming's stop lived).
     assert(shared?.code === 130 && shareMs < 2000
-        && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the naming of pool subjects:r1\\.3 waits on \\(pid ${sharePid}\\): writes in flight under the pool named lock its name, as may a transaction editing ob1_config; a stop leaves it named as it was$`, "m").test(shared.stdout)
-        && /stopped before pool subjects:r1\.3 was named: the caller's signal was aborted; nothing was named, pooled or claimed/.test(shared.stderr) && !/was pooled|stopped after/.test(shared.stderr)
+        && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the naming of pool subjects:r1\\.4 waits on \\(pid ${sharePid}\\): writes in flight under the pool named lock its name, as may a transaction editing ob1_config; a stop leaves it named as it was$`, "m").test(shared.stdout)
+        && /stopped before pool subjects:r1\.4 was named: the caller's signal was aborted; nothing was named, pooled or claimed/.test(shared.stderr) && !/was pooled|stopped after/.test(shared.stderr)
         && keptName === "subjects:r0" && keptFilled === "subjects:r0" && ownLeft === 0,
       `the naming's write waits for a write in flight under the pool named, names it, and a stop cancels it, nothing named and no connection left (exit ${shared?.code} after ${shareMs} ms; named ${keptName}, filled ${keptFilled}; ${ownLeft} connection(s) of its own left)`);
     // …and one held up for less than NAMING_WAIT.quietMs says nothing (review pass 9, run-it: the quiet check lived).
@@ -10408,7 +10432,7 @@ if (want("10h")) {
       Object.assign(NAMING_WAIT, savedWaits);
       await briefHolder.close({ timeout: 5 });
     }
-    assert(brief?.code === 0 && !/the naming of pool/.test(brief.stdout) && (await filledKey()) === "subjects:r1.3",
+    assert(brief?.code === 0 && !/the naming of pool/.test(brief.stdout) && (await filledKey()) === "subjects:r1.4",
       `a naming's write held up for less than the quiet time says nothing (exit ${brief?.code}: ${brief?.stdout.split("\n").find((l) => /waiting/.test(l))?.trim().slice(0, 90) ?? "nothing said"})`);
     // …and through the CLI: a signal ends the process at once, and the server ends the write it left waiting within a
     // second, so no rename lands once the write in flight ends (review pass 9, cold read and run-it: the write ran on,
@@ -10463,7 +10487,7 @@ if (want("10h")) {
       await deafHolder.close({ timeout: 5 });
     }
     assert(deafRun?.code === 130 && /^ {2}the naming's waits go unwatched: a second connection could not be opened \(/m.test(deafRun.stdout)
-        && /stopped before pool subjects:r1\.3 was pooled/.test(deafRun.stderr) && (await filledKey()) === "",
+        && /stopped before pool subjects:r1\.4 was pooled/.test(deafRun.stderr) && (await filledKey()) === "",
       `a run that cannot open its watching connection says so, and hears a stop before the pooling (exit ${deafRun?.code}: ${deafRun === null ? "no run" : `${deafRun.stdout.split("\n").find((l) => /unwatched/.test(l))?.trim().slice(0, 80) ?? "nothing said"}; ${deafRun.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 80)}`})`);
     // …and one lent a client and no url says its waits go unwatched.
     await setNamed("subjects:r0");
@@ -10515,13 +10539,13 @@ if (want("10h")) {
     const otherKeyT = await seed("A note another key's run holds while this key's pool is named.");
     await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-elsewhere', claimed_at = now(), ttl_expires_at = now() + interval '1 hour', attempt_count = 1 WHERE thought_id = ${otherKeyT}::uuid AND work_type = 'subjects:r0'`;
     await sweep({ model: false, switchKey: true });
-    const [{ underNew }] = (await sql`SELECT count(*)::int AS "underNew" FROM thought_work_claims WHERE thought_id = ${otherKeyT}::uuid AND work_type = 'subjects:r1.3'`) as { underNew: number }[];
+    const [{ underNew }] = (await sql`SELECT count(*)::int AS "underNew" FROM thought_work_claims WHERE thought_id = ${otherKeyT}::uuid AND work_type = 'subjects:r1.4'`) as { underNew: number }[];
     assert(underNew === 1, `a thought another key's run holds live is pooled under the key named now (${underNew} claim(s) under it)`);
     // A run under a pool named elsewhere while it asks: its answer is not written, the subject the new pool's run
     // recorded standing, and it stops, exit 2 (review pass 7, cold read: a run under the key before a switch replaced,
     // its call later, the subject the new pool's run had recorded, whose claim was finished, and no run asked again).
     // The new pool's run is its writes, made while the stub holds the answer.
-    const OFF = "subjects:r1.3:p3";
+    const OFF = "subjects:r1.4:p4";
     const offOnly = (...ids: string[]) => sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
                                                WHERE work_type = ${OFF} AND status IN ('pending', 'claimed') AND NOT (thought_id = ANY(${`{${ids.join(",")}}`}::uuid[]))`;
     const switchedT = await seed("Switched: reviewed and merged pull request 727 while its pool was switched.");
@@ -10533,15 +10557,15 @@ if (want("10h")) {
       if (switched || !t.includes("Switched:")) return;
       switched = true;
       await setNamed(POOL);
-      await asOther(switchedT, "pr:727", "subject:stub-judge@p3r");
+      await asOther(switchedT, "pr:727", "subject:stub-judge@p4r");
       await sql`SELECT requeue_thought_work(${POOL}, ${switchedT}::uuid)`;
       await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = ${switchedT}::uuid AND work_type = ${POOL}`;
     };
     asked = ownCalls;
     const offSwitched = await sweep({}, offEnv).finally(() => { onOwn = null; });
     const switchedNow = await standingOf(switchedT);
-    assert(offSwitched.code === 2 && /The subject pool is now subjects:r1\.3:p3r: another run named it while this one ran, so this run, under subjects:r1\.3:p3, records no subject more and stops here; what it holds goes back to its pool\./.test(offSwitched.stderr)
-        && switchedNow?.judge === "subject:stub-judge@p3r" && ownCalls === asked + 1 && (await claimOf(switchedT, OFF))?.status === "pending",
+    assert(offSwitched.code === 2 && /The subject pool is now subjects:r1\.4:p4r: another run named it while this one ran, so this run, under subjects:r1\.4:p4, records no subject more and stops here; what it holds goes back to its pool\./.test(offSwitched.stderr)
+        && switchedNow?.judge === "subject:stub-judge@p4r" && ownCalls === asked + 1 && (await claimOf(switchedT, OFF))?.status === "pending",
       `a run whose pool is named elsewhere while it asks records no subject more and stops, exit 2, the new pool's subject standing (exit ${offSwitched.code}; ${switchedNow?.judge}; ${ownCalls - asked} asked)`);
     // …and one whose answer writes nothing, not JSON here, stops at its next claim, asking nothing more.
     const switchedG = await seed("Switched, garbled: a note whose pool was switched as its answer came back.");
@@ -10559,14 +10583,14 @@ if (want("10h")) {
     };
     asked = ownCalls;
     const offStopped = await sweep({}, offEnv).finally(() => { onOwn = null; });
-    assert(offStopped.code === 2 && /The subject pool is now subjects:r1\.3:p3r/.test(offStopped.stderr) && ownCalls === asked + 1
+    assert(offStopped.code === 2 && /The subject pool is now subjects:r1\.4:p4r/.test(offStopped.stderr) && ownCalls === asked + 1
         && (await claimOf(switchedG, OFF))?.status === "failed" && (await claimOf(switchedNext, OFF))?.status === "pending",
       `…and one whose answer writes nothing stops at its next claim, asking nothing more (exit ${offStopped.code}; ${ownCalls - asked} asked)`);
     // …and one whose model names nothing closes no subject: here one found with the reasoning off, out of date under
     // the run's pool and current under the one named while it asked.
     const keptT = await seed("Switched back: a note whose subject stands under the pool named while it was asked.");
     await setNamed(POOL);
-    await asOther(keptT, "phrase:a note kept", "subject:stub-judge@p3");
+    await asOther(keptT, "phrase:a note kept", "subject:stub-judge@p4");
     await sql`SELECT requeue_thought_work(${POOL}, ${keptT}::uuid)`;
     await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
                WHERE work_type = ${POOL} AND status IN ('pending', 'claimed') AND thought_id <> ${keptT}::uuid`;
@@ -10577,7 +10601,7 @@ if (want("10h")) {
       await setNamed(OFF);
     };
     const keptRun = await sweep().finally(() => { onOwn = null; });
-    assert(keptRun.code === 2 && /The subject pool is now subjects:r1\.3:p3: /.test(keptRun.stderr) && (await standingOf(keptT))?.judge === "subject:stub-judge@p3",
+    assert(keptRun.code === 2 && /The subject pool is now subjects:r1\.4:p4: /.test(keptRun.stderr) && (await standingOf(keptT))?.judge === "subject:stub-judge@p4",
       `…and one whose model names nothing closes nothing, the subject current under the pool named now standing (exit ${keptRun.code}; ${(await standingOf(keptT))?.judge ?? "none standing"})`);
     // A naming waits for a write in flight under the pool it renames: the write locks the pool's name FOR SHARE first,
     // so no other pool is named, and its run records and finishes the thought, between that read and the write. Here
@@ -10613,7 +10637,7 @@ if (want("10h")) {
       await doorHolder.close({ timeout: 5 });
       await namer.close({ timeout: 5 });
     }
-    assert(renamed === "waited" && flightRun?.code === 0 && (await standingOf(flightT))?.judge === "subject:stub-judge@p3",
+    assert(renamed === "waited" && flightRun?.code === 0 && (await standingOf(flightT))?.judge === "subject:stub-judge@p4",
       `a naming waits for a write in flight under the pool it renames (the rename ${renamed || "not tried"}; exit ${flightRun?.code}; ${(await standingOf(flightT))?.judge})`);
     // …and for a model's empty answer's finish in flight, which locks the name FOR SHARE as a write does (review pass 8,
     // run-it: a plain read there lived).
@@ -10742,7 +10766,7 @@ if (want("10h")) {
       await alarmAt(5);
       const naming = await sweep({});
       const nothingIds = await seedAll([...notes(1, 1, "a note the judge names nothing for."), ...notes(2, 1, "alarm-invented, a ticket it does not name."), ...notes(3, 4, "never taken.")]);
-      const older = await asV1(nothingIds[0], "phrase:an older topic", "model", "subject:stub-judge@p3");
+      const older = await asV1(nothingIds[0], "phrase:an older topic", "model", "subject:stub-judge@p4");
       await otherWorkClaims(nothingIds.slice(0, 2));
       let asked = ownCalls;
       const nothingAhead = (by: string) => sql`UPDATE thought_work_claims SET enqueued_at = enqueued_at + ${by}::interval WHERE work_type = ${POOL} AND thought_id = ANY(${sql.array(nothingIds.slice(2), "TEXT")}::uuid[])`;
@@ -10772,7 +10796,7 @@ if (want("10h")) {
       await drop(nothingIds);
       await alarmAt(5);
       const [closedT, closedY] = await seedAll(["Alarm note 161: its older subject closed, then edited.", "Alarm note 162: named nothing."]);
-      await asV1(closedT, "phrase:an older topic", "model", "subject:stub-judge@p3");
+      await asV1(closedT, "phrase:an older topic", "model", "subject:stub-judge@p4");
       onOwn = async (thought) => {
         if (!thought.includes("Alarm note 162")) return;
         onOwn = null;
@@ -10963,7 +10987,7 @@ if (want("10h")) {
         if (!thought.includes("Alarm note 35")) return;
         onOwn = null;
         await sql`SELECT update_thought(${otherT}::uuid, ${"Alarm note 34: edited, and given a subject by another run."})`;
-        await asV1(otherT, "phrase:another run's subject", "model", "subject:stub-judge@p3r");
+        await asV1(otherT, "phrase:another run's subject", "model", "subject:stub-judge@p4r");
         await sql`UPDATE thought_work_claims SET status = 'succeeded', worker_id = 'another-run', finished_at = now() WHERE thought_id = ${otherT}::uuid AND work_type = ${POOL}`;
       };
       asked = ownCalls;
@@ -11479,7 +11503,7 @@ if (want("10h")) {
       const beforeRun = await alarmRun();
       const afterRun = await alarmRun({ switchKey: true }, offEnv);
       await setNamed(POOL);
-      assert(beforeRun.code === 0 && afterRun.code === 0 && !/gave no subject/.test(afterRun.stderr) && (await windowOf())?.pool === "subjects:r1.3:p3",
+      assert(beforeRun.code === 0 && afterRun.code === 0 && !/gave no subject/.test(afterRun.stderr) && (await windowOf())?.pool === "subjects:r1.4:p4",
         `a window is its pool's: the pool named again under the key without reasoning starts its own, and one empty answer on each side trips nothing (exits ${beforeRun.code} and ${afterRun.code}; the window's pool ${(await windowOf())?.pool})`);
       await drop([beforeT]);
 
@@ -13256,7 +13280,7 @@ if (want("10h")) {
         ow.release();
         await openWriter.close({ timeout: 5 });
       }
-      assert(early.code === 0 && /stopped before the pass began/.test(early.stderr) && writersRun?.code === 0 && /stopped before pool subjects:r1\.3:p3r was pooled/.test(writersRun.stderr),
+      assert(early.code === 0 && /stopped before the pass began/.test(early.stderr) && writersRun?.code === 0 && /stopped before pool subjects:r1\.4:p4r was pooled/.test(writersRun.stderr),
         `a following run's stop exits 0 before it begins and in the naming's wait for writers (exits ${early.code} and ${writersRun?.code}): ${writersRun?.stderr.trim().slice(0, 200)}`);
 
       // …and at the naming's write and in the pooling, each held up on a lock and watched, 0 (review pass 2, run-it: only
@@ -13289,7 +13313,7 @@ if (want("10h")) {
       await keepWindow("2000-01-06 00:00:00+00", ["stub-judge"], ["stub-judge"]);
       const dryOther = await sweep({ judgeChecked: true, dryRun: true }, otherEnv);
       await alarmAt(48, 1);
-      assert(/^0: stopped before pool subjects:r1\.3:p3r was named/.test(watchedStops.naming) && /^0: stopped before pool subjects:r1\.3:p3r was pooled/.test(watchedStops.pooling)
+      assert(/^0: stopped before pool subjects:r1\.4:p4r was named/.test(watchedStops.naming) && /^0: stopped before pool subjects:r1\.4:p4r was pooled/.test(watchedStops.pooling)
           && /; this run's judge model, stub-judge-2, is not held$/m.test(dryOther.stdout),
         `a following run stopped at the naming's write or in the pooling exits 0, and a dry --judge-checked run of an unheld model is told so without a lift's disclaimer (naming ${watchedStops.naming}; pooling ${watchedStops.pooling}): ${dryOther.stdout.trim().slice(0, 300)}`);
 
@@ -16109,8 +16133,8 @@ if (want("10h")) {
     // anywhere in the key, or skipping the prefix, lived): every way by every pass key here, odd ones and NULLs among
     // them.
     const ways = ["metadata", "first_line", "model", "other", null];
-    const passes = ["subject:metadata@r1", "subject:first_line@r3", "subject:first_line@r2", "subject:first_line@r1", "subject:rules@r1", "subject:x@p3", "subject:x@p3r", "subject:x@p2", "subject:x@p2r", "subject:x@p1", "subject:x@p1r",
-      "subject:x@p12", "subject:x@p12r", "subject:x@p20", "subject:x@p2rr", "subject:x@p3rr", "subject:x@p30", "extract:x@p2", "extract:x@p2r", "x@p2", "@p2r", "p2", "", null];
+    const passes = ["subject:metadata@r1", "subject:first_line@r4", "subject:first_line@r2", "subject:first_line@r1", "subject:rules@r1", "subject:x@p4", "subject:x@p4r", "subject:x@p2", "subject:x@p2r", "subject:x@p1", "subject:x@p1r",
+      "subject:x@p12", "subject:x@p12r", "subject:x@p20", "subject:x@p2rr", "subject:x@p4rr", "subject:x@p30", "extract:x@p2", "extract:x@p2r", "x@p2", "@p2r", "p2", "", null];
     const grid = ways.flatMap((by) => passes.map((judge) => ({ by, judge })));
     const differ: string[] = [];
     for (const on of [true, false]) {
@@ -31240,7 +31264,7 @@ if (want("47")) {
     // thread links it at the write's commit; --status counts it in each, a place in each thread wanting its edge;
     // unlinked, a run links it in both. Its set closed, both threads stand as before.
     const c1 = await thought("c1", "2026-11-04T01:00:00Z");
-    const setOf = async (keys: string[]) => ((await sql`SELECT record_thought_subjects(${c1}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL::uuid,
+    const setOf = async (keys: string[]) => ((await sql`SELECT record_thought_subjects(${c1}::uuid, ${sql.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p4r', NULL::uuid,
       (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${c1}::uuid), NULL::jsonb) AS r`)[0] as { r: { action: string; added: number; closed: number } }).r;
     const setWritten = await setOf([KB, KA]);
     const linkedAtWrite = [await pairs(KA), await pairs(KB)];
@@ -31868,7 +31892,7 @@ if (want("48")) {
       // the fourth while it waited on the third, and a writer taking the third, then the fourth, would deadlock with it.
       const S1 = "ticket:SMD-94891", S2 = "ticket:SMD-94892", S3 = "ticket:SMD-94893", S4 = "ticket:SMD-94894";
       const sx = await thought("sx", 1), s3n = await thought("s3n", 2), s4n = await thought("s4n", 3);
-      const setOn = (c: SQL, id: string, keys: string[]) => c`SELECT record_thought_subjects(${id}::uuid, ${c.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p3r', NULL::uuid,
+      const setOn = (c: SQL, id: string, keys: string[]) => c`SELECT record_thought_subjects(${id}::uuid, ${c.array(keys, "TEXT")}::text[], 'model', 'subject:qwen3.8:27b@p4r', NULL::uuid,
         (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = ${id}::uuid), NULL::jsonb)`;
       await setOn(owner, sx, [S1, S3]);
       await subjectOn(owner, s3n, S3);
@@ -31900,7 +31924,7 @@ if (want("48")) {
 
       // A raw writer's subject written or closed beside the doors, here and below.
       const addKey = (c: SQL, id: string, key: string) =>
-        c`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${id}::uuid, 'subject', ${{ key, by: "model", judge_key: "subject:qwen3.8:27b@p3r" }}::jsonb)`;
+        c`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${id}::uuid, 'subject', ${{ key, by: "model", judge_key: "subject:qwen3.8:27b@p4r" }}::jsonb)`;
       const closeKey = (c: SQL, id: string, key: string) =>
         c`UPDATE thought_facets SET valid_until = now() WHERE thought_id = ${id}::uuid AND kind = 'subject' AND valid_until IS NULL AND payload->>'key' = ${key}`;
 
