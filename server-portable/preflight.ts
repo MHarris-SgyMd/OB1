@@ -47,7 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
-import { MIN_RELAY_KEY, slotsSettingFrom } from "./slots.ts";
+import { relayKeyProblem, slotsSettingFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -5651,8 +5651,8 @@ if (configFailed) {
             add("slot relay", "skip", r
               ? `off for the api: OB1_SLOT_RELAY_KEY is unset, so its model calls keep its own shares (OB1_BACKGROUND_SLOTS), while the coordinator asks the host's broker for its passes' — set the key in deploy/.env and recreate the api and the coordinator for the api's to join (${guide})`
               : "off: OB1_SLOT_RELAY_KEY is unset, so the api's model calls keep its own shares (OB1_BACKGROUND_SLOTS)");
-          } else if (key.length < MIN_RELAY_KEY) {
-            add("slot relay", "warn", `OB1_SLOT_RELAY_KEY is shorter than ${MIN_RELAY_KEY} characters, so the coordinator does not listen for the api, whose calls keep its own shares`, `Mint a key (openssl rand -hex 32), set it as OB1_SLOT_RELAY_KEY in deploy/.env, and recreate the api and the coordinator (up -d api coordinator).`);
+          } else if (relayKeyProblem(key) !== null) {
+            add("slot relay", "warn", `${relayKeyProblem(key)}, so the coordinator does not listen for the api, whose calls keep its own shares`, `Mint a key (openssl rand -hex 32), set it as OB1_SLOT_RELAY_KEY in deploy/.env, and recreate the api and the coordinator (up -d api coordinator).`);
           } else if (w === null) {
             add("slot relay", "skip", "the heartbeat rows were not read — the workers row says why; the coordinator's row says whether it listens for the api.");
           } else if (c === undefined || c.stale || c.ended) {
@@ -5660,10 +5660,10 @@ if (configFailed) {
           } else if (r === undefined || r.sockets === undefined) {
             add("slot relay", "warn", `OB1_SLOT_RELAY_KEY is set, but the coordinator does not listen for the api — ${r === undefined ? "it names no broker (OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY), or" : "it relays its passes' calls alone:"} it was made before the key was set, or its port was taken — so the api's model calls keep its own shares`, `Set OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY beside OB1_SLOT_RELAY_KEY in deploy/.env (${guide}), then recreate the coordinator: ${COORDINATOR_UP}. Its log says why it does not listen (compose logs coordinator, the lines beginning "coordinator:").`);
           } else if (r.broker === "down") {
-            add("slot relay", "warn", `the coordinator listens for the api, but the host's broker had not answered it for ${ago(r.for_s + c.ageS)} at its last stamp — the api's and the passes' model calls take their own shares meanwhile, each counted at the broker once it is back`, `The coordinator's "slot relay:" lines say why (compose logs coordinator): a refused key (OB1_SLOT_BROKER_KEY against the registry's hash), or the broker down (bun --no-env-file deploy/federated/federated.ts check, then up).`);
+            add("slot relay", "warn", `the coordinator listens for the api, but the host's broker has not answered it for ${ago(r.for_s + c.ageS)} by its last stamp — the api's and the passes' model calls take their own shares meanwhile, each counted at the broker once it is back`, `The coordinator's "slot relay:" lines say why (compose logs coordinator): a refused key (OB1_SLOT_BROKER_KEY against the registry's hash), or the broker down (bun --no-env-file deploy/federated/federated.ts check, then up).`);
           } else {
             // The coordinator's row alone: a key the coordinator holds otherwise (one of the two recreated) is the api's log's to say (review pass 1).
-            add("slot relay", "ok", `the coordinator listens for the api, and its broker had answered for ${ago(r.for_s + c.ageS)} at its last stamp — the api's log says once it is through ("background slots: this process asks the host's slot broker") or refused (401, the two keys differing: recreate both)`);
+            add("slot relay", "ok", `the coordinator listens for the api, and its broker has answered for ${ago(r.for_s + c.ageS)} by its last stamp — the api's log says once it is through ("background slots: this process asks the host's slot broker") or refused (401, the two keys differing: recreate both)`);
           }
         }
 

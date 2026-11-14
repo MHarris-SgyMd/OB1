@@ -82,7 +82,8 @@ import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, typ
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
-import { MIN_RELAY_KEY, RELAY_PATH, RELAY_PORT, serveRelay, startRelay, type Relay, type RelayListener } from "./slot-relay.ts";
+import { RELAY_PATH, RELAY_PORT, serveRelay, startRelay, type Relay, type RelayListener } from "./slot-relay.ts";
+import { relayKeyProblem } from "../server-portable/slots.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
 import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S, rowWriter } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
@@ -510,15 +511,18 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   // The host's slot broker, through this process alone (SMD-3379 PR 3b-1): each child started with a channel to it,
   // and, where OB1_SLOT_RELAY_KEY is set, the api with a socket to it on the brain's network (PR 3b-2).
   const listenKey = env.OB1_SLOT_RELAY_KEY?.trim() || null;
+  // Said for a key that will not do as well, by listenForApi; but no relay held open for an api that cannot come.
   const rs = plan.children.length || listenKey ? relaySettings(env) : null;
   if (rs && "problem" in rs) writer.err(rs.problem);
   // With the api's sockets listened for, the first hello's `synced` waits for the api's calls to be named (review pass 1 of 3b-2).
-  const listening = !!listenKey && listenKey.length >= MIN_RELAY_KEY;
+  const listening = !!listenKey && relayKeyProblem(listenKey) === null;
   relay = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err, onChange: () => row.changed(), ...(listening ? { syncWaitMs: SYNC_WAIT_MS } : {}) }) : null;
   if (relay && plan.children.length) writer.err(`coordinator: the passes ask the host's slot broker through this process (OB1_SLOT_BROKER_URL), their own shares while it is away`);
-  listener = listenKey ? listenForApi(relay, listenKey, opts.relayPort ?? RELAY_PORT, writer.err, () => row.changed()) : null;
-  // Not listening after all (the port taken): no api is coming, so the held `synced` goes now.
+  listener = listenKey ? listenForApi(relay, listenKey, opts.relayPort ?? RELAY_PORT, writer.err, () => row.changed(), env.OB1_LISTEN_HOST?.trim() || undefined) : null;
+  // Not listening after all (the port taken, the key no good): no api is coming, so the held `synced` goes now — and with
+  // no pass either, the relay is held for no one, and closed (review pass 5 of 3b-2).
   if (listening && !listener) relay?.apiBack?.();
+  if (!listener && !plan.children.length && relay && opts.relay === undefined) { void relay.stop(); relay = null; }
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
@@ -572,12 +576,14 @@ export function relayMark(relay: Relay | null, listener: RelayListener | null) {
  * over a socket on the brain's network (slot-relay.ts's serveRelay). None — said, the api's calls on its own shares —
  * where no broker is named, the key is too short to stand, or the port is taken.
  */
-function listenForApi(relay: Relay | null, key: string, port: number, err: (line: string) => void, onChange: () => void): RelayListener | null {
+function listenForApi(relay: Relay | null, key: string, port: number, err: (line: string) => void, onChange: () => void, host?: string): RelayListener | null {
   const own = "the api's model calls keep its own shares (OB1_BACKGROUND_SLOTS)";
   if (!relay) { err(`coordinator: OB1_SLOT_RELAY_KEY is set, but no broker is named here (OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY) — not listening; ${own}`); return null; }
-  if (key.length < MIN_RELAY_KEY) { err(`coordinator: OB1_SLOT_RELAY_KEY is shorter than ${MIN_RELAY_KEY} characters — not listening; ${own}. Mint one: openssl rand -hex 32`); return null; }
+  const problem = relayKeyProblem(key);
+  if (problem) { err(`coordinator: ${problem} — not listening; ${own}. Mint one: openssl rand -hex 32`); return null; }
   try {
-    const l = serveRelay(relay, { key, port, log: err, onChange });
+    // OB1_LISTEN_HOST where set, as the servers: a checkout's coordinator kept to one address (review pass 5 of 3b-2).
+    const l = serveRelay(relay, { key, port, log: err, onChange, ...(host ? { hostname: host } : {}) });
     err(`coordinator: the api asks the host's slot broker through this process too, on :${l.port}${RELAY_PATH} (OB1_SLOT_RELAY_KEY)`);
     return l;
   } catch (e) {

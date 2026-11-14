@@ -350,6 +350,15 @@ type RelayClient = {
 
 /** The shortest OB1_SLOT_RELAY_KEY the coordinator listens with and the api dials with: a guessable one would let anything on the brain's network ask for slots. */
 export const MIN_RELAY_KEY = 16;
+/**
+ * What is wrong with an OB1_SLOT_RELAY_KEY, or null: at least MIN_RELAY_KEY characters, each printable ASCII — a header
+ * goes out as UTF-8 and is read as Latin-1, so two equal keys with another character never match (review pass 5 of 3b-2).
+ */
+export function relayKeyProblem(key: string): string | null {
+  if (key.length < MIN_RELAY_KEY) return `OB1_SLOT_RELAY_KEY is shorter than ${MIN_RELAY_KEY} characters`;
+  if (!/^[\x21-\x7e]+$/.test(key)) return "OB1_SLOT_RELAY_KEY holds a character that is not printable ASCII (a space, or one outside ASCII)";
+  return null;
+}
 /** The coordinator's listener for the api (SMD-3379 PR 3b-2, db/slot-relay.ts's serveRelay), on the brain's network: OB1_SLOT_RELAY_URL in its place. */
 export const RELAY_URL = "ws://coordinator:8096/v1/relay";
 /** The api's reconnect to the coordinator: from the first, doubling to the most — quick, as its calls running are uncounted
@@ -526,8 +535,9 @@ function ipcRelayClient(env: Record<string, string | undefined>, log: (line: str
 function socketRelayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
   const key = env.OB1_SLOT_RELAY_KEY?.trim();
   if (!key) return null;
-  if (key.length < MIN_RELAY_KEY) {
-    log(`background slots: OB1_SLOT_RELAY_KEY is shorter than ${MIN_RELAY_KEY} characters, and the coordinator does not listen with it — the coordinator is not asked, each call takes this process's own share`);
+  const problem = relayKeyProblem(key);
+  if (problem) {
+    log(`background slots: ${problem}, and the coordinator does not listen with it — the coordinator is not asked, each call takes this process's own share`);
     return null;
   }
   const url = env.OB1_SLOT_RELAY_URL?.trim() || RELAY_URL;
@@ -578,6 +588,8 @@ function socketRelayClient(env: Record<string, string | undefined>, log: (line: 
       const r = await fetch(url.replace(/^ws/, "http"), { headers: { "x-brain-key": key }, redirect: "error", signal: AbortSignal.timeout(2000) });
       if (r.status === 401) return ["401", `the coordinator refused OB1_SLOT_RELAY_KEY (401) — set the same key for the api and the coordinator, and recreate both`];
       if (r.status === 503) return ["503", `the coordinator's relay at ${url} holds its most sockets (503) — more api processes than it takes, or sockets of one gone and not yet dropped`];
+      // The listener answers a plain request with the key and room 426: it is there, and the upgrade was refused another way.
+      if (r.status === 426) return ["426", `the coordinator's relay at ${url} is there, but refused this socket's upgrade — a key the two read differently, or a moment's race`];
       return [`http${r.status}`, `no slot relay at ${url} (HTTP ${r.status}) — is OB1_SLOT_RELAY_URL the coordinator's ${new URL(url).pathname === "/v1/relay" ? "listener" : "/v1/relay"}?`];
     } catch (e) {
       return ["none", `the coordinator does not answer at ${url} (${(e as Error).message}) — it listens once OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY name the host's broker beside OB1_SLOT_RELAY_KEY, and it is running`];

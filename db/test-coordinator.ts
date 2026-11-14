@@ -23,6 +23,8 @@ import { join } from "node:path";
 import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, coordinatorValue, planPasses, relayMark, relaySettings, runOnce, type Child } from "./coordinator.ts";
 import type { Relay, RelayPort } from "./slot-relay.ts";
 import { hashKey, parseRegistry, startBroker } from "../deploy/federated/broker.ts";
+import { rowWriter } from "./pass-stamp.ts";
+import { relayKeyProblem } from "../server-portable/slots.ts";
 import { supervise } from "./supervise.ts";
 
 let pass = 0;
@@ -296,13 +298,15 @@ if (!existsSync(composePath)) {
   // Listening, its relay's first hello holds `synced` until the api's socket is back and its calls named (review pass 1
   // of 3b-2): a stand-in broker records what the coordinator's relay sends.
   {
-    const ops: { op: string; at: number }[] = [];
-    const fakeBroker = Bun.serve({
+    const ops: { op: string; at: number; conn: number }[] = [];
+    let conns = 0;
+    const fakeBroker = Bun.serve<{ n: number }, never>({
       port: 0, hostname: "127.0.0.1",
-      fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })),
+      fetch: (req, srv) => (srv.upgrade(req, { data: { n: ++conns } }) ? undefined : new Response("no", { status: 400 })),
       websocket: {
         open(ws) { ws.send(JSON.stringify({ op: "hello", brain: "b", boot: "x", idle_s: 10, max_waiting: 1024, servers: [{ bases: ["http://h:1/v1"] }] })); },
-        message(ws, m) { const f = JSON.parse(String(m)); ops.push({ op: f.op, at: performance.now() }); if (f.op === "ping") ws.send(JSON.stringify({ op: "pong", id: f.id })); },
+        message(ws, m) { const f = JSON.parse(String(m)); ops.push({ op: f.op, at: performance.now(), conn: ws.data.n }); if (f.op === "ping") ws.send(JSON.stringify({ op: "pong", id: f.id })); },
+        close(ws) { ops.push({ op: "closed", at: performance.now(), conn: ws.data.n }); },
       },
     });
     const key = "relay-key-of-this-brain-0123";
@@ -331,16 +335,29 @@ if (!existsSync(composePath)) {
     await Promise.race([c.done, Bun.sleep(5000)]);
     // Its port taken, it does not listen after all: no api is coming, so the first synced goes at once (review pass 2 of 3b-2).
     ops.length = 0;
+    const firstConns = conns;
     const taken = Bun.serve({ port: 0, fetch: () => new Response("") });
     const lines2: string[] = [];
     const c2 = coordinate({
       env: { PATH: process.env.PATH ?? "", OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${fakeBroker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: key }, sql: null, asOwnUsers: false,
       children: [], writer: { out: () => {}, err: (l) => lines2.push(l) }, relayPort: taken.port as number,
     });
-    for (let i = 0; i < 20 && !ops.some((o) => o.op === "synced"); i++) await Bun.sleep(50);
-    ok(lines2.some((l) => /could not listen on/.test(l)) && ops.some((o) => o.op === "synced"), `its port taken, it says so and its synced goes within a second, not held for an api (${lines2.filter((l) => /listen/.test(l)).join(" | ")}; ${ops.map((o) => o.op).join(", ")})`);
+    // None of its own left open: never dialled, or closed (the relay stopped before or after its dial).
+    await Bun.sleep(1000);
+    const openOwn = conns - firstConns - ops.filter((o) => o.op === "closed" && o.conn > firstConns).length;
+    ok(lines2.some((l) => /could not listen on/.test(l)) && openOwn === 0, `its port taken and no pass to run, it says so and holds no relay to the broker for no one (review pass 5) (${lines2.filter((l) => /listen/.test(l)).join(" | ")}; ${conns - firstConns} dialled, ${openOwn} open)`);
     c2.stop("SIGTERM");
     await Promise.race([c2.done, Bun.sleep(5000)]);
+    // With a pass to run, the relay stays for it, and its held synced goes at once: no api is coming.
+    const before3 = conns;
+    const c3 = coordinate({
+      env: { PATH: process.env.PATH ?? "", PROBE_OUT: join(dir, "taken.json"), OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${fakeBroker.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: key }, sql: null, asOwnUsers: false,
+      children: [{ ...CHILDREN["board-sync"], script: probe, args: () => [] }], writer: { out: () => {}, err: () => {} }, relayPort: taken.port as number,
+    });
+    for (let i = 0; i < 30 && !ops.some((o) => o.op === "synced" && o.conn > before3); i++) await Bun.sleep(50);
+    ok(ops.some((o) => o.op === "synced" && o.conn > before3), "its port taken but a pass to run: the relay kept for the pass, its synced not held for an api");
+    c3.stop("SIGTERM");
+    await Promise.race([c3.done, Bun.sleep(5000)]);
     void taken.stop(true);
     void fakeBroker.stop(true);
   }
@@ -353,10 +370,37 @@ if (!existsSync(composePath)) {
   const relayOf = { port: () => ({}) as RelayPort, state: () => st, stop: async () => {} } as Relay;
   ok(JSON.stringify(relayMark(relayOf, { port: 1, sockets: () => 3, stop() {} })) === '{"broker":"down","since":7,"sockets":3}' && JSON.stringify(relayMark(relayOf, null)) === '{"broker":"down","since":7}' && relayMark(null, null) === null,
     "the mark is read from the relay's state, with the listener's sockets where it listens, and none without a relay");
+  // The key's rule (review pass 5 of 3b-2): 16 characters or more, each printable ASCII — a header goes out as UTF-8 and
+  // is read as Latin-1, so two equal keys of another character never match.
+  ok(relayKeyProblem("relay-key-of-this-brain-0123") === null && /shorter than 16/.test(relayKeyProblem("short-key") ?? "")
+      && /not printable ASCII/.test(relayKeyProblem("clé-de-relais-0123456789") ?? "") && /not printable ASCII/.test(relayKeyProblem("relay key of this brain 01") ?? ""),
+    "a relay key: 16 printable ASCII characters or more; a short one, or one with a space or a character outside ASCII, refused by name");
+  // Its row's writes coalesced: changes while a write waits its turn are that write's (review pass 5 of 3b-2).
+  {
+    let writes = 0, n = 0;
+    const w = rowWriter({ value: () => n, everyS: 3600, timeoutMs: 5000, failed: () => {}, write: async () => { writes++; await Bun.sleep(100); return true; } });
+    for (let i = 0; i < 50; i++) { n = i; w.changed(); await Bun.sleep(2); }
+    await w.end();
+    ok(writes <= 4, `fifty changes in a tenth of a second while writes take as long: a few writes, not fifty (${writes})`);
+  }
+  // Listening, with OB1_LISTEN_HOST: on that address alone.
+  {
+    const lines: string[] = [];
+    const reg2 = parseRegistry(`broker:\n  warm_s: 0\nservers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\n    reserve: 0\nbrains:\n  b:\n    key: "${hashKey("slot_k")}"\n`).registry!;
+    const br = startBroker(reg2, { port: 0, log: () => {} });
+    const c = coordinate({ env: { PATH: process.env.PATH ?? "", OB1_SLOT_BROKER_URL: `ws://127.0.0.1:${br.port}/v1/slots`, OB1_SLOT_BROKER_KEY: "slot_k", OB1_SLOT_RELAY_KEY: "relay-key-of-this-brain-0123", OB1_LISTEN_HOST: "127.0.0.1" }, sql: null, asOwnUsers: false, children: [], writer: { out: () => {}, err: (l) => lines.push(l) }, relayPort: 0 });
+    const lport = Number(/on :(\d+)\/v1\/relay/.exec(lines.join("\n"))?.[1] ?? 0);
+    const r = await fetch(`http://127.0.0.1:${lport}/v1/relay`).then((x) => x.status).catch(() => 0);
+    ok(lport > 0 && r === 401, `with OB1_LISTEN_HOST, the listener answers there (${lport}, ${r})`);
+    c.stop("SIGTERM");
+    await Promise.race([c.done, Bun.sleep(5000)]);
+    await br.stop();
+  }
   // The key, but no broker named, or too short: said, and not listened for.
   for (const [what, env, said] of [
     ["no broker", { OB1_SLOT_RELAY_KEY: "relay-key-of-this-brain-0123" }, /OB1_SLOT_RELAY_KEY is set, but no broker is named here/],
     ["a short key", { OB1_SLOT_RELAY_KEY: "short", OB1_SLOT_BROKER_URL: "ws://127.0.0.1:1/v1/slots", OB1_SLOT_BROKER_KEY: "slot_k" }, /shorter than 16 characters — not listening/],
+    ["a key outside ASCII", { OB1_SLOT_RELAY_KEY: "clé-de-relais-0123456789", OB1_SLOT_BROKER_URL: "ws://127.0.0.1:1/v1/slots", OB1_SLOT_BROKER_KEY: "slot_k" }, /not printable ASCII.* — not listening/],
   ] as const) {
     const lines: string[] = [];
     const c = coordinate({ env: { PATH: process.env.PATH ?? "", ...env }, sql: null, asOwnUsers: false, children: [], writer: { out: () => {}, err: (l) => lines.push(l) }, relayPort: 0 });

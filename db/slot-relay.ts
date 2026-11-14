@@ -236,7 +236,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     saidDown = false;
     if (grace) { clearTimeout(grace); grace = null; }
     if (typeof m.max_waiting === "number" && m.max_waiting > 0) maxWaiting = m.max_waiting;
-    brokered = Array.isArray(m.servers) ? new Set(m.servers.flatMap((sv) => (Array.isArray(sv?.bases) ? sv.bases : []).map((x: string) => normalisedBase(x)))) : null;
+    brokered = Array.isArray(m.servers) ? new Set(m.servers.flatMap((sv) => (Array.isArray(sv?.bases) ? sv.bases : []).filter((x: unknown): x is string => typeof x === "string").map((x) => normalisedBase(x)))) : null;
     // Every call running — a grant, or a call on its own share — counted again; then the parked asks, their time carried.
     let held = 0;
     // A base the hello does not list is the pass's own share, nothing to count there: an ask parked before the list was
@@ -251,8 +251,9 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
     // 2 slots for 3.5 s). The broker keeps them KEEP_MS (5 s) meanwhile; the wait is less.
     if (!syncedOnce && syncWait > 0 && !apiSeen) {
       syncPending = sock;
-      syncBy = performance.now() + syncWait;
-      syncTimer = setTimeout(() => sendSynced(sock), syncWait);
+      // One bound from the first hello, kept across a socket lost before it is reached (review pass 5 of 3b-2).
+      if (syncBy === 0) syncBy = performance.now() + syncWait;
+      syncTimer = setTimeout(() => sendSynced(sock), Math.max(0, syncBy - performance.now()));
     } else { syncedOnce = true; sock.send(JSON.stringify({ op: "synced", id: nonce })); }
     // Each pass told the broker is back: a call still waiting on its own share asks again (review pass 4: a deep backlog
     // sent to own shares past the grace drained there for 45 s, the broker back).
@@ -531,7 +532,7 @@ export function startRelay(opts: { url: string; key: string; log?: (line: string
       const sock = ws;
       ws = null;
       open = false;
-      if (sock && sock.readyState <= 1) await new Promise<void>((r) => { sock.onclose = () => r(); sock.close(); setTimeout(r, 1000); });
+      if (sock && sock.readyState <= 1) await new Promise<void>((r) => { const t = setTimeout(r, 1000); sock.onclose = () => { clearTimeout(t); r(); }; sock.close(); });
     },
   };
 }
@@ -561,8 +562,9 @@ export type RelayListener = { port: number; sockets(): number; stop(opts?: { det
  * model calls asked of the host's broker through the coordinator, as its passes' are, over a WebSocket on the brain's
  * network at RELAY_PATH. The api proves itself with OB1_SLOT_RELAY_KEY, which both hold (x-brain-key; 401 without it,
  * checked before anything else is said). Each socket is one more of the relay's ports — the frames a pass sends over
- * its channel, and `{slot: "ping"}`, answered `{slot: "pong"}` here — and its close every call it had done (a socket
- * after it counts again those still running). At most MAX_RELAY_SOCKETS at once (503 past it), frames of at most
+ * its channel, and `{slot: "ping"}`, answered `{slot: "pong"}` here. Its close, under a coordinator that stays, keeps the
+ * api's running calls API_KEEP_MS for its next socket (by `x-relay-client`), which names what it still runs; a `bye`, an
+ * api that gives no id, or `stop({ detach })` gives them back at once. At most MAX_RELAY_SOCKETS at once (503 past it), frames of at most
  * RELAY_FRAME_MAX bytes, a socket silent RELAY_IDLE_S dropped.
  */
 export function serveRelay(relay: Relay, opts: { key: string; port?: number; hostname?: string; log?: (line: string) => void; idleS?: number; maxSockets?: number; onChange?: () => void; keepMs?: number }): RelayListener {
@@ -577,12 +579,12 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
   const free = Array.from({ length: max }, (_, i) => `api#${i + 1}`);
   const take = () => free.sort((a, b) => Number(a.slice(4)) - Number(b.slice(4))).shift();
   /** A socket's: its name, its port, the api process it is (`x-relay-client`), the ids it has named since it opened (until its `named`), and whether a newer socket of its api took its port. */
-  type Data = { name: string; port: RelayPort | null; client: string | null; named: Set<string> | null; fresh: boolean; replaced: boolean; bye: boolean; heardAt: number };
+  type Data = { name: string; port: RelayPort | null; client: string | null; named: Set<string> | null; fresh: boolean; replaced: boolean; bye: boolean; heardAt: number; keepBy: number | null };
   type Sock = import("bun").ServerWebSocket<Data>;
   const open = new Set<Sock>();
   /** Each api process's open socket, and its port kept after a close, by its id. */
   const liveBy = new Map<string, Sock>();
-  const kept = new Map<string, { name: string; port: RelayPort; timer: ReturnType<typeof setTimeout>; held: RelayFrame[] }>();
+  const kept = new Map<string, { name: string; port: RelayPort; timer: ReturnType<typeof setTimeout>; held: RelayFrame[]; by: number }>();
   /** The most frames held for a kept port's api: past it, the oldest dropped (a `lapsed` is the one that matters). */
   const HELD_FRAMES = 256;
   let refusedSaid = false;
@@ -613,7 +615,11 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
       const name = ws.data.name;
       const held: RelayFrame[] = [];
       port.attach((m) => { held.push(m); if (held.length > HELD_FRAMES) held.shift(); });
-      kept.set(c, { name, port, held, timer: setTimeout(() => { if (kept.get(c)?.port === port) { kept.delete(c); release(name, port); opts.onChange?.(); } }, keepMs) });
+      // Until its keeping's end: a fresh API_KEEP_MS from this close, but the one it resumed under where the socket ended
+      // before naming its calls — a link that lets the dial through and nothing back re-kept it at each dial, its ended
+      // calls counted 20 s (review pass 5 of 3b-2).
+      const by = ws.data.keepBy !== null && ws.data.named !== null ? ws.data.keepBy : performance.now() + keepMs;
+      kept.set(c, { name, port, held, by, timer: setTimeout(() => { if (kept.get(c)?.port === port) { kept.delete(c); release(name, port); opts.onChange?.(); } }, Math.max(0, by - performance.now())) });
     }
     opts.onChange?.();
   };
@@ -631,10 +637,18 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
       // An api back on a new socket takes its kept port's name, or its open one's, and so is never refused for room.
       const resumed = client === null ? undefined : kept.get(client)?.name ?? liveBy.get(client)?.data.name;
       // Full before a plain request's 426: the api asks again without the upgrade to say why it was refused.
+      // A kept port is a courtesy: a new api with no name free takes the oldest one's, its calls given back (review pass 5
+      // of 3b-2: an api crash-looping filled the eight names with its dead processes' ports, every new one refused).
+      if (resumed === undefined && open.size < max && !free.length && kept.size && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        const [oc, ok] = [...kept].sort((x, y) => x[1].by - y[1].by)[0];
+        clearTimeout(ok.timer);
+        kept.delete(oc);
+        release(ok.name, ok.port);
+      }
       if (resumed === undefined && (open.size >= max || !free.length)) return new Response("too many sockets\n", { status: 503 });
       if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("a WebSocket, at this path\n", { status: 426 });
       const name = resumed ?? take()!;
-      if (srv.upgrade(req, { data: { name, port: null, client, named: new Set(), fresh: resumed === undefined, replaced: false, bye: false, heardAt: performance.now() } })) return undefined;
+      if (srv.upgrade(req, { data: { name, port: null, client, named: new Set(), fresh: resumed === undefined, replaced: false, bye: false, heardAt: performance.now(), keepBy: null } })) return undefined;
       if (resumed === undefined) free.push(name);
       return new Response("upgrade failed\n", { status: 400 });
     },
@@ -655,6 +669,7 @@ export function serveRelay(relay: Relay, opts: { key: string; port?: number; hos
           kept.delete(c!);
           port = k.port;
           held = k.held;
+          ws.data.keepBy = k.by;
         } else if (old?.data.port) {
           // Its last socket still open here (half-open: the api dropped it, this side has not yet): this one takes its
           // port, the other closed without a word to the relay — its asks withdrawn first, as at a close, for the api asks

@@ -84,7 +84,7 @@ export type Env = {
    * coordinator, over a WebSocket on the brain's network, proved with this
    * key; the coordinator, which reads the same, listens for it once its broker
    * is named (OB1_SLOT_BROKER_URL and _KEY) and hands it to no pass. 16
-   * characters at least. Unset, the api's calls keep their own shares.
+   * printable ASCII characters at least. Unset, the api's calls keep their own shares.
    */
   OB1_SLOT_RELAY_KEY?: string;
   /**

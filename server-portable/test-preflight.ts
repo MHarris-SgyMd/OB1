@@ -3873,9 +3873,9 @@ else {
       assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is set, but the coordinator does not listen for the api — it names no broker/.test(noBroker) && /→ Set OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY beside OB1_SLOT_RELAY_KEY/.test(noBroker)
           && /^\s*!\s+.*does not listen for the api — it relays its passes' calls alone: it was made before the key was set/.test(passesOnly),
         `a coordinator that does not listen warns, naming the broker's settings or the recreate (${noBroker} | ${passesOnly})`);
-      assert(/^\s*!\s+slot relay\s+the coordinator listens for the api, but the host's broker had not answered it for 60 s at its last stamp/.test(down) && /slot relay:" lines say why/.test(down),
+      assert(/^\s*!\s+slot relay\s+the coordinator listens for the api, but the host's broker has not answered it for 60 s by its last stamp/.test(down) && /slot relay:" lines say why/.test(down),
         `a broker away warns, its time counted from the row's stamp (${down})`);
-      assert(/^\s*✓\s+slot relay\s+the coordinator listens for the api, and its broker had answered for 5 min at its last stamp — the api's log says/.test(up),
+      assert(/^\s*✓\s+slot relay\s+the coordinator listens for the api, and its broker has answered for 5 min by its last stamp — the api's log says/.test(up),
         `listening, the broker answering: ok, whatever the count of api sockets at the api's start (${up})`);
     } finally {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;

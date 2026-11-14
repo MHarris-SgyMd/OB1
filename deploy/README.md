@@ -408,8 +408,8 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
   the broker's log says each brain's connections, a socket ended for not
   answering, and a server over its slots.
 - **The api's calls** (SMD-3379 PR 3b-2) join with `OB1_SLOT_RELAY_KEY` set
-  in the same `deploy/.env` (any 16 characters or more: `openssl rand -hex
-  32`), then `up -d api coordinator`. The api reads the key, and so does the
+  in the same `deploy/.env` (16 printable ASCII characters or more, no
+  spaces: `openssl rand -hex 32`), then `up -d api coordinator`. The api reads the key, and so does the
   coordinator, which hands it to no pass. The coordinator then listens at
   `coordinator:8096`, published nowhere. The api reaches it on the brain's
   `data` network, and the services on its `egress` network can reach the

@@ -1179,6 +1179,67 @@ await withBroker(registry({ slots: 1 }), async (b) => {
   await bk.stop();
 }
 {
+  // The held `synced`'s bound is the first hello's, kept across a broker socket lost before it, not begun again at the
+  // next (review pass 5 of 3b-2).
+  const ops: { op: string; at: number }[] = [];
+  let conns = 0;
+  const t0 = performance.now();
+  const fakeBroker = Bun.serve<{ n: number }, never>({
+    port: 0, hostname: "127.0.0.1",
+    fetch: (req, srv) => (srv.upgrade(req, { data: { n: ++conns } }) ? undefined : new Response("no", { status: 400 })),
+    websocket: {
+      open(ws) {
+        ws.send(JSON.stringify({ op: "hello", brain: "stable", boot: "x", idle_s: 10, max_waiting: 1024, servers: [{ bases: [BASE] }] }));
+        if (ws.data.n === 1) setTimeout(() => ws.close(1011, "cut"), 1200);
+      },
+      message(ws, m) { const f = JSON.parse(String(m)); ops.push({ op: f.op, at: performance.now() - t0 }); if (f.op === "ping") ws.send(JSON.stringify({ op: "pong", id: f.id })); },
+    },
+  });
+  const r = startRelay({ url: `ws://127.0.0.1:${fakeBroker.port}/v1/slots`, key: KEYS.stable, log: () => {}, reconnectMs: { first: 50, max: 200 }, syncWaitMs: 2000 });
+  ok(await until(() => ops.some((o) => o.op === "synced"), 4000), "its synced sent at the bound, no api come");
+  const at = ops.find((o) => o.op === "synced")!.at;
+  ok(conns >= 2 && at < 2700, `at the first hello's bound (about 2 s), not 2 s after the second socket's (${Math.round(at)} ms, ${conns} sockets)`);
+  await r.stop();
+  void fakeBroker.stop(true);
+}
+await withBroker(registry({ slots: 2 }), async (b) => {
+  // A kept port gives way to a new api when no name is free, its calls given back; and a resumed socket that ends before
+  // naming its calls does not renew the keeping (review pass 5 of 3b-2).
+  const relay = relayTo(b, KEYS.stable);
+  await upOf(relay);
+  const listener = serveRelay(relay, { key: RKEY, port: 0, hostname: "127.0.0.1", log: () => {}, maxSockets: 2, keepMs: 1000 });
+  const dial = (client: string) => new Promise<WebSocket>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${listener.port}${RELAY_PATH}`, { headers: { "x-brain-key": RKEY, "x-relay-client": client } } as unknown as string[]);
+    ws.onopen = () => resolve(ws);
+    ws.onclose = () => reject(new Error("closed"));
+  });
+  const running = (ws: WebSocket, id: string) => ws.send(JSON.stringify({ slot: "running", id, base: BASE, model: "m", cls: "background" }));
+  const a = await dial("crash-loop-0001");
+  running(a, "a1");
+  const c2 = await dial("crash-loop-0002");
+  running(c2, "c1");
+  ok(await until(() => pool(b).background === 2), "two apis' calls counted", b.snapshot());
+  a.close(); c2.close();
+  await sleep(100);
+  const fresh = await dial("crash-loop-0003").catch(() => null);
+  ok(!!fresh && await until(() => pool(b).background === 1), "both names kept, a new api takes the oldest kept one's, whose call is given back", b.snapshot());
+  fresh?.close();
+  await sleep(1200);
+  ok(pool(b).background === 0, "and the rest given back past the keeping", b.snapshot());
+  // Resumed, closed before its named: the keeping ends at its first deadline.
+  const k1 = await dial("one-way-00001");
+  running(k1, "k1");
+  ok(await until(() => pool(b).background === 1), "a call counted", b.snapshot());
+  k1.close();
+  await sleep(600);
+  const k2 = await dial("one-way-00001");
+  k2.close();
+  await sleep(600);
+  ok(pool(b).background === 0, "a resumed socket closed before its named does not renew the keeping: given back at its first end", b.snapshot());
+  listener.stop({ detach: true });
+  await relay.stop();
+});
+{
   // The api's own refusals: another key (named), no coordinator listening (said), a key too short (never dialled).
   const relayless = startRelay({ url: "ws://127.0.0.1:1/v1/slots", key: KEYS.stable, log: () => {}, graceMs: 0 });
   const downSince = relayless.state().since;
