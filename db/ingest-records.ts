@@ -434,7 +434,7 @@ export function commitDocs(since: string, cwd: string = REPO_ROOT): Doc[] {
 // Write path — bare rows, idempotent by id, safe on a duplicate-content record.
 // ---------------------------------------------------------------------------
 
-/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. forgotten: the text was forgotten (forget_thought, migration 139: refused OB005), nothing written. stale: the row carries a newer watermark than the record — an older dump over a brain kept current — nothing written. */
+/** inserted: a new row. updated: the text moved (vector and chunks cleared). patched: the text stood and metadata moved. unchanged: nothing to write. skipped: another record already holds this text. held: another thought already IS this source item (thought_sources), nothing written. stale: the row carries a newer watermark than the record — an older dump over a brain kept current — nothing written. forgotten: the brain forgot this record (forget_thought, migration 139) — by its id or its identity, or its text refused OB005 — nothing written. */
 export type UpsertResult = "inserted" | "updated" | "patched" | "unchanged" | "skipped" | "held" | "stale" | "forgotten";
 
 function isFingerprintCollision(e: unknown): boolean {
@@ -551,14 +551,6 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
   try {
     return await sql.begin(async (tx) => {
       await tx`SELECT set_config('ob1.actor', ${JSON.stringify(actorPayload(actor))}, true)`;
-      // Another thought already IS this item — the board sync's row for a
-      // ticket, found by identity (thought_sources; on a brain the sync filled
-      // before 053, its metadata.issue claim). Asked BEFORE the write: with one
-      // renderer the sync's row holds the same text, so the insert would trip
-      // the fingerprint index first and read `skipped` — true, and the wrong
-      // word for a row that is this very ticket (run-it, test-live [22]).
-      // record_thought_source's IDENTITY_HELD stays the backstop for the race
-      // between this look and the write.
       // A record the brain forgot (139, SMD-1723): the whole record, not its
       // text alone (the maintainer, review pass 8), so an edited record — a
       // new text the refusal would not know — stays out too. Known by this
@@ -576,6 +568,14 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
                                  AND (${sys}::text IS NULL OR source_thought(${sys}::text, ${key}::text) IS NULL) AS gone`) as { gone: boolean }[];
         if (f?.gone) return { outcome: "forgotten" };
       }
+      // Another thought already IS this item — the board sync's row for a
+      // ticket, found by identity (thought_sources; on a brain the sync filled
+      // before 053, its metadata.issue claim). Asked BEFORE the write: with one
+      // renderer the sync's row holds the same text, so the insert would trip
+      // the fingerprint index first and read `skipped` — true, and the wrong
+      // word for a row that is this very ticket (run-it, test-live [22]).
+      // record_thought_source's IDENTITY_HELD stays the backstop for the race
+      // between this look and the write.
       if (doc.structure) {
         const [h] = (await tx`SELECT source_thought(${doc.structure.identity.system}, ${doc.structure.identity.key})::text AS t`) as { t: string | null }[];
         if (h?.t && h.t !== doc.id) return { outcome: "held", heldBy: h.t };

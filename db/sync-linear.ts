@@ -317,7 +317,7 @@ export type Plan = { fetch: string[]; missing: string[]; stale: string[]; extra:
  * its tags fell back, or a name the census carries moved; `extra` — a ticket
  * row Linear's list does not name (deleted, or moved out of the initiative).
  * `full` puts every listed issue in the fetch. `forgotten` — a ticket with no
- * row whose brain forgot it (migration 139's ledger, readForgottenIdentities:
+ * row the brain forgot (migration 139's ledger, readForgottenIdentities:
  * identityHash values): not missing, and not fetched. The whole record is
  * forgotten (SMD-1723 review passes 7 and 8: it was fetched and refused on
  * every pass, the audit said drift, and an edit in Linear brought it back).
@@ -510,8 +510,8 @@ export type PassReport = {
   twinsMarked: number;
   noVector: number;
   errors: { identifier: string; error: string }[];
-  /** Tickets whose text was forgotten (forget_thought, migration 139): the brain refuses it on its way back (OB005),
-   *  so the pass writes nothing for them and says so, rather than an error on every pass (SMD-1723). */
+  /** Tickets the brain forgot (forget_thought, migration 139): named by --only and left out, or refused OB005 on their
+   *  way back (a dated section's refusal included) — said, rather than an error on every pass (SMD-1723). */
   forgotten?: string[];
   /** Pointers the database refused while chaining twins — the ticket itself landed; the chain is as it was. */
   chainRefusals: { identifier: string; refusal: string }[];

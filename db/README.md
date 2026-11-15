@@ -2547,32 +2547,33 @@ another store's write that lands beside a forget is swept by a second
 a delete is, unless the caller detaches (`forget_thought(id, actor, true)`):
 the citing rows are deleted with the rest. Each call also deletes every
 bare orphan entity (no mention, edge, priority statement or merge record): once
-an entity's mentions are gone, whose it was can't be told. Every event of it in `thought_audit` is redacted in place
-through the log's third named amendment, `redact`: each text becomes the marker
-`[forgotten]` and each metadata object `{"forgotten": true}`, the `source`
-copied from the metadata blanked, while ids, fingerprints, times and the actor
-stay. The amendment takes only a deleted
-thought's events under the forget's own setting, once. `thought_forgotten` records
-each forgetting, append-only; a capture or edit to a forgotten text is refused
-`OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought already
-holds that text. The whole record a thought was ingested as is forgotten too:
-the ledger keeps its identity as a sha256, and `sync-linear.ts` leaves a
+an entity's mentions are gone, whose it was can't be told. Every event of it in
+`thought_audit` is redacted in place through the log's third named amendment,
+`redact`: each text becomes the marker `[forgotten]` and each metadata object
+`{"forgotten": true}`, the `source` copied from the metadata blanked, while ids,
+fingerprints, times and the actor stay. The amendment takes only a deleted
+thought's events under the forget's own setting, once. `thought_forgotten`
+records each forgetting, append-only; a capture or edit to a forgotten text is
+refused `OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought
+already holds that text. The whole record a thought was ingested as is forgotten
+too: the ledger keeps its identity as a sha256, and `sync-linear.ts` leaves a
 forgotten ticket out of its plan (not missing, not fetched, no drift in
 `--audit`, `--only` included) and a forgotten section out of its parts, while
-`ingest-records.ts` counts a record the brain forgot, by its id or its
-identity, as `forgotten`; edits at the source included, until a row stands
-there again. A thought deleted before it is forgotten has lost its record:
-detach with `forget_thought`, not `delete_thought`. It runs under READ COMMITTED alone, taking each item's priority
-lock before deleting its statements, as the priority writers do. A twin holding the same text keeps
-it and is named. Thoughts derived from the forgotten one, and every page whose own log names it
-(its earlier renders, and a section once built on it whose revision keeps the
-earlier body), are listed for a person to review: prose that absorbed the text
-can't be removed mechanically. Copies outside the brain (sleep
-dumps, posted Linear comments, digest files, extraction dumps, earlier backups) are named, not
-reached. Each role that writes thoughts is granted SELECT on the ledger. The
-operation over REST and MCP is PR 2; the other brains, PR 3. Needs 016, 034, 055,
-060, 064, 067, 116, 117, 123 and 134; a re-apply keeps the ledger. test-schema
-[128], test-upgrade [20cf].
+`ingest-records.ts` counts a record the brain forgot, by its id or its identity,
+as `forgotten`; edits at the source included, until a row stands there again. A
+thought deleted before it is forgotten has lost its record: detach with
+`forget_thought`, not `delete_thought`. It runs under READ COMMITTED alone,
+taking each item's priority lock before the row's, as the priority writers do. A
+twin holding the same text keeps it and is named. Thoughts derived from the
+forgotten one, and every page whose own log names it (its earlier renders, and a
+section once built on it whose revision keeps the earlier body), are listed for
+a person to review: prose that absorbed the text can't be removed mechanically.
+Copies outside the brain (sleep dumps, posted Linear comments, digest files,
+extraction dumps, earlier backups) are named, not reached. Each role that writes
+thoughts is granted SELECT on the ledger. The operation over REST and MCP is PR
+2; the other brains, PR 3. Needs 016, 034, 053, 055, 060, 064, 067, 116, 117,
+123 and 134; a re-apply keeps the ledger. test-schema [128], test-upgrade
+[20cf].
 
 Migration 138 has the priority writers name every statement they closed (SMD-4238).
 Since 133 a ticket and its own rows are one item to the writers, so a key's new

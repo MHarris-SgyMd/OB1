@@ -208,13 +208,13 @@ function definedIn(file: string): string[] {
  * on supersession_proposals [74] reads, and 111 last defines
  * ob1_record_derivation, which a re-apply of 084 reverts ([74], [92]). 134
  * is 120's validator with the deliverable kind (SMD-1715) and carries 120,
- * whose door and thread functions it does not define. 139 carries 055's
- * audit gate with the redact arm (SMD-1723), and 055, whose diff rule,
- * capture payload and backfill it does not define; a re-apply of 046 reverts
- * them ([51]). 137 is 129's
+ * whose door and thread functions it does not define. 137 is 129's
  * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
  * carries 129, whose nine-argument wrapper it does not define and whose
- * agenda it needs ([110] drops both). 141 is 061's record_thought_entities
+ * agenda it needs ([110] drops both). 139 is 055's audit gate with the
+ * redact arm (SMD-1723) and carries 055, whose diff rule, capture payload
+ * and backfill it does not define; a re-apply of 046 reverts them ([51]).
+ * 141 is 061's record_thought_entities
  * with its prune sparing an entity someone stated a priority on (SMD-4241),
  * and carries 061: a restore of the writer re-applied 061, whose other
  * functions it restored and whose DROP took 053's six-argument writer ([52]
@@ -21076,7 +21076,7 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
   // expired citation of T and, for the refusal, an active one; a priority statement on T with the text in its reason,
   // one on O taking its due time from T; an open item read from T, with a statement of its own; a close proposal on
   // an item from O whose evidence is T; T a deliverable of the spec O; a page section built on T; the query log
-  // naming T three ways; a twin pair, one forgotten.
+  // naming T three ways; an entity only T names, its snapshot vector, and the record T was ingested as.
   const T = await thought(`note: ${SECRET}`, { people: ["Ada"], topic: SECRET, source: `a call about the ${SECRET}` });
   await edit(T, `note, edited: ${SECRET}`);
   await db.transaction(async (tx) => {

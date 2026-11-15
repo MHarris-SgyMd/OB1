@@ -390,7 +390,8 @@ leaving the log to fight it:
   the thought is deleted, each event's `diff` becomes
   `ob1_audit_redacted_diff` — every text the marker `[forgotten]`, every
   metadata object `{"forgotten": true}`, ids, fingerprints and times kept —
-  with `redacted_at` stamped once. The saying-so row is the ledger,
+  the `source` copied from the metadata blanked, with `redacted_at` stamped
+  once. The saying-so row is the ledger,
   `thought_forgotten`, beside the log as the next bullet asks. `forget_thought`
   redacts after the row's delete, not before it, so the tombstone the delete
   writes, which carries the text in full, is redacted with the rest.

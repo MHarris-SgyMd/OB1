@@ -767,11 +767,10 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 115, 122, 123 or 129 ([20cb]); 138 replaces 133's two writers, their answers naming
   // the item and every statement closed, and adds
   // ob1_priority_closed_json, refusing by name without 115, 116, 117,
-  // 122 or 133 ([20cc]);
-  // 139 adds forgetting — the ledger, the
-  // log's redact amendment in 055's gate, the refusal of a forgotten text on
-  // thoughts, 116's, 117's and 134's guards admitting the forget's deletes,
-  // and forget_thought — refusing by name without 016, 034, 055, 060, 064,
+  // 122 or 133 ([20cc]); 139 adds forgetting — the ledger, the log's redact
+  // amendment in 055's gate, the refusal of a forgotten text on thoughts,
+  // 116's, 117's and 134's guards admitting the forget's deletes, and
+  // forget_thought — refusing by name without 016, 034, 053, 055, 060, 064,
   // 067, 116, 117, 123 or 134 ([20cf]);
   // 140 adds the per-holder claim cap — a table, two
   // refusing triggers and eight functions, claim_work redefined to count a
@@ -6370,7 +6369,7 @@ console.log("\n[20ca] Migration 136: onto a populated brain at the file before i
   // what it left.
   const ROLE = "ob1_upgrade_136_nopriority";
   await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE}`);
-  // The groups as a brain at 136 holds them: an object a later file adds (138's thought_forgotten in the capture
+  // The groups as a brain at 136 holds them: an object a later file adds (139's thought_forgotten in the capture
   // group) is skipped, as migrate.ts --grant skips it on a partly migrated database.
   const present136 = new Set(((await sql.unsafe(grantPresenceSql(grantedObjects(["capture", "server"])))) as { name: string; present: boolean }[])
     .filter((r) => r.present).map((r) => r.name));

@@ -561,7 +561,7 @@ const FUNCTIONS = [
   "ob1_deliverable_projection_drift()",
   "ob1_rebuild_deliverable_projection()",
   // 139 (SMD-1723): forgetting — the redaction's diff, the forget's setting,
-  // the ledger's guard, the refusal on thoughts, the item test and the call.
+  // the ledger's guard, the refusal on thoughts, the item test, every text's fingerprints and the call.
   "ob1_audit_redacted_diff(jsonb, text)",
   "ob1_forgetting()",
   "ob1_forgotten_guard()",
