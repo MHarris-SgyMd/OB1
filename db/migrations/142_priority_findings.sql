@@ -25,50 +25,53 @@
 --     - stale: an open statement made by the brain's own keys (an operator,
 --       agent or inferred one; not a source's, whose level is its source's
 --       to keep: board-sync's mirror of Linear, decision 9) at level 1 or
---       more, stated before the window (60 days), its due time and start not
---       still ahead (one is in force till then), on an item with no
---       activity within it. Activity: a statement on its pool made within
---       the window; for a ticket, its head row written (board-sync rewrites
---       it on any Linear change) or a thought standing on its subject
---       (`ticket:<key>`) captured; for a thought, its row written; for an
---       open item, its last change; for an entity, its last sighting.
+--       more, stated before the window (60 days), not in force (its start
+--       and its due time, a due reference's as the read resolves it, not
+--       still ahead), on an item with no activity within the window (see
+--       ob1_priority_activity: statements made or cleared, rows written by
+--       anything but a background pass, a ticket's subject, an open item's
+--       change, a thought mentioning an entity, an operator's decision).
 --     - overdue: an unsettled item effective_priority reads as overdue, from
---       any maker's due time.
---     - disagree: an operator's (tier 1) open statement and a source's
---       (tier 2) two or more levels apart, on an unsettled item.
+--       any maker's due time; one it takes from another item (a thought's
+--       open items, or a due reference to an item with its own overdue
+--       finding) is that item's alone.
+--     - disagree: the operator's counted statement (tier 1's newest) and the
+--       source's newest two or more levels apart, on an unsettled item.
 --     - settled: an open statement made by the brain's own keys, at level 1
 --       or more, on an item that has settled (a Done ticket, a done or
 --       dropped open item, a settled thought). It no longer ranks: the
 --       finding is housekeeping. A settled item yields this and not stale.
 --     (The ticket's fourth kind, a level inherited from a closed item, does
 --     not arise: effective_priority skips a settled source when it inherits.)
+--     Each maker's newest statement in a pool is its stance
+--     (ob1_priority_counted's rule).
 --   * ob1_priority_review(window_days, now): the scan. Under one advisory
---     lock it reads the items holding an open statement by the brain's own
---     keys or with a due time, writes a pending finding for each condition
---     newly found, refreshes a pending one's evidence, and marks moot a
---     pending one whose condition no longer holds. A finding decided within
---     the window (accepted or rejected: its suppressed_until) is not raised
---     again for that kind and item until the window passes, so a re-confirmed
---     level that still disagrees is not proposed again the next night. A
---     settled finding decided is not raised again while its statements are
---     those it was decided on (review pass 1: an agent's statement left on a
---     Done item stays open, since the operator can close only its own, and
---     came back every window). Each maker's newest statement in a pool is
---     its stance (ob1_priority_counted's rule): an older one a maker left on
---     a ticket's row is not read (review pass 1).
+--     lock it reads the pools holding an open statement by the brain's own
+--     keys, an operator's or one with a due time, and the open items past
+--     their due; writes a pending finding for each condition newly found,
+--     refreshes a pending one whose statements or evidence moved, marks moot
+--     a pending one whose condition no longer holds, and prunes moot ones
+--     past the window. A decided finding (accepted or rejected) holds the
+--     same kind and item back while its statements are those it was decided
+--     on — the decision's own statement among them, an overdue finding's
+--     excepted — for the window, or for a settled one at all: a moved
+--     deadline that passes, or the source's new level, raises it at once.
 --     Idempotent. Run by sleep (db/sleep.ts: at its first idle poll or
 --     period, then at most once every six hours), or by hand.
 --   * review_priority_finding(id, decision, level, due_at, clear, note,
---     actor): an operator key's (by its agent id, as 132's
---     set_priority_weights) decision on a pending finding. Accepting says
---     the outcome: a level (and a due time) the operator states on the item
---     through assert_priority, the same level re-confirming it (keeping the
---     operator's own statement's due time, start, due reference and, with
---     no note, reason), or clear,
---     which closes the operator's own statement there through
---     clear_priority. Either is the operator's own statement, in the history
---     under the operator's key. Rejecting changes nothing. Both suppress the
---     same finding for the window.
+--     actor): an operator key's decision (by its agent id, as 132's
+--     set_priority_weights; write scope alone) on a pending finding.
+--     Accepting says the outcome: a level 0 to 5 (and a due time) the
+--     operator states on the item through assert_priority, or clear, which
+--     closes the operator's own statement there through clear_priority. The
+--     same level re-confirms it, keeping the operator's own statement's
+--     start, due reference and, with no note, reason, and its due time
+--     while still ahead; a given due time replaces a reference and a start
+--     after it, and an overdue finding's deadline is not carried. A settled
+--     finding is accepted by clearing or stating 0. Either outcome is the
+--     operator's own statement, in the history under the operator's key; a
+--     writer's refusal decides nothing (WRITER_REFUSED). Rejecting changes
+--     nothing.
 --
 --   NOT CHANGED. No priority is changed by a finding; nothing is posted to
 --   Linear (SMD-4304); the operations over REST and MCP, brain_info's count
@@ -156,7 +159,7 @@ CREATE TABLE IF NOT EXISTS priority_findings (
   CHECK (decision_note IS NULL OR length(decision_note) <= 2000)
 );
 COMMENT ON TABLE priority_findings IS
-  'A review the brain proposes of a priority statement (docs/priority.md decision 6): stale (a statement by the brain''s own keys older than its window on an item with no activity within it), overdue (an unsettled item past its due time), disagree (an operator''s and a source''s statements two or more levels apart), settled (a statement by the brain''s own keys left on a settled item). Written by ob1_priority_review(), decided by an operator key through review_priority_finding(); a finding changes no priority. At most one pending per kind and item (keyed by its pool, ob1_priority_subject). Migration 142 / SMD-3671.';
+  'A review the brain proposes of a priority statement (docs/priority.md decision 6): stale (a statement by the brain''s own keys older than its window, not in force, on an item with no activity within it), overdue (an unsettled item past its due time), disagree (the operator''s counted statement and the source''s two or more levels apart), settled (a statement by the brain''s own keys left on a settled item). Written by ob1_priority_review(), decided by an operator key through review_priority_finding(); a finding changes no priority. At most one pending per kind and item (keyed by its pool, ob1_priority_subject). Migration 142 / SMD-3671.';
 
 CREATE UNIQUE INDEX IF NOT EXISTS priority_findings_one_pending
   ON priority_findings (kind, item_kind, item_key) WHERE status = 'pending';
@@ -392,7 +395,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_review(int, timestamptz) IS
-  'The priority review''s scan (SMD-3671): under one advisory lock, reads every pool holding an open statement by the brain''s own keys, an operator''s, or one with a due time, and finds stale, overdue, disagree and settled conditions (priority_findings'' comment says each); writes a pending finding for each newly found, refreshes a pending one''s statements and evidence, marks moot a pending one whose condition no longer holds, and raises none a decision suppressed within its window (a settled one, none while its statements are those decided on). Each maker''s newest open statement in a pool is its stance. Returns {ok, found, refreshed, moot, suppressed, pending, window_days, at}. Idempotent; changes no priority. Run by sleep, or by hand. Migration 142 / SMD-3671.';
+  'The priority review''s scan (SMD-3671): under one advisory lock, reads every pool holding an open statement by the brain''s own keys, an operator''s, or one with a due time, and finds stale, overdue, disagree and settled conditions (priority_findings'' comment says each); writes a pending finding for each newly found, refreshes a pending one whose statements or evidence moved, marks moot a pending one whose condition no longer holds, prunes moot ones past the window, and raises none a decision holds back (while its statements are those decided on: within the window, or for a settled finding at all). Each maker''s newest open statement in a pool is its stance. Returns {ok, found, refreshed, moot, suppressed, pending, window_days, at}. Idempotent; changes no priority. Run by sleep, or by hand. Migration 142 / SMD-3671.';
 
 -- ---------------------------------------------------------------------------
 -- review_priority_finding — an operator's decision
@@ -542,7 +545,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION review_priority_finding(uuid, text, int, timestamptz, boolean, text, jsonb) IS
-  'An operator key''s decision on a pending priority finding (SMD-3671): only a key the registry classifies operator, named by its agent id in p_actor (NOT_OPERATOR otherwise). accept says the outcome: p_level (with p_due_at, optionally) stated on the item through assert_priority — the same level re-confirms it, keeping the operator''s own statement''s due time, start, due reference and, with no note, reason — or p_clear, closing the operator''s own statement there through clear_priority (NOTHING_TO_CLEAR when it holds none: state 0 to outrank another maker''s); reject changes nothing. Both record who decided, the note and the writer''s answer, and suppress the same kind and item for the finding''s window. Refused: NOT_WRITE_SCOPE, BAD_DECISION, BAD_NOTE, ACCEPT_NEEDS_OUTCOME, BAD_OUTCOME (a level outside 0 to 5 included), NOT_FOUND, NOT_PENDING, and WRITER_REFUSED when the writer refused the outcome (its answer carried); a writer''s raise decides nothing either. Migration 142 / SMD-3671.';
+  'An operator key''s decision on a pending priority finding (SMD-3671): only a key the registry classifies operator, named by its agent id in p_actor (NOT_OPERATOR otherwise), with write scope. accept says the outcome: p_level 0 to 5 (with p_due_at, optionally) stated on the item through assert_priority — the same level re-confirms it, keeping the operator''s own statement''s start, due reference and, with no note, reason, and its due time while ahead; an overdue finding''s deadline is not carried — or p_clear, closing the operator''s own statement there through clear_priority (NOTHING_TO_CLEAR when it holds none: state 0 to outrank another maker''s); reject changes nothing. A settled finding takes clear or 0. Both record who decided, the note and the writer''s answer, and hold the same kind and item back while its statements are those decided on (the decision''s own among them, an overdue finding''s excepted), for the finding''s window. Refused: NOT_WRITE_SCOPE, BAD_DECISION, BAD_NOTE, ACCEPT_NEEDS_OUTCOME, BAD_OUTCOME (a level outside 0 to 5 included), NOT_FOUND, NOT_PENDING, and WRITER_REFUSED when the writer refused the outcome (its answer carried); a writer''s raise decides nothing either. Migration 142 / SMD-3671.';
 
 -- ---------------------------------------------------------------------------
 -- The priority group's grant, carried
