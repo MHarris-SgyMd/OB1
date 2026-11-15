@@ -46,13 +46,15 @@ So for Claude Code the order is: serve 2026-07-28 (SMD-4345), then `subscription
 | ChatGPT connector | The same. | The same. |
 | Claude Code, interactive | Only headless runs were made. | A hand-driven session against the probe. |
 
+The maintainer decided on 2026-11-14 not to put the probe at a public URL, so the three hosted clients stay unmeasured. The order above rests on Claude Code alone.
+
 Also not measured: a `ttlMs` longer than 3 s or a wait longer than 51 s; whether Claude Code lists again on a timer when idle for minutes; the SDK's `listMaxPages` and paged lists.
 
 The brain's request log cannot answer the first question for any client: it records neither the protocol version a request names nor the client's name. The probe's log did.
 
 ## How it was measured
 
-A scratch MCP server on `@modelcontextprotocol/server` 2.4.0, bound to loopback, not the brain's. It served three paths:
+A scratch MCP server on `@modelcontextprotocol/server` 2.4.0, bound to loopback, not the brain's: `evals/mcp-clients/probe.ts`. It served three paths:
 
 - 2026-07-28 and stateless 2025-era traffic, through the SDK's `createMcpHandler`;
 - 2025-era only, built per request with no session and POST only, as `mcp-server/app.ts` wires it;
@@ -60,8 +62,8 @@ A scratch MCP server on `@modelcontextprotocol/server` 2.4.0, bound to loopback,
 
 It logged every request's HTTP method, MCP headers, JSON-RPC method, the revision named and the client's stated name and capabilities. A control route added or removed one tool, with or without telling anyone, forgot the sessions, or cut the listen streams.
 
-Each run was one headless Claude Code session that called a tool, called the control route itself, waited, then said whether the new tool was available and called it. The result in the table is read from the server's log, not from the model's report.
+Each run (`evals/mcp-clients/run-claude-code.sh`) was one headless Claude Code session that called a tool, called the control route itself, waited, then said whether the new tool was available and called it. The result in the table is read from the server's log, not from the model's report.
 
-Before any run, the SDK's own client (2.4.0) proved each path: in its default mode it negotiated 2025-11-25, and with `versionNegotiation: { mode: "auto" }` it negotiated 2026-07-28, kept a list inside its `ttlMs` without a request, and listed again on a notification.
+Before any run, the SDK's own client (2.4.0) proved each path (`evals/mcp-clients/selfcheck.ts`): in its default mode it negotiated 2025-11-25, and with `versionNegotiation: { mode: "auto" }` it negotiated 2026-07-28, kept a list inside its `ttlMs` without a request, and listed again on a notification.
 
 Each case was run once, except the `ttlMs` case, run twice.
