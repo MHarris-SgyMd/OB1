@@ -908,8 +908,8 @@ export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextpro
  * server-portable and mcp-server to, the two installs that serve MCP.
  */
 export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
-  "@modelcontextprotocol/core": "2.1.0",
-  "@modelcontextprotocol/server": "2.1.0",
+  "@modelcontextprotocol/core": "2.4.0",
+  "@modelcontextprotocol/server": "2.4.0",
 };
 
 /** The environment variable naming the file report() appends each run's counts to (recordCount). */
