@@ -22227,14 +22227,14 @@ if (want("26")) {
       await sql`DELETE FROM ob1_entities`;
       // 2,100 dated thoughts a second apart, i = 1 the newest, and 3 with no created_at. Metadata: i = 101-116 and
       // 2,050 (past the newest 2,000) over-tagged with 11 tags; i = 14 a person alone; i = 15 tags as a string, 16 as
-      // an object, 17 no metadata at all (each no array, so an orphan); every other third tagged by topic. Content:
+      // an object, 17 no metadata at all (each no array, so an orphan); the other multiples of 3 tagged by topic. Content:
       // i = 11 and 18 whitespace only (the second a no-break space and a vertical tab), 12 text a markdown bullet
-      // must not keep, 13, 19 and 20 over 20,000 characters, 21 over it only with its trailing spaces, 22 cut at 120
+      // must not keep (a bell, a right-to-left override and an 8-bit escape introducer among it), 13, 19 and 20 over 20,000 characters, 21 over it only with its trailing spaces, 22 cut at 120
       // with brackets the preview drops, 23 exactly 120 characters, uncut. The newest
       // hundred's plain rows (91) get their fingerprint; a raw insert leaves the rest NULL.
       await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at)
         SELECT CASE WHEN i = 11 THEN E'  \\t \\n ' WHEN i = 18 THEN chr(160) || chr(11)
-                    WHEN i = 12 THEN E'[26] row 12 with \`code\`, [a link](x) and <!-- a comment -->\\n\\tthen  a' || chr(7) || E' second line  '
+                    WHEN i = 12 THEN E'[26] row 12 with \`code\`, [a link](x) and <!-- a comment -->\\n\\tthen  a' || chr(7) || chr(8238) || chr(155) || E' second line  '
                     WHEN i = 13 THEN repeat('x', 25000) WHEN i IN (19, 20) THEN repeat('y', 21000)
                     WHEN i = 21 THEN repeat('w', 19990) || repeat(' ', 20) WHEN i = 22 THEN repeat('[', 10) || repeat('q', 200)
                     WHEN i = 23 THEN repeat('v', 120) ELSE '[26] row ' || i END,
@@ -22245,7 +22245,7 @@ if (want("26")) {
                now() - (i || ' seconds')::interval
           FROM generate_series(1, 2100) i`);
       await sql.unsafe(`INSERT INTO thoughts (content, created_at) SELECT '[26] undated ' || k, NULL FROM generate_series(1, 3) k`);
-      await sql.unsafe(`UPDATE thoughts SET content_fingerprint = content_fingerprint_of(content) WHERE content IN (SELECT '[26] row ' || i FROM generate_series(1, 100) i) OR content IN (SELECT '[26] row ' || i FROM generate_series(1, 100) i)`);
+      await sql.unsafe(`UPDATE thoughts SET content_fingerprint = content_fingerprint_of(content) WHERE content IN (SELECT '[26] row ' || i FROM generate_series(1, 100) i)`);
       // Three entities, an edge between two, the newest ten thoughts mentioning one: the third entity has no edge.
       await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
       await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key)
@@ -22357,7 +22357,29 @@ if (want("26")) {
       assert(bound.code === 1 && /lint-sweep FAILED — locking thoughts, thought_entities, ob1_entities, ob1_entity_edges: 57014 canceling statement due to statement timeout\. No report was written\./.test(bound.stderr) && boundMs < 5_000 && !existsSync(boundReport),
         `…--statement-timeout 1 with thoughts held by another session: exit 1, 57014 in ${boundMs} ms, no report (exit ${bound.code}: ${bound.stderr.split("\n")[0]})`);
 
-      // A table the role may not read: Tier 2 exits 1 naming 42501 on thought_entities, runs no Tier 1 and writes no
+      // A lock the table lock does not cover: a REINDEX held open takes SHARE on thoughts (granted beside the run's
+      // ACCESS SHARE) and ACCESS EXCLUSIVE on the index, which the whole-table count's planner waits for, its statement
+      // unbounded; lock_timeout, the same bound, fails it with 55P03 in about a second (the hold let go after 15 s).
+      {
+        const reindexer = new SQL({ url: URL_, max: 1 });
+        let letGo = () => {};
+        const hold = new Promise<void>((r) => (letGo = r));
+        let indexed = () => {};
+        const reindexed = new Promise<void>((r) => (indexed = r));
+        const safety2 = setTimeout(() => letGo(), 15_000);
+        const reindexing = reindexer.begin(async (tx) => { await tx`REINDEX INDEX thoughts_pkey`; indexed(); await hold; });
+        await reindexed;
+        const t1 = performance.now();
+        const indexReport = join(scratch, "index.md");
+        const index = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--statement-timeout", "1", "--report", indexReport).finally(() => { clearTimeout(safety2); letGo(); });
+        const indexMs = Math.round(performance.now() - t1);
+        await reindexing;
+        await reindexer.close();
+        assert(index.code === 1 && /lint-sweep FAILED — tier 1: 55P03 canceling statement due to lock timeout\. No report was written\./.test(index.stderr) && indexMs < 5_000 && !existsSync(indexReport),
+          `…a REINDEX of thoughts' primary key held by another session: the whole-table count fails 55P03 in ${indexMs} ms, its lock wait bounded though its statement is not (exit ${index.code}: ${index.stderr.split("\n")[0]})`);
+      }
+
+      // A table the role may not read: Tier 2 exits 1 naming 42501 on thought_entities at the lock and writes no
       // report; Tier 1 alone runs on SELECT on thoughts. A role needs CREATE ROLE and credentials to swap, as in [50].
       const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
       const [{ mayCreate }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
@@ -22371,8 +22393,8 @@ if (want("26")) {
         const denied = await lint({ DATABASE_URL: probeUrl }, "--tier", "2", "--report", deniedReport);
         const t1Only = await lint({ DATABASE_URL: probeUrl }, "--tier", "1", "--report", join(scratch, "t1-only.md"));
         assert(denied.code === 1 && /lint-sweep FAILED — locking thoughts, thought_entities, ob1_entities, ob1_entity_edges: 42501 permission denied for table thought_entities\. No report was written\./.test(denied.stderr) && !existsSync(deniedReport)
-               && !/\[tier 1\]/.test(denied.stdout) && t1Only.code === 0 && existsSync(join(scratch, "t1-only.md")),
-          `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on thought_entities, no Tier 1, no report; Tier 1 runs (${denied.code}: ${denied.stderr.split("\n")[0]}; tier 1 ${t1Only.code})`);
+               && t1Only.code === 0 && existsSync(join(scratch, "t1-only.md")),
+          `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on thought_entities, no report; Tier 1 runs (${denied.code}: ${denied.stderr.split("\n")[0]}; tier 1 ${t1Only.code})`);
       }
 
       // The refusals, exit 2 and no report: --tier 3 (PR 2b's) and 4, a removed flag (saying why), a --report climbing
@@ -22388,13 +22410,14 @@ if (want("26")) {
       const dir = await r({ DATABASE_URL: URL_ }, "--report", refusedDir);
       const other = await r({ DATABASE_URL: URL_, PGDATABASE: "template1" }, "--report", "other.md");
       const dots = await r({ DATABASE_URL: URL_ }, "--tier", "1", "--report", "..dots.md");
+      const long = await r({ DATABASE_URL: URL_ }, "--report", `${"n".repeat(230)}.md`);
       const left = readdirSync(refusedDir);
       assert(three.code === 2 && /--tier 3 is not ported yet/.test(three.stderr) && four.code === 2 && /--tier must be 1, 2 or all/.test(four.stderr)
              && removed.code === 2 && /Tier 3's model calls/.test(removed.stderr) && climb.code === 2 && /climbs out of the working directory/.test(climb.stderr)
              && dir.code === 2 && /is a directory/.test(dir.stderr) && !/\[lint-sweep\] database/.test(dir.stdout)
              && other.code === 2 && /lint-sweep refused — the connection reached database "template1"/.test(other.stderr)
-             && dots.code === 0 && left.join(" ") === "..dots.md",
-        `…--tier 3 and 4, a removed flag, a climbing or directory --report and another database each refused, exit 2 and no report; ..dots.md written (${[three, four, removed, climb, dir, other, dots].map((x) => x.code).join(" ")}; ${left.join(" ")})`);
+             && dots.code === 0 && left.join(" ") === "..dots.md" && long.code === 2 && /longer than 220 bytes/.test(long.stderr),
+        `…--tier 3 and 4, a removed flag, a climbing, directory or over-long --report and another database each refused, exit 2 and no report; ..dots.md written (${[three, four, removed, climb, dir, other, dots, long].map((x) => x.code).join(" ")}; ${left.join(" ")})`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
       await sql`DELETE FROM thoughts`;

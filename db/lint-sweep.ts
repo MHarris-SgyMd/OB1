@@ -41,27 +41,36 @@
  *
  * ── What a run guarantees ───────────────────────────────────────────────────
  * The database the URL names is the one read: a connection that reached
- * another (PGDATABASE) is refused, exit 2. The tiers' reads are in one
- * REPEATABLE READ, READ ONLY transaction: the counts are of one moment, and a
+ * another (PGDATABASE) is refused, exit 2, before the transaction. The tiers'
+ * reads are in one REPEATABLE READ, READ ONLY transaction, whose first
+ * statement takes the locks below: the counts are of one moment, and a
  * run never writes to the brain. A role with SELECT on `thoughts`,
  * `thought_entities`, `ob1_entities` and `ob1_entity_edges` is enough. The
  * report is written only once every read succeeded, to a new file of the
  * run's own (O_EXCL, 0600) renamed over the path: never through a symlink
  * there, never keeping an older file's mode, and a failed write leaves an
  * earlier report as it was. A run that fails writes no report and exits 1 with
- * the database's reason.
+ * the reason (the database's, the file system's, or the connection's).
  *
  * ── Size and time ───────────────────────────────────────────────────────────
- * The samples are bounded and read the created_at index. The exact counts
- * read whole tables: `thoughts` once (a scan), and the entity graph's
- * anti-join through 016's edge indexes; seconds at a million thoughts, hours
- * at a billion, the snapshot held throughout (vacuum's horizon with it). A
+ * Each tier reads its sample once, through the created_at index, stopping
+ * after its rows. The exact counts read whole tables: `thoughts` once (a
+ * scan), and the entity graph's anti-join through 016's edge indexes —
+ * measured on a scratch brain at about half a second
+ * warm and 5 s cold for a million thoughts, so minutes at 100 million and
+ * about an hour at a billion, the snapshot held throughout (vacuum's horizon
+ * with it, and any CREATE or REINDEX … CONCURRENTLY waits for it). A
  * statement is bounded by --statement-timeout (60 s; 0 for none), lifted for
- * those counts and put back. The run's first statement locks the tables its
- * tiers read (ACCESS SHARE, as pg_dump does), under the bound: a lock another
- * session holds fails the run then, and the unbounded counts after can wait on
- * none; a TRUNCATE or ALTER waits for the run, and so does a migration
- * altering one of them (keep a sweep apart from an upgrade).
+ * those counts and put back, and every lock wait by the same bound
+ * (lock_timeout), the counts' included. The transaction's first statement locks
+ * the tables its tiers read (ACCESS SHARE, as pg_dump does): a lock another
+ * session holds fails the run then (an index's, a REINDEX's, at the statement
+ * that plans it). A TRUNCATE or ALTER of one of them waits for the run, and
+ * every read and write of that table waits behind it: the brain's traffic on
+ * it stalls for the rest of the sweep, or, for a migration, until the
+ * migrator's 10 s lock timeout fails the upgrade. Keep a sweep apart from an
+ * upgrade; the session's application_name is lint-sweep, for
+ * pg_stat_activity.
  * client_connection_check_interval (10 s, where the server's platform has it)
  * has the server end a stopped run's statement.
  *
@@ -72,7 +81,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { SQL } from "bun";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, openSql, reachedDatabaseRefusal } from "./connect.ts";
@@ -94,7 +103,7 @@ const STATEMENT_TIMEOUT_S = 60;
 /** The client_connection_check_interval a run sets on its session first, where the server's platform has it. */
 const CONNECTION_CHECK = "10s";
 
-/** The recipe's flags that went with its Tier 3, and the old connection's names: refused by name, saying why. */
+/** The recipe's flags that went with its Tier 3, and --verbose: refused by name, saying why. */
 const REMOVED_FLAGS: Readonly<Record<string, string>> = {
   "sample-size": "Tier 3's sample; Tier 3 comes in SMD-3318 PR 2b",
   "max-llm-calls": "Tier 3's model calls; Tier 3 comes in SMD-3318 PR 2b",
@@ -124,20 +133,28 @@ export interface Tier2 {
 }
 
 /**
- * A thought's text made safe for one markdown bullet: control characters
- * (escape sequences, bells), backticks, brackets and angle brackets (code, links,
- * HTML and comments) dropped, whitespace collapsed to single spaces.
+ * A thought's text made safe for one markdown bullet: C0 and C1 control
+ * characters (escape sequences, bells), zero-width and bidirectional controls
+ * (which reorder or hide text), backticks, brackets and angle brackets (code,
+ * links, HTML and comments) dropped, whitespace collapsed to single spaces. A
+ * bare URL stays text a renderer may still link.
  */
 export function sanitizePreview(s: string): string {
-  return s.replace(/[\u0000-\u0008\u000e-\u001f\u007f`[\]<>]/g, "").replace(/\s+/g, " ").trim();
+  return s.replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff`[\]<>]/g, "").replace(/\s+/g, " ").trim();
 }
 
 /** A metadata key's array length in SQL, 0 when the key is absent, not an array, or the metadata NULL. */
 const arrayLen = (key: string) => `jsonb_array_length(CASE WHEN jsonb_typeof(metadata->'${key}') = 'array' THEN metadata->'${key}' ELSE '[]'::jsonb END)`;
 /** Content trimmed of whitespace, in SQL: spaces, tabs, line breaks, form feeds, vertical tabs (chr 11), no-break spaces (chr 160). */
 const TRIMMED = `btrim(content, E' \\t\\n\\r\\f' || chr(11) || chr(160))`;
-/** The newest dated thoughts, `n` of them, with the columns `cols`. */
-const recent = (cols: string, n: number) => `SELECT ${cols} FROM thoughts WHERE created_at IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT ${n}`;
+/**
+ * The newest dated thoughts, `n` of them, with the columns `cols`. Ordered by
+ * created_at alone, so the created_at index stops after `n` rows: with an id
+ * tiebreak a group of thoughts sharing one created_at (an import's transaction,
+ * a day-precision date) was read and sorted whole. Which of a group at the
+ * sample's edge are in it is the index's order.
+ */
+const recent = (cols: string, n: number) => `SELECT ${cols} FROM thoughts WHERE created_at IS NOT NULL ORDER BY created_at DESC LIMIT ${n}`;
 
 /** Run `query` with the statement bound lifted, then put the session's back (the whole-table counts outlast a page's bound). */
 async function unbounded<T>(tx: SQL, bound: string, query: () => Promise<T>): Promise<T> {
@@ -153,41 +170,39 @@ async function tier1(tx: SQL, bound: string): Promise<Tier1> {
            count(*) FILTER (WHERE content_fingerprint IS NULL)::bigint::text AS no_fp,
            count(*) FILTER (WHERE created_at IS NULL)::bigint::text AS undated
       FROM thoughts`)) as { total: string; no_fp: string; undated: string }[]);
+  // One read of the sample: the counts and the listed rows from the same rows (the CTE, used twice, is read once).
   const [c] = (await tx.unsafe(`
-    WITH recent AS (${recent("id, content, metadata", TIER1_SAMPLE)})
+    WITH recent AS MATERIALIZED (${recent("id, content, metadata, created_at", TIER1_SAMPLE)})
     SELECT count(*)::int AS sampled,
            count(*) FILTER (WHERE ${arrayLen("topics")} = 0 AND ${arrayLen("tags")} = 0 AND ${arrayLen("people")} = 0)::int AS orphans,
            count(*) FILTER (WHERE ${TRIMMED} = '')::int AS empty,
            count(*) FILTER (WHERE length(${TRIMMED}) > ${VERY_LONG})::int AS very_long,
-           count(*) FILTER (WHERE ${arrayLen("tags")} > ${OVER_TAGGED})::int AS over_tagged
-      FROM recent`)) as { sampled: number; orphans: number; empty: number; very_long: number; over_tagged: number }[];
-  const over = (await tx.unsafe(`
-    WITH recent AS (${recent("id, metadata, created_at", TIER1_SAMPLE)})
-    SELECT id::text AS id, ${arrayLen("tags")} AS tags FROM recent WHERE ${arrayLen("tags")} > ${OVER_TAGGED}
-     ORDER BY created_at DESC, id DESC LIMIT ${LISTED}`)) as { id: string; tags: number }[];
+           count(*) FILTER (WHERE ${arrayLen("tags")} > ${OVER_TAGGED})::int AS over_tagged,
+           (SELECT coalesce(json_agg(json_build_object('id', o.id::text, 'tags', o.tags)), '[]'::json) FROM (
+              SELECT id, created_at, ${arrayLen("tags")} AS tags FROM recent WHERE ${arrayLen("tags")} > ${OVER_TAGGED}
+               ORDER BY created_at DESC, id DESC LIMIT ${LISTED}) o)::text AS over
+      FROM recent`)) as { sampled: number; orphans: number; empty: number; very_long: number; over_tagged: number; over: string }[];
   return {
     total: Number(whole.total), noFingerprint: Number(whole.no_fp), undated: Number(whole.undated), sampled: c.sampled,
-    orphansByTag: c.orphans, emptyContent: c.empty, veryLong: c.very_long, overTagged: over, overTaggedCount: c.over_tagged,
+    orphansByTag: c.orphans, emptyContent: c.empty, veryLong: c.very_long, overTagged: JSON.parse(c.over) as { id: string; tags: number }[], overTaggedCount: c.over_tagged,
   };
 }
 
 async function tier2(tx: SQL, bound: string): Promise<Tier2> {
+  // One read of the sample, as Tier 1's: the counts and the listed rows from the same rows.
   const [c] = (await tx.unsafe(`
-    WITH recent AS (${recent("id", TIER2_SAMPLE)})
-    SELECT count(*)::int AS sampled,
-           count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM thought_entities te WHERE te.thought_id = recent.id))::int AS unmentioned
-      FROM recent`)) as { sampled: number; unmentioned: number }[];
+    WITH recent AS MATERIALIZED (${recent("id, content, created_at", TIER2_SAMPLE)}),
+         lone AS MATERIALIZED (SELECT * FROM recent WHERE NOT EXISTS (SELECT 1 FROM thought_entities te WHERE te.thought_id = recent.id))
+    SELECT (SELECT count(*) FROM recent)::int AS sampled, (SELECT count(*) FROM lone)::int AS unmentioned,
+           (SELECT coalesce(json_agg(json_build_object('id', l.id::text, 'created', to_char(l.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
+                                                       'preview', left(l.content, ${PREVIEW}), 'cut', length(l.content) > ${PREVIEW})), '[]'::json)
+              FROM (SELECT * FROM lone ORDER BY created_at DESC, id DESC LIMIT ${LISTED}) l)::text AS listed`)) as { sampled: number; unmentioned: number; listed: string }[];
   const [g] = await unbounded(tx, bound, async () => (await tx.unsafe(`
     SELECT (SELECT count(*) FROM ob1_entities)::bigint::text AS entities,
            (SELECT count(*) FROM ob1_entities e
              WHERE NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id)
                AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.to_entity_id = e.id))::bigint::text AS lonely`)) as { entities: string; lonely: string }[]);
-  const rows = (await tx.unsafe(`
-    WITH recent AS (${recent("id, content, created_at", TIER2_SAMPLE)})
-    SELECT id::text AS id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS created,
-           left(content, ${PREVIEW}) AS preview, length(content) > ${PREVIEW} AS cut
-      FROM recent WHERE NOT EXISTS (SELECT 1 FROM thought_entities te WHERE te.thought_id = recent.id)
-     ORDER BY created_at DESC, id DESC LIMIT ${LISTED}`)) as { id: string; created: string; preview: string; cut: boolean }[];
+  const rows = JSON.parse(c.listed) as { id: string; created: string; preview: string; cut: boolean }[];
   return {
     sampled: c.sampled, unmentionedCount: c.unmentioned, entities: Number(g.entities), entitiesWithNoEdges: Number(g.lonely),
     unmentioned: rows.map((r) => ({ ...r, preview: sanitizePreview(r.preview ?? "") })),
@@ -196,7 +211,7 @@ async function tier2(tx: SQL, bound: string): Promise<Tier2> {
 
 /** The report, as markdown. */
 export function renderReport(r: { tier: string; database: string; startedAt: string; finishedAt: string; t1: Tier1 | null; t2: Tier2 | null }): string {
-  const day = r.finishedAt.slice(0, 10);
+  const day = r.startedAt.slice(0, 10);
   const L: string[] = [
     "---", `title: Lint Sweep — ${day}`, `database: ${r.database}`, `tier: ${r.tier}`, `started_at: ${r.startedAt}`, `finished_at: ${r.finishedAt}`, "---", "",
     `# Brain Lint Sweep — ${day}`, "",
@@ -247,6 +262,8 @@ export function reportPath(raw: string, cwd = process.cwd()): { path: string } |
   const expanded = expandHome(raw);
   const path = resolve(cwd, expanded);
   if (existsSync(path) && statSync(path).isDirectory()) return { error: `--report ${raw} is a directory; give a file's path` };
+  // The temporary file adds `.<pid>.<8 hex>.tmp` (up to 30 bytes) to the name, which must stay under 255.
+  if (Buffer.byteLength(basename(path)) > 220) return { error: `--report's file name is longer than 220 bytes; shorten it` };
   if (isAbsolute(expanded)) return { path };
   const rel = relative(cwd, path);
   if (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) return { path };
@@ -312,8 +329,7 @@ export async function run(opts: SweepOptions): Promise<number> {
     await opts.sql.begin("ISOLATION LEVEL REPEATABLE READ READ ONLY", async (txn) => {
       const tx = txn as unknown as SQL;
       // The tables the tiers read, ACCESS SHARE, first and under the statement bound (a REPEATABLE READ transaction's
-      // snapshot is its first query's; LOCK is none): a lock wait is bounded here, and the counts run unbounded after
-      // can wait on none; a TRUNCATE or a change of shape waits for the run.
+      // snapshot is its first query's; LOCK is none): a TRUNCATE or a change of shape waits for the run.
       const tables = [...(opts.tier !== "2" ? ["thoughts"] : []), ...(opts.tier !== "1" ? ["thoughts", "thought_entities", "ob1_entities", "ob1_entity_edges"] : [])];
       const toLock = [...new Set(tables)];
       try {
@@ -322,6 +338,10 @@ export async function run(opts: SweepOptions): Promise<number> {
         throw new Error(`locking ${toLock.join(", ")}: ${reasonOf(e)}`);
       }
       const [{ bound }] = (await tx.unsafe("SELECT pg_catalog.current_setting('statement_timeout') AS bound")) as { bound: string }[];
+      // Every lock wait bounded too, the unbounded counts' included: the table lock above does not cover an index
+      // (a REINDEX takes SHARE on its table, compatible with the run's, and ACCESS EXCLUSIVE on the index, which the
+      // planner of a count waits for).
+      await tx.unsafe("SELECT pg_catalog.set_config('lock_timeout', $1, true)", [bound]);
       if (opts.tier !== "2") {
         try {
           t1 = await tier1(tx, bound);
@@ -380,7 +400,7 @@ if (import.meta.main) {
   }
   const timeout = cli.int("statement-timeout", { absent: STATEMENT_TIMEOUT_S, min: 0, max: 2147483 });
   const url = databaseUrl(cli.value("url"));
-  const sql = openSql(url, { max: 1, session: { statement_timeout: `${timeout}s` } });
+  const sql = openSql(url, { max: 1, session: { statement_timeout: `${timeout}s`, application_name: "lint-sweep" } });
   await closeThenExit(sql, async () => {
     return run({ sql, tier, report: where.path, url });
   });

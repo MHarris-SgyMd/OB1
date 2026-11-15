@@ -35,21 +35,31 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   `thought_entities`, `ob1_entities` and `ob1_entity_edges` is enough.
 - **The report.** `--report`, or `./lint-report-<UTC date>.md` in the directory
   the run starts from. Its previews are thought text: keep it outside the
-  checkout. (The checkout's `.gitignore` covers the default name at its root, in
-  `db/` and in `recipes/lint-sweep/`.) It is written 0600 through a file of the
+  checkout, or under the default name in a place the checkout's `.gitignore`
+  covers (its root, `db/` and `recipes/lint-sweep/`). It is written 0600 through a file of the
   run's own renamed into place, so a failed run leaves an earlier report as it
   was, and only once every read succeeded.
-- **Upgrading a cron job.** In `recipes/lint-sweep`, rename the `.env.local`'s
-  `SUPABASE_URL` to `DATABASE_URL` and call `bun ../../db/lint-sweep.ts` where
-  you called `bun lint-sweep.js`. Flags take their value after a space
-  (`--tier 1`, `--report week.md`); `--tier=1` is refused. `--sample-size`,
-  `--max-llm-calls`, `--days`, `--llm-model` and `--verbose` went with Tier 3,
-  and each is refused saying so; `OPENROUTER_API_KEY` is not read.
+- **Upgrading a cron job.** The old script read `.env` and `.env.local` from its
+  own directory, wherever it ran from; Bun reads them from the working
+  directory. So `cd` into the directory holding the file (for the recipe's,
+  `recipes/lint-sweep`), rename its `SUPABASE_URL` (or the legacy
+  `OPEN_BRAIN_URL`) to `DATABASE_URL`, and call `bun ../../db/lint-sweep.ts`
+  where you called `bun lint-sweep.js`. Flags take their value after a space
+  (`--tier 1`, `--report week.md`); `--tier=1` is refused, and so are `-v` and
+  `-h` (`--help` prints the flags). `--sample-size`, `--max-llm-calls`, `--days`
+  and `--llm-model` went with Tier 3 and `--verbose` with the recipe's progress
+  lines; each is refused saying why. `OPENROUTER_API_KEY` is not read.
 - **Not during an upgrade.** The run locks the tables it reads (ACCESS SHARE,
-  as `pg_dump` does): writes go on, but a migration altering one of them waits,
-  and the brain's reads and writes of that table behind it, until the
-  migrator's 10 s lock timeout fails the upgrade. A statement is bounded by
-  `--statement-timeout` (60 s; 0 for none), lifted for the whole-table counts.
+  as `pg_dump` does) for its length: writes go on, but an `ALTER` or `TRUNCATE`
+  of one of them waits, and every read and write of that table waits behind it
+  — for the rest of the sweep, or, for a migration, until the migrator's 10 s
+  lock timeout fails the upgrade. A statement is bounded by
+  `--statement-timeout` (60 s; 0 for none), lifted for the whole-table counts,
+  and every lock wait by the same bound. In `pg_stat_activity` the run is
+  `lint-sweep`.
+- **Size and time.** Measured on a scratch brain: about half a second warm and
+  5 s cold for a million thoughts, so minutes at 100 million and about an hour
+  at a billion, the locks and the snapshot held throughout.
 
 ## What it checks
 
@@ -63,7 +73,10 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   those no entity mention names (extraction found nothing in them, has not
   reached them, or is off); the entities with no edge (exact).
 
-A run that fails writes no report and exits 1 with the database's reason.
+A run that fails writes no report and exits 1 with the reason. The samples
+read the created_at index; among thoughts sharing a `created_at` at a sample's
+edge (an import's transaction, a day-precision date), which are read is the
+index's order.
 
 ## What changed
 

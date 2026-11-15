@@ -194,7 +194,7 @@ acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed.
 
 **Stop the server and any re-embed or extraction worker first, let any backup
-(`db/backup.ts`, `pg_dump`) finish — its lock keeps a migration that alters a
+or sweep (`db/backup.ts`, `pg_dump`, `db/lint-sweep.ts`) finish — its lock keeps a migration that alters a
 table it reads waiting, and the brain's reads and writes of that table behind
 it, until the 10 s lock timeout fails the run — and connect directly, not
 through a transaction-mode pooler:** the migrator sets session
@@ -5743,15 +5743,19 @@ The recipe's two `importance` checks and its fingerprint groups are gone: the
 core has no `importance` (SMD-3661), and migration 003's partial unique index
 makes a set fingerprint unique (a twin of a fingerprinted thought's content
 keeps none, among the rows the no-fingerprint count counts). A thought with no
-`created_at` is in no sample, and counted. The first statement locks the
-tables the tiers read (ACCESS SHARE, as pg_dump does), under
-`--statement-timeout` (60 s), which the whole-table counts lift: keep a sweep
-apart from an upgrade. The markdown report is written 0600 through a file of
+`created_at` is in no sample, and counted; each tier reads its sample once,
+ordered by `created_at` alone, so ties at its edge cost nothing. The
+transaction's first statement locks the tables the tiers read (ACCESS SHARE,
+as pg_dump does), under `--statement-timeout` (60 s), which the whole-table
+counts lift; every lock wait, the counts' included, is bounded by the same
+value (`lock_timeout`). Keep a sweep apart from an upgrade: an `ALTER` of
+those tables waits for it, and their traffic behind the `ALTER`. The markdown report is written 0600 through a file of
 the run's own renamed into place, once every read succeeded. Tier 3, a model's reading of sampled thoughts, follows in SMD-3318
 PR 2b through the provider and the egress gate. test-live [26] holds every
 count against a planted table (undated rows and non-array metadata among it),
-the report's previews made safe and its path rules, the statement bound, a role
-that may not read a table, a report that cannot be written, and the refusals.
+the report's previews made safe and its path rules, the bound on a lock wait (a
+held table, and a held REINDEX under an unbounded count), a role that may not
+read a table, a report that cannot be written, and the refusals.
 
 ## Extensions
 
