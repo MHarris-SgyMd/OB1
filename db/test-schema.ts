@@ -21197,16 +21197,23 @@ console.log("\n[128] Migration 142: priority findings — ob1_priority_review() 
   await review();
   const rof = await pending(roT, "stale");
   const readOnly = await decide(rof!.id, "accept", { level: 1 }, { ...OP, scope: "read" });
-  // A read-scoped key decides nothing, a reject included (review pass 3); a capture-scoped one reaches the writer, which
-  // refuses a note it did not capture.
+  // Only a write-scoped key decides (review passes 3 and 5): a read key's reject, a capture key's reject and accept.
   const readReject = await decide(rof!.id, "reject", {}, { ...OP, scope: "read" });
-  const captureAcc = await decide(rof!.id, "accept", { level: 1 }, { ...OP, scope: "capture" });
+  const captureRej = await decide(rof!.id, "reject", {}, { ...OP, scope: "capture" });
+  // A writer's refusal decides nothing: the finding's note deleted under it, the writer answers ITEM_NOT_FOUND.
+  const goneT = await thought("[128] a note deleted under its finding");
+  await put("thought", goneT, 3, BOT);
+  await review();
+  const gf = await pending(goneT, "stale");
+  await db.query(`SELECT delete_thought($1::uuid, $2::jsonb)`, [goneT, JSON.stringify(OP)]);
+  const captureAcc = await decide(gf!.id, "accept", { level: 1 });
   const longNote = "n".repeat(1500);
   const longAcc = await decide(rof!.id, "accept", { level: 1, note: longNote });
   const kept = (await db.query<{ n: number }>(`SELECT length(decision_note)::int AS n FROM priority_findings WHERE id = $1::uuid`, [rof!.id])).rows[0].n;
-  assert(readOnly.error === "READ_ONLY_KEY" && readReject.error === "READ_ONLY_KEY" && captureAcc.error === "WRITER_REFUSED" && /ITEM_NOT_YOURS/.test(String(captureAcc.message))
+  assert(readOnly.error === "NOT_WRITE_SCOPE" && readReject.error === "NOT_WRITE_SCOPE" && captureRej.error === "NOT_WRITE_SCOPE"
+         && captureAcc.error === "WRITER_REFUSED" && /ITEM_NOT_FOUND/.test(String(captureAcc.message))
          && longAcc.ok === true && kept === 1500,
-    `a read-scoped key's accept and reject are READ_ONLY_KEY; a capture-scoped key's accept the writer refuses, WRITER_REFUSED naming ITEM_NOT_YOURS, deciding nothing; a 1500-character note is kept whole, the reason cut (${readOnly.error}, ${readReject.error}, ${captureAcc.error}, ${kept})`);
+    `a read key's accept and reject and a capture key's reject are NOT_WRITE_SCOPE; an accept the writer refuses (the note deleted) is WRITER_REFUSED naming ITEM_NOT_FOUND, deciding nothing; a 1500-character note is kept whole, the reason cut (${readOnly.error}, ${readReject.error}, ${captureRej.error}, ${captureAcc.error}, ${kept})`);
 
   // A maker's older statement in a ticket's pool is not its stance (review pass 1): the operator's 5 on the ticket's own
   // row and its later 2 on the ticket, both open (written raw, as a late row leaves them), against the source's 1 on
@@ -21388,6 +21395,62 @@ console.log("\n[128] Migration 142: priority findings — ob1_priority_review() 
   await review(60, "1 day");
   assert(!!(await pending(refItemId, "overdue")) && !(await pending(refT, "overdue")),
     `a note whose due time is its referenced item's raises no overdue finding of its own: the item's stands alone`);
+
+  // Review pass 5. A settled item's finding is accepted by clearing or stating none, not a level.
+  const doneItem = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, NULL, NULL, NULL, false, $2::jsonb) AS r`, ["[128] close the hatch", JSON.stringify(OP)])).rows[0].r;
+  const doneId = String((doneItem.item as J | undefined)?.id ?? doneItem.id ?? "");
+  await put("item", doneId, 3, BOT);
+  await db.query(`SELECT set_item_status($1, 'done', NULL, $2::jsonb)`, [doneId, JSON.stringify(OP)]);
+  await review(60, "1 day");
+  const dsf = await pending(doneId, "settled");
+  const levelOnSettled = dsf ? await decide(dsf.id, "accept", { level: 2 }) : { error: "no finding" };
+  assert(levelOnSettled.error === "BAD_OUTCOME" && !!(await pending(doneId, "settled")), `accepting a settled finding with a level is BAD_OUTCOME, the finding pending (${levelOnSettled.error})`);
+
+  // A passed due time is not carried: re-confirming an overdue item's level leaves it without the passed due.
+  const pastT = await thought("[128] the operator's word, due already");
+  await db.query(`SELECT assert_priority('thought', $1, 3, $2::timestamptz, NULL, NULL, NULL, 'was due', false, $3::jsonb)`,
+    [pastT, new Date(Date.now() - 86_400_000).toISOString(), JSON.stringify(OP)]);
+  await review(60, "1 day");
+  const pof = await pending(pastT, "overdue");
+  const pacc5 = pof ? await decide(pof.id, "accept", { level: 3 }) : { ok: false };
+  const pastRow = (await db.query<{ due_at: string | null }>(`SELECT due_at::text FROM ob1_priority_open('thought', $1) WHERE maker_name = '[128] op'`, [pastT])).rows;
+  assert(pacc5.ok === true && pastRow.length === 1 && pastRow[0].due_at === null,
+    `re-confirming an overdue item's level drops the passed due time rather than keeping it overdue (${JSON.stringify(pastRow)})`);
+
+  // A due time through a reference to a settled item stays the referring item's finding (review pass 5).
+  const setItem = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, $2, NULL, NULL, false, $3::jsonb) AS r`,
+    ["[128] fit the rudder", new Date(Date.now() - 86_400_000).toISOString(), JSON.stringify(OP)])).rows[0].r;
+  const setItemId = String((setItem.item as J | undefined)?.id ?? setItem.id ?? "");
+  const refT2 = await thought("[128] a note due when a settled item was");
+  await db.query(`SELECT assert_priority('thought', $1, 2, NULL, NULL, 'item', $2, NULL, false, $3::jsonb)`, [refT2, setItemId, JSON.stringify(BOT)]);
+  await db.query(`SELECT set_item_status($1, 'done', NULL, $2::jsonb)`, [setItemId, JSON.stringify(OP)]);
+  await review(60, "1 day");
+  assert(!(await pending(setItemId, "overdue")) && !!(await pending(refT2, "overdue")),
+    `a note due when an item since done was keeps its own overdue finding: the done item raises none`);
+
+  // A replace is no activity (review pass 5): a merge's move closes a statement as replaced today and restates it with
+  // its old time; the entity, untouched otherwise, still goes stale.
+  const ent5 = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[128] Bollard', '[128] bollard') RETURNING id::text`)).rows[0].id;
+  const rawBot = async (key: string, extra = "", params: unknown[] = []) =>
+    (await db.query<{ id: string }>(`INSERT INTO priority_assertions (id, item_kind, item_key, level, maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at${extra ? ", due_ref_kind, due_ref_key" : ""})
+       VALUES (gen_random_uuid(), 'entity', $1, 3, '[128] bot', $2::uuid, 'agent', 'agent', 'write', false, 3, now() - interval '90 days'${extra})
+       RETURNING id::text`, [key, BOT.agent_id, ...params])).rows[0].id;
+  const moved0 = await rawBot(ent5);
+  await db.query(`UPDATE priority_assertions SET closed_at = now(), close_reason = 'replaced', closed_by = gen_random_uuid() WHERE id = $1::uuid`, [moved0]);
+  await rawBot(ent5);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await review(60, "1 minute");
+  assert(!!(await pending(ent5, "stale")), `a statement replaced today by a move, its restatement keeping the old time, is no activity: the entity goes stale`);
+
+  // A statement due when an unsettled item is stays in force (review pass 5): an entity's 90-day-old statement with a
+  // due reference to an open item raises no stale finding.
+  const openRef = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, NULL, NULL, NULL, false, $2::jsonb) AS r`, ["[128] order the chain", JSON.stringify(OP)])).rows[0].r;
+  const openRefId = String((openRef.item as J | undefined)?.id ?? openRef.id ?? "");
+  const ent6 = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[128] Cleat', '[128] cleat') RETURNING id::text`)).rows[0].id;
+  await rawBot(ent6, ", 'item', $3", [openRefId]);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await review(60, "1 minute");
+  assert(!(await pending(ent6, "stale")), `an entity's 90-day-old statement due when an open item is stays in force: no stale finding`);
 
   // A re-apply keeps the rows and replaces the functions as they were.
   const count = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings`)).rows[0].n;

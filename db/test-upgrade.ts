@@ -778,7 +778,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 056's apply_entity_type_gate carried), refusing by name without 016,
   // 056, 061, 116, 133 or 136 ([20ce]); 142 adds priority_findings, the
   // priority review's scan and an operator's decision, refusing by name
-  // without 046, 116, 122 or 133 ([20cf]) — all recorded by the
+  // without 046, 068, 116, 117, 122 or 133 ([20cf]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
