@@ -966,6 +966,15 @@ services:
       # shares together below its slots — OB1_BACKGROUND_SLOTS=chat=1,embed=1 on
       # each of two brains on a server of 4 (deploy/.env.example).
       OB1_MODEL_SLOTS: ${OB1_MODEL_SLOTS:-}
+      # The api's way to the host's slot broker (SMD-3379 PR 3b-2): set, and the
+      # broker named for the coordinator (OB1_SLOT_BROKER_URL and _KEY, below),
+      # the api asks the broker for each model call through the coordinator,
+      # over a WebSocket on the brain's network (coordinator:8096), and proves
+      # itself with this key, which both read from here; no pass is handed it.
+      # 16 printable ASCII characters at least (openssl rand -hex 32).
+      # Unset, the api's calls keep their own shares (OB1_BACKGROUND_SLOTS),
+      # as before.
+      OB1_SLOT_RELAY_KEY: ${OB1_SLOT_RELAY_KEY:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
       # way /models cannot show), 1 to 3600, 0 or off for the start's probe
@@ -1501,15 +1510,18 @@ services:
       # The host's slot broker (SMD-3379 PR 3b-1, deploy/federated/): its
       # WebSocket URL, e.g. ws://host.containers.internal:8095/v1/slots, and
       # this brain's key to it (federated.ts key). The coordinator's alone: no
-      # pass is handed them, each asks through it. Unset, the passes keep their
-      # own shares (OB1_BACKGROUND_SLOTS), as before.
+      # pass is handed them, each asks through it, and so does the api where
+      # OB1_SLOT_RELAY_KEY is set (above, PR 3b-2). Unset, the passes and the
+      # api keep their own shares (OB1_BACKGROUND_SLOTS), as before.
       OB1_SLOT_BROKER_URL: ${OB1_SLOT_BROKER_URL:-}
       OB1_SLOT_BROKER_KEY: ${OB1_SLOT_BROKER_KEY:-}
     # The server's host alias (SMD-1875): the passes dial OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias
     # Postgres on `data`; the model provider and Linear's API on `egress`
-    # (SMD-2583).
+    # (SMD-2583). The api reaches its slot relay on `data` (coordinator:8096,
+    # SMD-3379 PR 3b-2), which listens on both networks: published nowhere,
+    # and refused without OB1_SLOT_RELAY_KEY.
     networks: [data, egress]
     # Its own, not the server image's HEALTHCHECK, which asks :8000/health,
     # which this serves not (podman's OCI builds drop that instruction, so it

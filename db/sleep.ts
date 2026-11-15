@@ -488,7 +488,7 @@ import { databaseUnavailable, outageWait, PERMANENT_REFUSALS, throughOutage, typ
 import { liveGate, MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type InHandAbort, type PassStop } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper, type SleepMark } from "./pass-stamp.ts";
 import { embeddingContract, MIGRATE_LOCK, MIGRATE_LOCK_HOLDER_SQL, MIGRATION_EXIT, reembedKey, startRefusalRemedy } from "./config.mjs";
-import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
+import { commandLine, consoleWriter, flagList, numberProblem, optionReader, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 const FLAGS = { url: "one", capture: "one", "abort-after": "one", "max-wait": "one", rescan: "one", poll: "one", workers: "one", "statement-timeout": "one", "work-mem": "one", "maintenance-work-mem": "one", "dump-dir": "one", follow: "none", "dry-run": "none" } as const;
@@ -1117,11 +1117,7 @@ export function dumpDirProblem(dir: string): string | null {
 
 /** The scheduler's numbers from its options, or the refusal of the first that breaks its flag's rule. */
 function numbers(opts: SleepOptions): Numbers | string {
-  const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number }): number | string => {
-    if (v == null) return absent;
-    const problem = numberProblem(flag, v, rule);
-    return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
-  };
+  const read = optionReader(FLAGS, HINTS);
   // A caller's options from before v2.0.0 (SMD-3379 PR 1c-4b): refused with what replaced them.
   for (const [k, words] of Object.entries(REMOVED_FLAGS)) if ((opts as Record<string, unknown>)[k] != null) return `${words}\n${flagList(FLAGS, HINTS)}`;
   const capture = read("--capture", opts.capture, DEFAULT_CAPTURE_S, { min: 1, max: 86_400 });

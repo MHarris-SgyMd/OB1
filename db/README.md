@@ -193,8 +193,11 @@ written since the row's enqueue; with 030 recorded and skipped, any
 acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed.
 
-**Stop the server and any re-embed or extraction worker first, and connect
-directly, not through a transaction-mode pooler:** the migrator sets session
+**Stop the server and any re-embed or extraction worker first, let any backup
+(`db/backup.ts`, `pg_dump`) finish — its lock keeps a migration that alters a
+table it reads waiting, and the brain's reads and writes of that table behind
+it, until the 10 s lock timeout fails the run — and connect directly, not
+through a transaction-mode pooler:** the migrator sets session
 state (the lock timeout, the pgvector search path) and takes locks across
 statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
@@ -3922,34 +3925,31 @@ will do before it claims anything.
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
 records its own subjects when a rule finds them: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), alone;
-else a session summary's header tickets: every one when the capture hook says
-the session's asks named them (`metadata.tickets_from` `asks`, the hook from
-1.8.0), else those one of the session's listed prompts names, in any case (not
-its title, which may be the harness's own and name the branch's ticket). The
-hook's header lists the tickets a session's prompts named, from every prompt,
-and its branch's or directory's only when they named none: a session on a branch
-may have done other work. The summary lists only 12 prompts, each cut at 200
-characters, so where it shows them in part (`- … and N more`, or a prompt
-clipped) every listed ticket is keyed once a listed prompt names one, unless the
-header's own branch or project names them all, a header the branch's words may
-have given; that guess is for a summary without the hook's word, which says
-`place` for the branch's. A header listing a ticket of another team than the
-session's, its branch's first ticket, else its project's, read as the hook reads
-a place (`hotfix-2026` names none), is left to the model: the hook learns a team
-from each ticket-shaped word of a branch, so on `smd-610-bump-node-22` a
-prompt's `node-22` is a ticket to it. The hook also learns teams from the
-session's other places and a directory's whole path, which the header does not
-show; that is SMD-4291's to fix in the hook. A summary the hook's model wrote
-(`metadata.summary_model`) keys no header: its prose is never the hook's layout.
-A prompt the user ended with `…` is no clip. Since the header rule's version 3
-(SMD-3306 PR 7a-3b-2) a header listing several, its full three included, keys a
-set of one rule's (migration 130); version 2 keyed a header listing one alone,
-and left several to the model. A ticket-shaped word counts unless its prefix is
+else a session summary's header ticket, when the header lists one alone: when
+the capture hook says the session's asks named it (`metadata.tickets_from`
+`asks`, the hook from 1.8.0), else when one of the session's listed prompts
+names it, in any case (not its title, which may be the harness's own and name
+the branch's ticket). The hook's header lists the tickets a session's prompts
+named, from every prompt, and its branch's or directory's only when they named
+none: a session on a branch may have done other work. A header listing several
+is left to the model, which names each whose work the session did. A header
+listing a ticket of another team than the session's, its branch's first ticket,
+else its project's, read as the hook reads a place (`hotfix-2026` names none),
+is left to the model too: the hook learns a team from each ticket-shaped word of
+a branch, so on `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it.
+The hook also learns teams from the session's other places and a directory's
+whole path, which the header does not show; that is SMD-4291's to fix in the
+hook. A summary the hook's model wrote (`metadata.summary_model`) keys no
+header: its prose is never the hook's layout. The header rule's version 3
+(SMD-3306 PR 7a-3b-2) keyed a header listing several as a set; its Verify on the
+canary failed on such sessions, whose raters mostly named one subject, often the
+review or triage the session did (Linear cd0dfb52), and version 4 (PR 7a-3b-3)
+keys one alone again, as version 2 did. A ticket-shaped word counts unless its prefix is
 on a fixed list of encodings, hashes, protocols, standards, licences, model
 names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names no ticket, and a
 key is the same on every brain and every run. It goes through migration 130's
 `record_thought_subjects` at the text the claim read, under its rule's key
-(`subject:metadata@r1`, `subject:first_line@r3`), and the pass asks no model for
+(`subject:metadata@r1`, `subject:first_line@r4`), and the pass asks no model for
 them. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought in its pool (migration 113, below), into which a pool's first run puts
 every thought with no current subject — none at its text (extracted before 111,
@@ -3958,19 +3958,23 @@ or by a model with its reasoning off while it is on — and the trigger each new
 edited one, gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`),
 the door replacing the old one. The
 model is asked the subject's own question about the thought alone
-(`server-portable/subject.ts`'s `OWN_RULES`, version 3), with its reasoning on
+(`server-portable/subject.ts`'s `OWN_RULES`, version 4), with its reasoning on
 unless `OB1_SUBJECT_REASONING` says off, and each subject it answers is read
 into a key: the first ticket id in it, else the PR it is (an
 answer that is one PR: a PR among other numbers is none), else a release's
 version, else the answer as a lower-case phrase. A ticket or a release counts
 only when the thought itself names it, and a PR only when its number appears in
 it: one it does not name is the model's invention, or its copy of the question's
-example, and is dropped. Version 3's question (SMD-3306 PR 7a-3b-2) asks for
-each thing the thought's own work is mainly about, at most three, the
-most-worked first and usually one, never a thing it only mentions; a ticket by
-its id alone. Of its first eight answers, the keys are a set, each once and at
-most three, a phrase whose tickets the answer also gives read as its first,
-written through 130's door; version 2 asked for one. 130 keeps a set by key, so
+example, and is dropped. Version 4's question (SMD-3306 PR 7a-3b-3) asks for
+the separate pieces of work the thought does or reports on, at most three, the
+most-worked first and usually one: a session that built two tickets' changes has
+both; a review or triage of several tickets is one, that review, and a ticket
+the session then works on another; a ticket only mentioned, listed, looked up,
+filed as a follow-up or offered is none; a ticket by its id alone. Version 3
+asked for each thing the thought's own work is mainly about, and version 2 for
+one. Of its first eight answers, the keys are a set, each once and
+at most three, a phrase whose tickets the answer also gives read as its first,
+written through 130's door. 130 keeps a set by key, so
 the model's order is its recipe's alone. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
@@ -3985,7 +3989,7 @@ thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
 (`OB1_METADATA_REASONING` would slow every extraction too), is on when unset, at
 about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
 summaries. A model's subject found with it off is pooled again while it is on
-(`subject:<model>@p3` under `@p3r`), its recipe naming the setting; turning it
+(`subject:<model>@p4` under `@p4r`), its recipe naming the setting; turning it
 off pools none again. An effort asked for (`low`, `high`; `none` is off) is keyed
 as on, though only the provider's default was measured. A brain that set
 `OB1_METADATA_REASONING` asked the question with that before PR 4: set
@@ -3997,8 +4001,8 @@ are asked again once for nothing. The default `--timeout` follows it: 900 s a
 call with reasoning on, where 2 of 200 such calls took over 300 s, else 300 s.
 The sweep claims
 from a pool, as the pass does (migration 113, SMD-3306 PR 5): `thought_work_claims`
-under its pool's key (`subjects:r1.3:p3r`, the rules' versions and the question's
-with its reasoning; `subjects:r1.3:p3` with it off; `subjects:r1.3` for
+under its pool's key (`subjects:r1.4:p4r`, the rules' versions and the question's
+with its reasoning; `subjects:r1.4:p4` with it off; `subjects:r1.4` for
 `--subjects rules`), named in `ob1_config.subject_pool_key`, into which 113's
 trigger puts each new or edited thought, and one whose `metadata.ticket` or
 `metadata.issue` changes. So a run costs what is in the pool, not the brain's size: before it, each
@@ -5688,6 +5692,63 @@ the pass before it began, and a stop is a stop however a pass then ends, unless 
 
 test-live [38] drives it against a stub model, and [38r] its re-embed first
 on a stub of its own (SMD-3392).
+
+## A JSON export of the brain (SMD-3318)
+
+### `backup.ts`
+
+```bash
+bun backup.ts --url postgres://… --out /srv/brain-backups   # <out>/<table>-YYYY-MM-DD.json
+bun backup.ts --url …                                       # ./backup under the working directory (ignored by git here and at the root)
+#   --statement-timeout SECONDS (60; 0: none) — per page; the count(*)s run unbounded
+#   exits 0 written · 1 nothing renamed into place (the reason, and the table it was reading), or a rename failed (the files it replaced named) · 2 usage, the URL, or the connection reached another database than the URL names (PGDATABASE) · 130/143/129 SIGINT/SIGTERM/SIGHUP, the run's files removed
+```
+
+The brain's `thoughts` and its entity graph (`ob1_entities`,
+`thought_entities`, `ob1_entity_edges`) as one JSON array per table, and the
+companion tables `entities`, `edges`, `ingestion_jobs` and `ingestion_items`
+when the brain has them as tables with their schema's key (another relation
+under the name is named and passed over), read in one REPEATABLE READ, READ
+ONLY transaction whose first statement locks every table it reads (ACCESS
+SHARE, before the snapshot, as pg_dump does), so the files agree and no
+TRUNCATE or rename lands under the run. Each row is Postgres's own
+`to_jsonb(row)`: timestamps keep their microseconds and the vector its text,
+and `jsonb_populate_record` reads a row back into the same values. Pages
+follow each table's primary key, and each table's rows are compared with
+its `count(*)` in the same snapshot. Every file is written new to a
+`.<run id>.tmp` of its own (the pid and a random part; never through an
+existing path) and renamed only once all are, so a run that fails first renames
+nothing and removes its files; a directory it made once the tables were locked stays.
+SIGINT, SIGTERM and SIGHUP remove the run's files too; a run killed outright
+leaves them. A page of thoughts is 100 rows (the others 1,000), and the run
+holds about three times a page's JSON. Thoughts are read in key order, at
+random through the heap: about 6.5 minutes and 18 GB a million thoughts with
+their graph (measured), so hours at 100 million and days at a billion, the
+locks and the snapshot held throughout; a large brain's backup is pg_dump. Not
+during an upgrade: a migration that alters a table the run reads waits behind
+its lock, the brain's reads and writes of that table wait behind the migration,
+and at the migrator's 10 s lock timeout the upgrade fails (run it again once the
+backup is done); pg_dump does the same. A companion's file an earlier run wrote the same date, when this
+run did not write one, stays and is named. The session's `client_connection_check_interval` (10 s, where the
+server's platform has it) ends a stopped run's statement on the server. SELECT
+on the tables is enough. A page is held in memory whole, and the snapshot holds
+back vacuum's horizon for the run's length, as pg_dump's does.
+
+It is the `db/` home of `recipes/brain-backup`'s export (SMD-2144), which
+leaves `compat/supabase-sql` (SMD-3216). It is not the whole brain:
+`pg_dump` is (`deploy/README.md`, the `postgres` service row). test-live
+[50] (in the sweep shard) holds the round trip, a companion table present,
+one named absent and a view and a keyless table under companions' names passed
+over, a page of three across composite keys, an empty table and an earlier
+run's companion file named, the one snapshot under a write between tables and
+a TRUNCATE kept waiting by the lock, the failures of a role that may not read a
+table and of a planted path, the refusal of another database, the statement bound on the
+session and put back after a count, the lock taken before the snapshot, a run
+failing mid-read leaving no file of its own, a SIGTERM while the run waits on its lock
+(the statement ended on the server), the signal cleanup itself (130, 143, 129),
+a brain with no companion table, the CLI's defaults, and a failed rename. Loaded back into a brain the rows pass through its triggers and lack
+what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
+brings a brain back.
 
 ## Extensions
 

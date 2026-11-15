@@ -196,7 +196,7 @@ import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snip
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, setBack, setFront, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
-import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 /**
@@ -409,11 +409,7 @@ type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number;
  * input first.
  */
 function numbers(opts: ConsolidateOptions): Numbers | string {
-  const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number; fraction?: boolean } = { min: 1 }): number | string => {
-    if (v == null) return absent;
-    const problem = numberProblem(flag, v, rule);
-    return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
-  };
+  const read = optionReader(FLAGS, HINTS);
   const workers = read("--workers", opts.workers, 2, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
   // One thought per claim: up to --k model calls per thought against a claim of

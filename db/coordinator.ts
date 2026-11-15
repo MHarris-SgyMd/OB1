@@ -82,7 +82,8 @@ import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, typ
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
-import { startRelay, type Relay } from "./slot-relay.ts";
+import { RELAY_PATH, RELAY_PORT, serveRelay, startRelay, type Relay, type RelayListener } from "./slot-relay.ts";
+import { relayKeyProblem } from "../server-portable/slots.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
 import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S, rowWriter } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
@@ -185,11 +186,20 @@ export const CHILDREN: Record<ChildName, Child> = {
 /** Every setting some child owns: handed to no child that does not. */
 export const OWNED: ReadonlySet<string> = new Set(Object.values(CHILDREN).flatMap((c) => c.own));
 /**
+ * The longest the coordinator's first `synced` waits for the api to name its calls, above the api's 1 s redial. What it
+ * holds is the broker's to keep: a closed coordinator's grants, KEEP_MS (5 s) from that close — so a recreate whose new
+ * relay reaches the broker more than about 4 s after the old one's close hands the api's calls' slots on until the api
+ * names them (review pass 2 of 3b-2).
+ */
+export const SYNC_WAIT_MS = 2500;
+
+/**
  * The coordinator's own settings, handed to no child. PORT is the server's, which no pass reads. The slot broker's URL
  * and key are the brain's own to the host's broker (SMD-3379 PR 3b-1): only the coordinator holds them, and its
- * children ask through it (docs/brain-coordinator.md, row 2).
+ * children ask through it (docs/brain-coordinator.md, row 2); OB1_SLOT_RELAY_KEY is its listener's and the api's
+ * (PR 3b-2), no pass's.
  */
-export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT", "OB1_SLOT_BROKER_URL", "OB1_SLOT_BROKER_KEY"];
+export const COORDINATOR_OWN: readonly string[] = ["OB1_PASSES", "PORT", "OB1_SLOT_BROKER_URL", "OB1_SLOT_BROKER_KEY", "OB1_SLOT_RELAY_KEY"];
 
 /**
  * The relay's settings, where both are set: the broker's WebSocket URL and the brain's key to it; null where neither
@@ -379,7 +389,9 @@ export function askedPasses(raw: string | undefined): Pass[] {
  * The coordinator's row (brain-info.ts's CoordinatorValue): the passes asked
  * for, and each child it runs — its heartbeat's key, its state, and the
  * seconds since it began it and, waiting, to its next try, both counted back
- * from `now`, the stamp's own time. A child not yet started is `starting`. Pure.
+ * from `now`, the stamp's own time. A child not yet started is `starting`. Its
+ * relay, where it has one: the broker's state and for how long, and the api's
+ * sockets where it listens for them. Pure.
  */
 export function coordinatorValue(o: {
   id: string;
@@ -391,6 +403,8 @@ export function coordinatorValue(o: {
   now: number;
   everyS: number;
   ended?: boolean;
+  /** Its relay's state and when it began (Date.now()), and the api's sockets where it listens for them. */
+  relay?: { broker: "up" | "down"; since: number; sockets?: number } | null;
 }): CoordinatorValue {
   const secs = (ms: number) => Math.max(0, Math.round(ms / 1000));
   const children: CoordinatorValue["children"] = {};
@@ -403,7 +417,9 @@ export function coordinatorValue(o: {
       : s.state === "held" ? { ...base, state: "held", refused: s.refused }
       : { ...base, state: s.state };
   }
-  return { v: 1, id: o.id, host: o.host, every_s: o.everyS, passes: [...o.passes], children, ...(o.ended ? { ended: true as const } : {}) };
+  const r = o.relay;
+  const relay = r ? { relay: { broker: r.broker, for_s: secs(o.now - r.since), ...(r.sockets === undefined ? {} : { sockets: r.sockets }) } } : {};
+  return { v: 1, id: o.id, host: o.host, every_s: o.everyS, passes: [...o.passes], children, ...relay, ...(o.ended ? { ended: true as const } : {}) };
 }
 
 /**
@@ -461,6 +477,8 @@ export type CoordinatorOptions = {
   host?: string;
   /** The slot relay in place of the one OB1_SLOT_BROKER_URL would open: a test's, or null for none. */
   relay?: Relay | null;
+  /** The port the api's listener takes, where OB1_SLOT_RELAY_KEY is set: RELAY_PORT unless a test asks for another (0, any free). */
+  relayPort?: number;
 };
 
 /** Start the children OB1_PASSES names; `done` settles with 0 once a stop has ended them all and the row says so. */
@@ -481,6 +499,9 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const everyS = opts.rowEveryS ?? MIN_STAMP_EVERY_S;
   const id = crypto.randomUUID();
   const host = opts.host ?? hostname();
+  // Declared before the row, whose value reads them: a stamp before they are set reads none.
+  let relay: Relay | null = null;
+  let listener: RelayListener | null = null;
   const row = coordinatorRow({
     sql: opts.sql,
     id,
@@ -488,13 +509,23 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
     everyS,
     timeoutMs: opts.stampTimeoutMs ?? STAMP_TIMEOUT_MS,
     err: writer.err,
-    value: (ended) => coordinatorValue({ id, host, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
+    value: (ended) => coordinatorValue({ id, host, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended, relay: relayMark(relay, listener) }),
   });
-  // The host's slot broker, through this process alone (SMD-3379 PR 3b-1): each child started with a channel to it.
-  const rs = plan.children.length ? relaySettings(env) : null;
+  // The host's slot broker, through this process alone (SMD-3379 PR 3b-1): each child started with a channel to it,
+  // and, where OB1_SLOT_RELAY_KEY is set, the api with a socket to it on the brain's network (PR 3b-2).
+  const listenKey = env.OB1_SLOT_RELAY_KEY?.trim() || null;
+  // Said for a key that will not do as well, by listenForApi; but no relay held open for an api that cannot come.
+  const rs = plan.children.length || listenKey ? relaySettings(env) : null;
   if (rs && "problem" in rs) writer.err(rs.problem);
-  const relay: Relay | null = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err }) : null;
-  if (relay) writer.err(`coordinator: the passes ask the host's slot broker through this process (OB1_SLOT_BROKER_URL), their own shares while it is away`);
+  // With the api's sockets listened for, the first hello's `synced` waits for the api's calls to be named (review pass 1 of 3b-2).
+  const listening = !!listenKey && relayKeyProblem(listenKey) === null;
+  relay = opts.relay !== undefined ? opts.relay : rs && "url" in rs ? startRelay({ url: rs.url, key: rs.key, log: writer.err, onChange: () => row.changed(), ...(listening ? { syncWaitMs: SYNC_WAIT_MS } : {}) }) : null;
+  if (relay && plan.children.length) writer.err(`coordinator: the passes ask the host's slot broker through this process (OB1_SLOT_BROKER_URL), their own shares while it is away`);
+  listener = listenKey ? listenForApi(relay, listenKey, opts.relayPort ?? RELAY_PORT, writer.err, () => row.changed(), env.OB1_LISTEN_HOST?.trim() || undefined) : null;
+  // Not listening after all (the port taken, the key no good): no api is coming, so the held `synced` goes now — and with
+  // no pass either, the relay is held for no one, and closed (review pass 5 of 3b-2).
+  if (listening && !listener) relay?.apiBack?.();
+  if (!listener && !plan.children.length && relay && opts.relay === undefined) { void relay.stop(); relay = null; }
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
@@ -524,7 +555,9 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const ended = children.length
     ? Promise.all(children.map((c) => c.done))
     : new Promise<void>((settle) => stopped.signal.addEventListener("abort", () => settle(), { once: true }));
-  const done = ended.then(() => relay?.stop()).then(() => row.end()).then(() => 0);
+  // The relay last: its close starts the broker's keeping of the api's calls, which the next coordinator's hello must
+  // reach within (review pass 2 of 3b-2: the row's write after it lengthened that gap).
+  const done = ended.then(() => listener?.stop()).then(() => row.end()).then(() => relay?.stop()).then(() => 0);
   return {
     done,
     stop(signal) {
@@ -532,6 +565,34 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
       for (const c of children) c.stop(signal);
     },
   };
+}
+
+/** The relay's mark for the coordinator's row: the broker's state and its start, and the api's sockets where it listens. */
+export function relayMark(relay: Relay | null, listener: RelayListener | null) {
+  if (!relay) return null;
+  const st = relay.state();
+  return { broker: st.broker, since: st.since, ...(listener ? { sockets: listener.sockets() } : {}) };
+}
+
+/**
+ * The api's listener (SMD-3379 PR 3b-2): OB1_SLOT_RELAY_KEY set, the api asks the broker through this process too,
+ * over a socket on the brain's network (slot-relay.ts's serveRelay). None — said, the api's calls on its own shares —
+ * where no broker is named, the key will not do (too short, or not printable ASCII), or the port is taken.
+ */
+function listenForApi(relay: Relay | null, key: string, port: number, err: (line: string) => void, onChange: () => void, host?: string): RelayListener | null {
+  const own = "the api's model calls keep its own shares (OB1_BACKGROUND_SLOTS)";
+  if (!relay) { err(`coordinator: OB1_SLOT_RELAY_KEY is set, but no broker is named here (OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY) — not listening; ${own}`); return null; }
+  const problem = relayKeyProblem(key);
+  if (problem) { err(`coordinator: ${problem} — not listening; ${own}. Mint one: openssl rand -hex 32`); return null; }
+  try {
+    // OB1_LISTEN_HOST where set, as the servers: a checkout's coordinator kept to one address (review pass 5 of 3b-2).
+    const l = serveRelay(relay, { key, port, log: err, onChange, ...(host ? { hostname: host } : {}) });
+    err(`coordinator: the api asks the host's slot broker through this process too, on :${l.port}${RELAY_PATH} (OB1_SLOT_RELAY_KEY)`);
+    return l;
+  } catch (e) {
+    err(`coordinator: could not listen on :${port} for the api (${(e as Error).message}) — ${own}`);
+    return null;
+  }
 }
 
 const USAGE = `coordinator.ts takes no arguments — OB1_PASSES names the passes it runs (${PASSES.join(", ")}) — or \`run <${Object.keys(CHILDREN).join("|")}> [args…]\`, one run of that pass's script as its user`;

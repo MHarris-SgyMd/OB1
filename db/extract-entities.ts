@@ -219,7 +219,7 @@ import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, setFront, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
-import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 import { endOnRefusal, passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
@@ -400,11 +400,7 @@ type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number;
  * input first.
  */
 function numbers(opts: ExtractOptions): Numbers | string {
-  const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number } = { min: 1 }): number | string => {
-    if (v == null) return absent;
-    const problem = numberProblem(flag, v, rule);
-    return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
-  };
+  const read = optionReader(FLAGS, HINTS);
   const workers = read("--workers", opts.workers, 2, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
   // One thought per claim. A claim costs half a millisecond against a model call
@@ -1349,7 +1345,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /**
    * The thought's own subjects by the rules (SMD-3306), recorded once its
    * entities are: the ticket it is filed under, else a session summary's
-   * header tickets its asks name (subject.ts's ruleSubject), each under
+   * header ticket its asks name, when it lists one (subject.ts's ruleSubject), under
    * its rule's key, at the text the claim read; record_thought_subjects (130)
    * refuses a text that moved since, and a ticket that did. No model is asked
    * here: a thought no rule keys is --subjects' (db/subject-sweep.ts). A
