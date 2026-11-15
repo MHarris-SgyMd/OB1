@@ -228,9 +228,9 @@ floor, as a quote that fails does, else its edge is closed. Since version 4
 (`docs/subject-anchored-claims.md`) about such a pair, and version 4 about an
 evolves the pass would store. A pair linked only through a third subject, or by
 one thought naming the other's subject in passing, is related at most, and no
-proposal is written for it. Since version 5 (SMD-3306) the pass stores H2O's
-evolves as related, at P(related) + P(evolves): a work thread's edges give
-evolves, so the link step is asked only of an outdates at the floor.
+proposal is written for it. Since version 5 (SMD-3306) the pass folds H2O's
+evolves into related before it chooses: a work thread's edges give evolves, so
+the link step is asked only of an outdates at the floor.
 
 **The record rule** (decide version 2, shelved 2026-10-18; the pass runs version
 5, version 1's writer with its quotes read without markdown and asked only at

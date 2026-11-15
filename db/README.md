@@ -4748,18 +4748,23 @@ tier gives each pair's verdict, not the judge:
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
 - **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with
-  no evolves of its own. The tier's evolves is stored as related, at the
-  tier's P(related) + P(evolves), the share of the word it now stands for
-  (at P(related) alone the tier's surest links would rank last among a
-  thought's relations), floored on the relation words' mass as any relation
-  is, so a pair it related before is related still: a pair evolves when the
-  newer comes next on the older's own subject's work thread, the edge
-  migration 120 keeps between consecutive thoughts of a thread (origin
-  `thread`), not by a pair's judgement. The link step is asked only first, on
-  the tier's outdates at the floor; version 4's check after an evolves goes
-  with the evolves. The run's verdicts line counts no evolves, and a
-  relation's note says `threaded` where an evolves, the tier's top or the
-  best an outdates fell back to, was stored as related. An evolves version 4
+  no evolves of its own. The tier's evolves is folded into related before
+  its best verdict is chosen (related + evolves), so a related stands at the
+  share of the word it now stands for, and the folded related outweighs a
+  duplicate or an unrelated the two words outweigh together: a few pairs
+  version 4 called duplicate or unrelated are related. The relation words'
+  mass, which the floor reads, is the same folded or not, so a pair it
+  related before is related still. A pair evolves when the newer comes next
+  on the older's own subject's work thread, the edge migration 120 keeps
+  between consecutive thoughts of a thread (origin `thread`), not by a pair's
+  judgement. The link step is asked only first, on the tier's outdates at
+  the floor; version 4's check after an evolves goes with the evolves, so a
+  pair it capped at P(related) now stands at the folded share, among a
+  thought's strongest relations. The run's verdicts line counts no evolves,
+  and a relation's note and dump line say `threaded` where the fold moved
+  the verdict. The board findings take a pair posted as evolves as posted
+  for related, and a posted evolves stands while a related does, so a
+  re-judge posts none of them again. An evolves version 4
   stored stands until its pair is judged again: a new key pools every
   thought, but a pair whose newer thought is superseded, or no longer among
   its candidates, is not judged again, and its evolves stays in the counts
@@ -4825,7 +4830,9 @@ tier gives each pair's verdict, not the judge:
   the tier and the writer said (`judged.decide`): since version 3 both of the
   writer's quotes, so a proposal can be checked again under another quote
   rule, and the floor when the writer was not asked; since version 4 the link
-  step's answer, when it was asked (`judged.decide.link`).
+  step's answer, when it was asked (`judged.decide.link`); since version 5
+  whether folding the tier's evolves moved the verdict
+  (`judged.decide.threaded`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each

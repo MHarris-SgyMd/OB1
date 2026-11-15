@@ -437,7 +437,11 @@ const closed = (k: string) => `coalesce(coalesce(
 // tickets and their dated sections), and both identities are identifiers —
 // 079's identity alone also names a fork change record's or any capture's
 // `ticket`, whose text is not the board's, and a raw identity went into the
-// comment unescaped (review pass 1).
+// comment unescaped (review pass 1). A pair posted as evolves is posted, not
+// again as related: decide version 5 stores an evolves as related (SMD-3306
+// PR 7b), so a re-judge would else post every pair a version 4 brain posted
+// as evolves a second time, asking the same link, ahead of new findings under
+// the cap (its review pass 2, run-it).
 const PAIR_RULE = `
      os = 'linear' AND ns = 'linear'
  AND ko ~ '^[A-Z][A-Z0-9]*-[0-9]+$' AND kn ~ '^[A-Z][A-Z0-9]*-[0-9]+$'
@@ -448,7 +452,8 @@ const PAIR_RULE = `
                   WHERE d.kind = 'link' AND d.valid_until IS NULL AND d.payload->>'system' = 'linear' AND d.payload->>'relation' = 'duplicate_of'
                     AND (coalesce(dh.metadata->>'ticket', dh.metadata->>'issue'), d.payload->>'target') IN ((ko, kn), (kn, ko)))
  AND NOT EXISTS (SELECT 1 FROM board_findings_posted b
-                  WHERE b.ticket_a = least(ko, kn) AND b.ticket_b = greatest(ko, kn) AND b.word = x.word)`;
+                  WHERE b.ticket_a = least(ko, kn) AND b.ticket_b = greatest(ko, kn)
+                    AND (b.word = x.word OR (x.word = 'related' AND b.word = 'evolves')))`;
 
 const PROPOSALS = `
 SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,

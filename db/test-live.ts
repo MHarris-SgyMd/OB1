@@ -19611,7 +19611,7 @@ if (want("16")) {
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
-          && banner.some((l) => /^\s*decide: .*an evolves is stored as related, the work threads giving evolves \(OB1_CONSOLIDATE_DECIDER/.test(l))
+          && banner.some((l) => /^\s*decide: .*an evolves is stored as related, folded into it before the choice, the work threads giving evolves \(OB1_CONSOLIDATE_DECIDER/.test(l))
           && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 12 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0 && linkCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
 
@@ -19663,14 +19663,14 @@ if (want("16")) {
       type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; threaded?: boolean; writer?: unknown } } } };
       const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
       const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
-      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null })
+      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null; threaded?: boolean | null })
         .find((l) => l.newer === n && l.older === o);
       const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
       assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
           && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
           && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link === undefined && pager.recipe.judged.decide.threaded === true
-          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.8 && pagerDump?.verdict === "related" && (pagerDump.link ?? null) === null && (pagerDump.asked ?? null) === null
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.8 && pagerDump?.verdict === "related" && pagerDump.threaded === true && (gateDump?.threaded ?? null) === null && (pagerDump.link ?? null) === null && (pagerDump.asked ?? null) === null
           && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
         `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so); the pager pair's evolves is stored as related at the tier's P(related) + P(evolves), its note marked, no link step asked (version 5); and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 3 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
@@ -30631,6 +30631,24 @@ if (want("41")) {
     const fine = "step" in timed ? await timed.step.run({ dryRun: false }) : -1;
     assert(fine === 0 && (await rowsOf("ZQ-64", "ZQ-65"))[0]?.origin === "found" && (comments.get("ZQ-65") ?? []).length === 1,
       `…and the next run finds that comment on the board and records it found, posting nothing again (exit ${fine})`);
+
+    // SMD-3306 PR 7b's review pass 2 (run-it): decide version 5 stores an evolves as related, so a pair posted as
+    // evolves is not posted again as related once re-judged, and its record still stands; one posted as related and
+    // judged evolves since is a new word, as before.
+    const y90 = await ticket(190, "a plan"), y91 = await ticket(191, "its next step");
+    const rel190 = await relate(y91, y90, "evolves", 0.7);
+    await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES ('ZQ-190', 'ZQ-191', 'evolves', 'ZQ-191', 'posted', 'c-pre-90', ARRAY[${rel190.id}::uuid])`;
+    const y92 = await ticket(192, "another plan"), y93 = await ticket(193, "its sequel");
+    const rel192 = await relate(y93, y92, "related", 0.7);
+    await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES ('ZQ-192', 'ZQ-193', 'related', 'ZQ-193', 'posted', 'c-pre-92', ARRAY[${rel192.id}::uuid])`;
+    const [rejudged, flipped] = [await relate(y91, y90, "related", 0.9), await relate(y93, y92, "evolves", 0.9)];
+    const chosen = await selectFindings(bsql);
+    const outcomeOf = async (a: string, word: string) => ((await FINDING_OUTCOMES_SQL(bsql)) as { ticket_a: string; word: string; stands: boolean | null }[]).find((r) => r.ticket_a === a && r.word === word)?.stands;
+    assert(rejudged.action === "replaced" && flipped.action === "replaced" && !chosen.some((f) => f.a === "ZQ-190") && chosen.some((f) => f.a === "ZQ-192" && f.word === "evolves")
+        && (await outcomeOf("ZQ-190", "evolves")) === true && (await outcomeOf("ZQ-192", "related")) === false,
+      `a pair posted as evolves and judged related since is not chosen again, its record standing; one posted related and judged evolves since is chosen, its related no longer standing (${JSON.stringify(chosen.filter((f) => /^ZQ-19[0-3]$/.test(f.a)).map((f) => [f.a, f.word]))})`);
+    await bsql`DELETE FROM board_findings_posted WHERE ticket_a IN ('ZQ-190', 'ZQ-192')`;
+    await bsql`DELETE FROM thoughts WHERE id IN (${y90.id}::uuid, ${y91.id}::uuid, ${y92.id}::uuid, ${y93.id}::uuid)`;
 
     // A role: capture and structure are what the step needs; without INSERT on the record it is off, and a dry run needs the reads alone.
     const FROLE = "ob1_live_findings";

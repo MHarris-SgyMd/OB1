@@ -393,7 +393,7 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
    - **Done, then:** decide version 4 builds the cap on the writer's link step, as the maintainer chose (amended 2026-10-22, PR 2b).
    - **Done:** the canary re-judge under `@p4d4`. The cap's precision missed its bar, 0.686 against 0.7, and three rounds of asking the link step another way did not qualify either, the test's version 3 among them (amended 2026-10-25, SMD-3299).
    - **Decided:** version 4 stays (the maintainer, 2026-10-25).
-   - **Then:** evolves as work threads, built from each thought's own subject (SMD-3306). Decide version 5 stores the tier's evolves as related and asks the link step only on an outdates at the floor, so row 2's cap no longer guards an evolves: a pair whose own subjects differ is never one thread (amended 2026-11-14, SMD-3306 PR 7b). The cap on outdates, row 3, stays.
+   - **Then:** evolves as work threads, built from each thought's own subject (SMD-3306). Decide version 5 folds the tier's evolves into related and asks the link step only on an outdates at the floor, so row 2's cap no longer guards an evolves: a pair whose own subjects differ is never one thread (amended 2026-11-14, SMD-3306 PR 7b). The cap on outdates, row 3, stays.
    - **SMD-3203's last Verify item** also waits on a subject with a timeline beyond tickets (steps 3 and 4). In it, a planted thought reads as stale once a non-ticket subject's state moves, and no pair whose thoughts share only that subject's state is joined.
 3. **SMD-3207, the spike:**
    - read the code artifacts a note names;

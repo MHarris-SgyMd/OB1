@@ -692,7 +692,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
   if (!REVIEW_ONLY) say(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
-  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls at >= ${MIN_CONFIDENCE}, two-sided with the part rule, its quotes read without markdown; it is first asked the mediated-pair test's link step of those pairs, and an H or F link caps the pair at related with no proposal; an evolves is stored as related, the work threads giving evolves (OB1_CONSOLIDATE_DECIDER, SMD-3115, SMD-3151, SMD-3203, SMD-3306)`);
+  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls at >= ${MIN_CONFIDENCE}, two-sided with the part rule, its quotes read without markdown; it is first asked the mediated-pair test's link step of those pairs, and an H or F link caps the pair at related with no proposal; an evolves is stored as related, folded into it before the choice, the work threads giving evolves (OB1_CONSOLIDATE_DECIDER, SMD-3115, SMD-3151, SMD-3203, SMD-3306)`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -2034,7 +2034,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // Decide mode: the tier's top and, when it asked no writer, the floor it was held to (SMD-3151); the writer's
           // link step's answer, when it was asked (first, before a proposal; after, on an evolves to store, decide
           // version 4 alone) and whether it capped the pair (SMD-3203).
-          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null, link: link?.link ?? null, asked: link?.asked ?? null, capped: link?.capped ?? null } : {}),
+          // Since decide version 5, whether folding H2O's evolves into related moved the verdict (SMD-3306 PR 7b's
+          // review pass 2: a fallen-back evolves read as a plain related).
+          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null, link: link?.link ?? null, asked: link?.asked ?? null, capped: link?.capped ?? null, threaded: j.decide.threaded ?? null } : {}),
         }) + "\n", { mode: 0o600 });
       }
     }

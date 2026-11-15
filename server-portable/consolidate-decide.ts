@@ -13,11 +13,11 @@
  * Since version 4 (SMD-3203) the judge's model is first asked the mediated-pair test's link step about such a pair. A
  * pair whose two thoughts are about different subjects, linked by a third subject both mention (F) or by one naming
  * the other's subject in passing (H), is related at most and proposes nothing: docs/subject-anchored-claims.md, row 3.
- * Since version 5 (SMD-3306 PR 7b) decide mode judges no evolves: H2O's evolves is stored as related at both words'
- * share (fromThreads),
- * since a pair evolves when the newer comes next on the older's own subject's work thread, an edge the database keeps
- * between consecutive thoughts of a thread (origin `thread`, migration 120), not a pair's judgement. Version 4 also
- * asked the link step after an evolves the pass would store, row 2's cap, which goes with it.
+ * Since version 5 (SMD-3306 PR 7b) decide mode judges no evolves: H2O's evolves is folded into related before its
+ * best verdict is chosen (foldEvolves, decideJudgement), since a pair evolves when the newer comes next on the older's
+ * own subject's work thread, an edge the database keeps between consecutive thoughts of a thread (origin `thread`,
+ * migration 120), not a pair's judgement. Version 4 also asked the link step after an evolves the pass would store,
+ * row 2's cap, which goes with it.
  *
  * The answer is a Judgement whose verdict probabilities are H2O's distribution, so the pass records proposals and
  * relations as it records the judge's, under the same floors. Off unless OB1_CONSOLIDATE_DECIDER names the tier's
@@ -28,7 +28,7 @@
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
-import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, MIN_COVERED, oneLine, outdatesConfidence, REASON_MAX, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
+import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, REASON_MAX, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
 import { jevChoose, type JevConfig, type JevModelInfo, type JevOption } from "./jev.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
@@ -342,7 +342,7 @@ export const DECIDE_PROMPT = [RELATION_QUESTION, ...OFFERED.map((v) => DESCRIPTI
  * H or F link, or an answer naming none of the four, caps the pair: related at most, and no supersession
  * (docs/subject-anchored-claims.md, rows 2 and 3; capJudgement). It asks the writer once more on those pairs, a
  * median 14.3 s of the 27B a pair on SMD-3203's 100. 5, the pass's (key `@p4d5`, SMD-3306 PR 7b): version 4, H2O's
- * evolves stored as related at P(related) + P(evolves) (fromThreads), and the link step asked only first: work threads give evolves (SMD-3306's
+ * evolves folded into related before a verdict is chosen (foldEvolves), and the link step asked only first: work threads give evolves (SMD-3306's
  * items 3 and 4), and row 2's cap guarded an evolves the pass no longer stores. On the canary's pairs the cap's
  * precision missed its bar, 0.686 against 0.7 (SMD-3203), and three rounds of asking it otherwise did not qualify
  * (SMD-3299); the threads need no cap, since a pair whose own subjects differ is never one thread.
@@ -383,8 +383,10 @@ export type DecideNote = {
    */
   link?: { model: string; asked: "first" | "after"; link: Link | "unparsed"; via: string; reason: string; capped: boolean };
   /**
-   * Since version 5: true when the judgement came to evolves, H2O's top or the best a gated, declined or failed outdates
-   * fell back to, and was stored as related (fromThreads), so a relation's recipe says so whatever its `top`.
+   * Since version 5: true when folding H2O's evolves into related changed the verdict stored, against the best verdict
+   * that proposes nothing over H2O's own five (version 4's): an evolves, H2O's top or the best a gated, declined or
+   * failed outdates fell back to, or a duplicate or unrelated the folded related outweighs. A relation's recipe says so
+   * whatever its `top`.
    */
   threaded?: true;
 };
@@ -398,35 +400,37 @@ const best = (p: Record<string, number>, vs: readonly Verdict[]): Verdict => vs.
  * H2O's top was outdates at the floor (null when the writer was not asked), and `standing` whether its quotes passed. A standing proposal is an outdates in the side it
  * names, its quote the evidence; anything else is H2O's best verdict that proposes nothing. Either way the verdict
  * probabilities are H2O's, so proposalConfidence reads P(outdates) and relationConfidence the relation words' mass (P(unrelated) for a distinct, SMD-3117).
+ * With `fold` (version 5) that best verdict is chosen over foldEvolves's distribution, and a related records the folded
+ * share (`foldedEvolves`); the recipe keeps H2O's five as they came.
  */
-export function decideJudgement(p: Record<Verdict, number>, proposal: Proposal | null, standing: boolean): Judgement {
+export function decideJudgement(p: Record<Verdict, number>, proposal: Proposal | null, standing: boolean, fold = false): Judgement {
   const probabilities = { verdict: { p, covered: 1 } };
   if (proposal && standing && proposal.current !== "none") {
     return { verdict: "outdates", supersedes: proposal.current, confidence: p.outdates, reason: proposal.reason, evidence: proposal.evidence, evidenceFound: true, malformed: false, probabilities };
   }
-  const v = best(p, VERDICTS.filter((x) => x !== "outdates"));
-  const why = proposal === null ? "" : proposal.malformed ? "the writer's answer was not JSON of the expected shape" : proposal.current === "none" ? `the writer found neither current: ${proposal.reason}` : "the writer's quotes did not check out";
-  return { verdict: v, supersedes: "unknown", confidence: p[v] ?? 0, reason: why, evidence: "", malformed: false, probabilities };
+  const q = fold ? foldEvolves(p) : p;
+  const v = best(q, PROPOSING_NONE);
+  const writer = proposal === null ? "" : proposal.malformed ? "the writer's answer was not JSON of the expected shape" : proposal.current === "none" ? `the writer found neither current: ${proposal.reason}` : "the writer's quotes did not check out";
+  const threads = v !== best(p, PROPOSING_NONE) ? "evolves comes from the work threads (SMD-3306), so the pair is related" : "";
+  const why = [writer, threads].filter((w) => w !== "").join("; ");
+  return { verdict: v, supersedes: "unknown", confidence: q[v] ?? 0, reason: why, evidence: "", malformed: false, probabilities, ...(fold && v === "related" ? { foldedEvolves: true } : {}) };
 }
 
+/** The verdicts that propose nothing, which a judgement falls back to. */
+const PROPOSING_NONE: readonly Verdict[] = VERDICTS.filter((x) => x !== "outdates");
+
 /**
- * A judgement as decide mode stores it since version 5: an evolves is related, any other verdict as it was. Its
- * relation stands at P(related) + P(evolves) (`foldedEvolves`, read by relationConfidence): the share of the word it
- * now stands for, at most the relation words' mass the pass's floor reads, which is the same for either word, so a pair
- * it related before is related still. Not P(related) alone, as capJudgement stores a capped pair: there the rest of the
- * mass is about a third subject, while an evolves is the tier's surest link, and at P(related) it would rank last among
- * a thought's relations and read 0.00 on the board (review pass 1, run-it and cold read). Without H2O's distribution
- * the written number stands, as relationConfidence reads it. What evolves stands between two thoughts is a work
- * thread's edge (SMD-3306).
+ * H2O's distribution as decide version 5 chooses from it: evolves folded into related (related + evolves, evolves 0),
+ * so related stands for both words. Folded before the choice, not after (the maintainer's choice, review pass 2): a
+ * related top and an evolves top over the same two shares store one number (0.85 for 0.45 and 0.40 either way, where
+ * converting an evolves after the choice stored 0.45 and 0.85), and the folded related outweighs a duplicate or an
+ * unrelated the two words outweigh together (duplicate 0.45, related 0.20, evolves 0.30: related at 0.50), so a few pairs
+ * version 4 called duplicate or unrelated are related. Not as capJudgement stores a capped pair, at P(related) alone:
+ * there the rest of the mass is about a third subject. The relation words' mass, which the pass's floor reads, is the
+ * same folded or not. Rounded to four places, as verdictDistribution rounds H2O's.
  */
-export function fromThreads(j: Judgement): Judgement {
-  if (j.verdict !== "evolves") return j;
-  const d = j.probabilities?.verdict;
-  const p = d?.p as Record<string, number> | undefined;
-  const { evidenceFound: _quoteChecked, ...rest } = j;
-  const why = "evolves comes from the work threads (SMD-3306), so the pair is related";
-  const both = p && d && d.covered >= MIN_COVERED ? Math.round(((p.related ?? 0) + (p.evolves ?? 0)) * 10000) / 10000 : j.confidence;
-  return { ...rest, verdict: "related", foldedEvolves: true, supersedes: "unknown", confidence: both, evidence: "", reason: j.reason ? `${j.reason}; ${why}` : why };
+export function foldEvolves(p: Record<Verdict, number>): Record<Verdict, number> {
+  return { ...p, related: (Math.round((p.related ?? 0) * 10000) + Math.round((p.evolves ?? 0) * 10000)) / 10000, evolves: 0 };
 }
 
 /**
@@ -496,9 +500,9 @@ async function askLink(older: PairSide, newer: PairSide, cfg: EmbedConfig, asked
  * One pair in decide mode: H2O's verdict through the tier, then, when it is outdates at `floor` (the pass's
  * `--min-confidence`, read by outdatesConfidence as the pass reads a proposal's), the writer's link step and, on a D
  * or N link, the writer's proposal, both through the judge's chat endpoint. An H or F link, or an answer naming none
- * of the four, caps the pair (capJudgement). A judgement that comes to evolves is stored as related (fromThreads,
- * version 5), and asks nothing more. Refuses BEFORE any request when the egress gate
- * says either row may not reach the chat endpoint (the tier's client gates its own call), as judgePair does. Throws on
+ * of the four, caps the pair (capJudgement). H2O's evolves is folded into related before the verdict is chosen
+ * (foldEvolves, version 5), which asks nothing more. Refuses BEFORE any request when the egress gate says either row
+ * may not reach the chat endpoint (the tier's client gates its own call), as judgePair does. Throws on
  * a transport or provider error from any call, so the worker classifies them as it does the judge's; a writer's
  * malformed proposal is a decline, since H2O's verdict still stands.
  */
@@ -517,11 +521,11 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   const p = verdictDistribution(result.probabilities);
   const top = best(p, OFFERED);
   const note: DecideNote = { decider: { name: model.name, revision: model.revision, weights_sha256: model.weights_sha256, rules: model.rules }, version: DECIDE_VERSION, top };
-  // Version 5: an evolves stored as related, and the note marked so.
-  const threaded = (j: Judgement): Judgement => {
-    const t = fromThreads(j);
-    if (t !== j) note.threaded = true;
-    return t;
+  // Version 5: H2O's evolves folded into related before the choice, and the note marked where that moved the verdict.
+  const folded = (proposal: Proposal | null, standing: boolean): Judgement => {
+    const j = decideJudgement(p, proposal, standing, true);
+    if (j.verdict !== "outdates" && j.verdict !== decideJudgement(p, proposal, standing).verdict) note.threaded = true;
+    return j;
   };
   if (top === "outdates" && outdatesConfidence(p) >= floor) {
     // Row 3 (SMD-3203): a mediated pair proposes nothing, so the link step goes first, and a pair it caps is written
@@ -540,12 +544,12 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
         ? quoteIn(proposal.stale, other, current) || (evidenceIn(proposal.stale, other) && onlyQuoted(proposal.stale, current))
         : evidenceIn(proposal.stale, other, current)),
     };
-    return { ...threaded(decideJudgement(p, proposal, standing)), decide: note };
+    return { ...folded(proposal, standing), decide: note };
   }
   // Under the floor a standing proposal would record nothing and close the pair's relation (SMD-3151 review pass 3),
   // so the writer is not asked: the pair takes H2O's best verdict that proposes nothing, as a quote that fails does.
   if (top === "outdates") note.floor = floor;
   // Version 5 (SMD-3306 PR 7b): an evolves is related, the work threads giving evolves; version 4 asked the link step
   // after one the pass would store, row 2's cap.
-  return { ...threaded(decideJudgement(p, null, false)), decide: note };
+  return { ...folded(null, false), decide: note };
 }

@@ -1456,10 +1456,12 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
              max(n.valid_until) FILTER (WHERE EXISTS (SELECT 1 FROM thoughts g WHERE g.id = (n.payload->>'target')::uuid)) AS gone_at
         FROM unnest(b.finding_ids) AS x(id)
         JOIN thought_facets o ON o.id = x.id AND o.kind = 'relation'
-        -- The judge's word on the pair, not a work thread's evolves there (origin thread, 120, SMD-3306).
+        -- The judge's word on the pair, not a work thread's evolves there (origin thread, 120, SMD-3306). A posted
+        -- evolves stands while a related does: decide version 5 stores an evolves as related, and the judge took
+        -- nothing back (SMD-3306 PR 7b's review pass 2, run-it).
         JOIN thought_facets n ON n.thought_id = o.thought_id AND n.kind = 'relation' AND n.payload->>'target' = o.payload->>'target'
                              AND n.payload->>'origin' = 'judged'
-       WHERE b.word <> 'outdates' AND n.payload->>'relation' = b.word) r ON b.word <> 'outdates'
+       WHERE b.word <> 'outdates' AND (n.payload->>'relation' = b.word OR (b.word = 'evolves' AND n.payload->>'relation' = 'related'))) r ON b.word <> 'outdates'
    ORDER BY b.posted_at DESC, b.ticket_a, b.ticket_b, b.word`;
 
 const FINDING_WORD_NAMES = ["outdates", "related", "evolves", "duplicate"] as const;
