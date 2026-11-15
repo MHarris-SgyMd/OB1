@@ -4245,7 +4245,7 @@ jobs:
           own=$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | grep -v -e "^$gw$" -e '^172\.1[6-9]\.' -e '^172\.2[0-9]\.' -e '^172\.3[01]\.' | head -1 || true)
           [ -n "$own" ] || { echo "the runner names no address of its own outside the bridges, so the refusal below proves nothing" >&2; exit 1; }
           if curl -s --max-time 3 "http://$own:8095/health" > /dev/null; then echo "the broker answers on the runner's own address $own" >&2; exit 1; fi
-          # down, as the operator runs it, leaves nothing of the project.
+          # down, as the operator runs it, leaves no container of the project.
           bun --no-env-file federated/federated.ts down --runtime docker
           [ -z "$(docker ps -aq --filter label=com.docker.compose.project=ob1-federated)" ] || { echo "federated.ts down left the project's containers" >&2; exit 1; }
 
