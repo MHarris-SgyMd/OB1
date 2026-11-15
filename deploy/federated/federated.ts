@@ -34,7 +34,6 @@
 // secrets.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 import { factsFrom, type Facts } from "../edge/edge.ts";
 import { bunEnvProblem, listens, PS_ARGS, containersIn, holds, reason, shellQuote } from "../instance.ts";
@@ -75,15 +74,19 @@ export function gatewayFrom(out: string): { host: string } | { why: string } {
 }
 
 /** Why the daemon's bridge gateway is not this host's, or "": the shape needs the gateway to be an address of this
- *  host's own (`addresses`, os.networkInterfaces()'s), since the port is checked and dialled here — a daemon of another
- *  host (a DOCKER_HOST, a Docker context), or a client in a container, is refused; a local daemon by any socket passes
- *  (review passes 2 and 3 of 3b-3a: DOCKER_HOST alone missed contexts; the daemon's name told hosts apart by name). */
-export function remoteGateway(gateway: string, addresses: readonly string[]): string {
-  return addresses.includes(gateway) ? "" : `the default bridge's gateway ${gateway} is no address of this host's: the daemon is another host's (a DOCKER_HOST or a Docker context points it elsewhere), or this runs in a container — run federated.ts on the daemon's own host`;
+ *  host's own (`local`, ownsAddress's), since the port is checked and dialled here — a daemon of another host (a
+ *  DOCKER_HOST, a Docker context), or a client in a container, is refused; a local daemon by any socket passes (review
+ *  passes 2 and 3 of 3b-3a: DOCKER_HOST alone missed contexts; the daemon's name told hosts apart by name). */
+export function remoteGateway(gateway: string, local: boolean): string {
+  return local ? "" : `the default bridge's gateway ${gateway} is no address of this host's: the daemon is another host's (a DOCKER_HOST or a Docker context points it elsewhere), or this runs in a container — run federated.ts on the daemon's own host`;
 }
 
-/** This host's IPv4 addresses, every interface's. */
-const hostAddresses = () => Object.values(networkInterfaces()).flat().filter((a) => !!a && a.family === "IPv4").map((a) => a!.address);
+/** Whether `address` is assigned to this host: a socket bound there for an instant. Linux binds an address assigned to
+ *  an interface whatever its link state — the default bridge with no container on it is down, and the interface list
+ *  (os.networkInterfaces) leaves it out (CI, measured: the runner's own 172.17.0.1 refused). */
+export function ownsAddress(address: string): boolean {
+  try { const s = Bun.listen({ hostname: address, port: 0, socket: { data() {} } }); s.stop(true); return true; } catch { return false; }
+}
 
 /** The environment compose runs in: the shell's, less anything that would steer compose or the project's settings,
  *  then the project's. */
@@ -186,7 +189,7 @@ async function main(cmd: string, args: string[]) {
     const got = g.ok ? gatewayFrom(g.out) : { why: `${o.runtime} network inspect bridge failed: ${reason(g.err)}` };
     if ("why" in got) { refusals.push(got.why); unknown = true; }
     else {
-      const remote = remoteGateway(got.host, hostAddresses());
+      const remote = remoteGateway(got.host, ownsAddress(got.host));
       if (remote) { refusals.push(remote); unknown = true; } else host = got.host;
     }
   }
@@ -228,7 +231,8 @@ function selfCheck() {
     ["rootless podman, rootless Docker Engine, Docker Desktop and podman on Linux are refused, naming why", !measured(facts({ rootless: true })).ok && !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", rootless: true })).ok
       && !measured(facts({ engine: "docker", desktop: true })).ok && (() => { const m = measured(facts({ platform: "linux" })); return !m.ok && /podman on linux: no shape/.test(m.why); })()],
     ["the gateway is the bridge's private or shared IPv4 one; none, or any other, refused", (() => { const a = gatewayFrom("172.17.0.1 \n"), b = gatewayFrom("fd00::1 10.200.0.1 "), c = gatewayFrom(" "), d = gatewayFrom("203.0.113.1 "), e = gatewayFrom("100.64.0.1 "), f = gatewayFrom("100.128.0.1 "), g = gatewayFrom("127.0.0.1 "); return "host" in a && a.host === "172.17.0.1" && "host" in b && b.host === "10.200.0.1" && "why" in c && "why" in d && /no private or shared/.test(d.why) && "host" in e && e.host === "100.64.0.1" && "why" in f && "why" in g; })()],
-    ["a gateway that is no address of this host's is refused (another host's daemon, a client in a container); one of its own is not", /no address of this host's/.test(remoteGateway("172.17.0.1", ["127.0.0.1", "10.1.0.4"])) && remoteGateway("172.17.0.1", ["127.0.0.1", "172.17.0.1", "10.1.0.4"]) === ""],
+    ["a gateway that is no address of this host's is refused (another host's daemon, a client in a container); one of its own is not", /no address of this host's/.test(remoteGateway("172.17.0.1", false)) && remoteGateway("172.17.0.1", true) === ""],
+    ["an address is this host's where a socket binds there: the loopback is, a documentation address is not", ownsAddress("127.0.0.1") && !ownsAddress("203.0.113.1")],
     ["podman on Linux is refused pointing at --runtime docker, unless docker is that podman (podman-docker)", (() => { const m = measured(facts({ platform: "linux" })), s = measured(facts({ runtime: "docker", platform: "linux" })); return !m.ok && /--runtime docker/.test(m.why) && !s.ok && !/--runtime docker/.test(s.why); })()],
     ["Docker Engine whose OS type is not linux is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", osType: "windows" })).ok],
     ["a re-up under the gateway shape knows its own port: ps's binding on the gateway address is this broker's", (() => { const line = `abc|ob1-federated-slots-1|172.17.0.1:8095->8095/tcp|${PROJECT}|slots|running|||`; const c = containersIn(line)[0]; return !!c && c.project === PROJECT && holds(c.ports, { hostIp: "172.17.0.1", port: 8095, protocol: "tcp" }) && !holds(c.ports, { hostIp: "127.0.0.1", port: 8095, protocol: "tcp" }); })()],
