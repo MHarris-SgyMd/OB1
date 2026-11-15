@@ -635,9 +635,17 @@ export type CoordinatorValue = {
   /** The passes OB1_PASSES asks for, those of COORDINATOR_PASSES alone, in its order. */
   passes: (typeof COORDINATOR_PASSES)[number][];
   children: Partial<Record<Coordinated, ChildMark>>;
+  /**
+   * Its relay to the host's slot broker (SMD-3379 PR 3b), where it runs one: whether the broker answers, for how long
+   * (seconds back from the stamp), and the api's sockets to it — absent where it does not listen (no
+   * OB1_SLOT_RELAY_KEY), so the api's calls keep their own shares.
+   */
+  relay?: RelayMark;
   /** The coordinator has stopped. */
   ended?: true;
 };
+/** The coordinator's relay as its row says it. */
+export type RelayMark = { broker: "up" | "down"; for_s: number; sockets?: number };
 /** The coordinator's row as the record carries it: its value, read in full, and its stamp judged against the database's clock. */
 export type CoordinatorBeat = Omit<CoordinatorValue, "v" | "id" | "host" | "every_s" | "ended"> & { at: string; ageS: number; everyS: number; stale: boolean; ended: boolean };
 
@@ -678,9 +686,16 @@ export function parseCoordinator(r: { value: unknown; at: unknown; age_s: unknow
     children[name as Coordinated] = mark;
   }
   const everyS = v.every_s as number;
+  let relay: RelayMark | undefined;
+  if (v.relay !== undefined) {
+    const m = v.relay as Record<string, unknown> | null;
+    if (m === null || typeof m !== "object" || (m.broker !== "up" && m.broker !== "down") || !count(m.for_s, MAX_FOR_S) || !(m.sockets === undefined || count(m.sockets, 1024))) return null;
+    relay = { broker: m.broker, for_s: m.for_s as number, ...(m.sockets === undefined ? {} : { sockets: m.sockets as number }) };
+  }
   return {
     passes: p as CoordinatorValue["passes"],
     children,
+    ...(relay ? { relay } : {}),
     at: r.at,
     ageS: Math.max(0, Math.round(ageS)),
     everyS,
@@ -2217,7 +2232,12 @@ export function taskStates(workers: { heartbeats: readonly WorkerHeartbeat[]; ig
     const live = !c.stale && !c.ended;
     const runs = Object.keys(c.children);
     const when = `last stamped ${ago(c.ageS)} ago, every ${c.everyS} s`;
-    const what = runs.length ? `runs ${runs.join(", ")}` : "runs no pass";
+    // Its relay (SMD-3379 PR 3b): the broker's state, and the api's sockets where it listens for them.
+    const r = c.relay;
+    const whose = [runs.length ? "the passes'" : "", r?.sockets === undefined ? "" : `the api's (${r.sockets} socket${r.sockets === 1 ? "" : "s"})`].filter(Boolean).join(" and ") || "no one's";
+    const relayed = r === undefined ? ""
+      : `; relays ${whose} model-call slots to the host's broker, which has ${r.broker === "up" ? "" : "not "}answered for ${ago(r.for_s + c.ageS)}`;
+    const what = (runs.length ? `runs ${runs.join(", ")}` : "runs no pass") + relayed;
     tasks.push({
       task: "coordinator", job: null, key: COORDINATOR_KEY, coordinated: false, at: c.at, ageS: c.ageS,
       state: c.ended ? "stopped" : c.stale ? "stale" : "running",

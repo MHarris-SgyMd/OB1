@@ -2548,7 +2548,9 @@ export const ROLE_GRANTS = Object.freeze({
     // statement on a deleted entity and re-projecting it. 116's guard lets the
     // role close a statement, never write or reopen one. Without these the
     // trigger skips, and the statements stay open for
-    // ob1_close_orphan_priorities().
+    // ob1_close_orphan_priorities(). The SELECT also lets the role's prunes
+    // spare an entity with an open statement (141, SMD-4241); without it they
+    // prune as before.
     Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "136" }),
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "136" }),
   ]),

@@ -3834,6 +3834,54 @@ else {
     }
   }
 
+  // The api's slot relay (SMD-3379 PR 3b-2): OB1_SLOT_RELAY_KEY read beside the coordinator's row, which says whether
+  // it listens for the api and whether its broker answers.
+  {
+    const put = (value: object | null, agoS = 10) => value === null
+      ? claims`DELETE FROM ob1_config WHERE key = 'heartbeat:coordinator'`
+      : claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:coordinator', ${JSON.stringify(value)}, now() - make_interval(secs => ${agoS}))
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+    const coord = (relay?: object) => ({ v: 1, every_s: 60, passes: [], children: {}, ...(relay ? { relay } : {}) });
+    const KEY = "relay-key-of-this-brain-0123";
+    const at = async (key: string | undefined) => {
+      const out = (await run({ ...SQL_ENV, ...(key === undefined ? {} : { OB1_SLOT_RELAY_KEY: key }) })).out;
+      return `${row(out, "slot relay")} ${fix(out, "slot relay")}`;
+    };
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    try {
+      const off = await at(undefined);
+      await put(coord({ broker: "up", for_s: 60 }));
+      const offForApi = await at(undefined);
+      const short = await at("short");
+      await put(null);
+      const none = await at(KEY);
+      await put(coord());
+      const noBroker = await at(KEY);
+      await put(coord({ broker: "up", for_s: 60 }));
+      const passesOnly = await at(KEY);
+      await put(coord({ broker: "down", for_s: 50, sockets: 1 }));
+      const down = await at(KEY);
+      await put(coord({ broker: "up", for_s: 290, sockets: 0 }));
+      const up = await at(KEY);
+      await put(coord({ broker: "up", for_s: 290, sockets: 1 }), 600);
+      const stale = await at(KEY);
+      assert(/^\s*·\s+slot relay\s+off: OB1_SLOT_RELAY_KEY is unset/.test(off) && /^\s*·\s+slot relay\s+off for the api: .*while the coordinator asks the host's broker for its passes'/.test(offForApi),
+        `no key: a skip, saying whether the coordinator relays the passes' all the same (${off} | ${offForApi})`);
+      assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is shorter than 16 characters.*openssl rand -hex 32/.test(short), `a key too short warns, naming how to mint one (${short})`);
+      assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is set, and no coordinator has stamped a row on this brain/.test(none) && /^\s*!\s+.*the coordinator has not stamped for 10 min/.test(stale),
+        `a key with no coordinator, or one gone quiet, warns (${none} | ${stale})`);
+      assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is set, but the coordinator does not listen for the api — it names no broker/.test(noBroker) && /→ Set OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY beside OB1_SLOT_RELAY_KEY/.test(noBroker)
+          && /^\s*!\s+.*does not listen for the api — it relays its passes' calls alone: it was made before the key was set/.test(passesOnly),
+        `a coordinator that does not listen warns, naming the broker's settings or the recreate (${noBroker} | ${passesOnly})`);
+      assert(/^\s*!\s+slot relay\s+the coordinator listens for the api, but the host's broker has not answered it for 60 s by its last stamp/.test(down) && /slot relay:" lines say why/.test(down),
+        `a broker away warns, its time counted from the row's stamp (${down})`);
+      assert(/^\s*✓\s+slot relay\s+the coordinator listens for the api, and its broker has answered for 5 min by its last stamp — the api's log says/.test(up),
+        `listening, the broker answering: ok, whatever the count of api sockets at the api's start (${up})`);
+    } finally {
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    }
+  }
+
   // SMD-2041: `vector extension`, `migration ledger` and `schema version` read
   // brain-info.ts's readDatabaseFacts — the read brain_info and the keyed
   // /health body make — so a change to that read moves these rows and the

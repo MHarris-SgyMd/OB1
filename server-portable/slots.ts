@@ -348,83 +348,377 @@ type RelayClient = {
   close(): void;
 };
 
+/** The shortest OB1_SLOT_RELAY_KEY the coordinator listens with and the api dials with: a guessable one would let anything on the brain's network ask for slots. */
+export const MIN_RELAY_KEY = 16;
 /**
- * The relay client, where the coordinator started this process with a channel and said so (OB1_SLOT_RELAY=ipc); null
- * elsewhere — a pass run by hand from a checkout, the api — which keeps the semaphore alone. The channel is held
- * (ref) only while an ask waits on it, so a pass with nothing outstanding exits on its own (measured: an open channel
- * holds a child open). A word not come within RELAY_ANSWER_MS takes the process's own share, withdrawing the ask.
+ * What is wrong with an OB1_SLOT_RELAY_KEY, or null: at least MIN_RELAY_KEY characters, each printable ASCII — a header
+ * goes out as UTF-8 and is read as Latin-1, so two equal keys with another character never match (review pass 5 of 3b-2).
  */
-function relayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
-  const proc = process as unknown as { send?: (m: unknown) => boolean; channel?: { ref(): void; unref(): void }; on(ev: string, f: (m: unknown) => void): void; off(ev: string, f: (m: unknown) => void): void };
-  if (env.OB1_SLOT_RELAY !== "ipc" || typeof proc.send !== "function") return null;
-  const waiting = new Map<string, (word: "go" | "queued" | "own", why?: string) => void>();
-  let closed = false;
+export function relayKeyProblem(key: string): string | null {
+  if (key.length < MIN_RELAY_KEY) return `OB1_SLOT_RELAY_KEY is shorter than ${MIN_RELAY_KEY} characters`;
+  if (!/^[\x21-\x7e]+$/.test(key)) return "OB1_SLOT_RELAY_KEY holds a character that is not printable ASCII (a space, or one outside ASCII)";
+  return null;
+}
+/** The coordinator's listener for the api (SMD-3379 PR 3b-2, db/slot-relay.ts's serveRelay), on the brain's network: OB1_SLOT_RELAY_URL in its place. */
+export const RELAY_URL = "ws://coordinator:8096/v1/relay";
+/** The api's reconnect to the coordinator: from the first, doubling to the most — quick, as its calls running are uncounted
+ *  until a socket is back (review pass 1 of 3b-2: at 5 s a recreated coordinator's broker handed their slots on). */
+export const RELAY_RECONNECT_MS = { first: 250, max: 1000 } as const;
+/** Dials failing this long (no coordinator listening: no broker named), they ease to every RELAY_EASED_MS. */
+export const RELAY_EASE_MS = 10_000;
+export const RELAY_EASED_MS = 5000;
+/** How long the api's asks wait for its next socket after one is lost, rather than taking its own share. */
+export const RELAY_GRACE_MS = 2000;
+/** The api's dials within its grace: a coordinator back late in it still found before it ends (twenty local dials at most). */
+export const RELAY_GRACE_RETRY_MS = 100;
+/** How long a dial may take to open before it is dropped and tried again. */
+export const RELAY_DIAL_MS = 3000;
+/** A refused dial is asked why (a plain request) at most this often. */
+export const RELAY_WHY_MS = 30_000;
+/** A socket to the coordinator silent this long is dropped: the api pings every third of it, the listener answers. */
+export const RELAY_SILENCE_MS = 10_000;
+
+/** A transport's state: `up`, asks sent; `away`, none to send on for now (a socket dialled again), so an ask waits for the next within the grace, else takes its own share and asks again at the next `back`; `gone` for good (a channel closed). */
+type Reach = "up" | "away" | "gone";
+
+/**
+ * What both clients share: the asks waiting on the relay's word, the calls running — a live call, a granted one, one on
+ * this process's own share — by id, each with the frame that counts it again at a socket after a lost one, and the
+ * relay's `back`s. `send` drops a frame while nothing is up.
+ */
+function relayCore(t: { send(m: object): void; reach(): Reach; grace(): boolean; hold(d: 1 | -1): void; close(): void }) {
+  /** Each ask waiting on the relay's word: its answer; `park`, waiting here with no socket; `resend`, asked again on one. */
+  const waiting = new Map<string, { answer(word: "go" | "queued" | "own", why?: string): void; park(): void; resend(): void }>();
+  const running = new Map<string, object>();
   let next = 0;
   let back = new AbortController();
   let backs = 0;
-  let held = 0;
-  const hold = (d: 1 | -1) => {
-    held += d;
-    try { if (held === 1 && d === 1) proc.channel?.ref(); else if (held === 0) proc.channel?.unref(); } catch { /* the channel is going */ }
-  };
-  const send = (m: object) => { if (closed) return; try { proc.send!(m); } catch { /* disconnect follows */ } };
-  const onMessage = (m: unknown) => {
-    const f = m as { slot?: string; id?: string };
-    if (f?.slot === "back") { backs++; const was = back; back = new AbortController(); was.abort(BACK); return; }
+  const sayBack = () => { backs++; const was = back; back = new AbortController(); was.abort(BACK); };
+  const heard = (m: unknown) => {
+    const f = m as { slot?: string; id?: string; why?: string } | null;
+    if (f?.slot === "back") return sayBack();
+    // A grant the broker took back past its lease is not counted again at a later socket (the broker's protocol: no
+    // `held` for it; review pass 1 of 3b-2).
+    if (f?.slot === "lapsed" && typeof f.id === "string") { running.delete(f.id); return; }
     if (typeof f?.id !== "string" || (f.slot !== "go" && f.slot !== "queued" && f.slot !== "own")) return;
-    waiting.get(f.id)?.(f.slot, (f as { why?: string }).why);
+    const w = waiting.get(f.id);
+    // A `go` for a call not waiting and not running — its ask answered otherwise meanwhile — is given back at once, so no
+    // grant sits counted with no call behind it (review pass 3 of 3b-2: a re-ask answered `own`, its first ask's later
+    // grant held a slot until the lease).
+    if (!w) { if (f.slot === "go" && !running.has(f.id)) t.send({ slot: "done", id: f.id }); return; }
+    w.answer(f.slot, f.why);
   };
-  const onDisconnect = () => {
-    closed = true;
-    log("background slots: the coordinator's relay is gone — every call takes this process's own share");
-    for (const answer of [...waiting.values()]) answer("own");
-  };
-  proc.on("message", onMessage);
-  proc.on("disconnect", onDisconnect);
-  try { proc.channel?.unref(); } catch { /* no channel to unref */ }
-  const frame = (id: string, call: ResolvedModelCall, extra: object = {}) => ({ slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls, ...extra });
-  return {
-    gone: () => closed,
+  /** Every ask waiting answered `own`: asked again at the next `back` where `away`. */
+  const answerAll = (away: boolean) => { for (const w of [...waiting.values()]) w.answer("own", away ? "away" : undefined); };
+  const runningFrame = (id: string, call: ResolvedModelCall) => ({ slot: "running", id, base: call.base, model: call.model ?? null, cls: call.cls });
+  const client: RelayClient = {
+    gone: () => t.reach() === "gone",
     backSignal: () => back.signal,
     backs: () => backs,
-    close() { proc.off("message", onMessage); proc.off("disconnect", onDisconnect); },
+    close: () => t.close(),
     live(call) {
       const id = `l${++next}`;
-      send(frame(id, call));
+      running.set(id, runningFrame(id, call));
+      t.send({ slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls });
       return id;
     },
     running(call) {
       const id = `o${++next}`;
-      send({ slot: "running", id, base: call.base, model: call.model ?? null, cls: call.cls });
+      const f = runningFrame(id, call);
+      running.set(id, f);
+      t.send(f);
       return id;
     },
-    done(id) { send({ slot: "done", id }); },
+    done(id) { running.delete(id); t.send({ slot: "done", id }); },
     ask(call, signal, told, first, maxWaitS, waitedS) {
       const id = `b${++next}`;
       // The backs said as it is sent: one said before its `own` comes means the broker is back already (review pass 5:
       // a back read in the same batch as the own was missed, the call waiting on its own share).
       const sentAt = backs;
+      const askedAt = performance.now();
       return new Promise((resolve, reject) => {
         if (signal.aborted) return reject(signal.reason);
-        const end = () => { waiting.delete(id); clearTimeout(timer); signal.removeEventListener("abort", onAbort); hold(-1); };
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let toldOnce = false;
+        const tell = () => { if (!toldOnce) { toldOnce = true; told(); } };
+        const end = () => { waiting.delete(id); if (timer) clearTimeout(timer); signal.removeEventListener("abort", onAbort); t.hold(-1); };
         // `retry`: the broker was away (the relay's grace, or no word in time), so the call asks again at the next back;
         // a base it does not broker, or a bad frame, is its own share for good (review pass 5).
         const own = (retry: boolean) => { end(); resolve({ own: true, retry, backs: sentAt }); };
-        const timer = setTimeout(() => { send({ slot: "done", id }); own(true); }, RELAY_ANSWER_MS);
-        const onAbort = () => { send({ slot: "done", id }); end(); reject(signal.reason); };
+        // No word within RELAY_ANSWER_MS of a send: its own share, the ask withdrawn.
+        const arm = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => { t.send({ slot: "done", id }); own(true); }, RELAY_ANSWER_MS); };
+        const onAbort = () => { t.send({ slot: "done", id }); end(); reject(signal.reason); };
         signal.addEventListener("abort", onAbort, { once: true });
-        waiting.set(id, (word, why) => {
-          if (word === "queued") { clearTimeout(timer); told(); return; }
-          if (word === "own") return own(why === "away");
-          end();
-          resolve({ go: id });
+        // Its time waited carried each time it is asked (the relay orders asks by it).
+        const frame = () => {
+          const waited = (waitedS ?? 0) + (performance.now() - askedAt) / 1000;
+          return { slot: "ask", id, base: call.base, model: call.model ?? null, cls: call.cls, ...(first ? { first: true } : {}), max_wait_s: maxWaitS, ...(waited >= 0.001 ? { waited_s: Math.min(waited, 86_400) } : {}) };
+        };
+        waiting.set(id, {
+          answer(word, why) {
+            if (word === "queued") { if (timer) clearTimeout(timer); timer = null; tell(); return; }
+            if (word === "own") return own(why === "away");
+            end();
+            running.set(id, runningFrame(id, call));
+            resolve({ go: id });
+          },
+          park() { if (timer) clearTimeout(timer); timer = null; tell(); },
+          resend() { arm(); t.send(frame()); },
         });
-        hold(1);
-        if (closed) return own(false);
-        send(frame(id, call, { ...(first ? { first: true } : {}), max_wait_s: maxWaitS, ...(waitedS ? { waited_s: Math.min(waitedS, 86_400) } : {}) }));
+        t.hold(1);
+        const reach = t.reach();
+        if (reach === "up") { arm(); t.send(frame()); return; }
+        // A socket lost a moment ago: waits for the next within the grace, asked again there (review pass 2 of 3b-2).
+        if (reach === "away" && t.grace()) { waiting.get(id)!.park(); return; }
+        own(reach === "away");
       });
     },
   };
+  /** Every ask waiting parked: the socket lost, the grace begun. */
+  const park = () => { for (const w of waiting.values()) w.park(); };
+  /** Every ask waiting asked again: a socket back. */
+  const resendAsks = () => { for (const w of [...waiting.values()]) w.resend(); };
+  return { client, heard, answerAll, sayBack, running, park, resendAsks };
+}
+
+/**
+ * The relay client: over this process's IPC channel where the coordinator started it with one and said so
+ * (OB1_SLOT_RELAY=ipc, a pass), else over a socket to the coordinator where the process asks for one (`socket`: the api
+ * alone, PR 3b-2) and OB1_SLOT_RELAY_KEY is set — a script run by hand with the key in its environment dials nothing,
+ * whose socket would hold it open (review pass 1 of 3b-2); null elsewhere — a pass run by hand from a checkout, an api
+ * with no key or a bad one (relayKeyProblem) — which keeps the semaphore alone.
+ */
+function relayClient(env: Record<string, string | undefined>, log: (line: string) => void, socket: boolean): RelayClient | null {
+  return ipcRelayClient(env, log) ?? (socket ? socketRelayClient(env, log) : null);
+}
+
+/**
+ * A pass's: its asks over its IPC channel. The channel is held (ref) only while an ask waits on it, so a pass with
+ * nothing outstanding exits on its own (measured: an open channel holds a child open). A word not come within
+ * RELAY_ANSWER_MS takes the process's own share, withdrawing the ask; a channel closed, every call from then.
+ */
+function ipcRelayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
+  const proc = process as unknown as { send?: (m: unknown) => boolean; channel?: { ref(): void; unref(): void }; on(ev: string, f: (m: unknown) => void): void; off(ev: string, f: (m: unknown) => void): void };
+  if (env.OB1_SLOT_RELAY !== "ipc" || typeof proc.send !== "function") return null;
+  let closed = false;
+  let held = 0;
+  const core = relayCore({
+    send: (m) => { if (closed) return; try { proc.send!(m); } catch { /* disconnect follows */ } },
+    reach: () => (closed ? "gone" : "up"),
+    grace: () => false,
+    hold: (d) => {
+      held += d;
+      try { if (held === 1 && d === 1) proc.channel?.ref(); else if (held === 0) proc.channel?.unref(); } catch { /* the channel is going */ }
+    },
+    close: () => { proc.off("message", core.heard); proc.off("disconnect", onDisconnect); },
+  });
+  const onDisconnect = () => {
+    closed = true;
+    log("background slots: the coordinator's relay is gone — every call takes this process's own share");
+    core.answerAll(false);
+  };
+  proc.on("message", core.heard);
+  proc.on("disconnect", onDisconnect);
+  try { proc.channel?.unref(); } catch { /* no channel to unref */ }
+  return core.client;
+}
+
+/**
+ * The api's (SMD-3379 PR 3b-2; docs/brain-coordinator.md, row 2): its asks over a WebSocket to the coordinator on the
+ * brain's network — RELAY_URL, or OB1_SLOT_RELAY_URL — proved with OB1_SLOT_RELAY_KEY, which the coordinator holds too.
+ * The frames are a pass's. Unlike a pass's channel, the socket comes back: dialled again on its loss, every
+ * RELAY_GRACE_RETRY_MS within RELAY_GRACE_MS, then RELAY_RECONNECT_MS apart, every RELAY_EASED_MS once RELAY_EASE_MS of
+ * dials have failed. An ask meanwhile, and before the first socket, waits out the grace for the next, then takes this
+ * process's own share and asks again at the next socket, which says `back`; the calls running are kept — a live call, a
+ * granted one, one on its own share — each counted again (`running`) on that socket, so the broker counts what runs (as
+ * the relay's `held` does, review pass 1 of 3b-1), then all named (`named`), the listener giving back any other it kept.
+ * It pings every third of RELAY_SILENCE_MS, drops a socket silent for it, and says `bye` at its close. A loss is said at
+ * most once a minute; a refused socket's reason (a 401, a full listener, none listening) once each.
+ */
+function socketRelayClient(env: Record<string, string | undefined>, log: (line: string) => void): RelayClient | null {
+  const key = env.OB1_SLOT_RELAY_KEY?.trim();
+  if (!key) return null;
+  const problem = relayKeyProblem(key);
+  if (problem) {
+    log(`background slots: ${problem}, and the coordinator does not listen with it — the coordinator is not asked, each call takes this process's own share`);
+    return null;
+  }
+  const url = env.OB1_SLOT_RELAY_URL?.trim() || RELAY_URL;
+  let ws: WebSocket | null = null;
+  let up = false;
+  let closed = false;
+  let wait: number = RELAY_RECONNECT_MS.first;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let ping: ReturnType<typeof setInterval> | null = null;
+  let lostSaidAt = -Infinity;
+  let lostSaid = false;
+  /** Until when (performance.now) asks wait for the next socket rather than taking the own share: RELAY_GRACE_MS from a loss, and from the start. */
+  let graceUntil = 0;
+  let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The current dial's bound (RELAY_DIAL_MS), cleared at its open, its close and the client's. */
+  let dialing: ReturnType<typeof setTimeout> | null = null;
+  /** This process's id to the listener, so a socket after a lost one takes back the calls it kept counted. */
+  const clientId = crypto.randomUUID();
+  /** When dials began failing (performance.now), or null while a socket is open: past RELAY_EASE_MS, the dials ease. */
+  let failingSince: number | null = null;
+  /** When the last refused dial was asked why: at most every RELAY_WHY_MS, never in the way of the next dial. */
+  let whyAt = -Infinity;
+  const said = new Set<string>();
+  const once = (what: string, line: string) => { if (!said.has(what)) { said.add(what); log(line); } };
+  const core = relayCore({
+    send: (m) => { if (up && ws) { try { ws.send(JSON.stringify(m)); } catch { /* close follows */ } } },
+    reach: () => (closed ? "gone" : up ? "up" : "away"),
+    grace: () => performance.now() < graceUntil,
+    hold: () => {},
+    close: () => {
+      closed = true;
+      if (retry) clearTimeout(retry);
+      if (ping) clearInterval(ping);
+      if (graceTimer) clearTimeout(graceTimer);
+      if (dialing) clearTimeout(dialing);
+      const sock = ws;
+      ws = null;
+      // Its calls end with it: said, so the coordinator keeps none for a socket that will not come.
+      if (up && sock) { try { sock.send(JSON.stringify({ slot: "bye", id: "" })); } catch { /* gone */ } }
+      up = false;
+      try { sock?.close(1000, "the api is stopping"); } catch { /* gone */ }
+    },
+  });
+  const own = "each call takes this process's own share (OB1_BACKGROUND_SLOTS) meanwhile";
+  /** Why a socket that never opened was refused: a 401 is the key, named; anything else no listener. */
+  const whyRefused = async (): Promise<[string, string]> => {
+    try {
+      const r = await fetch(url.replace(/^ws/, "http"), { headers: { "x-brain-key": key }, redirect: "error", signal: AbortSignal.timeout(2000) });
+      if (r.status === 401) return ["401", `the coordinator refused OB1_SLOT_RELAY_KEY (401) — set the same key for the api and the coordinator, and recreate both`];
+      if (r.status === 503) return ["503", `the coordinator's relay at ${url} holds its most sockets (503) — more api processes than it takes, or sockets of one gone and not yet dropped`];
+      // The listener answers a plain request with the key and room 426: it is there, and the upgrade was refused another way.
+      if (r.status === 426) return ["426", `the coordinator's relay at ${url} is there, but refused this socket's upgrade — a key the two read differently, or a moment's race`];
+      return [`http${r.status}`, `no slot relay at ${url} (HTTP ${r.status}) — is OB1_SLOT_RELAY_URL the coordinator's ${new URL(url).pathname === "/v1/relay" ? "listener" : "/v1/relay"}?`];
+    } catch (e) {
+      return ["none", `the coordinator does not answer at ${url} (${(e as Error).message}) — it listens once OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY name the host's broker beside OB1_SLOT_RELAY_KEY, and it is running`];
+    }
+  };
+  const again = () => {
+    if (closed) return;
+    if (failingSince === null) failingSince = performance.now();
+    // Within the grace, every RELAY_GRACE_RETRY_MS: a coordinator back in it is found before the parked asks take
+    // their own share (review pass 3 of 3b-2: dials at 1.75 and 2.75 s missed one back at 1.8 s), as the relay's
+    // GRACE_RETRY_MS for its broker.
+    if (performance.now() < graceUntil) { retry = setTimeout(() => { retry = null; connect(); }, RELAY_GRACE_RETRY_MS); return; }
+    retry = setTimeout(() => { retry = null; connect(); }, wait);
+    // Quick through a recreate; past RELAY_EASE_MS of failing (no coordinator listening), every RELAY_EASED_MS.
+    wait = performance.now() - failingSince < RELAY_EASE_MS ? Math.min(wait * 2, RELAY_RECONNECT_MS.max) : RELAY_EASED_MS;
+  };
+  const connect = () => {
+    if (closed) return;
+    let sock: WebSocket;
+    try {
+      sock = new WebSocket(url, { headers: { "x-brain-key": key, "x-relay-client": clientId } } as unknown as string[]);
+    } catch (e) {
+      once("url", `background slots: OB1_SLOT_RELAY_URL could not be opened (${(e as Error).message}) — ${own.replace(" meanwhile", "")}`);
+      closed = true;
+      return;
+    }
+    ws = sock;
+    let opened = false;
+    let heard = performance.now();
+    // A dial not open within RELAY_DIAL_MS is dropped and tried again (review pass 3 of 3b-2: a coordinator that takes the
+    // connection and never answers the upgrade held it for good, as the relay's HELLO_MS found of the broker's).
+    if (dialing) clearTimeout(dialing);
+    // This dial's own bound: a late open or close of an earlier dial clears nothing of it, and is ignored.
+    const bound = setTimeout(() => {
+      if (opened || ws !== sock) return;
+      try { (sock as unknown as { terminate?: () => void }).terminate?.() ?? sock.close(); } catch { /* gone */ }
+      ws = null;
+      if (!graceTimer) core.answerAll(true);
+      once("dial", `background slots: the coordinator at ${url} took the connection but did not open the socket within ${RELAY_DIAL_MS / 1000} s — dialled again; said once`);
+      again();
+    }, RELAY_DIAL_MS);
+    dialing = bound;
+    sock.onopen = () => {
+      clearTimeout(bound);
+      // An earlier dial's socket opening late: not this client's any more.
+      if (ws !== sock) { try { sock.close(); } catch { /* gone */ } return; }
+      opened = true;
+      up = true;
+      wait = RELAY_RECONNECT_MS.first;
+      failingSince = null;
+      graceUntil = 0;
+      if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+      heard = performance.now();
+      // Every call still running counted again, then each call waiting on its own share told to ask again.
+      for (const f of core.running.values()) sock.send(JSON.stringify(f));
+      const counted = core.running.size;
+      core.sayBack();
+      // The asks parked through the loss asked again, then every call named: the listener gives back any other it kept.
+      core.resendAsks();
+      sock.send(JSON.stringify({ slot: "named", id: "" }));
+      if (!said.has("up") || lostSaid) {
+        said.add("up");
+        log(`background slots: this process asks the host's slot broker through the coordinator (${url})${counted ? `; ${counted} call${counted === 1 ? "" : "s"} still running counted again` : ""}`);
+        lostSaid = false;
+      }
+      ping = setInterval(() => {
+        if (performance.now() - heard > RELAY_SILENCE_MS) {
+          try { sock.close(4000, "silent"); } catch { /* gone */ }
+          lost(sock, `silent for ${RELAY_SILENCE_MS / 1000} s`);
+          return;
+        }
+        try { sock.send(JSON.stringify({ slot: "ping", id: "" })); } catch { /* close follows */ }
+      }, RELAY_SILENCE_MS / 3);
+    };
+    sock.onmessage = (ev) => {
+      heard = performance.now();
+      let m: unknown;
+      try { m = JSON.parse(String(ev.data)); } catch { return; }
+      core.heard(m);
+    };
+    sock.onclose = (ev) => {
+      clearTimeout(bound);
+      if (ws !== sock) return;
+      if (opened) return lost(sock, `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`);
+      ws = null;
+      if (!graceTimer) core.answerAll(true);
+      // The next dial at once on its clock; why this one was refused asked beside it, now and then (review pass 2 of 3b-2:
+      // the 2 s ask held each redial, a recreate's api back late).
+      again();
+      if (performance.now() - whyAt >= RELAY_WHY_MS) {
+        whyAt = performance.now();
+        void whyRefused().then(([kind, why]) => once(`refused:${kind}`, `background slots: ${why}; ${own}, and it is dialled again every second, every ${RELAY_EASED_MS / 1000} s after ${RELAY_EASE_MS / 1000} s`));
+      }
+    };
+    sock.onerror = () => { /* onclose follows */ };
+  };
+  /** Asks wait RELAY_GRACE_MS for the next socket, parked; past it, their own share. */
+  const beginGrace = () => {
+    graceUntil = performance.now() + RELAY_GRACE_MS;
+    core.park();
+    if (graceTimer) clearTimeout(graceTimer);
+    graceTimer = setTimeout(() => { graceTimer = null; if (!up) core.answerAll(true); }, RELAY_GRACE_MS);
+  };
+  /** An open socket gone (closed, or dropped here): its asks parked for the next socket, RELAY_GRACE_MS at most, then answered `own`. */
+  const lost = (sock: WebSocket, why: string) => {
+    if (ws !== sock) return;
+    ws = null;
+    up = false;
+    if (ping) { clearInterval(ping); ping = null; }
+    if (closed) return core.answerAll(true);
+    // Its asks wait RELAY_GRACE_MS for the next socket — a coordinator recreated, a link cut — asked again there; past
+    // it, their own share (as the relay's GRACE_MS for the passes; review pass 2 of 3b-2: at once, each loss ran them
+    // past the broker's room).
+    beginGrace();
+    if (performance.now() - lostSaidAt >= 60_000) {
+      lostSaidAt = performance.now();
+      lostSaid = true;
+      log(`background slots: the coordinator's socket was lost (${why}) — ${own}, the calls still running counted again once it is back`);
+    }
+    again();
+  };
+  // The first socket's dial is a grace of its own: a call made before it opens waits for it, rather than running on the
+  // own share and being counted past the room once it opens (review pass 3 of 3b-2: 6 calls on 2 slots at a start).
+  beginGrace();
+  connect();
+  return core.client;
 }
 
 /**
@@ -434,19 +728,22 @@ function relayClient(env: Record<string, string | undefined>, log: (line: string
  * every wait, a call already running keeping its slot until it ends; and the
  * settings' problems, said through `log`, the defaults then standing in.
  * Under `off` no hook is set, unless the coordinator's relay is in (`env`,
- * process.env unless given, says OB1_SLOT_RELAY=ipc). `maxWaitS` is
- * --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a finite number.
+ * process.env unless given, says OB1_SLOT_RELAY=ipc, or holds
+ * OB1_SLOT_RELAY_KEY where `relaySocket` asks for the api's socket).
+ * `maxWaitS` is --max-wait's, DEFAULT_MAX_WAIT_S unless given, or not a
+ * finite number.
  * `connectS` bounds a connection's opening and each statement, CONNECT_S
  * unless a test asks for less.
  */
-export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number; env?: Record<string, string | undefined> }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
+export function installBackgroundSlots(opts: { url: string; raw: string | undefined; modelSlots?: string | undefined; log?: (line: string) => void; stop?: AbortSignal; connectS?: number; maxWaitS?: number; env?: Record<string, string | undefined>; relaySocket?: boolean }): { installed: boolean; problem?: string; uninstall: () => Promise<void> } {
   const log = opts.log ?? ((line: string) => console.error(line));
   const setting = slotsSettingFrom(opts.raw, opts.modelSlots);
   for (const p of setting.problems) log(p);
   const problem = setting.problems.length ? setting.problems.join("; ") : undefined;
-  // The coordinator's relay, where it started this process with one (SMD-3379 PR 3b-1): read before `off`, which holds
-  // nothing to this process's own shares but leaves the host's broker in (review pass 1: `off` dropped it unsaid).
-  const relay = relayClient(opts.env ?? process.env, log);
+  // The coordinator's relay, where it started this process with one (SMD-3379 PR 3b-1) or the key to its socket is
+  // here (the api, PR 3b-2): read before `off`, which holds nothing to this process's own shares but leaves the host's
+  // broker in (review pass 1: `off` dropped it unsaid).
+  const relay = relayClient(opts.env ?? process.env, log, opts.relaySocket === true);
   if (!setting.set && !setting.defaults && !relay) return { installed: false, ...(problem ? { problem } : {}), uninstall: async () => {} };
   const ended = new AbortController();
   const stop = opts.stop ? AbortSignal.any([opts.stop, ended.signal]) : ended.signal;

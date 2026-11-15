@@ -210,9 +210,15 @@ function definedIn(file: string): string[] {
  * whose door and thread functions it does not define. 137 is 129's
  * ten-argument agenda ordering a tie by the unblocks count (SMD-4264) and
  * carries 129, whose nine-argument wrapper it does not define and whose
- * agenda it needs ([110] drops both).
+ * agenda it needs ([110] drops both). 141 is 061's record_thought_entities
+ * with its prune sparing an entity someone stated a priority on (SMD-4241),
+ * and carries 061: a restore of the writer re-applied 061, whose other
+ * functions it restored and whose DROP took 053's six-argument writer ([52]
+ * re-applies 053). 056 and 136, whose apply_entity_type_gate and
+ * merge_entities it also carries, are not carried: 056 runs the gate over the
+ * rows at each apply.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "141": ["061"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -7099,7 +7105,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'thought_facets' AND indexname LIKE 'thought_facets_link%' ORDER BY 1`)).map((x) => x.n);
   assert(idx.join(",") === "thought_facets_link_active_uniq,thought_facets_link_target_idx", `the active-link unique index and the target probe exist (${idx.join(",")})`);
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
-  assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
+  assert(lastDefinerOf("record_thought_entities").startsWith("141") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 141, its last definer (061's body, 056's with the lineage row [57], its prune sparing an entity with a priority [127]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
   assert(lastDefinerOf("thought_facets_validate").startsWith("134") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102, 111, 120 and 134, its last definer (053's body plus the relation kind, [74], with distinct, [92], the subject kind, [98], and the deliverable kind, [121])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
@@ -8026,8 +8032,8 @@ console.log("\n[52] Migration 056: the entity name gate — a number or a type w
     "the SQL rule spells every shape, every vocabulary word (no more), the numeric pattern and the trim entity-gate.ts does, no pattern beside them, and places each shape by its scope: the any and notPerson overrides before the type door, the person/place shapes after it, the place-only handle shape inside the place clause (SMD-2300)");
   const fn = await one<{ v: string; s: boolean }>(`SELECT provolatile AS v, proisstrict AS s FROM pg_proc WHERE oid = 'entity_type_gate(text, text)'::regprocedure`);
   assert(fn.v === "i" && fn.s === true, "entity_type_gate is IMMUTABLE and STRICT");
-  assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),
-    "061 is the last definer of record_thought_entities (056's body with the lineage row), and its live body carries the name-gate sentinel beside 053's");
+  assert(lastDefinerOf("record_thought_entities").startsWith("141") && /ob1:name-gate/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && /ob1:structured-wins/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),
+    "141 is the last definer of record_thought_entities (061's body, 056's with the lineage row, [127]), and its live body carries the name-gate sentinel beside 053's");
   assert(/en\.merged_from @> ARRAY\[i\.nname\]/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")) && !/= ANY\(en\.merged_from\)/.test(await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)")),
     "…and resolves a merged name with `@>`, which 016's GIN index serves, not `= ANY`");
   const passSrc = await src("apply_entity_type_gate()");
@@ -9286,8 +9292,8 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   for (const fn of ["ob1_record_derivation", "ob1_actor_agent_id", "ob1_record_vector_lineage", "ob1_drop_thought_derivations", "ob1_drop_proposal_derivation", "record_thought_entities", "record_supersession_proposal", "update_thought"])
     assert((await functionsNamed(fn)) === 1, `one ${fn} — the older arity dropped where it moved`);
   assert((await functionsNamed("upsert_thought")) === 3, "three upsert_thought overloads still");
-  for (const fn of ["record_thought_entities", "ob1_record_vector_lineage"])
-    assert(lastDefinerOf(fn).startsWith("061"), `061 is the last definer of ${fn} (${lastDefinerOf(fn)})`);
+  assert(lastDefinerOf("ob1_record_vector_lineage").startsWith("061"), `061 is the last definer of ob1_record_vector_lineage (${lastDefinerOf("ob1_record_vector_lineage")})`);
+  assert(lastDefinerOf("record_thought_entities").startsWith("141"), `141 is the last definer of record_thought_entities — 061's body, its prune sparing an entity with a priority, [127] (${lastDefinerOf("record_thought_entities")})`);
   for (const [fn, last] of [["upsert_thought", "080"], ["update_thought", "099"]])
     assert(lastDefinerOf(fn).startsWith(last), `${last} is the last definer of ${fn} — 061's body with the trust stamp, [66] (${lastDefinerOf(fn)})`);
   assert(lastDefinerOf("record_supersession_proposal").startsWith("063"), `063 is the last definer of record_supersession_proposal — the stale proposal's replacement, on 061's body (${lastDefinerOf("record_supersession_proposal")})`);
@@ -20068,6 +20074,9 @@ console.log("\n[123] Migration 136: a deleted item's priority statements close �
     maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
   const file = files.find((f) => /^\d{3}_priority_deleted_items\.sql$/.test(f)) ?? "no NNN_priority_deleted_items.sql";
   await reapply(file.slice(0, 4));
+  // 136's merge_entities, just re-applied, is no longer the shipped one: the merge rows below hold 141's, which keeps 136's
+  // rules for the loser's statements (141's [127] holds its due references).
+  await restoreShipped("merge_entities");
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[123] op', 'operator'), ('[123] bot', 'agent')`);
   const OP = { name: "[123] op", scope: "write" }, BOT = { name: "[123] bot", scope: "write" };
   const thoughtAs = async (content: string) => {
@@ -20397,6 +20406,8 @@ console.log("\n[123] Migration 136: a deleted item's priority statements close �
   assert(reasons.every((r) => r === "deleted") && (await row(living)).close_reason === null && (await row(upper)).close_reason === null && (await row(kept.id)).close_reason === null
          && await closedCount() === before && await drift() === 0,
     `on upgrade the statements on a thought and an entity gone before 136, and on a thought key that is no uuid, close as deleted; a living thought's stay open, keyed in upper case too; a re-apply closes nothing more (${reasons.join(", ")})`);
+  // The re-applies above put 136's merge_entities back over 141's.
+  await restoreShipped("merge_entities");
 }
 
 console.log("\n[124] Migration 137: within one level the agenda puts the item that unblocks more first — after the sooner due time and before kind and key, under both orders, so a Medium blocking 50 open items leads Mediums blocking 6 and 3 whose keys sort first, and of two at 2.1 the one blocking 2 leads the one blocking 1; no score moves, so a Low blocking 50 stays below a Medium blocking none; the due order breaks a tie on the moment by the count too; 129's body re-applied puts key order back; the shape; a re-apply a no-op (SMD-4264)");
@@ -20765,6 +20776,250 @@ console.log("\n[126] Migration 140: the per-holder cap on live work claims, oper
   await reapply(file.slice(0, 4));
   assert((await capNow()) === 50 && lastDefinerOf("claim_work") === file && (await claim("SMD-8621", H)).outcome === "claimed",
     `a re-apply is a no-op: the built-in cap stands, 140 is still claim_work's last definer, and a claim is taken (${await capNow()})`);
+}
+
+console.log("\n[127] Migration 141: an entity's priority statements follow it — the prunes (record_thought_entities, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting (rebuild_derived, unchanged) still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references, counting what stands; the shape; a re-apply a no-op (SMD-4241)");
+{
+  type Assertion = { id: string; item: { kind: string; key: string }; level: number; reason: string | null; due_ref: { kind: string; key: string } | null; asserted_at: string;
+    maker: { name: string }; closed_at: string | null; close_reason: string | null; closed_by: string | null };
+  type J = Record<string, unknown>;
+  const file = files.find((f) => /^\d{3}_entity_priorities_follow\.sql$/.test(f)) ?? "no NNN_entity_priorities_follow.sql";
+  await reapply(file.slice(0, 4));
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[127] op', 'operator'), ('[127] bot', 'agent')`);
+  const OP = { name: "[127] op", scope: "write" }, BOT = { name: "[127] bot", scope: "write" };
+  const thought = async (content: string) => {
+    let id = "";
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "[127] op" })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [content])).rows[0].id;
+    });
+    return id;
+  };
+  const entity = async (name: string, type = "tool") =>
+    (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ($1, $2, normalize_entity_name($2)) RETURNING id::text`, [type, name])).rows[0].id;
+  const idOf = async (type: string, name: string) =>
+    (await db.query<{ id: string }>(`SELECT id::text FROM ob1_entities WHERE entity_type = $1 AND normalized_name = normalize_entity_name($2)`, [type, name])).rows[0]?.id ?? null;
+  const exists = async (id: string) => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_entities WHERE id = $1::uuid`, [id])).rows[0].n === 1;
+  const E = (name: string, type = "tool") => ({ name, type, confidence: 0.9 });
+  const rte = async (id: string, ents: unknown[]) =>
+    (await db.query<{ r: J }>(`SELECT record_thought_entities($1::uuid, 'extract:m@p126', $2::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [id, JSON.stringify(ents)])).rows[0].r;
+  const put = async (kind: string, key: string, level: number, actor: object, o: { ref?: [string, string]; reason?: string } = {}) => {
+    const r = (await db.query<{ r: { outcome: string; assertion: Assertion } }>(`SELECT assert_priority($1, $2, $3, NULL, NULL, $4, $5, $6, false, $7::jsonb) AS r`,
+      [kind, key, level, o.ref?.[0] ?? null, o.ref?.[1] ?? null, o.reason ?? null, JSON.stringify(actor)])).rows[0].r;
+    if (r.outcome !== "asserted") throw new Error(`[127] fixture: assert_priority on ${kind} ${key} answered ${JSON.stringify(r)}`);
+    return r.assertion;
+  };
+  const clear = async (kind: string, key: string, actor: object) => db.query(`SELECT clear_priority($1, $2, $3::jsonb)`, [kind, key, JSON.stringify(actor)]);
+  const history = async (kind: string, key: string) => (await db.query<{ r: Assertion[] }>(`SELECT priority_history($1, $2) AS r`, [kind, key])).rows[0].r;
+  const open = async (kind: string, key: string) => (await history(kind, key)).filter((h) => h.closed_at === null);
+  const row = async (id: string) =>
+    (await db.query<{ close_reason: string | null; closed_by: string | null }>(`SELECT close_reason, closed_by::text FROM priority_assertions WHERE id = $1::uuid`, [id])).rows[0];
+  const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
+  const merge = async (s: string, l: string) => (await db.query<{ r: J }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [s, l])).rows[0].r;
+
+  // The shape: two new functions, and the four carried, each naming 141; the partial index.
+  const named = (await db.query<{ n: string }>(
+    `SELECT p.proname AS n FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
+      WHERE s.nspname = 'public' AND obj_description(p.oid, 'pg_proc') ILIKE '%migration 141 / SMD-4241%' ORDER BY 1`)).rows.map((r) => r.n);
+  assert(JSON.stringify(named) === JSON.stringify(["apply_entity_type_gate", "merge_entities", "ob1_entity_has_open_priority", "ob1_priority_merge_entity",
+                                                   "prune_orphan_entities", "record_thought_entities"]),
+    `six functions name 141: two new, four carried, rebuild_derived not among them (${named.join(", ")})`);
+  const dueIdx = (await db.query<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'priority_assertions_open_due_ref_idx'`)).rows[0]?.d ?? "";
+  assert(/\(due_ref_kind, due_ref_key\) WHERE \(\(closed_at IS NULL\) AND \(due_ref_key IS NOT NULL\)\)/.test(dueIdx),
+    `a partial index on the open statements' due references serves the spare test and the merge (${dueIdx})`);
+
+  // The ticket's Verify: an entity with a statement, re-extracted under the same name, keeps its id and its statement.
+  const t1 = await thought("[127] Atlas and Borealis ship on Friday");
+  await rte(t1, [E("[127] Atlas"), E("[127] Borealis")]);
+  const atlas = (await idOf("tool", "[127] Atlas"))!, borealis = (await idOf("tool", "[127] Borealis"))!;
+  const onAtlas = await put("entity", atlas, 4, OP, { reason: "the launch" });
+  const again = await rte(t1, [E("[127] Atlas"), E("[127] Borealis")]);
+  assert(again.ok === true && await idOf("tool", "[127] Atlas") === atlas && (await row(onAtlas.id)).close_reason === null,
+    `a re-extraction naming the entity again keeps its id, and its statement stands (${JSON.stringify(again)})`);
+
+  // The thought's next extraction names neither: Borealis, with no statement, is pruned; Atlas, with one, is spared, its
+  // statement open and its projection standing.
+  const none = await rte(t1, []);
+  assert(none.pruned_entities === 1 && !(await exists(borealis)) && await exists(atlas) && (await row(onAtlas.id)).close_reason === null
+         && (await open("entity", atlas)).length === 1 && await drift() === 0,
+    `record_thought_entities prunes the unmentioned entity without a statement and spares the one with an open statement (${JSON.stringify(none)})`);
+
+  // A later capture naming Atlas finds it, under its id, statement and all.
+  const t2 = await thought("[127] Atlas again");
+  await rte(t2, [E("[127] Atlas")]);
+  assert(await idOf("tool", "[127] Atlas") === atlas && (await open("entity", atlas))[0]?.id === onAtlas.id,
+    `a later capture naming the spared entity writes onto it, its statement standing`);
+
+  // Cleared, the next prune touching it takes it.
+  await clear("entity", atlas, OP);
+  const after = await rte(t2, []);
+  assert(after.pruned_entities === 1 && !(await exists(atlas)) && (await row(onAtlas.id)).close_reason === "cleared",
+    `once its statement is cleared, the next prune takes the entity (${JSON.stringify(after)})`);
+
+  // rebuild_derived, its input leaving, is a forgetting (SMD-1723's forget_thought, rebuild.ts --gone, whose reason is
+  // 'operator: forget'), and spares nothing (the maintainer, review pass 1; review pass 2: whatever the reason says): the
+  // walk's prune (a thought whose entities came through the writer, lineage and all) and the fallback's (mentions written
+  // raw, no lineage row) both take an entity with a statement, which 136's trigger closes as deleted.
+  const walked = await thought("[127] the walk's thought");
+  await rte(walked, [E("[127] Walked kept"), E("[127] Walked gone")]);
+  const wKept = (await idOf("tool", "[127] Walked kept"))!, wGone = (await idOf("tool", "[127] Walked gone"))!;
+  const onWKept = await put("entity", wKept, 3, OP);
+  const lineage = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'entities' AND artifact_id = $1::uuid`, [walked])).rows[0].n;
+  await db.query(`SELECT rebuild_derived($1::uuid, 'operator: forget', true, NULL, false, false)`, [walked]);
+  const raw = await thought("[127] the fallback's thought");
+  const fKept = await entity("[127] Fallback kept"), fGone = await entity("[127] Fallback gone");
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 0.9, 'extract:raw'), ($1::uuid, $3::uuid, 0.9, 'extract:raw')`, [raw, fKept, fGone]);
+  const onFKept = await put("entity", fKept, 2, OP);
+  await db.query(`SELECT rebuild_derived($1::uuid, '[127] input gone', true, NULL, false, false)`, [raw]);
+  assert(lineage === 1 && !(await exists(wKept)) && !(await exists(wGone)) && (await row(onWKept.id)).close_reason === "deleted"
+         && !(await exists(fKept)) && !(await exists(fGone)) && (await row(onFKept.id)).close_reason === "deleted" && await drift() === 0,
+    `rebuild_derived with its input leaving, whatever its reason, prunes an entity with a statement in the walk's prune and in the fallback's, closed as deleted (${lineage})`);
+
+  // prune_orphan_entities spares it too; a deliberate DELETE still closes it as deleted (136).
+  const lone = await entity("[127] Lone with a word"), bare = await entity("[127] Lone bare");
+  const onLone = await put("entity", lone, 5, BOT);
+  const swept = (await db.query<{ n: number }>(`SELECT prune_orphan_entities() AS n`)).rows[0].n;
+  const spared = await exists(lone), bareGone = !(await exists(bare));
+  await db.query(`DELETE FROM ob1_entities WHERE id = $1::uuid`, [lone]);
+  assert(swept >= 1 && spared && bareGone && (await row(onLone.id)).close_reason === "deleted" && await drift() === 0,
+    `prune_orphan_entities spares the entity with a statement and takes the bare one; an operator's DELETE then closes its statement as deleted (${swept})`);
+
+  // An entity with no statement of its own that another item's open statement takes its due time from is spared too
+  // (review pass 1: pruned, the reference named a deleted id and read no due time); once that statement is cleared, the
+  // next prune takes it.
+  const tE = await thought("[127] Keel is named here");
+  await rte(tE, [E("[127] Keel")]);
+  const keel = (await idOf("tool", "[127] Keel"))!;
+  const dueOnKeel = await thought("[127] due when Keel is");
+  await put("thought", dueOnKeel, 3, OP, { ref: ["entity", keel] });
+  const keelPrune = await rte(tE, []);
+  const keelSpared = await exists(keel);
+  await clear("thought", dueOnKeel, OP);
+  await db.query(`SELECT prune_orphan_entities()`);
+  assert(keelPrune.pruned_entities === 0 && keelSpared && !(await exists(keel)),
+    `an entity an open statement takes its due time from is spared, and pruned once that statement is cleared (${JSON.stringify(keelPrune)})`);
+
+  // A role without SELECT on the assertions prunes as before (no 42501 from the spare test): the entity goes, its statement
+  // left open, and 136's sweep closes it.
+  const BLIND = "ob1_test_prune_blind";
+  await db.exec(`CREATE ROLE ${BLIND} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${BLIND}`, ...grantStatements(BLIND, { groups: ["capture", "extraction"] }),
+                    `REVOKE SELECT ON priority_assertions FROM ${BLIND}`]) await db.exec(st);
+  const blindT = await thought("[127] pruned by a role that cannot read priorities");
+  await rte(blindT, [E("[127] Blind")]);
+  const blind = (await idOf("tool", "[127] Blind"))!;
+  const onBlind = await put("entity", blind, 3, OP);
+  let blindRun = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${BLIND}`);
+      blindRun = JSON.stringify((await tx.query<{ r: J }>(`SELECT record_thought_entities($1::uuid, 'extract:m@p126', '[]'::jsonb, '[]'::jsonb, NULL, NULL) AS r`, [blindT])).rows[0].r.pruned_entities);
+    });
+  } catch (e) { blindRun = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  const blindLeft = (await row(onBlind.id)).close_reason;
+  await db.query(`SELECT * FROM ob1_close_orphan_priorities()`);
+  assert(blindRun === "1" && !(await exists(blind)) && blindLeft === null && (await row(onBlind.id)).close_reason === "deleted",
+    `a role without SELECT on the assertions prunes as before, the statement left open for the sweep, which closes it (${blindRun})`);
+  await db.exec(`DROP OWNED BY ${BLIND}; DROP ROLE ${BLIND}`);
+
+  // A merge restates the due references naming the loser: another maker's statement on a thought, and a statement on the
+  // survivor (its reference, which would now name itself, dropped: 116's CHECK refuses one); a closed statement naming the
+  // loser untouched; the loser's own statement restated on the survivor beside them, as 136 does.
+  const S = await entity("[127] Survivor"), L = await entity("[127] Loser");
+  const tRef = await thought("[127] due when the loser is"), tRef2 = await thought("[127] also due when the loser is");
+  const refBot = await put("thought", tRef, 3, BOT, { ref: ["entity", L], reason: "follows the loser" });
+  const refOld = await put("thought", tRef2, 1, OP, { ref: ["entity", L] });
+  await Bun.sleep(5);
+  const refNew = await put("thought", tRef2, 2, OP, { ref: ["entity", L] });  // closes refOld as replaced
+  const refOnS = await put("entity", S, 4, BOT, { ref: ["entity", L] });
+  const onL = await put("entity", L, 2, OP);
+  const m = await merge(S, L);
+  const onT = await open("thought", tRef), onT2 = await open("thought", tRef2), onS = await open("entity", S);
+  const sBot = onS.find((h) => h.maker.name === "[127] bot"), sOp = onS.find((h) => h.maker.name === "[127] op");
+  assert(m.ok === true && m.priority_refs_moved === 3 && m.priorities_moved === 1
+         && onT.length === 1 && onT[0].due_ref?.key === S && onT[0].due_ref?.kind === "entity" && onT[0].level === 3 && onT[0].reason === "follows the loser"
+         && onT[0].maker.name === "[127] bot" && onT[0].asserted_at === refBot.asserted_at
+         && (await row(refBot.id)).close_reason === "replaced" && (await row(refBot.id)).closed_by === onT[0].id
+         && onT2.length === 1 && onT2[0].level === 2 && onT2[0].due_ref?.key === S && (await row(refOld.id)).closed_by === refNew.id
+         && sBot?.level === 4 && sBot?.due_ref === null && (await row(refOnS.id)).closed_by === sBot?.id
+         && sOp?.level === 2 && (await row(onL.id)).closed_by === sOp?.id && await drift() === 0,
+    `a merge restates the references naming the loser: a thought's (another maker's, level, reason and asserted_at kept) to name the survivor; the survivor's own with the reference dropped; a closed one untouched; the loser's own statement restated; priority_refs_moved 3, priorities_moved 1 (${JSON.stringify(m)})`);
+
+  // The maker's statement on the survivor naming the loser, restated with its reference dropped, is then replaced by the
+  // same maker's later statement on the loser, restated: priority_refs_moved counts what still stands, none.
+  const S2 = await entity("[127] Survivor replaced"), L2 = await entity("[127] Loser later");
+  const refOnS2 = await put("entity", S2, 1, OP, { ref: ["entity", L2] });
+  await Bun.sleep(5);  // the times are what the merge compares, and PGlite's clock can give two calls one millisecond
+  const onL2 = await put("entity", L2, 5, OP);
+  const m2 = await merge(S2, L2);
+  const onS2 = await open("entity", S2);
+  assert(m2.priority_refs_moved === 0 && m2.priorities_moved === 1 && onS2.length === 1 && onS2[0].level === 5
+         && (await row(onL2.id)).closed_by === onS2[0].id && (await row(refOnS2.id)).close_reason === "replaced" && await drift() === 0,
+    `a reference restated on the survivor and then replaced by the maker's later word on the loser is not counted: priority_refs_moved 0, priorities_moved 1 (${JSON.stringify(m2)})`);
+
+  // A role that cannot restate (the extraction group's: no INSERT) moves no reference: the thought's still names the loser.
+  const NOINS = "ob1_test_no_insert_126";
+  await db.exec(`CREATE ROLE ${NOINS} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${NOINS}`, ...grantStatements(NOINS, { groups: ["capture", "extraction"] })]) await db.exec(st);
+  const sNo = await entity("[127] Survivor no insert"), lNo = await entity("[127] Loser no insert");
+  const tNo = await thought("[127] due when the loser no insert is");
+  const refNo = await put("thought", tNo, 3, OP, { ref: ["entity", lNo] });
+  let noIns = "";
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${NOINS}`);
+      noIns = JSON.stringify((await tx.query<{ r: J }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sNo, lNo])).rows[0].r);
+    });
+  } catch (e) { noIns = `raised: ${(e as Error).message.split("\n")[0]}`; }
+  assert(/"ok":true/.test(noIns) && /"priority_refs_moved":0/.test(noIns) && (await row(refNo.id)).close_reason === null,
+    `a role that cannot restate merges as before, the reference left naming the loser (${noIns})`);
+  await db.exec(`DROP OWNED BY ${NOINS}; DROP ROLE ${NOINS}`);
+
+  // Under REPEATABLE READ a merge moves no reference, as the writers refuse a transaction there.
+  const sRR = await entity("[127] Survivor repeatable read"), lRR = await entity("[127] Loser repeatable read");
+  const tRR = await thought("[127] due when the loser repeatable read is");
+  const refRR = await put("thought", tRR, 3, OP, { ref: ["entity", lRR] });
+  let rr = "";
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+    rr = JSON.stringify((await tx.query<{ r: J }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [sRR, lRR])).rows[0].r);
+  });
+  assert(/"priority_refs_moved":0/.test(rr) && (await row(refRR.id)).close_reason === null,
+    `a merge under REPEATABLE READ moves no reference (${rr})`);
+
+  // apply_entity_type_gate's merge: a person named like an identifier is retyped to the tool of its name and merged into
+  // it; its statement moves onto the tool and a reference naming it now names the tool, where 136 closed both.
+  const toType = (await db.query<{ t: string | null }>(`SELECT entity_type_gate('WGT-1261', 'person') AS t`)).rows[0].t;
+  const target = await entity("WGT-1261", toType ?? "tool"), retyped = await entity("WGT-1261", "person");
+  const onRetyped = await put("entity", retyped, 4, OP, { reason: "the widget" });
+  const tGate = await thought("[127] due when the widget is");
+  const refGate = await put("thought", tGate, 2, BOT, { ref: ["entity", retyped] });
+  const gate = (await db.query<{ r: J }>(`SELECT apply_entity_type_gate() AS r`)).rows[0].r;
+  const onTarget = await open("entity", target), onTGate = await open("thought", tGate);
+  assert(toType !== null && toType !== "person" && !(await exists(retyped)) && (gate.merged_entities as number) >= 1
+         && (gate.priorities_moved as number) >= 1 && (gate.priority_refs_moved as number) >= 1
+         && onTarget.length === 1 && onTarget[0].level === 4 && onTarget[0].reason === "the widget" && (await row(onRetyped.id)).closed_by === onTarget[0].id
+         && onTGate.length === 1 && onTGate[0].due_ref?.key === target && (await row(refGate.id)).closed_by === onTGate[0].id && await drift() === 0,
+    `the gate's retype merge moves the entity's statement onto the one it merges into and restates the reference naming it, where the delete closed them (${toType}; ${JSON.stringify(gate)})`);
+
+  // Two retyped rows bound for one target (a person and a place named like a ticket, both project by the gate under 056's rule and 065's): the first
+  // merges, then the second, whose maker's later statement replaces the first's restatement. priorities_moved counts the
+  // one standing (review pass 2: summed per merge, it said two).
+  const target2 = await entity("WGT-1262", toType ?? "project"), asPerson = await entity("WGT-1262", "person");
+  await put("entity", asPerson, 2, OP);
+  await Bun.sleep(5);  // the times are what the merge compares, and PGlite's clock can give two calls one millisecond
+  const asPlace = await entity("WGT-1262", "place");
+  await put("entity", asPlace, 5, OP);
+  const gate2 = (await db.query<{ r: J }>(`SELECT apply_entity_type_gate() AS r`)).rows[0].r;
+  const onTarget2 = await open("entity", target2);
+  assert(!(await exists(asPerson)) && !(await exists(asPlace)) && gate2.priorities_moved === 1 && onTarget2.length === 1 && onTarget2[0].level === 5 && await drift() === 0,
+    `two retyped rows merging into one target, the second's later statement replacing the first's restatement, count one moved (${JSON.stringify(gate2)})`);
+
+  // A re-apply moves nothing and replaces the functions as they were.
+  const closedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE closed_at IS NOT NULL`)).rows[0].n;
+  const before = await closedCount();
+  await reapply(file.slice(0, 4));
+  assert(await closedCount() === before && await drift() === 0, `a re-apply closes nothing`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

@@ -294,7 +294,8 @@
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
- *      moved onto the shim (SMD-2144, SMD-2139), weekly-digest retired
+ *      moved onto the shim (SMD-2144, SMD-2139; brain-backup's since to
+ *      db/backup.ts, SMD-3318), weekly-digest retired
  *      for the db/ verb db/weekly-digest.ts (SMD-2239), brain-smoke-test
  *      retired into deploy/smoke.sh (SMD-2103), and ob-graph's
  *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
@@ -3259,6 +3260,7 @@ const NOT_FORWARDED: Record<string, string> = {
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
   OB1_SLOT_RELAY: "set by the coordinator alone, in the environment of each pass it starts with an IPC channel to its slot relay (SMD-3379 PR 3b-1) — the api has no channel, and a value forwarded from deploy/.env would have a process ask a relay that is not there",
+  OB1_SLOT_RELAY_URL: "where the api dials the coordinator's slot relay (SMD-3379 PR 3b-2): in the stack, always its own coordinator on the brain's network (slots.ts's RELAY_URL, ws://coordinator:8096/v1/relay); a checkout's api or a test sets it — forwarded from deploy/.env, a value could only point the api away from its own coordinator",
 };
 
 /**
@@ -6607,8 +6609,9 @@ const REST_CLIENT = "a script still to port; it becomes a REST-core client throu
  * recipe's README stays a pointer); and brain-smoke-test's smoke-all.js (SMD-2103), retired with its
  * recipe once deploy/smoke.sh took the wrong-key refusal, the one check of its that applied here and
  * that smoke.sh lacked; and ob-graph's smoke-graph-rpcs.mjs, with its recipe (SMD-2920; SMD-2146
- * canceled). Five more are on the shim: brain-backup's
- * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
+ * canceled). Five more went onto the shim: brain-backup's
+ * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land — the first of them
+ * since moved again, to db/backup.ts (SMD-3318) — and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
  * the first writers.
  */
@@ -6636,7 +6639,8 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
   // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
   // templates, is read to cover it. Its
-  // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
+  // two read-only siblings, brain-backup and lint-sweep, went onto the shim (SMD-2144, rescoped 2026-09-26);
+  // brain-backup's export is db/backup.ts now (SMD-3318).
   ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
 ]);
 function checkPostgrestClients() {
@@ -7714,6 +7718,7 @@ function listenLoopbackFiles(): string[] | null {
     .filter((n) => existsSync(join(ROOT, n)) && statSync(join(ROOT, n)).isFile()).sort();
 }
 const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
+  ["db/test-coordinator.ts", 'Bun.serve({ port: 0, fetch: () => new Response("") })', "the port-taken row: it holds a port on every address, as the coordinator's relay listener binds in its container, so that listener finds it taken (SMD-3379 PR 3b-2)"],
   ["db/test-support.ts", "new Response(token)", "secondLoopback's probe: it stands for a server on every address, so a row can find an address that reaches one"],
   ["db/test-support.ts", 'OB1_LISTEN_HOST: "127.0.0.1", ...env', "serveChild's own default, which a case's env may override; each override is an object naming OB1_LISTEN_HOST, read here as a site of its own"],
   ["server-portable/test-rest.ts", "OB1_LISTEN_HOST: value", "[11b]'s refusing children: told a value that is no address, or none the host has, they exit before they serve"],
@@ -11771,7 +11776,6 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["recipes/atomizer/re-atomize-gmail-thought.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/authorship-edges/README.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/authorship-edges/backfill-authorship.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
-  ["recipes/brain-backup/backup-brain.mjs", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/chatgpt-conversation-import/.env.example", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/chatgpt-conversation-import/README.md", { name: { why: KEPT.UPSTREAM, lines: 1 } }],
   ["recipes/editorial-policy/README.md", { fork: { why: KEPT.UPSTREAM, lines: 1 }, name: { why: KEPT.UPSTREAM, lines: 2 } }],
