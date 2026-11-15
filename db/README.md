@@ -2525,7 +2525,9 @@ agent id): accepting states a level (and a due time; re-confirming keeps the ope
 own statement's terms) through `assert_priority`, or
 clears the operator's own statement through `clear_priority`, so the history shows
 the operator's key; rejecting changes nothing; both suppress the same finding for the
-window. No finding changes a priority. The operations over REST and MCP, `brain_info`
+window while its statements are those decided on (a moved deadline, or the source's new
+level, raises it at once). Moot findings past the window are pruned; decided ones stay.
+No finding changes a priority. The operations over REST and MCP, `brain_info`
 and preflight are PR 2; posting to Linear is SMD-4304. Needs 046, 068, 116, 117, 122
 and 133, refusing by name without them; a re-apply is a no-op. test-schema [128],
 test-upgrade [20cf].
@@ -3096,7 +3098,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
 | | `priority_weight_settings` (132; the operator's weights, which every effective priority reads; a row changes only to end, once, and a DELETE and TRUNCATE are refused by trigger, for the owner too; `set_priority_weights` admits an operator key alone; the identity `id` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
-| | `priority_findings` (142; the priority review's findings: `ob1_priority_review()` writes and moots them, `review_priority_finding` records an operator key's decision) | `SELECT, INSERT, UPDATE` |
+| | `priority_findings` (142; the priority review's findings: `ob1_priority_review()` writes, moots and prunes them, `review_priority_finding` records an operator key's decision) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
 | | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
 | | `thought_sources` (053; since 133, which ticket's row a thought is: a ticket and its own rows are one item to the writers and the reads) | `SELECT` |

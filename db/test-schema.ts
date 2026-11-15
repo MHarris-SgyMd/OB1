@@ -21442,15 +21442,74 @@ console.log("\n[128] Migration 142: priority findings — ob1_priority_review() 
   await review(60, "1 minute");
   assert(!!(await pending(ent5, "stale")), `a statement replaced today by a move, its restatement keeping the old time, is no activity: the entity goes stale`);
 
-  // A statement due when an unsettled item is stays in force (review pass 5): an entity's 90-day-old statement with a
-  // due reference to an open item raises no stale finding.
-  const openRef = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, NULL, NULL, NULL, false, $2::jsonb) AS r`, ["[128] order the chain", JSON.stringify(OP)])).rows[0].r;
+  // A statement due when another item is stays in force while that due time is ahead (review passes 5 and 6): an
+  // entity's 90-day-old statement due when an open item due next month is raises no stale finding; one due when an
+  // item with no due time is has no deadline, and goes stale.
+  const openRef = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, $2, NULL, NULL, false, $3::jsonb) AS r`,
+    ["[128] order the chain", new Date(Date.now() + 30 * 86_400_000).toISOString(), JSON.stringify(OP)])).rows[0].r;
   const openRefId = String((openRef.item as J | undefined)?.id ?? openRef.id ?? "");
   const ent6 = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[128] Cleat', '[128] cleat') RETURNING id::text`)).rows[0].id;
   await rawBot(ent6, ", 'item', $3", [openRefId]);
   await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
   await review(60, "1 minute");
-  assert(!(await pending(ent6, "stale")), `an entity's 90-day-old statement due when an open item is stays in force: no stale finding`);
+  const noDueRef = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, NULL, NULL, NULL, false, $2::jsonb) AS r`, ["[128] someday the mast", JSON.stringify(OP)])).rows[0].r;
+  const noDueRefId = String((noDueRef.item as J | undefined)?.id ?? noDueRef.id ?? "");
+  const ent7 = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[128] Davit', '[128] davit') RETURNING id::text`)).rows[0].id;
+  await rawBot(ent7, ", 'item', $3", [noDueRefId]);
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
+  await review(60, "1 minute");
+  assert(!(await pending(ent6, "stale")) && !!(await pending(ent7, "stale")),
+    `an entity's 90-day-old statement due when an item due next month is stays in force; one due when an item with no due time is goes stale`);
+
+  // Review pass 6. A decision suppresses only while its statements are those decided on: accepting an overdue finding
+  // with a new due time, which then passes, raises the new deadline's finding at once.
+  const mvT = await thought("[128] a note whose deadline moves");
+  await db.query(`SELECT assert_priority('thought', $1, 3, $2::timestamptz, NULL, NULL, NULL, NULL, false, $3::jsonb)`,
+    [mvT, new Date(Date.now() - 86_400_000).toISOString(), JSON.stringify(OP)]);
+  await review(60, "1 minute");
+  const mvf = await pending(mvT, "overdue");
+  const mvDue = new Date(Date.now() + 2 * 86_400_000).toISOString();
+  await decide(mvf!.id, "accept", { level: 3, due: mvDue });
+  await review(60, "1 day");
+  const heldBack = !(await pending(mvT, "overdue"));
+  await review(60, "3 days");
+  assert(heldBack && !!(await pending(mvT, "overdue")), `a moved deadline holds no finding while ahead, and once it passes is raised at once, not held for the window`);
+
+  // The operator's counted statement is its stance: an older operator key's 4 beside a newer operator key's 1, the
+  // source's 1 — no disagreement.
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[128] op2', 'operator')`);
+  const OP2 = { name: "[128] op2", agent_id: await idOfAgent("[128] op2"), scope: "write" };
+  const twoOpT = await thought("[128] a note two operator keys stated on");
+  await put("thought", twoOpT, 4, OP2);
+  await Bun.sleep(5);
+  await put("thought", twoOpT, 1, OP);
+  await sourced("thought", twoOpT, 1);
+  await review(60, "1 minute");
+  assert(!(await pending(twoOpT, "disagree")), `an older operator key's 4 raises no disagreement when the newer operator statement, the counted one, agrees with the source`);
+
+  // A moot finding past the window is pruned; a decided one stays.
+  const mootCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings WHERE status = 'moot'`)).rows[0].n;
+  const decidedCount = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings WHERE status IN ('accepted', 'rejected')`)).rows[0].n;
+  const decidedBefore = await decidedCount();
+  await review(60, "400 days");
+  assert(await mootCount() === 0 || (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings WHERE status = 'moot' AND moot_at < now() + interval '340 days'`)).rows[0].n === 0,
+    `moot findings older than the window are pruned`);
+  assert(await decidedCount() === decidedBefore, `decided findings stay (${decidedBefore})`);
+
+  // An overdue finding's deadline is not carried through a due reference either (review pass 6): the operator's 3 due
+  // when an item since done was; re-confirming the level writes it without the reference.
+  const pastItem = (await db.query<{ r: J }>(`SELECT open_item($1, NULL, $2, NULL, NULL, false, $3::jsonb) AS r`,
+    ["[128] caulk the deck", new Date(Date.now() - 86_400_000).toISOString(), JSON.stringify(OP)])).rows[0].r;
+  const pastItemId = String((pastItem.item as J | undefined)?.id ?? pastItem.id ?? "");
+  const refOpT = await thought("[128] the operator's word, due when a done item was");
+  await db.query(`SELECT assert_priority('thought', $1, 3, NULL, NULL, 'item', $2, NULL, false, $3::jsonb)`, [refOpT, pastItemId, JSON.stringify(OP)]);
+  await db.query(`SELECT set_item_status($1, 'done', NULL, $2::jsonb)`, [pastItemId, JSON.stringify(OP)]);
+  await review(60, "1 minute");
+  const rof6 = await pending(refOpT, "overdue");
+  const racc = rof6 ? await decide(rof6.id, "accept", { level: 3 }) : { ok: false };
+  const refOpRow = (await db.query<{ due_ref_key: string | null }>(`SELECT due_ref_key FROM ob1_priority_open('thought', $1) WHERE maker_name = '[128] op'`, [refOpT])).rows;
+  assert(!!rof6 && racc.ok === true && refOpRow.length === 1 && refOpRow[0].due_ref_key === null,
+    `re-confirming an overdue finding's level drops the due reference that made it overdue (${JSON.stringify(refOpRow)})`);
 
   // A re-apply keeps the rows and replaces the functions as they were.
   const count = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_findings`)).rows[0].n;

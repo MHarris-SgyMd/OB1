@@ -5356,7 +5356,7 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
          && grants[1] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO "ob1_upgrade_probe";`
          && grants[2] === `GRANT SELECT ON priority_sources TO "ob1_upgrade_probe";`
          && grants[3] === `GRANT SELECT, INSERT, UPDATE ON priority_weight_settings TO "ob1_upgrade_probe";`
-         && grants[4] === `GRANT SELECT, INSERT, UPDATE ON priority_findings TO "ob1_upgrade_probe";`
+         && grants[4] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_findings TO "ob1_upgrade_probe";`
          && grants[5] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`
          && grants[6] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[7] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`
          && grants[8] === `GRANT SELECT ON thought_sources TO "ob1_upgrade_probe";`,
@@ -6810,7 +6810,7 @@ console.log("\n[20cf] Migration 142: onto a populated brain at the file before i
   const first = (await sql`SELECT ob1_priority_review() AS r`)[0].r as { found: number; pending: number };
   const second = (await sql`SELECT ob1_priority_review() AS r`)[0].r as { found: number; refreshed: number; pending: number };
   const rows = (await sql`SELECT kind, status FROM priority_findings WHERE item_key = ${note}`) as { kind: string; status: string }[];
-  const granted = (await sql`SELECT has_table_privilege(${OLD}, 'priority_findings', 'INSERT') AND has_table_privilege(${OLD}, 'priority_findings', 'UPDATE')
+  const granted = (await sql`SELECT has_table_privilege(${OLD}, 'priority_findings', 'INSERT') AND has_table_privilege(${OLD}, 'priority_findings', 'UPDATE') AND has_table_privilege(${OLD}, 'priority_findings', 'DELETE')
                                AND has_table_privilege(${OLD}, 'priority_findings', 'SELECT') AS g`)[0].g as boolean;
   assert(await made() && first.found === 1 && second.found === 0 && second.refreshed === 1 && rows.length === 1 && rows[0].kind === "disagree" && rows[0].status === "pending" && granted,
     `applied: the scan finds the operator's 4 against the source's 1 written before, one pending finding, and a second scan none new; the role holding the priority group gains the findings' grant (${JSON.stringify(first)})`);

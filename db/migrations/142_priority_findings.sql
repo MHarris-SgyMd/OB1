@@ -83,7 +83,9 @@
 --
 -- SAFETY
 --   One new table with its indexes, three new functions, and the priority
---   group's grant on the table, carried to the roles holding the group.
+--   group's grant on the table (SELECT, INSERT, UPDATE and DELETE: the scan
+--   prunes moot findings past the window), carried to the roles holding the
+--   group.
 --   MINOR under FORK.md's version rules. test-schema [128],
 --   test-upgrade [20cf].
 --
@@ -292,9 +294,11 @@ BEGIN
     -- stale (review pass 2).
     v_stale := ARRAY(SELECT a.id FROM _opr_pool a
                       WHERE NOT a.maker_source AND a.level >= 1 AND a.asserted_at < v_cut
-                        AND (a.due_at IS NULL OR a.due_at <= p_now) AND (a.not_before IS NULL OR a.not_before <= p_now)
-                        -- Due when an unsettled item is: in force too (review pass 5).
-                        AND (a.due_ref_key IS NULL OR ob1_item_settled(a.due_ref_kind, a.due_ref_key))
+                        AND (a.not_before IS NULL OR a.not_before <= p_now)
+                        -- Its due time as the read resolves it, a due reference's included:
+                        -- ahead, it is in force (review passes 2, 5 and 6; a reference
+                        -- resolving to no due time is no deadline).
+                        AND COALESCE((ob1_priority_due((SELECT p FROM priority_assertions p WHERE p.id = a.id), c.kind, c.key, true)).due_at, '-infinity') <= p_now
                       ORDER BY a.seq);
     IF cardinality(v_stale) > 0 THEN
       v_act := ob1_priority_activity(c.kind, c.key);
@@ -307,14 +311,15 @@ BEGIN
       END IF;
     END IF;
     -- disagree: an operator's statement and a source's two or more levels apart.
+    -- The operator's stance is tier 1's newest, as the read counts it, not an
+    -- older operator key's (review pass 6); the source's its newest.
     INSERT INTO _opr_found
     SELECT 'disagree', c.kind, c.key, ARRAY[o.id, s.id],
            jsonb_build_object('operator', jsonb_build_object('id', o.id, 'level', o.level, 'maker', o.maker_name),
                               'source',   jsonb_build_object('id', s.id, 'level', s.level, 'maker', s.maker_name))
-      FROM _opr_pool o, _opr_pool s
-     WHERE o.tier = 1 AND s.tier = 2 AND s.maker_source AND abs(o.level - s.level) >= 2
-     ORDER BY o.seq DESC, s.seq DESC
-     LIMIT 1;
+      FROM (SELECT * FROM _opr_pool WHERE tier = 1 ORDER BY seq DESC LIMIT 1) o,
+           (SELECT * FROM _opr_pool WHERE tier = 2 AND maker_source ORDER BY seq DESC LIMIT 1) s
+     WHERE abs(o.level - s.level) >= 2;
   END LOOP;
 
   -- overdue: an unsettled item effective_priority reads as past its due time,
@@ -343,6 +348,11 @@ BEGIN
                   WHERE a.id = ANY(f.ids) AND a.due_ref_key IS NOT NULL
                     AND g.kind = 'overdue' AND g.item_kind = r.kind AND g.item_key = r.key);
 
+  -- Moot findings past the window go: a condition that flaps would add a row
+  -- each cycle (the maintainer, review pass 6). Decided ones stay, the record
+  -- of who decided what.
+  DELETE FROM priority_findings p WHERE p.status = 'moot' AND p.moot_at < v_cut;
+
   -- Pending findings whose condition no longer holds: moot.
   UPDATE priority_findings p SET status = 'moot', moot_at = p_now
    WHERE p.status = 'pending'
@@ -360,13 +370,15 @@ BEGIN
       v_fresh := v_fresh + 1;
       CONTINUE;
     END IF;
-    -- Decided within its window: not raised again until the window passes. A
-    -- settled finding decided: not again while its statements are those it
-    -- was decided on (review pass 1).
+    -- Decided, and its statements those decided on (the decision's own
+    -- statement among them): not raised again within the window, or for a
+    -- settled finding at all (review pass 1). A statement new since (a moved
+    -- deadline, the source's new level) raises it at once (the maintainer,
+    -- review pass 6).
     IF EXISTS (SELECT 1 FROM priority_findings p
                 WHERE p.kind = c.kind AND p.item_kind = c.item_kind AND p.item_key = c.item_key
-                  AND p.suppressed_until IS NOT NULL
-                  AND (p.suppressed_until > p_now OR (p.kind = 'settled' AND c.ids <@ p.assertion_ids))) THEN
+                  AND p.suppressed_until IS NOT NULL AND c.ids <@ p.assertion_ids
+                  AND (p.suppressed_until > p_now OR p.kind = 'settled')) THEN
       v_skipped := v_skipped + 1;
       CONTINUE;
     END IF;
@@ -474,6 +486,13 @@ BEGIN
       IF v_prev.level IS DISTINCT FROM p_level THEN
         v_prev := NULL;
       END IF;
+      -- An overdue finding's deadline is what was reviewed: its due reference
+      -- is not carried either (review pass 6: a passed reference kept it
+      -- overdue).
+      IF v_f.kind = 'overdue' THEN
+        v_prev.due_ref_kind := NULL;
+        v_prev.due_ref_key := NULL;
+      END IF;
       -- A due time given replaces the kept due reference, and a kept start
       -- after it (review pass 4: assert_priority refused the pair, raising).
       IF p_due_at IS NOT NULL THEN
@@ -509,6 +528,12 @@ BEGIN
      SET status = CASE p_decision WHEN 'accept' THEN 'accepted' ELSE 'rejected' END,
          decided_at = v_now, decided_by = v_who.name, decided_by_agent_id = v_who.env_agent_id,
          decision_note = p_note, outcome = v_out,
+         -- The statement the decision wrote, so a re-scan finding it holds the
+         -- suppression (a level kept that still disagrees), and a later one
+         -- does not (review pass 6). Not an overdue finding's: the deadline it
+         -- wrote, once passed, is a new one to raise.
+         assertion_ids = assertion_ids || CASE WHEN v_out->'assertion'->>'id' IS NOT NULL AND v_f.kind <> 'overdue'
+                                               AND v_out->>'outcome' = 'asserted' THEN ARRAY[(v_out->'assertion'->>'id')::uuid] ELSE '{}'::uuid[] END,
          suppressed_until = v_now + make_interval(days => v_f.window_days)
    WHERE id = p_id
    RETURNING * INTO v_f;
@@ -536,7 +561,7 @@ BEGIN
      WHERE c.oid = 'priority_assertions'::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('SELECT', 'INSERT')
   LOOP
     EXECUTE format('GRANT %s ON priority_findings TO %s',
-                   CASE v_item.privilege_type WHEN 'SELECT' THEN 'SELECT' ELSE 'INSERT, UPDATE' END,
+                   CASE v_item.privilege_type WHEN 'SELECT' THEN 'SELECT' ELSE 'INSERT, UPDATE, DELETE' END,
                    CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
   END LOOP;
 END
