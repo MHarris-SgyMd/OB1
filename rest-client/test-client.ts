@@ -125,6 +125,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     // Work claims (SMD-3598): the token rides the JSON body of each POST, never the URL.
     list_claims: { ticket: "SMD-3379", holder: "a key", include_ended: true, limit: 7 },
     claim_work: { ticket: "smd-3379", piece: "PR 1b-2", label: "a session & a branch", lease_seconds: 600, token: "wc_" + "0".repeat(64) },
+    set_work_claim_cap: { cap: 50 },
     renew_claim: { id: ID, token: "wc_" + "1".repeat(64), lease_seconds: 3600 },
     release_claim: { id: ID, token: "wc_" + "2".repeat(64), reason: "merged", force: false },
     // Priority assertions (SMD-3664): the item in the path — a ticket key and a uuid — the rest in the body or none.

@@ -3389,6 +3389,30 @@ console.log("\n[22] The per-holder claim cap through both doors (SMD-3606, migra
   }
 }
 
+console.log("\n[23] set_work_claim_cap through both doors (SMD-3606 PR 1b, migration 140): the operator sets the per-holder cap over REST and MCP, an agent key refused 403 NOT_OPERATOR, a cap out of range refused by the schema, null clears; brain_info shows the standing cap and the built-in default");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('rival', 'agent')`;
+  try {
+    const set = await rest("POST", "/v1/work-claim-cap", { cap: 7 });  // the writer is the operator (the default key)
+    const mcpSet = await mcp("set_work_claim_cap", { cap: 3 });
+    const byAgent = await rest("POST", "/v1/work-claim-cap", { cap: 9 }, KEYS.rival);
+    const badSchema = await rest("POST", "/v1/work-claim-cap", { cap: 0 });  // the schema admits 1..100000, so 0 is refused before the database
+    const info = await mcp("brain_info", {});
+    const cleared = await rest("POST", "/v1/work-claim-cap", { cap: null });
+    const infoCleared = await mcp("brain_info", {});
+    assert(set.status === 200 && set.body.changed === true && set.body.cap === 7 && set.body.previous === null && !("token" in set.body)
+        && !mcpSet.isError && mcpSet.sc.cap === 3 && mcpSet.sc.previous === 7 && /^Set the per-holder cap on live work claims to 3:/.test(mcpSet.text)
+        && byAgent.status === 403 && byAgent.body.code === "REFUSED_NOT_OPERATOR"
+        && badSchema.status === 400 && badSchema.body.code === "REFUSED_INPUT"
+        && /the operator's: 3 \(set /.test(info.text)
+        && cleared.status === 200 && cleared.body.cap === null && cleared.body.changed === true && /built in \(50\)/.test(infoCleared.text),
+      `the operator sets the cap over both doors (REST 7, MCP 3), an agent key refused 403 NOT_OPERATOR, 0 refused 400 by the schema, null clears; brain_info shows the operator's 3 then the built-in 50 (${set.status}/${set.body.cap} ${mcpSet.sc.cap} ${byAgent.body.code} ${badSchema.status}/${badSchema.body.code} cleared ${cleared.body.cap})`);
+  } finally {
+    // Clear through the op (the writer is the operator), so the built-in cap stands for any later section; the server passes the actor envelope.
+    await rest("POST", "/v1/work-claim-cap", { cap: null });
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

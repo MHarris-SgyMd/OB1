@@ -1262,11 +1262,13 @@ calls does.
 | Code | Status | When |
 | --- | --- | --- |
 | `WORK_CLAIMED` | 409 | A live claim covers the work. `heldBy` names each claim: id, holder, kind, times and `ownKey` (the caller's own key holds it: another session of it, or this one without its token), never its label. |
+| `CLAIM_LIMIT` | 409 | The holder already holds its cap of live claims — the operator's per-holder cap, or the built-in 50 — so a new claim is refused until one ends or an operator raises the cap (`set_work_claim_cap`). `cap` and `held` name the cap and the holder's live-claim count; a renewal is never capped (SMD-3606, migration 140). |
 | `CLAIM_NOT_YOURS` | 403 | Not this key with this token. `forced: true` means a force refused: the key is no operator by agent id. `ownKey: true`: the caller's own key holds it under a token this call did not give. |
 | `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). `claim_work` with the caller's own ended claim's token, on that claim's work, answers it too, rather than making a new claim (SMD-3654); on other work the token is ignored and a new claim made. |
 | `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
+| `CLAIM_CAP_UNATTRIBUTED` | 503 | `set_work_claim_cap` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `PRIORITY_UNATTRIBUTED`, for the cap setter (SMD-3606 PR 1b). |
 | `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), the claim unreleased; or a `claim_work` with that token on exactly that claim's work while it is unreleased, live or lapsed, which 115 would otherwise read as another's: refused WORK_CLAIMED while live, taken over once lapsed (SMD-3705). On a renew and on that `claim_work`, `lapsedAt` when the claim's lease had run out (a release carries none): another claim may cover its work by now, so list the ticket's claims before carrying on. `forced: true`: a forced release, which needs the id to classify an operator. |
 
 A whole ticket and any of its pieces are the same work; two different pieces are not.
@@ -1342,6 +1344,19 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   the database refuses fails the agenda and a ranked search (500, its message naming
   the setting and the weight) until an operator sets it again or clears it; a search's
   priority labels and `plan_context`'s board say only that they were not read.
+- **`set_work_claim_cap`** (`POST /v1/work-claim-cap`, write scope; SMD-3606 PR 1b,
+  migration 140): the operator's per-holder cap on how many live work claims one key
+  may hold, which `claim_work` enforces — a new claim past it is refused `CLAIM_LIMIT`,
+  a renewal of the holder's own never. `null` clears it, so the built-in 50 stands. Past
+  the scope, the database admits a key the operator classified `operator`, by its agent
+  id, alone: any other is refused `REFUSED_NOT_OPERATOR` (403); a cap out of range (1 to
+  100000) is refused `REFUSED_INPUT` (400) by the schema. While the agent registry
+  cannot give the key's agent id the call is refused `CLAIM_CAP_UNATTRIBUTED` (503,
+  retryable), as `set_priority_weights` answers `PRIORITY_UNATTRIBUTED`. The answer is
+  `{changed, cap, previous, setAt, setBy, caller}`: `changed` false means the cap given
+  was the one standing, and nothing was written; a replaced setting stays as history.
+  `brain_info`'s `database.workClaimCap` shows the standing cap — built in, the
+  operator's, or the operator's refused.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while
