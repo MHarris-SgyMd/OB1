@@ -7309,7 +7309,7 @@ OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outsi
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-coordinator.ts                     # the coordinator's passes, each one's settings and command line — no database; as root, its planted /proc check
-bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run() — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run(), and the claim workers' loop (claim-loop.ts's claimWorker, SMD-4308) over a stand-in for the database — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject, and what became of a finding posted (SMD-2682) — no database
