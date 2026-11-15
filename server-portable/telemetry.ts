@@ -122,13 +122,17 @@ export interface RequestRecord {
 const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"]);
 /**
  * The JSON-RPC methods an MCP client sends this server (the 2025-06-18
- * schema's, client to server), and `batch`, which the MCP server writes for a
- * body of several messages; any other is `other`.
+ * schema's, client to server, and the two the 2026-07-28 revision adds,
+ * `server/discover` and `subscriptions/listen`: a client that offers that
+ * revision probes with the first before it initializes, SMD-4345), and
+ * `batch`, which the MCP server writes for a body of several messages; any
+ * other is `other`.
  */
 const RPC_METHODS = new Set([
   "batch", "initialize", "ping", "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read",
   "resources/subscribe", "resources/unsubscribe", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel",
   "notifications/initialized", "notifications/cancelled", "notifications/progress", "notifications/roots/list_changed",
+  "server/discover", "subscriptions/listen",
 ]);
 const TOOL_NAMES: ReadonlySet<string> = new Set(TOOLS.map((t) => t.name));
 /** The enabled plugins' tool names (SMD-2310), known beside the core's once a server loads them (knowTools). */

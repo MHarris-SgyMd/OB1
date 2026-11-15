@@ -83,8 +83,19 @@ const app = createMcpApp({ rest, edge: () => ({ configured: false, origin: null 
 
 let rpcId = 1;
 type Rpc = { status: number; headers: Headers; body: Record<string, unknown> | null };
-async function rpc(method: string, params: unknown, key?: string, opts: { notification?: boolean; via?: "header" | "query" | "bearer"; path?: string } = {}): Promise<Rpc> {
+/** The 2026-07-28 revision's per-request envelope, which takes the place of `initialize`: the revision, who the client is, what it can do. */
+const MODERN = "2026-07-28";
+const ENVELOPE = { "io.modelcontextprotocol/protocolVersion": MODERN, "io.modelcontextprotocol/clientInfo": { name: "test-mcp", version: "0" }, "io.modelcontextprotocol/clientCapabilities": {} };
+/** `modern`: the request as a 2026-07-28 client sends it — the envelope in `params._meta`, and the revision, the method and a called tool's name as headers. */
+async function rpc(method: string, params: unknown, key?: string, opts: { notification?: boolean; via?: "header" | "query" | "bearer"; path?: string; modern?: boolean } = {}): Promise<Rpc> {
   const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  if (opts.modern) {
+    headers["mcp-protocol-version"] = MODERN;
+    headers["mcp-method"] = method;
+    const named = (params as { name?: unknown } | null)?.name;
+    if (typeof named === "string") headers["mcp-name"] = named;
+    params = { ...(params as object), _meta: ENVELOPE };
+  }
   const via = opts.via ?? "header";
   if (key && via === "header") headers["x-brain-key"] = key;
   if (key && via === "bearer") headers.authorization = `Bearer ${key}`;
@@ -928,6 +939,24 @@ console.log("\n[9] The method guard, the preflight and discovery, as index.ts an
   assert(r.status === 405 && r.headers.get("allow") === "GET, HEAD, POST, OPTIONS", "PUT at a health path: 405 naming its GET and HEAD");
   r = await app.fetch(new Request("http://mcp/mcp", { method: "OPTIONS" }));
   assert(r.status === 200 && r.headers.get("access-control-allow-origin") === "*", "OPTIONS: the CORS preflight");
+  const allowed = (r.headers.get("access-control-allow-headers") ?? "").split(", ");
+  assert(["mcp-protocol-version", "mcp-method", "mcp-name"].every((h) => allowed.includes(h)), `…its allow-headers name what a 2026-07-28 POST must carry, so a browser-hosted client's preflight passes (SMD-4345: ${allowed.filter((h) => h.startsWith("mcp-")).join(", ")})`);
+  {
+    // A 2026-07-28 client's first request, `server/discover` (SMD-4345 PR 1). This server serves the 2025-era
+    // revisions alone until PR 2, so the SDK's transport refuses the revision, and the client falls back to
+    // `initialize` (docs/mcp-client-refresh.md). Its line names the method all the same.
+    const { useRequestLog } = await import("../server-portable/telemetry.ts");
+    const lines: Record<string, unknown>[] = [];
+    const before = useRequestLog((l) => lines.push(JSON.parse(l) as Record<string, unknown>));
+    const probe = await rpc("server/discover", {}, "read-raw", { modern: true });
+    const keyless = await rpc("server/discover", {}, undefined, { modern: true });
+    useRequestLog(before);
+    const said = String((probe.body?.error as { message?: unknown } | undefined)?.message);
+    assert(probe.status === 400 && said.includes("Unsupported protocol version: 2026-07-28"), `a 2026-07-28 server/discover with a key: refused 400 by its revision, until PR 2 serves it (${probe.status} ${said})`);
+    assert(lines[0]?.rpc === "server/discover" && lines[0]?.status === 400 && lines[0]?.agent === "chatgpt", `…its line names the method, not \`other\` (${JSON.stringify(lines[0])})`);
+    assert(keyless.status === 200 && (keyless.body?.error as { code?: unknown } | undefined)?.code === -32001 && lines[1]?.rpc === "server/discover" && lines[1]?.outcome === "refused" && lines[1]?.code === "UNAUTHORIZED",
+      `…and with no key it is refused at the key as a 2025-era request is, the -32001 envelope, before its revision is read (${keyless.status} ${JSON.stringify(keyless.body)}; ${JSON.stringify(lines[1])})`);
+  }
   r = await app.fetch(new Request("http://mcp/.well-known/oauth-protected-resource/mcp"));
   assert(r.status === 404, "an unconfigured stack's protected-resource path: 404");
 }

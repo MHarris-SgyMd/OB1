@@ -3974,6 +3974,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   } as never, at)) as Record<string, unknown>;
   assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
     `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  const modernRpc = ["server/discover", "subscriptions/listen"].map((rpc) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rpc, status: 200, outcome: "ok", ms: 1 }, at)) as { rpc?: unknown }).rpc);
+  assert(JSON.stringify(modernRpc) === '["server/discover","subscriptions/listen"]', `the two methods the 2026-07-28 revision adds are named, not \`other\` (SMD-4345: ${JSON.stringify(modernRpc)})`);
   assert(odd.agent === "laptop?{\"forged\":1}" && !JSON.stringify(odd).includes("the-key") && !JSON.stringify(odd).includes("private") && !("url" in odd) && !("query" in odd),
     "…the agent's name held to printable ASCII (a line break is `?`); a field the record does not declare is not written");
 
