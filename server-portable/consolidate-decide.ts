@@ -13,7 +13,8 @@
  * Since version 4 (SMD-3203) the judge's model is first asked the mediated-pair test's link step about such a pair. A
  * pair whose two thoughts are about different subjects, linked by a third subject both mention (F) or by one naming
  * the other's subject in passing (H), is related at most and proposes nothing: docs/subject-anchored-claims.md, row 3.
- * Since version 5 (SMD-3306 PR 7b) decide mode judges no evolves: H2O's evolves is stored as related (fromThreads),
+ * Since version 5 (SMD-3306 PR 7b) decide mode judges no evolves: H2O's evolves is stored as related at both words'
+ * share (fromThreads),
  * since a pair evolves when the newer comes next on the older's own subject's work thread, an edge the database keeps
  * between consecutive thoughts of a thread (origin `thread`, migration 120), not a pair's judgement. Version 4 also
  * asked the link step after an evolves the pass would store, row 2's cap, which goes with it.
@@ -27,7 +28,7 @@
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
-import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, REASON_MAX, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
+import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, MIN_COVERED, oneLine, outdatesConfidence, REASON_MAX, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
 import { jevChoose, type JevConfig, type JevModelInfo, type JevOption } from "./jev.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
@@ -336,12 +337,12 @@ export const DECIDE_PROMPT = [RELATION_QUESTION, ...OFFERED.map((v) => DESCRIPTI
  * quotes now check out, would close for no proposal. Under the floor the writer is not asked, and the pair takes
  * H2O's best verdict that proposes nothing, as a quote that fails did: its relation at the floor, else a closed edge.
  * Both decide which judgements become proposals, so they are rules between the two and move the key.
- * 4, the pass's (key `@p4d4`, SMD-3203): version 3, and the writer's link step, the mediated-pair test's step 2
+ * 4 (key `@p4d4`, SMD-3203): version 3, and the writer's link step, the mediated-pair test's step 2
  * (linkMessages), asked first on H2O's outdates at the floor and after on a pair the pass would store as evolves. An
  * H or F link, or an answer naming none of the four, caps the pair: related at most, and no supersession
  * (docs/subject-anchored-claims.md, rows 2 and 3; capJudgement). It asks the writer once more on those pairs, a
  * median 14.3 s of the 27B a pair on SMD-3203's 100. 5, the pass's (key `@p4d5`, SMD-3306 PR 7b): version 4, H2O's
- * evolves stored as related (fromThreads), and the link step asked only first: work threads give evolves (SMD-3306's
+ * evolves stored as related at P(related) + P(evolves) (fromThreads), and the link step asked only first: work threads give evolves (SMD-3306's
  * items 3 and 4), and row 2's cap guarded an evolves the pass no longer stores. On the canary's pairs the cap's
  * precision missed its bar, 0.686 against 0.7 (SMD-3203), and three rounds of asking it otherwise did not qualify
  * (SMD-3299); the threads need no cap, since a pair whose own subjects differ is never one thread.
@@ -381,6 +382,11 @@ export type DecideNote = {
    * pair: an H or F link, or none read.
    */
   link?: { model: string; asked: "first" | "after"; link: Link | "unparsed"; via: string; reason: string; capped: boolean };
+  /**
+   * Since version 5: true when the judgement came to evolves, H2O's top or the best a gated, declined or failed outdates
+   * fell back to, and was stored as related (fromThreads), so a relation's recipe says so whatever its `top`.
+   */
+  threaded?: true;
 };
 
 /** The best of the verdicts in `vs` by `p`, the first on a tie. */
@@ -404,17 +410,23 @@ export function decideJudgement(p: Record<Verdict, number>, proposal: Proposal |
 }
 
 /**
- * A judgement as decide mode stores it since version 5: an evolves is related at H2O's P(related), as capJudgement
- * stores a capped pair, and any other verdict stands. The pass's floor reads the relation words' mass
- * (relationConfidence), the same for either word, so a pair it related before is related still; what evolves stands
- * between two thoughts is a work thread's edge (SMD-3306).
+ * A judgement as decide mode stores it since version 5: an evolves is related, any other verdict as it was. Its
+ * relation stands at P(related) + P(evolves) (`foldedEvolves`, read by relationConfidence): the share of the word it
+ * now stands for, at most the relation words' mass the pass's floor reads, which is the same for either word, so a pair
+ * it related before is related still. Not P(related) alone, as capJudgement stores a capped pair: there the rest of the
+ * mass is about a third subject, while an evolves is the tier's surest link, and at P(related) it would rank last among
+ * a thought's relations and read 0.00 on the board (review pass 1, run-it and cold read). Without H2O's distribution
+ * the written number stands, as relationConfidence reads it. What evolves stands between two thoughts is a work
+ * thread's edge (SMD-3306).
  */
 export function fromThreads(j: Judgement): Judgement {
   if (j.verdict !== "evolves") return j;
-  const p = j.probabilities?.verdict?.p as Record<string, number> | undefined;
+  const d = j.probabilities?.verdict;
+  const p = d?.p as Record<string, number> | undefined;
   const { evidenceFound: _quoteChecked, ...rest } = j;
   const why = "evolves comes from the work threads (SMD-3306), so the pair is related";
-  return { ...rest, verdict: "related", supersedes: "unknown", confidence: p?.related ?? 0, evidence: "", reason: j.reason ? `${j.reason}; ${why}` : why };
+  const both = p && d && d.covered >= MIN_COVERED ? Math.round(((p.related ?? 0) + (p.evolves ?? 0)) * 10000) / 10000 : j.confidence;
+  return { ...rest, verdict: "related", foldedEvolves: true, supersedes: "unknown", confidence: both, evidence: "", reason: j.reason ? `${j.reason}; ${why}` : why };
 }
 
 /**
@@ -505,6 +517,12 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   const p = verdictDistribution(result.probabilities);
   const top = best(p, OFFERED);
   const note: DecideNote = { decider: { name: model.name, revision: model.revision, weights_sha256: model.weights_sha256, rules: model.rules }, version: DECIDE_VERSION, top };
+  // Version 5: an evolves stored as related, and the note marked so.
+  const threaded = (j: Judgement): Judgement => {
+    const t = fromThreads(j);
+    if (t !== j) note.threaded = true;
+    return t;
+  };
   if (top === "outdates" && outdatesConfidence(p) >= floor) {
     // Row 3 (SMD-3203): a mediated pair proposes nothing, so the link step goes first, and a pair it caps is written
     // no proposal: it takes H2O's best verdict that proposes nothing, related at most.
@@ -522,12 +540,12 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
         ? quoteIn(proposal.stale, other, current) || (evidenceIn(proposal.stale, other) && onlyQuoted(proposal.stale, current))
         : evidenceIn(proposal.stale, other, current)),
     };
-    return { ...fromThreads(decideJudgement(p, proposal, standing)), decide: note };
+    return { ...threaded(decideJudgement(p, proposal, standing)), decide: note };
   }
   // Under the floor a standing proposal would record nothing and close the pair's relation (SMD-3151 review pass 3),
   // so the writer is not asked: the pair takes H2O's best verdict that proposes nothing, as a quote that fails does.
   if (top === "outdates") note.floor = floor;
   // Version 5 (SMD-3306 PR 7b): an evolves is related, the work threads giving evolves; version 4 asked the link step
   // after one the pass would store, row 2's cap.
-  return { ...fromThreads(decideJudgement(p, null, false)), decide: note };
+  return { ...threaded(decideJudgement(p, null, false)), decide: note };
 }

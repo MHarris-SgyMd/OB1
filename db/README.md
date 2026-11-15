@@ -4749,14 +4749,21 @@ tier gives each pair's verdict, not the judge:
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
 - **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with
   no evolves of its own. The tier's evolves is stored as related, at the
-  tier's P(related), floored on the relation words' mass as any relation is,
-  so a pair it related before is related still: a pair evolves when the newer
-  comes next on the older's own subject's work thread, the edge migration 120
-  keeps between consecutive thoughts of a thread (origin `thread`), not by a
-  pair's judgement. The link step is asked only first, on the tier's outdates
-  at the floor; version 4's check after an evolves goes with the evolves. The
-  run's verdicts line counts no evolves, and a relation's note keeps the
-  tier's top, so an evolves stored as related says so.
+  tier's P(related) + P(evolves), the share of the word it now stands for
+  (at P(related) alone the tier's surest links would rank last among a
+  thought's relations), floored on the relation words' mass as any relation
+  is, so a pair it related before is related still: a pair evolves when the
+  newer comes next on the older's own subject's work thread, the edge
+  migration 120 keeps between consecutive thoughts of a thread (origin
+  `thread`), not by a pair's judgement. The link step is asked only first, on
+  the tier's outdates at the floor; version 4's check after an evolves goes
+  with the evolves. The run's verdicts line counts no evolves, and a
+  relation's note says `threaded` where an evolves, the tier's top or the
+  best an outdates fell back to, was stored as related. An evolves version 4
+  stored stands until its pair is judged again: a new key pools every
+  thought, but a pair whose newer thought is superseded, or no longer among
+  its candidates, is not judged again, and its evolves stays in the counts
+  and the board findings.
 - **Version 4** (`@p4d4`, SMD-3203): version 3, with the
   writer's **link step**, the mediated-pair test's step 2
   (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
@@ -4804,8 +4811,8 @@ tier gives each pair's verdict, not the judge:
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
   on, or a new decide version, starts a fresh pass: the tier again for every
   pooled thought's candidates, the link step for each outdates at the floor
-  and each evolves it would store, and the writer for each outdates at the
-  floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  (and, under version 4, each evolves it would store), and the writer for
+  each outdates at the floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
   about 3.8 s a pair.
 - **Refused at start:** the run refuses with neither `OB1_CONSOLIDATE_DECIDER_URL`
   nor `OB1_JEV_BASE_URL` set, or, on the shared tier, with `OB1_JEV_MODEL` naming

@@ -19657,10 +19657,10 @@ if (want("16")) {
       // Decide version 4 (SMD-3203): the gateway pair, an outdates at the floor whose link step finds F, is written no
       // proposal and takes the tier's related, capped, under the floor, and its stale proposal is settled, the note
       // saying the link step capped it. Version 5 (SMD-3306 PR 7b): the pager pair, an evolves the pass would store, is
-      // stored related at the tier's P(related), at the same floor, no link step asked.
+      // stored related at the tier's P(related) + P(evolves), at the same floor, its note marked, no link step asked.
       const [gateAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${gateProp}::uuid`) as { status: string; review_note: string | null }[];
       const cappedNote = passSettledNote("judged again after a text moved — related, capped by the writer's link step (an F link, SMD-3203)", DKEY);
-      type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
+      type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; threaded?: boolean; writer?: unknown } } } };
       const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
       const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
       const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null })
@@ -19669,10 +19669,10 @@ if (want("16")) {
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
       assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
           && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
-          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link === undefined
-          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.verdict === "related" && (pagerDump.link ?? null) === null && (pagerDump.asked ?? null) === null
+          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link === undefined && pager.recipe.judged.decide.threaded === true
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.8 && pagerDump?.verdict === "related" && (pagerDump.link ?? null) === null && (pagerDump.asked ?? null) === null
           && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
-        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so); the pager pair's evolves is stored as related at the tier's P(related), no link step asked (version 5); and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
+        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so); the pager pair's evolves is stored as related at the tier's P(related) + P(evolves), its note marked, no link step asked (version 5); and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 3 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
           && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)

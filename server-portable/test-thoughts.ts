@@ -2093,12 +2093,24 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(capJudgement(decideJudgement({ ...capP, duplicate: 0.5, evolves: 0 }, null, false), "F").verdict === "related" && capJudgement(declined, "unparsed").verdict === "related" && capJudgement(declined, "unparsed").confidence === declined.confidence
       && capJudgement(noWriter, "F").verdict === "unrelated" && /no link it could read/.test(capJudgement(declined, "unparsed").reason),
     "a duplicate capped is related; a related or an unrelated stands; an unread link says so");
-  // Version 5 (SMD-3306 PR 7b): the work threads give evolves, so decide mode stores an evolves as related, at H2O's
-  // P(related) as the cap does, its floor the relation words' mass; every other verdict stands as it was.
+  // Review pass 1 (mutant): a capped outdates whose next best is duplicate is related by the cap; the threads' rule
+  // would leave a duplicate.
+  assert(capJudgement(decideJudgement({ unrelated: 0.05, related: 0.1, evolves: 0.05, duplicate: 0.3, outdates: 0.5 }, null, false), "H").verdict === "related"
+      && fromThreads(decideJudgement({ unrelated: 0.05, related: 0.1, evolves: 0.05, duplicate: 0.3, outdates: 0.5 }, null, false)).verdict === "duplicate",
+    "…the cap relates a duplicate, which the threads' rule leaves as it was");
+  // Version 5 (SMD-3306 PR 7b): the work threads give evolves, so decide mode stores an evolves as related, at
+  // P(related) + P(evolves), the share of the word it now stands for (review pass 1: at P(related) alone the tier's
+  // surest links ranked last), its floor the relation words' mass; every other verdict stands as it was.
   const threaded = fromThreads(evolving);
-  assert(threaded.verdict === "related" && threaded.confidence === 0.15 && relationVerdict(threaded) === "related" && relationConfidence(threaded).mass === relationConfidence(evolving).mass
-      && threaded.supersedes === "unknown" && /evolves comes from the work threads \(SMD-3306\), so the pair is related/.test(threaded.reason) && threaded.probabilities?.verdict?.p.evolves === 0.45,
-    "an evolves stored as related at H2O's P(related), its floor the relation words' mass, H2O's distribution kept whole");
+  assert(threaded.verdict === "related" && threaded.foldedEvolves === true && threaded.confidence === 0.6 && relationConfidence(threaded).confidence === 0.6 && relationVerdict(threaded) === "related"
+      && relationConfidence(threaded).mass === relationConfidence(evolving).mass && relationConfidence(threaded).mass === 0.65 && threaded.supersedes === "unknown"
+      && evolving.reason === "" && threaded.reason === "evolves comes from the work threads (SMD-3306), so the pair is related" && threaded.probabilities?.verdict?.p.evolves === 0.45,
+    "an evolves stored as related at P(related) + P(evolves), under the relation words' mass its floor reads, H2O's distribution kept whole");
+  const surest = fromThreads(decideJudgement({ unrelated: 0.002, related: 0.004, evolves: 0.99, duplicate: 0.002, outdates: 0.002 }, null, false));
+  const unweighted = fromThreads({ ...evolving, confidence: 0.8, probabilities: undefined });
+  const thin = fromThreads({ ...evolving, confidence: 0.7, probabilities: { verdict: { p: capP, covered: 0.3 } } });
+  assert(relationConfidence(surest).confidence === 0.99 && relationConfidence(unweighted).confidence === 0.8 && relationConfidence(unweighted).mass === 0.8 && relationConfidence(thin).confidence === 0.7 && relationConfidence(thin).source === "stated",
+    "…the tier's surest evolves at 0.99, not 0.00; without its distribution, or under MIN_COVERED, the written number, as relationConfidence reads it (review pass 1, cold read)");
   assert([stood, declined, noWriter, capped].every((j) => fromThreads(j) === j) && /the writer found neither current: .*; evolves comes from the work threads/.test(fromThreads({ ...declined, verdict: "evolves" }).reason),
     "…any other verdict returned as it is, and a reason the judgement carried kept before the threads' word");
 
@@ -2260,9 +2272,9 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     n0 = asked();
     tierP = { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 };
     const evolvesTop = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(evolvesTop.verdict === "related" && evolvesTop.confidence === 0.2 && relationConfidence(evolvesTop).mass === 0.85 && evolvesTop.decide.top === "evolves" && evolvesTop.decide.link === undefined
-        && evolvesTop.decide.floor === undefined && evolvesTop.decide.version === 5 && linkCalls === n0.link && writerCalls === n0.writer,
-      "H2O's evolves at the floor: related at H2O's P(related), its mass still the relation words', no link step asked");
+    assert(evolvesTop.verdict === "related" && evolvesTop.confidence === 0.8 && relationConfidence(evolvesTop).mass === 0.85 && evolvesTop.decide.top === "evolves" && evolvesTop.decide.link === undefined
+        && evolvesTop.decide.threaded === true && evolvesTop.decide.floor === undefined && evolvesTop.decide.version === 5 && linkCalls === n0.link && writerCalls === n0.writer,
+      "H2O's evolves at the floor: related at P(related) + P(evolves), its mass still the relation words', the note marked, no link step asked");
     tierP = { unrelated: 0.3, related: 0.05, evolves: 0.35, duplicate: 0, outdates: 0.3 };
     const lowEvolves = await decidePair(older, newer, cfg, jev, FLOOR);
     const quiet: Judgement[] = [];
@@ -2271,14 +2283,15 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       quiet.push(await decidePair(older, newer, cfg, jev, FLOOR));
     }
     assert(lowEvolves.verdict === "related" && relationConfidence(lowEvolves).mass === 0.4 && quiet.map((q) => q.verdict).join() === "related,duplicate,unrelated"
-        && [lowEvolves, ...quiet].every((q) => (q as typeof fFirst).decide.link === undefined) && linkCalls === n0.link && writerCalls === n0.writer,
+        && [lowEvolves, ...quiet].every((q) => (q as typeof fFirst).decide.link === undefined) && quiet.every((q) => (q as typeof fFirst).decide.threaded === undefined)
+        && linkCalls === n0.link && writerCalls === n0.writer,
       "an evolves under the floor related too, which the pass would not store, and a related, duplicate or unrelated top as it was: no link step");
     // H2O's outdates under the floor whose next best is an evolves: gated, the note naming the floor, and related.
     tierP = { unrelated: 0, related: 0.1, evolves: 0.44, duplicate: 0, outdates: 0.46 };
     const gatedEvolves = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(gatedEvolves.verdict === "related" && gatedEvolves.confidence === 0.1 && gatedEvolves.decide.floor === FLOOR && gatedEvolves.decide.link === undefined && gatedEvolves.decide.writer === undefined
+    assert(gatedEvolves.verdict === "related" && gatedEvolves.confidence === 0.54 && gatedEvolves.decide.top === "outdates" && gatedEvolves.decide.threaded === true && gatedEvolves.decide.floor === FLOOR && gatedEvolves.decide.link === undefined && gatedEvolves.decide.writer === undefined
         && linkCalls === n0.link && writerCalls === n0.writer,
-      "H2O's outdates under the floor falling back to an evolves: the note names the floor, and the pair is related, no link step asked");
+      "H2O's outdates under the floor falling back to an evolves: the note names the floor and is marked though its top is outdates, and the pair is related, no link step asked");
     // H2O's outdates at the floor, a D link, and a writer who finds neither current: H2O's best verdict that proposes
     // nothing, an evolves, stored as related.
     tierP = { unrelated: 0.05, related: 0.1, evolves: 0.3, duplicate: 0, outdates: 0.55 };
@@ -2287,7 +2300,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both still hold" });
     const declinedEvolves = await decidePair(older, newer, cfg, jev, FLOOR);
     writerAnswer = keptAnswer;
-    assert(declinedEvolves.verdict === "related" && declinedEvolves.confidence === 0.1 && proposalVerdict(declinedEvolves) === null && declinedEvolves.decide.writer?.current === "none"
+    assert(declinedEvolves.verdict === "related" && declinedEvolves.confidence === 0.4 && declinedEvolves.decide.threaded === true && proposalVerdict(declinedEvolves) === null && declinedEvolves.decide.writer?.current === "none"
         && /the writer found neither current: both still hold; evolves comes from the work threads/.test(declinedEvolves.reason) && linkCalls === n0.link + 1 && writerCalls === n0.writer + 1,
       "H2O's outdates at the floor the writer declines, its next best an evolves: related, the writer's reason kept");
     // The link step's provider error is the pass's to classify, as the writer's is; no proposal follows it.
