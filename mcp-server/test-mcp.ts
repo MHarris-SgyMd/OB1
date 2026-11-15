@@ -83,8 +83,8 @@ const app = createMcpApp({ rest, edge: () => ({ configured: false, origin: null 
 
 let rpcId = 1;
 type Rpc = { status: number; headers: Headers; body: Record<string, unknown> | null };
-/** The 2026-07-28 revision's per-request envelope, which takes the place of `initialize`: the revision, who the client is, what it can do. */
 const MODERN = "2026-07-28";
+/** The 2026-07-28 revision's per-request envelope, which takes the place of `initialize`: the revision, who the client is, what it can do. */
 const ENVELOPE = { "io.modelcontextprotocol/protocolVersion": MODERN, "io.modelcontextprotocol/clientInfo": { name: "test-mcp", version: "0" }, "io.modelcontextprotocol/clientCapabilities": {} };
 /** `modern`: the request as a 2026-07-28 client sends it — the envelope in `params._meta`, and the revision, the method and a called tool's name as headers. */
 async function rpc(method: string, params: unknown, key?: string, opts: { notification?: boolean; via?: "header" | "query" | "bearer"; path?: string; modern?: boolean } = {}): Promise<Rpc> {
