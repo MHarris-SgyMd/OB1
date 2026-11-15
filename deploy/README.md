@@ -397,7 +397,8 @@ coordinator holds the brain's one connection, and its passes ask through it,
 as does the api where `OB1_SLOT_RELAY_KEY` is set (below).
 While the broker is away, a call waits a few seconds for it, then runs on the
 brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
-back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
+back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`
+(`host.docker.internal` under Docker Engine on Linux).
 
 - **One coordinator per key.** A second coordinator on the same key — one run
   by hand from a checkout with the brain's environment, say — makes the
@@ -446,7 +447,7 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
 container reaches it at the host alias, as it reaches the host's Ollama, and
-its port is published on the host's loopback alone.
+its port is published where that alias lands alone (below).
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
@@ -471,11 +472,23 @@ bun --no-env-file deploy/federated/federated.ts down
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1`. A call to any other base isn't
   brokered.
-- **Only podman machine is measured.** There, a container dials
-  `host.containers.internal:<port>` and the loopback port answers. On Docker
-  Engine on Linux a container reaches the host at the bridge's gateway, which
-  a loopback port doesn't answer, so `federated.ts` refuses it until a shape
-  is measured there.
+- **Two runtimes are measured, a shape each** (SMD-3379 PR 3b-3a):
+  - **podman machine (macOS, rootful):** a container dials
+    `host.containers.internal:<port>`, which reaches the host's loopback, so
+    the port is published on `127.0.0.1`.
+  - **Docker Engine on Linux (rootful):** a container dials
+    `host.docker.internal:<port>`, the default bridge's gateway, which a
+    loopback port doesn't answer. So the port is published on that gateway
+    address, read from Docker at each `check` and `up`: the host and its
+    containers reach it, the network doesn't. `up` then has a container dial
+    the broker at the alias, as a brain's does, and fails naming why where
+    none answers: a firewall dropping the bridge's traffic to the host, or a
+    daemon whose `host-gateway-ip` isn't the bridge's gateway. CI measures
+    this shape: the stack's own coordinator container is granted a slot
+    there.
+
+  `federated.ts` refuses any other runtime: Docker Desktop, rootless podman
+  or Docker, podman on Linux.
 - **The broker keeps nothing across a restart.** A brain re-registers the
   slots it holds when it reconnects. For `warm_s` (10 unless set) after a
   start, background calls wait while that happens.

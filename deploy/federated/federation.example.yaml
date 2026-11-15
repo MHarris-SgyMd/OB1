@@ -4,8 +4,11 @@
 #   bun --no-env-file deploy/federated/federated.ts up
 #
 # broker        the slot broker's settings, each optional:
-#   port        its port on the host's loopback (default 8095); a brain's
-#               container reaches it at host.containers.internal:<port>;
+#   port        its port (default 8095), on the host's loopback under podman
+#               machine, on the default bridge's gateway under Docker Engine
+#               on Linux; a brain's container reaches it at
+#               host.containers.internal:<port> (host.docker.internal under
+#               Docker);
 #   lease_s     a grant held longer than this is taken back (default 900):
 #               longer than the longest model call a brain makes;
 #   warm_s      after a start, background calls wait this long while the
