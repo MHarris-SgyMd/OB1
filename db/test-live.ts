@@ -68,6 +68,7 @@ import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, priorityStep, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { Ingested } from "./ingest-contract.ts";
@@ -20172,6 +20173,36 @@ if (want("19")) {
   const patched = await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } });
   assert(patched.outcome === "patched" && (await sql`SELECT metadata->>'file' AS f FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].f === "test-note-a", `a record whose text stands and whose metadata gained a key is 'patched' (${patched.outcome})`);
   assert((await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } })).outcome === "unchanged", "…and the same record again is 'unchanged' — a key already held is not a patch");
+
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    // 139 (SMD-1723): a record whose text was forgotten is 'forgotten' — counted and named, nothing written — not an
+    // error that ends the run (review pass 4: every later run ended at it too).
+    const forgottenDoc = mk("fork", "1139", "a record forgotten later, SMD-1723");
+    const firstGo = (await upsertRecord(sql, forgottenDoc)).outcome;
+    await sql`SELECT forget_thought(${forgottenDoc.id}::uuid)`;
+    const secondGo = (await upsertRecord(sql, forgottenDoc)).outcome;
+    assert(firstGo === "inserted" && secondGo === "forgotten", `a record whose text was forgotten comes back 'forgotten', not a crash (${firstGo}, ${secondGo})`);
+    // …and edited since at its source, a text the refusal never saw: still forgotten, by its id (review pass 7), nothing written.
+    const editedGo = (await upsertRecord(sql, { ...forgottenDoc, content: "a record forgotten later, SMD-1723, edited at its source" })).outcome;
+    const editedRows = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${forgottenDoc.id}::uuid`)[0].c);
+    assert(editedGo === "forgotten" && editedRows === 0, `a forgotten record edited at its source stays forgotten, by its id (${editedGo}, ${editedRows} row(s))`);
+    // A ticket the board sync wrote, under an id of its own, forgotten: the sync reads it from the ledger by its
+    // identity's hash (review pass 7), and an ingest of the same ticket — under the ingester's id, its text edited —
+    // stays out by that identity too (review pass 8: it came back).
+    const [ticketRow] = await sql`INSERT INTO thoughts (content) VALUES (${"a ticket forgotten later, SMD-1723"}) RETURNING id::text AS id`;
+    await sql`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+              VALUES (${ticketRow.id}::uuid, 'linear', 'FG-1139', 'c', 'application/json', encode(sha256(convert_to('c', 'UTF8')), 'hex'))`;
+    const beforeForget = (await readForgottenIdentities(sql, "linear")).has(identityHash("FG-1139"));
+    await sql`SELECT forget_thought(${ticketRow.id}::uuid)`;
+    const afterForget = (await readForgottenIdentities(sql, "linear")).has(identityHash("FG-1139"));
+    const viaIngest: Doc = { ...mk("linear", "FG-1139", "a ticket forgotten later, SMD-1723, edited in Linear"),
+      structure: { identity: { system: "linear", key: "FG-1139" }, canonical: { text: "c2", mediaType: "application/json" }, links: [], mentions: [] } as unknown as Doc["structure"] };
+    const ingestGo = (await upsertRecord(sql, viaIngest)).outcome;
+    const ingestRows = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${viaIngest.id}::uuid`)[0].c);
+    assert(!beforeForget && afterForget && ingestGo === "forgotten" && ingestRows === 0,
+      `the board sync reads a forgotten ticket from the ledger, and an ingest of it under another id, edited, stays out by its identity (${beforeForget}, ${afterForget}, ${ingestGo}, ${ingestRows})`);
+  })();
 
   // A different record whose content is byte-identical to one already stored
   // collides on the partial-unique content_fingerprint index → skipped, not a crash.
