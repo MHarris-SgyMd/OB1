@@ -1595,7 +1595,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // thought's processing does with an error, and its release, are below.
     await claimWorker<Row>({
       sql, job: JOB, prefix: "extract", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: !!FOLLOW, admit: ADMIT,
-      gate: () => gate, err, errAside, outage, taken, claiming, activeWorkers, unreturned, inCall,
+      gate: () => gate, err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
       stopping: () => stopping, hardStopped: () => hardStopped, isolated: () => isolated, pollNow: () => { pollNow = true; },
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
       finallyFirst: (workerId) => { inHand.delete(workerId); },

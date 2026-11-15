@@ -1094,19 +1094,21 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
     }) as unknown as import("bun").SQL;
     return { sql, wants, statements };
   };
-  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next" } = {}) => {
+  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; admit?: import("./lease.ts").Admit; gate?: AbortSignal; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next" } = {}) => {
     const seen: string[] = [];
     const errs: string[] = [];
     const counts = { lost: 0, vanished: 0, beats: -1 };
     const taken = new Set<string>();
+    const claiming = { n: 0 };
+    const limit = o.limit ?? 0;
     const activeWorkers = new Set<string>();
     let polled = false;
     let workerId = "";
     let activeInRow = false;
     await claimWorker<Row>({
-      sql: db.sql, job: "test:job", prefix: "probe", n: 3, ttlS: 900, heartbeatS: 60, batch: o.batch ?? 2, limit: o.limit ?? 0, follow: o.follow ?? false, admit: undefined,
-      gate: () => new AbortController().signal, err: (l) => errs.push(l), errAside: (l) => errs.push(l),
-      outage: o.outage ?? new ProviderOutage(), taken, claiming: { n: 0 }, activeWorkers, unreturned: new Unreturned(async () => null), inCall: { end: () => {} },
+      sql: db.sql, job: "test:job", prefix: "probe", n: 3, ttlS: 900, heartbeatS: 60, batch: o.batch ?? 2, limit, follow: o.follow ?? false, admit: o.admit,
+      gate: () => o.gate ?? new AbortController().signal, err: (l) => errs.push(l), errAside: (l) => errs.push(l),
+      outage: o.outage ?? new ProviderOutage(), taken, claiming, limitReached: () => limit > 0 && taken.size + claiming.n >= limit, activeWorkers, unreturned: new Unreturned(async () => null), inCall: { end: () => {} },
       stopping: () => false, hardStopped: () => false, isolated: () => o.isolated ?? false, pollNow: () => { polled = true; },
       count: { lost: () => { counts.lost++; }, vanished: () => { counts.vanished++; }, beats: (k) => { counts.beats = k; } },
       readRows: async (ids) => ids.map((id) => ({ id })),
@@ -1161,6 +1163,27 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const whole = database([["a"]]);
   await drive(whole, { batch: 5, follow: true });
   ok(whole.wants[0] === 5, `…and any other pass claims its whole batch (asked for ${whole.wants[0]})`);
+
+  // The admit gate before each claim (SMD-3379 PR 1b): closed, a worker waits holding no claim, and a stop ends it there.
+  const { liveGate } = await import("./lease.ts");
+  const moment = () => new Promise((r) => setTimeout(r, 20));
+  const door = liveGate();
+  door.close();
+  const gated = database([["a"]]);
+  const waiting = drive(gated, { follow: true, admit: door.admit, gate: new AbortController().signal });
+  await moment();
+  const heldBack = gated.statements.join(" ") === "" && door.waiting === 1;
+  door.open();
+  const g = await waiting;
+  ok(heldBack && g.seen.join(" ") === "a:a" && gated.statements.join(" ") === "claim claim return", `a worker at a closed admit gate waits there, nothing claimed, and claims once it opens (held back ${heldBack}; ${g.seen.join(" ")}; ${gated.statements.join(" ")})`);
+  door.close();
+  const passEnds = new AbortController();
+  const ended = database([["a"]]);
+  const endingAtGate = drive(ended, { follow: true, admit: door.admit, gate: passEnds.signal });
+  await moment();
+  passEnds.abort();
+  const atGate = await endingAtGate;
+  ok(atGate.seen.length === 0 && ended.statements.join(" ") === "return" && door.waiting === 0, `…and a stop while it waits ends the worker with no claim made (${ended.statements.join(" ")}; ${door.waiting} still waiting)`);
 
   // A claim the database refuses: a passing error costs the worker its poll; the end of the database's patience ends a follower.
   const passing = database([], { claimThrows: Object.assign(new Error("could not serialize access"), { name: "PostgresError", errno: "40001" }) });

@@ -71,6 +71,8 @@ export type ClaimWorkerOptions<Row extends { id: string }> = {
   taken: Set<string>;
   /** --limit's claims in flight, shared by the pass's workers. */
   claiming: { n: number };
+  /** Whether --limit is met by what is taken and being claimed: the engine's rule, which its pass reads too. */
+  limitReached: () => boolean;
   activeWorkers: Set<string>;
   unreturned: Unreturned;
   inCall: { end(workerId: string): void };
@@ -87,11 +89,10 @@ export type ClaimWorkerOptions<Row extends { id: string }> = {
 
 /** One worker of a pass: claims until a stop, an outage, --limit or an empty pool, and returns what it still holds. */
 export async function claimWorker<Row extends { id: string }>(o: ClaimWorkerOptions<Row>): Promise<void> {
-  const { sql, err, errAside, outage, taken, claiming } = o;
+  const { sql, err, errAside, outage, taken, claiming, limitReached } = o;
   const JOB = o.job;
   const TTL = o.ttlS;
   const LIMIT = o.limit;
-  const limitReached = (): boolean => LIMIT > 0 && taken.size + claiming.n >= LIMIT;
   const workerId = `${o.prefix}-${hostname()}-${process.pid}-${o.n}-${randomUUID().slice(0, 8)}`;
   o.activeWorkers.add(workerId);
   const hb = startHeartbeat({
