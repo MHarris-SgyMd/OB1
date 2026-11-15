@@ -479,13 +479,18 @@ bun --no-env-file deploy/federated/federated.ts down
   - **Docker Engine on Linux (rootful):** a container dials
     `host.docker.internal:<port>`, the default bridge's gateway, which a
     loopback port doesn't answer. So the port is published on that gateway
-    address, read from Docker at each `check` and `up`: the host and its
-    containers reach it, the network doesn't. `up` then has a container dial
-    the broker at the alias, as a brain's does, and fails naming why where
-    none answers: a firewall dropping the bridge's traffic to the host, or a
-    daemon whose `host-gateway-ip` isn't the bridge's gateway. CI measures
-    this shape: the stack's own coordinator container is granted a slot
-    there.
+    address, read from Docker at each `check` and `up`. The host and its
+    containers reach it, and so can a machine beside the host that routes
+    the bridge's subnet through it (Docker's own caveat), so the brain keys
+    are the guard there: an unknown key is refused before any upgrade. `up`
+    then has a container on the default bridge dial the broker at the alias,
+    and fails naming why where none answers: a firewall dropping the bridge's
+    traffic to the host, a daemon whose `host-gateway-ip` isn't the bridge's
+    gateway, or an alias that resolves to IPv6 first. A brain dials from its
+    own network, which a firewall may treat apart (a rule for `docker0`
+    alone), so allow the brains' bridges too. CI measures this shape: the
+    stack's own coordinator container is granted a slot there. A remote
+    daemon (`DOCKER_HOST` not a local socket) is refused.
 
   `federated.ts` refuses any other runtime: Docker Desktop, rootless podman
   or Docker, podman on Linux.
