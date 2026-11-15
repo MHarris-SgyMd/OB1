@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and forty (140) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and forty-two (142) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 140 SMD-3606, 141 SMD-4241).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2508,6 +2508,33 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 142 proposes a review of stale, overdue, disagreeing and settled priority
+statements (SMD-3671 PR 1). A priority stated once stood for ever; docs/priority.md
+decision 6 has the brain propose findings and an operator decide them.
+`priority_findings` holds them, one pending per kind and item (keyed by its pool):
+**stale**, a statement by the brain's own keys (not a source's: Linear's level is
+Linear's, decision 9) at level 1 or more, older than the window (60 days), its due time
+and start not still ahead, on an item with no activity within it (a statement on its
+pool, its row written by anything but a background pass, a thought on a ticket's
+subject, an open item's change, a thought mentioning an entity, an operator's decision
+on a finding about it); **overdue**, an unsettled
+item past its due time; **disagree**, an operator's and a source's statements two or
+more levels apart; **settled**, a statement by the brain's own keys left on a settled
+item. `ob1_priority_review(window_days, now)` is the scan: it writes what it newly
+finds, refreshes what stands, marks moot what no longer holds, and raises nothing a
+decision suppressed within its window. Sleep runs it at its first idle poll or period,
+then at most once every six hours, idle or not. `review_priority_finding` is an operator key's decision (by its
+agent id): accepting states a level (and a due time; re-confirming keeps the operator's
+own statement's terms) through `assert_priority`, or
+clears the operator's own statement through `clear_priority`, so the history shows
+the operator's key; rejecting changes nothing; both suppress the same finding for the
+window while its statements are those decided on (a moved deadline, or the source's new
+level, raises it at once). Moot findings past the window are pruned; decided ones stay.
+No finding changes a priority. The operations over REST and MCP, `brain_info`
+and preflight are PR 2; posting to Linear is SMD-4304. Needs 046, 068, 116, 117, 122
+and 133, refusing by name without them; a re-apply is a no-op. test-schema [128],
+test-upgrade [20cf].
+
 Migration 141 has an entity's priority statements follow it (SMD-4241). A
 re-extraction naming the same entity keeps its id, but extraction prunes an entity
 nothing mentions any more (the thought's next extraction drops the name), and 136's
@@ -2534,6 +2561,46 @@ standing. Like 136's restatement, one on another item is the newest within its t
 there, and may outrank another maker's written after the original. Needs 016, 056,
 061, 116, 133 and 136, refusing by name without them; a re-apply is a no-op.
 test-schema [127], test-upgrade [20ce].
+
+Migration 139 forgets a thought (SMD-1723 PR 1). `delete_thought` removes the row
+but the brain keeps what it said: every event in the log carries the text, and the
+entities, vectors, facets, page sections, priority statements, open items,
+deliverables and query log keep the text or the id. `forget_thought(id, actor)`
+removes the thought and all of these in one transaction, and returns what each
+store gave up; a thought deleted first is forgotten from what remains. A capture
+of one of its texts waits for a running forget and is refused after (`OB005`);
+another store's write that lands beside a forget is swept by a second
+`forget_thought` of the same id. A thought another cites is refused `CITED`, as
+a delete is, unless the caller detaches (`forget_thought(id, actor, true)`):
+the citing rows are deleted with the rest. Each call also deletes every
+bare orphan entity (no mention, edge, priority statement or merge record): once
+an entity's mentions are gone, whose it was can't be told. Every event of it in
+`thought_audit` is redacted in place through the log's third named amendment,
+`redact`: each text becomes the marker `[forgotten]` and each metadata object
+`{"forgotten": true}`, the `source` copied from the metadata blanked, while ids,
+fingerprints, times and the actor stay. The amendment takes only a deleted
+thought's events under the forget's own setting, once. `thought_forgotten`
+records each forgetting, append-only; a capture or edit to a forgotten text is
+refused `OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought
+already holds that text. The whole record a thought was ingested as is forgotten
+too: the ledger keeps its identity as a sha256, and `sync-linear.ts` leaves a
+forgotten ticket out of its plan (not missing, not fetched, no drift in
+`--audit`, `--only` included) and a forgotten section out of its parts, while
+`ingest-records.ts` counts a record the brain forgot, by its id or its identity,
+as `forgotten`; edits at the source included, until a row stands there again. A
+thought deleted before it is forgotten has lost its record: detach with
+`forget_thought`, not `delete_thought`. It runs under READ COMMITTED alone,
+taking each item's priority lock before the row's, as the priority writers do. A
+twin holding the same text keeps it and is named. Thoughts derived from the
+forgotten one, and every page whose own log names it (its earlier renders, and a
+section once built on it whose revision keeps the earlier body), are listed for
+a person to review: prose that absorbed the text can't be removed mechanically.
+Copies outside the brain (sleep dumps, posted Linear comments, digest files,
+extraction dumps, earlier backups) are named, not reached. Each role that writes
+thoughts is granted SELECT on the ledger. The operation over REST and MCP is PR
+2; the other brains, PR 3. Needs 016, 034, 053, 055, 060, 064, 067, 116, 117,
+123 and 134; a re-apply keeps the ledger. test-schema [129], test-upgrade
+[20cg].
 
 Migration 138 has the priority writers name every statement they closed (SMD-4238).
 Since 133 a ticket and its own rows are one item to the writers, so a key's new
@@ -3039,6 +3106,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
+| | `thought_forgotten` (139) | `SELECT` — 139's refusal on `thoughts` reads the ledger of forgotten texts on every capture and every edit of a text (SMD-1723), so after 139 a role without it cannot write a thought at all; 139 grants it to each role already writing thoughts, by a grant on the table, on one of its columns, or through PUBLIC |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -3074,6 +3142,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
 | | `priority_weight_settings` (132; the operator's weights, which every effective priority reads; a row changes only to end, once, and a DELETE and TRUNCATE are refused by trigger, for the owner too; `set_priority_weights` admits an operator key alone; the identity `id` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
+| | `priority_findings` (142; the priority review's findings: `ob1_priority_review()` writes, moots and prunes them, `review_priority_finding` records an operator key's decision) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
 | | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
 | | `thought_sources` (053; since 133, which ticket's row a thought is: a ticket and its own rows are one item to the writers and the reads) | `SELECT` |
@@ -4750,13 +4819,36 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 4 is the pass's** (`@p4d4`, SMD-3203): version 3, with the
+- **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with no
+  evolves of its own. The tier's evolves is folded into related before its best
+  verdict is chosen (related + evolves), so a related stands at the share of the
+  word it now stands for, and the folded related outweighs a duplicate or an
+  unrelated the two words outweigh together (a tie below): a few pairs version 4
+  called duplicate or unrelated are related. The relation words' mass, which the
+  floor reads, is the same folded or not, so a pair it related before is related
+  still. A pair evolves when the newer comes next on the older's own subject's
+  work thread, the edge migration 120 keeps between consecutive thoughts of a
+  thread (origin `thread`), not by a pair's judgement. The link step is asked
+  only first, on the tier's outdates at the floor; version 4's check after an
+  evolves goes with the evolves, so a pair it capped at P(related) now stands at
+  the folded share, among a thought's strongest relations. A tie goes to the
+  first verdict in prompt 4's order (unrelated, related, evolves, duplicate): a
+  folded related that ties a duplicate is related, and one that ties an
+  unrelated is not. The run's verdicts line counts no evolves, and a relation's
+  note and dump line say `threaded` where the fold moved the verdict. The board
+  findings ("Posted once", below) take a pair posted as evolves, or as a
+  duplicate, as posted for related, so a re-judge posts none of them again. An
+  evolves version 4 stored stands until its pair is judged again: a new key
+  pools every thought, but a pair whose newer thought is superseded, or no
+  longer among its candidates, is not judged again, and its evolves stays in the
+  counts and the board findings.
+- **Version 4** (`@p4d4`, SMD-3203): version 3, with the
   writer's **link step**, the mediated-pair test's step 2
   (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
   equal to the ADR's by `evals/eval-mediated-pairs.ts --self-check`):
   - **When:** first on the tier's outdates at the floor, before any proposal
     is written, and after on a pair the pass would store as evolves (its
-    relation words' mass at the floor).
+    relation words' mass at the floor), which version 5 drops.
   - **The cap:** an H link (one thought's own subject named in passing by the
     other), an F link (both mention a third subject that is neither's own),
     or an answer naming none of the four caps the pair: related at most, and
@@ -4797,9 +4889,10 @@ tier gives each pair's verdict, not the judge:
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
   on, or a new decide version, starts a fresh pass: the tier again for every
   pooled thought's candidates, the link step for each outdates at the floor
-  and each evolves it would store, and the writer for each outdates at the
-  floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
-  about 3.8 s a pair.
+  (and, under version 4, each evolves it would store), and the writer for
+  each outdates at the floor not yet proposed that the link step leaves
+  uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at about
+  3.8 s a pair.
 - **Refused at start:** the run refuses with neither `OB1_CONSOLIDATE_DECIDER_URL`
   nor `OB1_JEV_BASE_URL` set, or, on the shared tier, with `OB1_JEV_MODEL` naming
   another model (SMD-3326).
@@ -4811,7 +4904,9 @@ tier gives each pair's verdict, not the judge:
   the tier and the writer said (`judged.decide`): since version 3 both of the
   writer's quotes, so a proposal can be checked again under another quote
   rule, and the floor when the writer was not asked; since version 4 the link
-  step's answer, when it was asked (`judged.decide.link`).
+  step's answer, when it was asked (`judged.decide.link`); since version 5
+  whether folding the tier's evolves moved the verdict
+  (`judged.decide.threaded`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -7075,14 +7170,20 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
 - **Posted once.** Migration 087's `board_findings_posted` holds one row per
   ticket pair and word (`outdates`, `related`, `evolves`, `duplicate`), so a
   relation a re-judge replaced at another score is not posted again, and a pair
-  is posted again only for a word not posted for it before (a proposal judged
-  the other way round is not). The comment's last line is a marker,
+  is posted again only for a word not posted for it before, nor covered by one
+  posted (a proposal judged the other way round is not). `related` and
+  `evolves` each cover the other, since both ask the board to link the pair as
+  related, and a `duplicate` covers a `related`, the lesser ask: decide
+  version 5 folds an evolves into related, and turns a few pairs version 4
+  called duplicate related, so a re-judge posts none of them again. The
+  comment's last line is a marker,
   `ob1-finding SMD-A SMD-B words`, in letters, digits, hyphens and spaces:
   Linear keeps a comment as rich text and returns
   markdown derived from it, so the marker is read back with identifiers
   un-autolinked and escapes undone. Before posting, both tickets' comments are
-  read (the first 250 of each); a word a marker already names — another brain
-  posted it, or this one lost its row — is recorded `found` and not posted.
+  read (the first 250 of each); a word a marker already names or covers —
+  another brain posted it, or this one lost its row — is recorded `found` and
+  not posted.
   So a person who writes the line on either ticket silences that word for the
   pair. Two brains on one board read each other's markers; two that post the
   same pair in the same moment can both post.
@@ -7151,8 +7252,9 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   (a proposal the pass took back and a text move reopened does not wait), a
   link since notwithstanding; **withdrawn** — within the window, its proposal settled by
   the pass's own re-judge (067's `settled by the pass:` note, a rejection no
-  person made), or a relation the judge stopped saying at that word (one
-  re-judged at the same word still stands); or its proposals or relation
+  person made), or a relation the judge stopped saying at that word or one it
+  covers (one re-judged at the same word, or a posted evolves re-judged
+  related, still stands); or its proposals or relation
   deleted with a thought, which leaves no time — the comment stays on the
   board, so past the window that reads unanswered. What the judge last
   asserted decides (SMD-2913): the pass's settles are kept across 067's

@@ -6,8 +6,8 @@
   "dependencies": {
     "@better-auth/cimd": "1.7.6",
     "@better-auth/oauth-provider": "1.7.6",
-    "@modelcontextprotocol/core": "2.1.0",
-    "@modelcontextprotocol/server": "2.1.0",
+    "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
     "better-auth": "1.7.6",
     "jose": "6.2.12",
     "zod": "4.6.5"
