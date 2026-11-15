@@ -5737,7 +5737,8 @@ Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read
 in one REPEATABLE READ, READ ONLY transaction. Tier 1: the thoughts' row count
 and rows with no fingerprint (exact), and in the 2,000 newest the thoughts
 with no topics, tags or people, with more than 10 tags, or with empty or
-over-20,000-character content once trimmed (Unicode spaces too). Tier 2: in the 500 newest, the thoughts no
+over-20,000-character content once trimmed of what a preview drops or
+collapses; a metadata list's entries are those the brain shows. Tier 2: in the 500 newest, the thoughts no
 `thought_entities` row mentions, and the `ob1_entities` with no edge (exact).
 The recipe's two `importance` checks and its fingerprint groups are gone: the
 core has no `importance` (SMD-3661), and migration 003's partial unique index

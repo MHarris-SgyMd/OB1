@@ -22229,22 +22229,27 @@ if (want("26")) {
       // 2,100 dated thoughts a second apart, i = 1 the newest; 3 with no created_at, one at infinity and one at
       // -infinity (undated too: infinity would sort first). Metadata: i = 101-116 and 2,050 (past the newest 2,000)
       // over-tagged with 11 tags, i = 24 exactly 10; i = 14 a person alone; i = 15 tags as a string, 16 as an object,
-      // 17 no metadata at all (each no array, so an orphan); the other multiples of 3 tagged by topic. Content: i = 11,
+      // 17 no metadata at all (each no array, so an orphan); i = 27 topics a reader does not see (blank, null) and 30
+      // eleven null tags (each an orphan, 30 not over-tagged); the other multiples of 3 tagged by topic. i = 28's
+      // content is characters a preview drops alone (zero-width joiners, a word joiner, NEL, SOH): empty. Content: i = 11,
       // 18 and 26 whitespace only (ASCII's with a carriage return and a form feed; a no-break space and a vertical
       // tab; an em space, an ideographic space and a zero-width space), 12 text a markdown bullet must not keep (a
       // bell, an escape, an Arabic letter mark, a right-to-left override, a zero-width space, an isolate, a byte-order
       // mark and an 8-bit escape introducer among it), 13, 19 and 20 over 20,000 characters, 21 exactly 20,000 once
       // trimmed of its trailing spaces, 22 cut at 120 with brackets the preview drops, 23 exactly 120 characters,
-      // uncut. The newest hundred's plain rows (90) get their fingerprint; a raw insert leaves the rest NULL.
+      // uncut. The newest hundred's plain rows (89) get their fingerprint; a raw insert leaves the rest NULL.
       await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at)
         SELECT CASE WHEN i = 11 THEN E'  \\t \\n ' || chr(13) || chr(12) WHEN i = 18 THEN chr(160) || chr(11)
                     WHEN i = 26 THEN chr(8195) || chr(12288) || chr(8203)
+                    WHEN i = 28 THEN chr(8204) || chr(8205) || chr(8288) || chr(133) || chr(1)
                     WHEN i = 12 THEN E'[26] row 12 with \`code\`, [a link](x) and <!-- a comment -->\\n\\tthen  a' || chr(7) || chr(27) || chr(1564) || chr(8238) || chr(8203) || chr(8294) || chr(65279) || chr(155) || E' second line  '
                     WHEN i = 13 THEN repeat('x', 25000) WHEN i IN (19, 20) THEN repeat('y', 21000)
                     WHEN i = 21 THEN repeat('w', 20000) || repeat(' ', 20) WHEN i = 22 THEN repeat('[', 10) || repeat('q', 200)
                     WHEN i = 23 THEN repeat('v', 120) ELSE '[26] row ' || i END,
                CASE WHEN i BETWEEN 101 AND 116 OR i = 2050 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 11) j))
                     WHEN i = 24 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 10) j))
+                    WHEN i = 27 THEN '{"topics": ["", null, "  "]}'::jsonb
+                    WHEN i = 30 THEN jsonb_build_object('tags', (SELECT jsonb_agg(NULL::text) FROM generate_series(1, 11) j))
                     WHEN i = 14 THEN '{"people": ["Ada"]}'::jsonb WHEN i = 15 THEN '{"tags": "a,b,c"}'::jsonb
                     WHEN i = 16 THEN '{"tags": {"x": 1}}'::jsonb WHEN i = 17 THEN NULL
                     WHEN i % 3 = 0 THEN '{"topics": ["b"]}'::jsonb ELSE '{}'::jsonb END,
@@ -22265,16 +22270,16 @@ if (want("26")) {
       const mentionedIds = ((await sql`SELECT t.id::text AS id FROM thoughts t JOIN thought_entities te ON te.thought_id = t.id`) as { id: string }[]).map((r) => r.id);
       const newestOverTagged = ((await sql`SELECT id::text AS id FROM thoughts WHERE content IN (SELECT '[26] row ' || i FROM generate_series(101, 115) i)`) as { id: string }[]).map((r) => r.id).sort();
       const [{ row12Date }] = (await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS "row12Date" FROM thoughts WHERE content LIKE '[26] row 12 %'`) as { row12Date: string }[];
-      assert(planted.t === 2105 && planted.nofp === 2015 && planted.m === 10 && planted.e === 1, `the planted brain: 2,105 thoughts, 2,015 with no fingerprint, 10 mentions, 1 edge (${JSON.stringify(planted)})`);
+      assert(planted.t === 2105 && planted.nofp === 2016 && planted.m === 10 && planted.e === 1, `the planted brain: 2,105 thoughts, 2,016 with no fingerprint, 10 mentions, 1 edge (${JSON.stringify(planted)})`);
 
-      // Both tiers, as deployed. Of the newest 2,000 dated: 659 tagged by topic, 17 by tags (16 over-tagged) and one
-      // by a person, so 1,323 orphans; 3 empty; 3 very long. Of the newest 500, 490 with no mention; of 3 entities, 1
+      // Both tiers, as deployed. Of the newest 2,000 dated: 657 tagged by topic, 17 by tags (16 over-tagged) and one
+      // by a person, so 1,325 orphans; 4 empty; 3 very long. Of the newest 500, 490 with no mention; of 3 entities, 1
       // with no edge.
       const report = join(scratch, "sweep.md");
       const both = await lint({ DATABASE_URL: URL_ }, "--report", report);
       const text = read(report);
       assert(both.code === 0
-             && both.stdout.includes("[tier 1] 2105 thoughts, 2015 without a fingerprint, 5 undated; of the newest 2000: 1323 orphans by tag, 16 over-tagged, 3 empty, 3 very long")
+             && both.stdout.includes("[tier 1] 2105 thoughts, 2016 without a fingerprint, 5 undated; of the newest 2000: 1325 orphans by tag, 16 over-tagged, 4 empty, 3 very long")
              && both.stdout.includes("[tier 2] of the newest 500: 490 with no entity mention; 1 of 3 entities with no edge")
              && both.stdout.includes("[lint-sweep] database ") && both.stdout.includes(`[lint-sweep] report written: ${report}`)
              && existsSync(report) && modeOf(report) === "600",
@@ -22282,12 +22287,12 @@ if (want("26")) {
       const overLines = text.split("\n").filter((l) => /^  - [0-9a-f-]{36} → 11 tags$/.test(l));
       assert(/^---\ntitle: Lint Sweep — \d{4}-\d\d-\d\d\ndatabase: \S+\ntier: all\nstarted_at: \d{4}-\d\d-\d\dT[\d:.]+Z\nfinished_at: \d{4}-\d\d-\d\dT[\d:.]+Z\n---\n/.test(text)
              && /^- \*\*Tier 1\*\* — .*\*\*2000 newest dated thoughts\*\*/m.test(text) && /^- \*\*Tier 2\*\* — .*\*\*500 newest dated thoughts\*\*/m.test(text) && /\*\*Safety:\*\* every finding/.test(text)
-             && /Total thoughts \(exact\): \*\*2105\*\*/.test(text) && /No content_fingerprint \(exact\): \*\*2015\*\*/.test(text) && /No created_at, or an infinite one \(exact\): \*\*5\*\*/.test(text)
-             && /Orphans by tag \(no topics, tags or people; newest 2000\): \*\*1323\*\*/.test(text) && /Over-tagged \(more than 10 tags; newest 2000\): \*\*16\*\*/.test(text)
+             && /Total thoughts \(exact\): \*\*2105\*\*/.test(text) && /No content_fingerprint \(exact\): \*\*2016\*\*/.test(text) && /No created_at, or an infinite one \(exact\): \*\*5\*\*/.test(text)
+             && /Orphans by tag \(no topics, tags or people; newest 2000\): \*\*1325\*\* — pages/.test(text) && /Over-tagged \(more than 10 tags; newest 2000\): \*\*16\*\*/.test(text)
              && overLines.length === 15 && /^  - …and 1 more$/m.test(text.split("## Tier 2")[0] ?? "")
              && overLines.map((l) => l.slice(4, 40)).sort().join(",") === newestOverTagged.join(",")
-             && /Empty content \(newest 2000\): \*\*3\*\*/.test(text) && /Very long content \(over 20,000 characters; newest 2000\): \*\*3\*\*/.test(text)
-             && /Thoughts no entity mention names \(newest 500\): \*\*490\*\*/.test(text) && /^  - …and 475 more$/m.test(text)
+             && /Empty content \(newest 2000\): \*\*4\*\*/.test(text) && /Very long content \(over 20,000 characters once trimmed; newest 2000\): \*\*3\*\*/.test(text)
+             && /Thoughts no entity mention names \(newest 500\): \*\*490\*\* — .*failed on them/.test(text) && /^  - …and 475 more$/m.test(text)
              && /Entities with no edge either way \(exact, of 3\): \*\*1\*\*/.test(text) && /not ported yet \(SMD-3318 PR 2b/.test(text),
         `…the report carries its frontmatter, scope and safety lines, the counts, the 15 newest of the 16 over-tagged and the last counted, 15 of the 490 unmentioned and the rest counted (${overLines.length} over-tagged lines; ${text.length} chars)`);
       const listed = text.split("## Tier 2")[1] ?? "";
@@ -22299,12 +22304,12 @@ if (want("26")) {
              && new RegExp(`^  - [0-9a-f-]{36} \\(\\d{4}-\\d\\d-\\d\\d\\) — ${"v".repeat(120)}$`, "m").test(listed),
         `…the unmentioned list leaves out the ten mentioned and the undated; row 12's date its created_at's in UTC, its preview one line with no backtick, bracket, angle bracket, control or doubled space; row 13's 120 characters and the mark of a cut, row 22's mark though its preview is shorter, row 23's none (${row12.slice(0, 120) || "no row 12"})`);
 
-      // One tier: its section alone. Before --tier 2, i = 26-500 mentioned too: of the newest 500, i = 11-25
-      // unmentioned, all 15 listed, and no line for more.
+      // One tier: its section alone. Before --tier 2, the 26th to 500th newest dated (i = 26-500) mentioned too: of the
+      // newest 500, i = 11-25 unmentioned, all 15 listed, and no line for more.
       const oneReport = join(scratch, "one.md");
       const one = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--report", oneReport);
       await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key)
-        SELECT t.id, e.id, 0.9, 'test-live' FROM thoughts t, ob1_entities e WHERE e.normalized_name = 'ada' AND (t.content IN (SELECT '[26] row ' || i FROM generate_series(27, 500) i) OR t.content = chr(8195) || chr(12288) || chr(8203))`;
+        SELECT t.id, e.id, 0.9, 'test-live' FROM ob1_entities e, (SELECT id FROM thoughts WHERE created_at > '-infinity' AND created_at < 'infinity' ORDER BY created_at DESC OFFSET 25 LIMIT 475) t WHERE e.normalized_name = 'ada'`;
       const twoReport = join(scratch, "two.md");
       const two = await lint({ DATABASE_URL: URL_ }, "--tier", "2", "--report", twoReport);
       const twoText = read(twoReport);
@@ -22440,18 +22445,20 @@ if (want("26")) {
       const tilde = await r({ DATABASE_URL: URL_, HOME: homeDir }, "--report", "~");
       const negative = await r({ DATABASE_URL: URL_ }, "--statement-timeout", "-1");
       const huge = await r({ DATABASE_URL: URL_ }, "--statement-timeout", "2147484");
+      const refused = await r({ DATABASE_URL: "postgres://ob1@127.0.0.1:1/ob1" }, "--tier", "1");
       const absReport = join(scratch, "abs.md");
       const abs = await r({}, "--url", URL_, "--tier", "1", "--statement-timeout", "0", "--report", absReport);
       const left = readdirSync(refusedDir);
       assert(three.code === 2 && /--tier 3 is not ported yet/.test(three.stderr) && four.code === 2 && /--tier must be 1, 2 or all/.test(four.stderr)
-             && removed.code === 2 && /Tier 3's model calls/.test(removed.stderr) && climb.code === 2 && /climbs out of the working directory/.test(climb.stderr)
+             && removed.code === 2 && /^--max-llm-calls was Tier 3's model calls, and is removed/m.test(removed.stderr) && climb.code === 2 && /climbs out of the working directory/.test(climb.stderr)
              && dir.code === 2 && /is a directory/.test(dir.stderr) && !/\[lint-sweep\] database/.test(dir.stdout)
              && other.code === 2 && /lint-sweep refused — the connection reached database "template1"/.test(other.stderr)
              && dots.code === 0 && left.join(" ") === "..dots.md" && long.code === 2 && /longer than 220 bytes/.test(long.stderr)
              && tilde.code === 2 && /--report ~ is a directory/.test(tilde.stderr)
              && negative.code === 2 && /statement-timeout/.test(negative.stderr) && huge.code === 2 && /statement-timeout/.test(huge.stderr)
-             && abs.code === 0 && existsSync(absReport),
-        `…--tier 3 and 4, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0 (${[three, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs].map((x) => x.code).join(" ")}; ${left.join(" ")})`);
+             && abs.code === 0 && existsSync(absReport)
+             && refused.code === 1 && /lint-sweep FAILED — ERR_POSTGRES_CONNECTION_REFUSED /.test(refused.stderr),
+        `…--tier 3 and 4, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0; a refused connection exit 1 naming the client's code (${[three, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs, refused].map((x) => x.code).join(" ")}; ${left.join(" ")}; ${refused.stderr.split("\n")[0]})`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
       await sql`DELETE FROM thoughts`;

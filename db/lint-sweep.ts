@@ -20,16 +20,18 @@
  * infinite one (exact). Then, in the 2,000 newest dated thoughts (ordered by
  * created_at alone): those with no metadata topics, tags or people; those
  * with more than 10 tags; those whose content is empty or longer than 20,000
- * characters once trimmed of whitespace (JavaScript's `\s`: spaces, tabs,
- * line breaks, form feeds, vertical tabs, no-break and Unicode spaces, the
- * byte-order mark; and the zero-width space). An undated thought is in no
+ * characters (code points) once trimmed of every character a preview drops or
+ * collapses (whitespace, control characters, zero-width and bidirectional
+ * marks: one set, so a thought whose preview is blank is empty). A list's
+ * entries are those a reader sees, as the brain renders them (render.ts's
+ * metaList): a JSON null or a blank string is none. An undated thought is in no
  * sample: it has no place in "newest" (`infinity` would sort first and print
  * no date; migration 020 reads it as brand new, `-infinity` as infinitely
  * old).
  * Tier 2, the entity graph (migration 016's tables):
  *   - in the 500 newest dated thoughts: those no `thought_entities` row
- *     mentions (extraction found nothing in them, has not reached them, or is
- *     off);
+ *     mentions (extraction found nothing in them, has not reached them, failed
+ *     on them — `bun db/extract-entities.ts --retry-failed` — or is off);
  *   - `ob1_entities` with no `ob1_entity_edges` row either way (exact).
  *
  * What the recipe read and the core lacks is gone, not mapped (the ticket's
@@ -110,11 +112,11 @@ const CONNECTION_CHECK = "10s";
 
 /** The recipe's flags that went with its Tier 3, and --verbose: refused by name, saying why. */
 const REMOVED_FLAGS: Readonly<Record<string, string>> = {
-  "sample-size": "Tier 3's sample; Tier 3 comes in SMD-3318 PR 2b",
-  "max-llm-calls": "Tier 3's model calls; Tier 3 comes in SMD-3318 PR 2b",
-  days: "Tier 3's window; Tier 3 comes in SMD-3318 PR 2b",
-  "llm-model": "Tier 3's model; Tier 3 comes in SMD-3318 PR 2b",
-  verbose: "the run's lines are its progress",
+  "sample-size": "--sample-size was Tier 3's sample, and is removed: Tier 3 comes in SMD-3318 PR 2b",
+  "max-llm-calls": "--max-llm-calls was Tier 3's model calls, and is removed: Tier 3 comes in SMD-3318 PR 2b (tiers 1 and 2 make none)",
+  days: "--days was Tier 3's window, and is removed: Tier 3 comes in SMD-3318 PR 2b",
+  "llm-model": "--llm-model was Tier 3's model, and is removed: Tier 3 comes in SMD-3318 PR 2b",
+  verbose: "--verbose is removed: the run's lines are its progress",
 };
 
 export interface Tier1 {
@@ -137,23 +139,39 @@ export interface Tier2 {
   entitiesWithNoEdges: number;
 }
 
+/** Whitespace, as ranges of code points: JavaScript's `\s`, which a preview collapses to one space. */
+const BLANK_RANGES: readonly (readonly [number, number])[] = [[9, 13], [32, 32], [160, 160], [5760, 5760], [8192, 8202], [8232, 8233], [8239, 8239], [8287, 8287], [12288, 12288], [65279, 65279]];
+/** Characters a preview drops: C0 and C1 controls, the Arabic letter mark, zero-width and bidirectional controls (which reorder or hide text). */
+const HIDDEN_RANGES: readonly (readonly [number, number])[] = [[0, 8], [14, 31], [127, 159], [1564, 1564], [8203, 8207], [8234, 8238], [8288, 8297]];
+const classOf = (ranges: readonly (readonly [number, number])[]) =>
+  ranges.map(([a, b]) => (a === b ? [a] : [a, b]).map((c) => `\\u${c.toString(16).padStart(4, "0")}`).join("-")).join("");
+const HIDDEN = new RegExp(`[${classOf(HIDDEN_RANGES)}\`[\\]<>]`, "g");
+const BLANK_RUN = new RegExp(`[${classOf(BLANK_RANGES)}]+`, "g");
+
 /**
- * A thought's text made safe for one markdown bullet: C0 and C1 control
- * characters (escape sequences, bells), zero-width and bidirectional controls
- * (which reorder or hide text), backticks, brackets and angle brackets (code,
- * links, HTML and comments) dropped, whitespace collapsed to single spaces. A
- * bare URL stays text a renderer may still link.
+ * A thought's text made safe for one markdown bullet: the hidden characters
+ * above, backticks, brackets and angle brackets (code, links, HTML and
+ * comments) dropped, whitespace collapsed to single spaces. A bare URL stays
+ * text a renderer may still link.
  */
 export function sanitizePreview(s: string): string {
-  return s.replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069`[\]<>]/g, "").replace(/\s+/g, " ").trim();
+  return s.replace(HIDDEN, "").replace(BLANK_RUN, " ").trim();
 }
 
-/** A metadata key's array length in SQL, 0 when the key is absent, not an array, or the metadata NULL. */
-const arrayLen = (key: string) => `jsonb_array_length(CASE WHEN jsonb_typeof(metadata->'${key}') = 'array' THEN metadata->'${key}' ELSE '[]'::jsonb END)`;
-/** The code points trimmed: JavaScript's `\s` (as the preview collapses) and the zero-width space (as it drops). */
-const BLANKS = [9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8203, 8232, 8233, 8239, 8287, 12288, 65279];
-/** Content trimmed of whitespace, in SQL (`chr` of constants, folded once by the planner). */
-const TRIMMED = `btrim(content, ${BLANKS.map((c) => `chr(${c})`).join(" || ")})`;
+/** Every code point a preview drops or collapses, as one SQL text (NUL aside: Postgres text holds none), computed once per statement. */
+const INVISIBLE = `(SELECT string_agg(chr(c), '') FROM unnest(ARRAY[${[...BLANK_RANGES, ...HIDDEN_RANGES]
+  .flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i)).filter((c) => c !== 0).join(",")}]) c)`;
+/** An SQL text expression trimmed of the invisible characters at both ends: '' when a preview of it would be blank. */
+const trimmed = (expr: string) => `btrim(${expr}, ${INVISIBLE})`;
+
+/**
+ * A metadata list's entries a reader sees, in SQL, as render.ts's metaList shows them: a JSON null or a string blank
+ * once trimmed is none; 0 when the key is absent, not an array, or the metadata NULL.
+ */
+const arrayLen = (key: string) => `(SELECT count(*) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(metadata->'${key}') = 'array' THEN metadata->'${key}' ELSE '[]'::jsonb END) e
+  WHERE jsonb_typeof(e) <> 'null' AND (jsonb_typeof(e) <> 'string' OR ${trimmed("e #>> '{}'")} <> ''))::int`;
+/** Content trimmed of the invisible characters, in SQL. */
+const TRIMMED = trimmed("content");
 /** A dated thought's created_at in SQL: set and finite, as a range the created_at index reads. */
 const DATED = `created_at > '-infinity' AND created_at < 'infinity'`;
 /**
@@ -235,16 +253,16 @@ export function renderReport(r: { tier: string; database: string; startedAt: str
     L.push(`- Total thoughts (exact): **${r.t1.total}**`);
     L.push(`- No content_fingerprint (exact): **${r.t1.noFingerprint}** — a capture through the brain's functions sets it; a raw insert leaves it NULL, \`SELECT backfill_content_fingerprints();\` sets it (migration 023), and a twin of a fingerprinted thought's content keeps none.`);
     L.push(`- No created_at, or an infinite one (exact): **${r.t1.undated}** — in no sample below.`);
-    L.push(`- Orphans by tag (no topics, tags or people; newest ${r.t1.sampled}): **${r.t1.orphansByTag}** — a capture whose tagging failed, or a raw insert.`);
+    L.push(`- Orphans by tag (no topics, tags or people; newest ${r.t1.sampled}): **${r.t1.orphansByTag}** — pages (\`upsert_page\` writes none), imports and raw inserts, and a capture whose tagging was cut off (an outage or a refused egress leaves its \`metadata_extraction_failed\` marker alone; other failures tag it \`uncategorized\` beside the marker, which counts as tagged).`);
     L.push(`- Over-tagged (more than ${OVER_TAGGED} tags; newest ${r.t1.sampled}): **${r.t1.overTaggedCount}** — imports' tags: the brain's capture writes topics, not tags.`);
     for (const o of r.t1.overTagged) L.push(`  - ${o.id} → ${o.tags} tags`);
     if (r.t1.overTaggedCount > r.t1.overTagged.length) L.push(`  - …and ${r.t1.overTaggedCount - r.t1.overTagged.length} more`);
     L.push(`- Empty content (newest ${r.t1.sampled}): **${r.t1.emptyContent}**`);
-    L.push(`- Very long content (over ${VERY_LONG.toLocaleString("en-US")} characters; newest ${r.t1.sampled}): **${r.t1.veryLong}**`, "");
+    L.push(`- Very long content (over ${VERY_LONG.toLocaleString("en-US")} characters once trimmed; newest ${r.t1.sampled}): **${r.t1.veryLong}**`, "");
   }
   if (r.t2) {
     L.push("## Tier 2 — the entity graph", "");
-    L.push(`- Thoughts no entity mention names (newest ${r.t2.sampled}): **${r.t2.unmentionedCount}** — extraction found nothing in them, has not reached them yet, or is off.`);
+    L.push(`- Thoughts no entity mention names (newest ${r.t2.sampled}): **${r.t2.unmentionedCount}** — extraction found nothing in them, has not reached them yet, failed on them (\`bun db/extract-entities.ts --retry-failed\`), or is off.`);
     for (const u of r.t2.unmentioned) L.push(`  - ${u.id} (${u.created}) — ${u.preview}${u.cut ? "…" : ""}`);
     if (r.t2.unmentionedCount > r.t2.unmentioned.length) L.push(`  - …and ${r.t2.unmentionedCount - r.t2.unmentioned.length} more`);
     L.push(`- Entities with no edge either way (exact, of ${r.t2.entities}): **${r.t2.entitiesWithNoEdges}**`, "");
@@ -310,10 +328,11 @@ export interface SweepOptions {
   writer?: Writer;
 }
 
-/** The SQLSTATE and message of a database error, else the message. */
+/** The SQLSTATE and message of a database error, else the client's code (a refused connection's) and message, else the message. */
 function reasonOf(e: unknown): string {
-  const err = e as { errno?: unknown; message?: unknown };
-  const state = typeof err?.errno === "string" && /^[0-9A-Z]{5}$/.test(err.errno) ? `${err.errno} ` : "";
+  const err = e as { errno?: unknown; code?: unknown; message?: unknown };
+  const state = typeof err?.errno === "string" && /^[0-9A-Z]{5}$/.test(err.errno) ? `${err.errno} `
+    : typeof err?.code === "string" && /^ERR_[A-Z_]+$/.test(err.code) ? `${err.code} ` : "";
   return `${state}${String(err?.message ?? e).split("\n")[0]}`;
 }
 

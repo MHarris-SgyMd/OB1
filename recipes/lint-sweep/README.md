@@ -48,7 +48,13 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   (`--tier 1`, `--report week.md`); `--tier=1` is refused, and so are `-v` and
   `-h` (`--help` prints the flags). `--sample-size`, `--max-llm-calls`, `--days`
   and `--llm-model` went with Tier 3 and `--verbose` with the recipe's progress
-  lines; each is refused saying why. `OPENROUTER_API_KEY` is not read.
+  lines; each is refused saying why, so drop `--max-llm-calls 0` from the line.
+  `OPENROUTER_API_KEY` is not read. A read-only role the old README granted
+  `entities` and `edges` needs SELECT on `ob1_entities` and `ob1_entity_edges`
+  in their place: the run locks every table its tiers read first, so a missing
+  grant fails the whole run, Tier 1 included (`--tier 1` needs `thoughts`
+  alone). A usage error (no URL, a bad flag) exits 2, where the recipe's exited
+  1; a failed run still exits 1.
 - **Not during an upgrade.** The run locks the tables it reads (ACCESS SHARE,
   as `pg_dump` does) for its length: writes go on, but an `ALTER` or `TRUNCATE`
   of one of them waits, and every read and write of that table waits behind it
@@ -67,25 +73,34 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   `content_fingerprint` and the rows with no `created_at` or an infinite one
   (exact); in the 2,000 newest dated thoughts, those with no topics, tags or
   people, those with more than 10 tags, and those whose content is empty or
-  over 20,000 characters once trimmed of whitespace (Unicode spaces and the
-  zero-width space included). A thought with no `created_at`, or an infinite
-  one, is in no sample.
+  over 20,000 characters (code points) once trimmed of every character a
+  preview drops or collapses (whitespace, controls, zero-width and
+  bidirectional marks). A list's entries are those the brain shows: a JSON
+  null or a blank string is none. A thought with no `created_at`, or an
+  infinite one, is in no sample. Orphans are pages (which carry no tags),
+  imports and raw inserts, and captures whose tagging was cut off; a capture
+  whose extraction failed otherwise is tagged `uncategorized` beside its
+  `metadata_extraction_failed` marker, and counts as tagged.
 - **Tier 2, the entity graph** (migration 016's `ob1_entities`,
   `thought_entities`, `ob1_entity_edges`): in the 500 newest dated thoughts,
   those no entity mention names (extraction found nothing in them, has not
-  reached them, or is off); the entities with no edge (exact).
+  reached them, failed on them — `bun db/extract-entities.ts --retry-failed` —
+  or is off); the entities with no edge (exact).
 
 A run that fails writes no report and exits 1 with the reason. The samples
 read the created_at index; among thoughts sharing a `created_at` at a sample's
 edge (an import's transaction, a day-precision date), which are read is the
-index's order.
+index's order. A far-future `created_at` (a mistyped year) is the newest, and
+leads both samples.
 
 ## What changed
 
 - **The checks on `importance` are gone:** low-signal noise and high-importance
   thoughts with no entity links. The core retired `importance` (SMD-3661,
   decision 8), and its `thoughts` has no such column. Tier 2 reads the newest
-  thoughts with no mention instead.
+  thoughts with no mention instead. A brain with `schemas/enhanced-thoughts`
+  applied (the only kind the old script's default run worked on) keeps both
+  checks as `views.sql`'s `lint_low_signal` and `lint_high_importance_isolated`.
 - **Fingerprint groups are gone:** migration 003's partial unique index makes a
   set fingerprint unique, so no two rows share one. A twin of a fingerprinted
   thought's content keeps no fingerprint (migration 023's header), so duplicate
@@ -98,7 +113,13 @@ index's order.
   has, and its entity check covers all of them, where the recipe read the first
   2,000 entities and 5,000 edges.
 - **The report's summary section is gone;** each tier's section carries its
-  counts.
+  counts. Its headings, frontmatter (`database:` in place of `generated_at`),
+  list lines (no `thought #`; 15 listed, not 10) and the progress lines
+  (`[tier 1] N thoughts, …`, `report written: …`) are new: a job that greps
+  them must follow.
+- **Lengths are code points,** as Postgres counts them, where the recipe
+  counted JavaScript's UTF-16 units: an emoji is one character, not two, in
+  the very-long check and the 120-character previews.
 - **The connection** is `--url` or `DATABASE_URL`, not `SUPABASE_URL`, and the
   run refuses (exit 2) when `PGDATABASE` would point it at another database.
 
