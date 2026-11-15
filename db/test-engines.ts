@@ -1064,6 +1064,115 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
     `the stamper writes holds as given, a copy, leaves them out once emptied or cleared, and keeps them on the row's end (${JSON.stringify([heldValue.holds, emptyValue.holds, clearedValue.holds, endedValue.holds])})`);
 }
 
+// ---------------------------------------------------------------------------
+// db/claim-loop.ts's claimWorker (SMD-4308): the loop around a thought, over a
+// stand-in for the database. Each statement is told apart by its text.
+// ---------------------------------------------------------------------------
+{
+  const { claimWorker } = await import("./claim-loop.ts");
+  const { ProviderOutage, SUSPECT_WINDOW_MS, Unreturned } = await import("./worker-bootstrap.ts");
+  type Row = { id: string };
+  /** A database of claim batches: what each claim_thoughts call asked for, how many leases the worker's return freed, and the lost row's status. */
+  const database = (batches: string[][], o: { lostStatus?: string | null; claimThrows?: Error } = {}) => {
+    const wants: number[] = [];
+    const statements: string[] = [];
+    const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("?");
+      if (text.includes("claim_thoughts(")) {
+        statements.push("claim");
+        wants.push(values[2] as number);
+        if (o.claimThrows) return Promise.reject(o.claimThrows);
+        return Promise.resolve((batches.shift() ?? []).slice(0, values[2] as number).map((thought_id) => ({ thought_id, attempt: 1 })));
+      }
+      if (text.includes("release_claims_for_worker(")) {
+        statements.push("return");
+        return Promise.resolve([{ n: 2 }]);
+      }
+      // reportLost's read of the row: none for a deleted thought.
+      statements.push("lost-read");
+      return Promise.resolve(o.lostStatus == null ? [] : [{ status: o.lostStatus, worker_id: null }]);
+    }) as unknown as import("bun").SQL;
+    return { sql, wants, statements };
+  };
+  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next" } = {}) => {
+    const seen: string[] = [];
+    const errs: string[] = [];
+    const counts = { lost: 0, vanished: 0, beats: -1 };
+    const taken = new Set<string>();
+    const activeWorkers = new Set<string>();
+    let polled = false;
+    let workerId = "";
+    let activeInRow = false;
+    await claimWorker<Row>({
+      sql: db.sql, job: "test:job", prefix: "probe", n: 3, ttlS: 900, heartbeatS: 60, batch: o.batch ?? 2, limit: o.limit ?? 0, follow: o.follow ?? false, admit: undefined,
+      gate: () => new AbortController().signal, err: (l) => errs.push(l), errAside: (l) => errs.push(l),
+      outage: o.outage ?? new ProviderOutage(), taken, claiming: { n: 0 }, activeWorkers, unreturned: new Unreturned(async () => null), inCall: { end: () => {} },
+      stopping: () => false, hardStopped: () => false, isolated: () => o.isolated ?? false, pollNow: () => { polled = true; },
+      count: { lost: () => { counts.lost++; }, vanished: () => { counts.vanished++; }, beats: (k) => { counts.beats = k; } },
+      readRows: async (ids) => ids.map((id) => ({ id })),
+      row: async (b, row, hand) => {
+        seen.push(`${b.thought_id}:${row?.id}`);
+        workerId = hand.workerId;
+        activeInRow = activeWorkers.has(hand.workerId) && hand.hb.held.has(b.thought_id);
+        const answer = o.row?.(b.thought_id, hand) ?? "next";
+        // An engine takes a thought out of the heartbeat's set as it releases it.
+        if (answer === "next") hand.hb.held.delete(b.thought_id);
+        return answer;
+      },
+    });
+    return { seen, errs, counts, taken, activeWorkers, polled, workerId, activeInRow };
+  };
+
+  const plain = database([["a", "b"], ["c"]]);
+  const p = await drive(plain);
+  ok(p.seen.join(" ") === "a:a b:b c:c" && plain.wants.join(",") === "2,2,2" && plain.statements.join(" ") === "claim claim claim return",
+     `claimWorker claims a batch at a time until the pool is empty, hands the engine each thought with its row, and returns its leases last (${p.seen.join(" ")}; ${plain.statements.join(" ")})`);
+  ok(/^probe-.+-\d+-3-[0-9a-f]{8}$/.test(p.workerId) && p.activeInRow && p.activeWorkers.size === 0 && p.counts.beats === 0 && p.errs.join("") === "  " + p.workerId + ": returned 2 unfinished row(s) to the pool",
+     `…under an id of the engine's name, the host, the process and the worker's number, active and beating for the thought while it is in hand, and neither once it ends; a run without --follow says what it returned (${p.errs.join(" | ")})`);
+  const quiet = await drive(database([["a"]]), { follow: true });
+  ok(quiet.errs.length === 0, `…and a follower's return says nothing (${quiet.errs.join(" | ")})`);
+
+  // The row a beat found no longer this worker's is skipped, and counted by what the row says.
+  for (const [status, want] of [["pending", "lost"], [null, "vanished"]] as const) {
+    const db = database([["a", "b", "c"]], { lostStatus: status });
+    const r = await drive(db, { batch: 3, row: (id, hand) => { if (id === "a") { hand.hb.held.delete("b"); hand.hb.lost.add("b"); } return "next"; } });
+    ok(r.seen.join(" ") === "a:a c:c" && r.counts[want] === 1 && r.counts.lost + r.counts.vanished === 1 && db.statements.join(" ") === "claim lost-read claim return" && r.errs.some((l) => l.startsWith("  b: ")),
+       `a thought a beat found lost before the loop reached it is not handed to the engine: its row is read, it is named, and it counts as ${want} (${r.seen.join(" ")}; ${JSON.stringify(r.counts)}; ${db.statements.join(" ")})`);
+  }
+
+  // "stop" ends the worker where it is; the rest of the batch goes back with its leases.
+  const stopped = database([["a", "b"], ["c"]]);
+  const s = await drive(stopped, { follow: true, row: () => "stop" });
+  ok(s.seen.join(" ") === "a:a" && stopped.statements.join(" ") === "claim return", `an engine's "stop" ends the worker at that thought: no later thought, no further claim, the leases returned (${s.seen.join(" ")}; ${stopped.statements.join(" ")})`);
+
+  // --limit: what is taken counts against it, and a claim asks for no more than is left.
+  const limited = database([["a", "b"], ["c", "d"], ["e"]]);
+  const l = await drive(limited, { limit: 3, follow: true });
+  ok(l.seen.join(" ") === "a:a b:b c:c" && limited.wants.join(",") === "2,1" && l.taken.size === 3, `under --limit 3 a worker of batch 2 claims two, then the one left, and no more (asked for ${limited.wants.join(",")}; ${l.seen.join(" ")})`);
+
+  // An isolated pass (SMD-2641) claims one thought at a time, and ends once no suspect is left to retry.
+  const outage = new ProviderOutage(() => 0, SUSPECT_WINDOW_MS, true);
+  outage.begin("500", "s1");
+  outage.end();
+  const iso = database([["s1"], ["x"], ["y"]]);
+  const i = await drive(iso, { batch: 5, isolated: true, outage, follow: true });
+  ok(outage.reason === null && iso.wants.join(",") === "1,1" && i.seen.join(" ") === "s1:s1 x:x" && i.polled && !outage.isolating(),
+     `a pass retrying an outage's suspects claims one thought a claim whatever --batch is, and once a claim brings a thought that is no suspect it ends, the next pass polled at once (asked for ${iso.wants.join(",")}; ${i.seen.join(" ")}; polled ${i.polled})`);
+  const whole = database([["a"]]);
+  await drive(whole, { batch: 5, follow: true });
+  ok(whole.wants[0] === 5, `…and any other pass claims its whole batch (asked for ${whole.wants[0]})`);
+
+  // A claim the database refuses: a passing error costs the worker its poll; the end of the database's patience ends a follower.
+  const passing = database([], { claimThrows: Object.assign(new Error("could not serialize access"), { name: "PostgresError", errno: "40001" }) });
+  const pe = await drive(passing, { follow: true });
+  ok(pe.seen.length === 0 && passing.statements.join(" ") === "claim return" && pe.errs.some((e) => /could not serialize access — this worker stops$/.test(e)), `a claim that meets a passing error stops this worker with the error said, its leases returned (${pe.errs.join(" | ")})`);
+  const ending = database([], { claimThrows: Object.assign(new Error("permission denied for function claim_thoughts"), { name: "PostgresError", errno: "42501" }) });
+  const thrown = await drive(ending, { follow: true }).then(() => "none", (e: Error) => e.message);
+  const oneShot = await drive(database([], { claimThrows: Object.assign(new Error("permission denied for function claim_thoughts"), { name: "PostgresError", errno: "42501" }) }), { follow: false }).then((r) => r.errs.join(""), (e: Error) => `threw ${e.message}`);
+  ok(thrown === "permission denied for function claim_thoughts" && ending.statements.join(" ") === "claim return" && oneShot.includes("permission denied for function claim_thoughts — this worker stops"),
+     `a follower's claim refused for good throws the refusal for its caller, its leases returned first; a one-shot run's worker stops with it said (${thrown}; ${oneShot})`);
+}
+
 listener.stop(true);
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
