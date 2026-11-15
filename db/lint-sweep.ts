@@ -16,13 +16,16 @@
  *
  * ── What it reads ───────────────────────────────────────────────────────────
  * Tier 1, `thoughts`, in one pass over the table: its row count, its rows with
- * no content_fingerprint, and its rows with no created_at (exact). Then, in
- * the 2,000 newest dated thoughts (created_at, then id): those with no
- * metadata topics, tags or people; those with more than 10 tags; those whose
- * content is empty or longer than 20,000 characters once trimmed of
- * whitespace (spaces, tabs, line breaks, form feeds, vertical tabs, no-break
- * spaces). A thought with no created_at is in no sample: it has no place in
- * "newest".
+ * no content_fingerprint, and its undated rows, with no created_at or an
+ * infinite one (exact). Then, in the 2,000 newest dated thoughts (ordered by
+ * created_at alone): those with no metadata topics, tags or people; those
+ * with more than 10 tags; those whose content is empty or longer than 20,000
+ * characters once trimmed of whitespace (JavaScript's `\s`: spaces, tabs,
+ * line breaks, form feeds, vertical tabs, no-break and Unicode spaces, the
+ * byte-order mark; and the zero-width space). An undated thought is in no
+ * sample: it has no place in "newest" (`infinity` would sort first and print
+ * no date; migration 020 reads it as brand new, `-infinity` as infinitely
+ * old).
  * Tier 2, the entity graph (migration 016's tables):
  *   - in the 500 newest dated thoughts: those no `thought_entities` row
  *     mentions (extraction found nothing in them, has not reached them, or is
@@ -50,7 +53,9 @@
  * run's own (O_EXCL, 0600) renamed over the path: never through a symlink
  * there, never keeping an older file's mode, and a failed write leaves an
  * earlier report as it was. A run that fails writes no report and exits 1 with
- * the reason (the database's, the file system's, or the connection's).
+ * the reason (the database's, the file system's, or the connection's). The
+ * tables are named unqualified, as `db/backup.ts` names them: the role's
+ * search_path finds them.
  *
  * ── Size and time ───────────────────────────────────────────────────────────
  * Each tier reads its sample once, through the created_at index, stopping
@@ -140,13 +145,17 @@ export interface Tier2 {
  * bare URL stays text a renderer may still link.
  */
 export function sanitizePreview(s: string): string {
-  return s.replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff`[\]<>]/g, "").replace(/\s+/g, " ").trim();
+  return s.replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069`[\]<>]/g, "").replace(/\s+/g, " ").trim();
 }
 
 /** A metadata key's array length in SQL, 0 when the key is absent, not an array, or the metadata NULL. */
 const arrayLen = (key: string) => `jsonb_array_length(CASE WHEN jsonb_typeof(metadata->'${key}') = 'array' THEN metadata->'${key}' ELSE '[]'::jsonb END)`;
-/** Content trimmed of whitespace, in SQL: spaces, tabs, line breaks, form feeds, vertical tabs (chr 11), no-break spaces (chr 160). */
-const TRIMMED = `btrim(content, E' \\t\\n\\r\\f' || chr(11) || chr(160))`;
+/** The code points trimmed: JavaScript's `\s` (as the preview collapses) and the zero-width space (as it drops). */
+const BLANKS = [9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8203, 8232, 8233, 8239, 8287, 12288, 65279];
+/** Content trimmed of whitespace, in SQL (`chr` of constants, folded once by the planner). */
+const TRIMMED = `btrim(content, ${BLANKS.map((c) => `chr(${c})`).join(" || ")})`;
+/** A dated thought's created_at in SQL: set and finite, as a range the created_at index reads. */
+const DATED = `created_at > '-infinity' AND created_at < 'infinity'`;
 /**
  * The newest dated thoughts, `n` of them, with the columns `cols`. Ordered by
  * created_at alone, so the created_at index stops after `n` rows: with an id
@@ -154,7 +163,7 @@ const TRIMMED = `btrim(content, E' \\t\\n\\r\\f' || chr(11) || chr(160))`;
  * a day-precision date) was read and sorted whole. Which of a group at the
  * sample's edge are in it is the index's order.
  */
-const recent = (cols: string, n: number) => `SELECT ${cols} FROM thoughts WHERE created_at IS NOT NULL ORDER BY created_at DESC LIMIT ${n}`;
+const recent = (cols: string, n: number) => `SELECT ${cols} FROM thoughts WHERE ${DATED} ORDER BY created_at DESC LIMIT ${n}`;
 
 /** Run `query` with the statement bound lifted, then put the session's back (the whole-table counts outlast a page's bound). */
 async function unbounded<T>(tx: SQL, bound: string, query: () => Promise<T>): Promise<T> {
@@ -168,7 +177,7 @@ async function tier1(tx: SQL, bound: string): Promise<Tier1> {
   const [whole] = await unbounded(tx, bound, async () => (await tx.unsafe(`
     SELECT count(*)::bigint::text AS total,
            count(*) FILTER (WHERE content_fingerprint IS NULL)::bigint::text AS no_fp,
-           count(*) FILTER (WHERE created_at IS NULL)::bigint::text AS undated
+           count(*) FILTER (WHERE NOT (${DATED}) OR created_at IS NULL)::bigint::text AS undated
       FROM thoughts`)) as { total: string; no_fp: string; undated: string }[]);
   // One read of the sample: the counts and the listed rows from the same rows (the CTE, used twice, is read once).
   const [c] = (await tx.unsafe(`
@@ -218,14 +227,14 @@ export function renderReport(r: { tier: string; database: string; startedAt: str
     "*Read-only audit: the tiers' reads are one snapshot, and nothing is written to the brain.*", "",
     "## Scan scope", "",
   ];
-  if (r.t1) L.push(`- **Tier 1** — the table's row count and its rows with no content_fingerprint or no created_at, exact; the per-row checks over the **${r.t1.sampled} newest dated thoughts** (\`created_at desc\`, then id; at most ${TIER1_SAMPLE}).`);
+  if (r.t1) L.push(`- **Tier 1** — the table's row count and its rows with no content_fingerprint or no finite created_at, exact; the per-row checks over the **${r.t1.sampled} newest dated thoughts** (\`created_at desc\`; at most ${TIER1_SAMPLE}).`);
   if (r.t2) L.push(`- **Tier 2** — the mention check over the **${r.t2.sampled} newest dated thoughts** (at most ${TIER2_SAMPLE}); the entities with no edge, exact, over all ${r.t2.entities}.`);
   L.push("- **Tier 3** — not ported yet (SMD-3318 PR 2b: a model's reading of sampled thoughts, through the brain's provider and egress gate).", "");
   if (r.t1) {
     L.push("## Tier 1 — thoughts", "");
     L.push(`- Total thoughts (exact): **${r.t1.total}**`);
     L.push(`- No content_fingerprint (exact): **${r.t1.noFingerprint}** — a capture through the brain's functions sets it; a raw insert leaves it NULL, \`SELECT backfill_content_fingerprints();\` sets it (migration 023), and a twin of a fingerprinted thought's content keeps none.`);
-    L.push(`- No created_at (exact): **${r.t1.undated}** — in no sample below.`);
+    L.push(`- No created_at, or an infinite one (exact): **${r.t1.undated}** — in no sample below.`);
     L.push(`- Orphans by tag (no topics, tags or people; newest ${r.t1.sampled}): **${r.t1.orphansByTag}** — a capture whose tagging failed, or a raw insert.`);
     L.push(`- Over-tagged (more than ${OVER_TAGGED} tags; newest ${r.t1.sampled}): **${r.t1.overTaggedCount}** — imports' tags: the brain's capture writes topics, not tags.`);
     for (const o of r.t1.overTagged) L.push(`  - ${o.id} → ${o.tags} tags`);

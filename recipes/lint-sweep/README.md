@@ -64,10 +64,12 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
 ## What it checks
 
 - **Tier 1, `thoughts`:** the row count, the rows with no
-  `content_fingerprint` and the rows with no `created_at` (exact); in the 2,000
-  newest dated thoughts, those with no topics, tags or people, those with more
-  than 10 tags, and those whose content is empty or over 20,000 characters once
-  trimmed. A thought with no `created_at` is in no sample.
+  `content_fingerprint` and the rows with no `created_at` or an infinite one
+  (exact); in the 2,000 newest dated thoughts, those with no topics, tags or
+  people, those with more than 10 tags, and those whose content is empty or
+  over 20,000 characters once trimmed of whitespace (Unicode spaces and the
+  zero-width space included). A thought with no `created_at`, or an infinite
+  one, is in no sample.
 - **Tier 2, the entity graph** (migration 016's `ob1_entities`,
   `thought_entities`, `ob1_entity_edges`): in the 500 newest dated thoughts,
   those no entity mention names (extraction found nothing in them, has not

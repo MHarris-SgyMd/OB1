@@ -5737,13 +5737,13 @@ Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read
 in one REPEATABLE READ, READ ONLY transaction. Tier 1: the thoughts' row count
 and rows with no fingerprint (exact), and in the 2,000 newest the thoughts
 with no topics, tags or people, with more than 10 tags, or with empty or
-over-20,000-character content. Tier 2: in the 500 newest, the thoughts no
+over-20,000-character content once trimmed (Unicode spaces too). Tier 2: in the 500 newest, the thoughts no
 `thought_entities` row mentions, and the `ob1_entities` with no edge (exact).
 The recipe's two `importance` checks and its fingerprint groups are gone: the
 core has no `importance` (SMD-3661), and migration 003's partial unique index
 makes a set fingerprint unique (a twin of a fingerprinted thought's content
 keeps none, among the rows the no-fingerprint count counts). A thought with no
-`created_at` is in no sample, and counted; each tier reads its sample once,
+`created_at`, or an infinite one, is in no sample, and counted; each tier reads its sample once,
 ordered by `created_at` alone, so ties at its edge cost nothing. The
 transaction's first statement locks the tables the tiers read (ACCESS SHARE,
 as pg_dump does), under `--statement-timeout` (60 s), which the whole-table
@@ -5752,7 +5752,8 @@ value (`lock_timeout`). Keep a sweep apart from an upgrade: an `ALTER` of
 those tables waits for it, and their traffic behind the `ALTER`. The markdown report is written 0600 through a file of
 the run's own renamed into place, once every read succeeded. Tier 3, a model's reading of sampled thoughts, follows in SMD-3318
 PR 2b through the provider and the egress gate. test-live [26] holds every
-count against a planted table (undated rows and non-array metadata among it),
+count against a planted table (undated and infinite rows, non-array metadata,
+and each threshold's edge among it),
 the report's previews made safe and its path rules, the bound on a lock wait (a
 held table, and a held REINDEX under an unbounded count), a role that may not
 read a table, a report that cannot be written, and the refusals.
