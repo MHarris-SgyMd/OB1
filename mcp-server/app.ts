@@ -341,6 +341,8 @@ const WORDS: Record<ToolName, Words> = {
   renew_claim: { render: (o) => say.renderRenewClaim(o), fault: writeFault("renew_claim failed: ") },
   release_claim: { render: (o) => say.renderReleaseClaim(o), fault: writeFault("release_claim failed: ") },
   list_claims: { render: (o) => say.renderListClaims(o), fault: readFault() },
+  // The per-holder claim cap (SMD-3606 PR 1b, migration 140).
+  set_work_claim_cap: { render: (o) => say.renderSetWorkClaimCap(o), fault: writeFault("set_work_claim_cap failed: ", say.setCapHint) },
   // Priority assertions (SMD-3664).
   set_priority: { render: (o) => say.renderSetPriority(o), fault: writeFault("set_priority failed: ") },
   clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },

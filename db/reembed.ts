@@ -501,7 +501,7 @@ import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
 import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, callWaitsFor, setBack, setFront, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
-import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
+import { blankProblem, commandLine, consoleWriter, flagList, numberIn, optionReader, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 /**
@@ -752,15 +752,9 @@ export async function reembedBacklog(sql: SQL, job: string, mine?: { prefix: str
 /** What run() says when a caller's signal stopped --retire or --accept-failed before its write: neither has a pass. */
 const stoppedBefore = (flag: string): string => `\n  stopped before ${flag} wrote anything: the caller's signal was aborted`;
 
-/** An option held to its flag's rule, in the scanner's words and with its flag list, or the CLI's default when absent. */
-function readOption(flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number } = { min: 1 }): number | string {
-  if (v == null) return absent;
-  const problem = numberProblem(flag, v, rule);
-  return problem === null ? v : `${problem}\n${flagList(FLAGS, HINTS)}`;
-}
-
 /** The run's numbers read first, or the refusal of the first that breaks its flag's rule, in the CLI's order. */
 function numbers(opts: ReembedOptions): { workers: number; batch: number; follow: number } | string {
+  const readOption = optionReader(FLAGS, HINTS);
   const workers = readOption("--workers", opts.workers, 2, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
   // One thought a claim under the admit gate (SMD-3379 PR 1b), else the CLI's eight.
@@ -779,6 +773,7 @@ function numbers(opts: ReembedOptions): { workers: number; batch: number; follow
  * ints.
  */
 function leaseNumbers(opts: ReembedOptions): { ttl: number; heartbeat: number } | string {
+  const readOption = optionReader(FLAGS, HINTS);
   const ttl = readOption("--ttl", opts.ttl, DEFAULT_TTL_S);
   if (typeof ttl === "string") return ttl;
   const heartbeat = readOption("--heartbeat", opts.heartbeat, heartbeatFor(ttl));

@@ -3333,8 +3333,9 @@ else {
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
       // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing; 132's
-      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'.
-      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE: set_priority and clear_priority fail naming the table; set_priority_weights fails naming priority_weight_settings \(migration 132\), and nothing else does/.test(missingBoth.out)
+      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'; 142's findings (SMD-3671), the
+      // review's.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE, priority_findings INSERT, priority_findings UPDATE, priority_findings DELETE: set_priority and clear_priority fail naming the table; set_priority_weights fails naming priority_weight_settings \(migration 132\); the priority review's scan \(ob1_priority_review\) and review_priority_finding fail naming priority_findings \(migration 142\), and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
              `…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it (${missingBoth.out.split("\n").find((l) => /!  priority\s/.test(l))?.trim()})`);
       // 117's items group (SMD-3665 PR 2): soft too — the writes it lacks named, the open-item writers alone failing.
@@ -3378,11 +3379,12 @@ else {
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
-      // 132's setting's writes, missing for this role too, are a clause of their own between (SMD-4193 PR 2).
-      assert(/, and so does agenda \(SMD-3669\); set_priority_weights fails naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\);.* plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
+      // 132's setting's writes, missing for this role too, are a clause of their own between (SMD-4193 PR 2), and 142's
+      // findings' another after (SMD-3671).
+      assert(/, and so does agenda \(SMD-3669\); set_priority_weights fails naming priority_weight_settings \(migration 132\); the priority review's scan \(ob1_priority_review\) and review_priority_finding fail naming priority_findings \(migration 142\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\);.* plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
              && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
-      assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
+      assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); the priority review's scan \(ob1_priority_review\) and review_priority_finding fail naming priority_findings \(migration 142\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
         `…and without SELECT on the operator's weights, the priority row says every ranked priority read fails (${rowOf(noWeights.out, "priority").trim().slice(-260)})`);
       assert(/thought_sources SELECT[^:]*: [^;]*; set_priority, clear_priority and priority_history on a thought or a ticket \(or set_priority taking one's due time\), agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources \(migration 133\);.* plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noSources.out, "priority").trim()),
         `…and without SELECT on thought_sources, the priority row says every priority call on a thought or a ticket fails, in a clause of its own (${rowOf(noSources.out, "priority").trim().slice(-260)})`);
@@ -3829,6 +3831,54 @@ else {
       const runnerStopped = await run(SQL_ENV);
       assert(/orchestration-runner stopped$/m.test(row(runnerStopped.out, "tasks")) && !/import runner/.test(fix(runnerStopped.out, "tasks")),
         `a runner stopped with its profile is said in the row, and no fix is named for it (${row(runnerStopped.out, "tasks")} | ${fix(runnerStopped.out, "tasks")})`);
+    } finally {
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    }
+  }
+
+  // The api's slot relay (SMD-3379 PR 3b-2): OB1_SLOT_RELAY_KEY read beside the coordinator's row, which says whether
+  // it listens for the api and whether its broker answers.
+  {
+    const put = (value: object | null, agoS = 10) => value === null
+      ? claims`DELETE FROM ob1_config WHERE key = 'heartbeat:coordinator'`
+      : claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:coordinator', ${JSON.stringify(value)}, now() - make_interval(secs => ${agoS}))
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+    const coord = (relay?: object) => ({ v: 1, every_s: 60, passes: [], children: {}, ...(relay ? { relay } : {}) });
+    const KEY = "relay-key-of-this-brain-0123";
+    const at = async (key: string | undefined) => {
+      const out = (await run({ ...SQL_ENV, ...(key === undefined ? {} : { OB1_SLOT_RELAY_KEY: key }) })).out;
+      return `${row(out, "slot relay")} ${fix(out, "slot relay")}`;
+    };
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    try {
+      const off = await at(undefined);
+      await put(coord({ broker: "up", for_s: 60 }));
+      const offForApi = await at(undefined);
+      const short = await at("short");
+      await put(null);
+      const none = await at(KEY);
+      await put(coord());
+      const noBroker = await at(KEY);
+      await put(coord({ broker: "up", for_s: 60 }));
+      const passesOnly = await at(KEY);
+      await put(coord({ broker: "down", for_s: 50, sockets: 1 }));
+      const down = await at(KEY);
+      await put(coord({ broker: "up", for_s: 290, sockets: 0 }));
+      const up = await at(KEY);
+      await put(coord({ broker: "up", for_s: 290, sockets: 1 }), 600);
+      const stale = await at(KEY);
+      assert(/^\s*·\s+slot relay\s+off: OB1_SLOT_RELAY_KEY is unset/.test(off) && /^\s*·\s+slot relay\s+off for the api: .*while the coordinator asks the host's broker for its passes'/.test(offForApi),
+        `no key: a skip, saying whether the coordinator relays the passes' all the same (${off} | ${offForApi})`);
+      assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is shorter than 16 characters.*openssl rand -hex 32/.test(short), `a key too short warns, naming how to mint one (${short})`);
+      assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is set, and no coordinator has stamped a row on this brain/.test(none) && /^\s*!\s+.*the coordinator has not stamped for 10 min/.test(stale),
+        `a key with no coordinator, or one gone quiet, warns (${none} | ${stale})`);
+      assert(/^\s*!\s+slot relay\s+OB1_SLOT_RELAY_KEY is set, but the coordinator does not listen for the api — it names no broker/.test(noBroker) && /→ Set OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY beside OB1_SLOT_RELAY_KEY/.test(noBroker)
+          && /^\s*!\s+.*does not listen for the api — it relays its passes' calls alone: it was made before the key was set/.test(passesOnly),
+        `a coordinator that does not listen warns, naming the broker's settings or the recreate (${noBroker} | ${passesOnly})`);
+      assert(/^\s*!\s+slot relay\s+the coordinator listens for the api, but the host's broker has not answered it for 60 s by its last stamp/.test(down) && /slot relay:" lines say why/.test(down),
+        `a broker away warns, its time counted from the row's stamp (${down})`);
+      assert(/^\s*✓\s+slot relay\s+the coordinator listens for the api, and its broker has answered for 5 min by its last stamp — the api's log says/.test(up),
+        `listening, the broker answering: ok, whatever the count of api sockets at the api's start (${up})`);
     } finally {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }

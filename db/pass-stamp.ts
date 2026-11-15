@@ -265,7 +265,9 @@ export async function endOnRefusal(opts: { sql: SQL; worker: StampingWorker; job
  * failure is told once (`failed`) until a write lands, and nothing but end()
  * waits on a write. `write` runs the statement and answers whether it landed,
  * since an owned upsert may decline; `declined` is told on the first of a run
- * of declines.
+ * of declines. A change while a write waits its turn is that write's: its value
+ * is taken as it runs, so a burst of changes is one write, not a chain that
+ * grows while the database does not answer (SMD-3379 PR 3b-2, review pass 5).
  */
 export function rowWriter<V>(o: {
   write: (value: V) => Promise<boolean>;
@@ -279,8 +281,11 @@ export function rowWriter<V>(o: {
   let failing = false;
   let declining = false;
   let ended = false;
+  /** A write queued and not yet begun: a change meanwhile is its. */
+  let waiting = false;
   const write = (end: boolean): Promise<void> => {
     chain = chain.then(async () => {
+      if (!end) waiting = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const landed = await Promise.race([
@@ -299,11 +304,10 @@ export function rowWriter<V>(o: {
     });
     return chain;
   };
-  const tick = setInterval(() => void write(false), o.everyS * 1000);
+  const soon = () => { if (ended || waiting) return; waiting = true; void write(false); };
+  const tick = setInterval(soon, o.everyS * 1000);
   return {
-    changed() {
-      if (!ended) void write(false);
-    },
+    changed() { soon(); },
     async end() {
       ended = true;
       clearInterval(tick);

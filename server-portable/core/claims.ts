@@ -238,3 +238,30 @@ export async function listClaims(ctx: Ctx, _principal: Principal, input: Input<"
   const rows = await (await ctx.store()).listClaims({ issue: input.ticket, holder: input.holder, includeEnded: input.include_ended, limit: Math.min(input.limit + 1, LIST_MAX) });
   return ok({ claims: rows.slice(0, input.limit), truncated: rows.length > input.limit || (input.limit === LIST_MAX && rows.length === LIST_MAX) });
 }
+
+/**
+ * What the operator's cap setting did (SMD-3606 PR 1b, migration 140): the per-holder cap every new claim now reads
+ * (null: none, the built-in cap stands), the one it replaced, when and by which key the standing one was set, and
+ * whether anything was written.
+ */
+export type CapSet = { changed: boolean; cap: number | null; previous: number | null; setAt: string | null; setBy: string | null; caller: string };
+export type CapSetCode = "REFUSED_NOT_OPERATOR" | "CLAIM_CAP_UNATTRIBUTED";
+
+export async function setWorkClaimCap(ctx: Ctx, principal: Principal, { cap }: Input<"set_work_claim_cap">): Promise<Outcome<CapSet, CapSetCode>> {
+  // Who may is the database's to say (migration 140): the key's registry kind by its agent id, which the server does
+  // not hold. The cap is checked there again, in 140's words; null clears. Without the agent id the database can tell
+  // no operator (a name lends no kind): the registry's absence is said as set_priority_weights says it, and a principal
+  // that has none by design is named so, never told to classify a key that may be the operator's already (132's rule).
+  const away = unattributedAs("CLAIM_CAP_UNATTRIBUTED", principal);
+  if (away) return away;
+  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true });
+  const result = await (await ctx.store()).setWorkClaimCap({ cap, actor: actorOf(ctx, principal) });
+  if (!result.ok) {
+    if (result.error === "NOT_OPERATOR") return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: result.kind });
+    // BAD_CAP is unreachable: the schema admits a cap only in 140's range (1..100000) or null, exactly what 140 accepts;
+    // a database refusing one the schema admits means the two have diverged — a fault, not the caller's.
+    throw new Error(`set_work_claim_cap: the database refused a cap the schema admits (${result.message})`);
+  }
+  // No action-log row, as set_priority_weights: a setting is no search.
+  return ok({ changed: result.changed, cap: result.cap, previous: result.previous, setAt: result.setAt, setBy: result.setBy, caller: principal.name });
+}

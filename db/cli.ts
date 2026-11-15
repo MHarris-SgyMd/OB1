@@ -286,6 +286,22 @@ export function numberProblem(flag: string, n: number, rule: { min: number; max?
 }
 
 /**
+ * An engine's reader of its numeric options (SMD-4308): the option given, held
+ * to its flag's rule by numberProblem, or `absent` — the CLI's default — when
+ * it is null or undefined. A broken rule is returned as the refusal, in the
+ * scanner's words with the script's flag list under it, as the CLI prints it;
+ * the list is built only then. One reader for the claim workers' and the
+ * scheduler's `numbers()`, each of which held a copy.
+ */
+export function optionReader<K extends string>(spec: FlagSpec<K>, hints: Partial<Record<K, string>> = {}): (flag: string, v: number | null | undefined, absent: number, rule?: { min: number; max?: number; fraction?: boolean }) => number | string {
+  return (flag, v, absent, rule = { min: 1 }) => {
+    if (v == null) return absent;
+    const problem = numberProblem(flag, v, rule);
+    return problem === null ? v : `${problem}\n${flagList(spec, hints)}`;
+  };
+}
+
+/**
  * The process's arguments, for a script whose parser is pure and returns its
  * refusal (graph-centrality.ts's `parseArgs`, which the suite drives): `--help`
  * prints `usage` and exits 0 first, as `commandLine` does.

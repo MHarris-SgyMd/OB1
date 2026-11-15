@@ -47,7 +47,7 @@ import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN }
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
-import { slotsSettingFrom } from "./slots.ts";
+import { relayKeyProblem, slotsSettingFrom } from "./slots.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -239,12 +239,14 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
  * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
  * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
- * its own too.
+ * its own too. 142's priority_findings is written by the priority review's scan and by an operator's decision on a
+ * finding (SMD-3671), and read by nothing else: a clause of its own, no board lost for it.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
   const sources = ungranted.filter((g) => g.startsWith("thought_sources "));
-  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings ") && !g.startsWith("thought_sources "));
+  const findings = ungranted.filter((g) => g.startsWith("priority_findings "));
+  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings ") && !g.startsWith("thought_sources ") && !g.startsWith("priority_findings "));
   const clauses: string[] = [];
   if (rest.length) {
     const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
@@ -262,6 +264,9 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
     clauses.push(weights.includes("priority_weight_settings SELECT")
       ? "every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings (migration 132)"
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
+  }
+  if (findings.length) {
+    clauses.push("the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)");
   }
   const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
@@ -453,7 +458,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -5635,6 +5640,36 @@ if (configFailed) {
               });
               add("tasks", wrong.length ? "warn" : "ok", detail, wrong.length ? fixes.join(" ") : undefined);
             }
+          }
+        }
+
+        // The api's way to the host's slot broker (SMD-3379 PR 3b-2): with OB1_SLOT_RELAY_KEY, its model calls ask the
+        // broker through the coordinator, whose row says whether it listens for them and whether the broker answers.
+        // Read at the api's start, when its own socket is not yet open: the row's count of api sockets is not judged.
+        {
+          const key = env.OB1_SLOT_RELAY_KEY?.trim();
+          const keyProblem = key ? relayKeyProblem(key) : null;
+          const w = facts.workers;
+          const c = w?.coordinator;
+          const r = c?.relay;
+          const guide = `deploy/README.md, "The slot broker for the brains on one host"`;
+          if (!key) {
+            add("slot relay", "skip", r
+              ? `off for the api: OB1_SLOT_RELAY_KEY is unset, so its model calls keep its own shares (OB1_BACKGROUND_SLOTS), while the coordinator asks the host's broker for its passes' — set the key in deploy/.env and recreate the api and the coordinator for the api's to join (${guide})`
+              : "off: OB1_SLOT_RELAY_KEY is unset, so the api's model calls keep its own shares (OB1_BACKGROUND_SLOTS)");
+          } else if (keyProblem !== null) {
+            add("slot relay", "warn", `${keyProblem}, so the coordinator does not listen for the api, whose calls keep its own shares`, `Mint a key (openssl rand -hex 32), set it as OB1_SLOT_RELAY_KEY in deploy/.env, and recreate the api and the coordinator (up -d api coordinator).`);
+          } else if (w === null) {
+            add("slot relay", "skip", "the heartbeat rows were not read — the workers row says why; the coordinator's row says whether it listens for the api.");
+          } else if (c === undefined || c.stale || c.ended) {
+            add("slot relay", "warn", `OB1_SLOT_RELAY_KEY is set, and ${c === undefined ? "no coordinator has stamped a row on this brain" : c.ended ? "the coordinator stopped" : `the coordinator has not stamped for ${ago(c.ageS)}`} — the api's model calls take its own shares until one listens`, `Start it: ${COORDINATOR_UP}. It listens for the api once OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY name the host's broker beside the key.`);
+          } else if (r === undefined || r.sockets === undefined) {
+            add("slot relay", "warn", `OB1_SLOT_RELAY_KEY is set, but the coordinator does not listen for the api — ${r === undefined ? "it names no broker (OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY), or" : "it relays its passes' calls alone:"} it was made before the key was set, or its port was taken — so the api's model calls keep its own shares`, `Set OB1_SLOT_BROKER_URL and OB1_SLOT_BROKER_KEY beside OB1_SLOT_RELAY_KEY in deploy/.env (${guide}), then recreate the coordinator: ${COORDINATOR_UP}. Its log says why it does not listen (compose logs coordinator, the lines beginning "coordinator:").`);
+          } else if (r.broker === "down") {
+            add("slot relay", "warn", `the coordinator listens for the api, but the host's broker has not answered it for ${ago(r.for_s + c.ageS)} by its last stamp — the api's and the passes' model calls take their own shares meanwhile, each counted at the broker once it is back`, `The coordinator's "slot relay:" lines say why (compose logs coordinator): a refused key (OB1_SLOT_BROKER_KEY against the registry's hash), or the broker down (bun --no-env-file deploy/federated/federated.ts check, then up).`);
+          } else {
+            // The coordinator's row alone: a key the coordinator holds otherwise (one of the two recreated) is the api's log's to say (review pass 1).
+            add("slot relay", "ok", `the coordinator listens for the api, and its broker has answered for ${ago(r.for_s + c.ageS)} by its last stamp — the api's log says once it is through ("background slots: this process asks the host's slot broker") or refused (401, the two keys differing: recreate both)`);
           }
         }
 
