@@ -22431,6 +22431,7 @@ if (want("26")) {
       // out of the working directory, naming a directory (before any read; `~` too) or too long for its temporary file,
       // a --statement-timeout out of range, another database than the URL's (PGDATABASE). A name only starting with two
       // dots is inside; an absolute path outside the working directory is taken as given (here with --url and no bound).
+      // A refused connection exits 1, naming the client's code.
       const refusedDir = join(scratch, "refused");
       mkdirSync(refusedDir);
       const r = (extra: Record<string, string>, ...flags: string[]) => lintIn(refusedDir, extra, ...flags);

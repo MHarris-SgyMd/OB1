@@ -4,7 +4,7 @@
  * `thoughts` and checks of the entity graph, written as a markdown report
  * (SMD-3318).
  *
- *   bun db/lint-sweep.ts --url postgres://…                       # both tiers; ./lint-report-YYYY-MM-DD.md (UTC date)
+ *   bun db/lint-sweep.ts --url postgres://…                        # both tiers; ./lint-report-YYYY-MM-DD.md (UTC date)
  *   bun db/lint-sweep.ts --url … --tier 1 --report ~/lint/week.md  # one tier, another path
  *
  * This is the `db/` home for what `recipes/lint-sweep/lint-sweep.js` did
@@ -63,23 +63,22 @@
  * Each tier reads its sample once, through the created_at index, stopping
  * after its rows. The exact counts read whole tables: `thoughts` once (a
  * scan), and the entity graph's anti-join through 016's edge indexes —
- * measured on a scratch brain at about half a second
- * warm and 5 s cold for a million thoughts, so minutes at 100 million and
- * about an hour at a billion, the snapshot held throughout (vacuum's horizon
- * with it, and any CREATE or REINDEX … CONCURRENTLY waits for it). A
- * statement is bounded by --statement-timeout (60 s; 0 for none), lifted for
- * those counts and put back, and every lock wait by the same bound
- * (lock_timeout), the counts' included. The transaction's first statement locks
- * the tables its tiers read (ACCESS SHARE, as pg_dump does): a lock another
- * session holds fails the run then (an index's, a REINDEX's, at the statement
- * that plans it). A TRUNCATE or ALTER of one of them waits for the run, and
- * every read and write of that table waits behind it: the brain's traffic on
- * it stalls for the rest of the sweep, or, for a migration, until the
- * migrator's 10 s lock timeout fails the upgrade. Keep a sweep apart from an
- * upgrade; the session's application_name is lint-sweep, for
- * pg_stat_activity.
- * client_connection_check_interval (10 s, where the server's platform has it)
- * has the server end a stopped run's statement.
+ * measured on a scratch brain at about half a second warm and 5 s cold for a
+ * million thoughts, so minutes at 100 million and about an hour at a billion,
+ * the snapshot held throughout (vacuum's horizon with it, and any CREATE or
+ * REINDEX … CONCURRENTLY waits for it). A statement is bounded by
+ * --statement-timeout (60 s; 0 for none), lifted for those counts and put
+ * back, and every lock wait by the same bound (lock_timeout), the counts'
+ * included. The transaction's first statement locks the tables its tiers read
+ * (ACCESS SHARE, as pg_dump does): a lock another session holds fails the run
+ * then (an index's, a REINDEX's, at the statement that plans it). A TRUNCATE
+ * or ALTER of one of them waits for the run, and every read and write of that
+ * table waits behind it: the brain's traffic on it stalls for the rest of the
+ * sweep, or, for a migration, until the migrator's 10 s lock timeout fails the
+ * upgrade. Keep a sweep apart from an upgrade; the session's application_name
+ * is lint-sweep, for pg_stat_activity. client_connection_check_interval (10 s,
+ * where the server's platform has it) has the server end a stopped run's
+ * statement.
  *
  * `recipes/lint-sweep/views.sql` stays the recipe's: views over the columns
  * `schemas/enhanced-thoughts` adds, which this script does not read.
@@ -183,7 +182,7 @@ const DATED = `created_at > '-infinity' AND created_at < 'infinity'`;
  */
 const recent = (cols: string, n: number) => `SELECT ${cols} FROM thoughts WHERE ${DATED} ORDER BY created_at DESC LIMIT ${n}`;
 
-/** Run `query` with the statement bound lifted, then put the session's back (the whole-table counts outlast a page's bound). */
+/** Run `query` with the statement bound lifted, then put the session's back (the whole-table counts outlast a statement's bound). */
 async function unbounded<T>(tx: SQL, bound: string, query: () => Promise<T>): Promise<T> {
   await tx.unsafe("SET LOCAL statement_timeout = 0");
   const out = await query();
@@ -211,7 +210,7 @@ async function tier1(tx: SQL, bound: string): Promise<Tier1> {
       FROM recent`)) as { sampled: number; orphans: number; empty: number; very_long: number; over_tagged: number; over: string }[];
   return {
     total: Number(whole.total), noFingerprint: Number(whole.no_fp), undated: Number(whole.undated), sampled: c.sampled,
-    orphansByTag: c.orphans, emptyContent: c.empty, veryLong: c.very_long, overTagged: JSON.parse(c.over) as { id: string; tags: number }[], overTaggedCount: c.over_tagged,
+    orphansByTag: c.orphans, emptyContent: c.empty, veryLong: c.very_long, overTagged: JSON.parse(c.over) as Tier1["overTagged"], overTaggedCount: c.over_tagged,
   };
 }
 
@@ -229,7 +228,7 @@ async function tier2(tx: SQL, bound: string): Promise<Tier2> {
            (SELECT count(*) FROM ob1_entities e
              WHERE NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id)
                AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.to_entity_id = e.id))::bigint::text AS lonely`)) as { entities: string; lonely: string }[]);
-  const rows = JSON.parse(c.listed) as { id: string; created: string; preview: string; cut: boolean }[];
+  const rows = JSON.parse(c.listed) as Tier2["unmentioned"];
   return {
     sampled: c.sampled, unmentionedCount: c.unmentioned, entities: Number(g.entities), entitiesWithNoEdges: Number(g.lonely),
     unmentioned: rows.map((r) => ({ ...r, preview: sanitizePreview(r.preview ?? "") })),
@@ -319,7 +318,6 @@ export function writeReport(path: string, text: string): void {
 export interface SweepOptions {
   /** A client on the brain, of one connection (the CLI's): the run's session setting and its check go on it before the transaction. */
   sql: SQL;
-  /** "1", "2" or "all". */
   tier: "1" | "2" | "all";
   /** The report's resolved path. */
   report: string;
@@ -358,8 +356,7 @@ export async function run(opts: SweepOptions): Promise<number> {
       const tx = txn as unknown as SQL;
       // The tables the tiers read, ACCESS SHARE, first and under the statement bound (a REPEATABLE READ transaction's
       // snapshot is its first query's; LOCK is none): a TRUNCATE or a change of shape waits for the run.
-      const tables = [...(opts.tier !== "2" ? ["thoughts"] : []), ...(opts.tier !== "1" ? ["thoughts", "thought_entities", "ob1_entities", "ob1_entity_edges"] : [])];
-      const toLock = [...new Set(tables)];
+      const toLock = ["thoughts", ...(opts.tier !== "1" ? ["thought_entities", "ob1_entities", "ob1_entity_edges"] : [])];
       try {
         await tx.unsafe(`LOCK TABLE ${toLock.join(", ")} IN ACCESS SHARE MODE`);
       } catch (e) {

@@ -36,9 +36,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
 - **The report.** `--report`, or `./lint-report-<UTC date>.md` in the directory
   the run starts from. Its previews are thought text: keep it outside the
   checkout, or under the default name in a place the checkout's `.gitignore`
-  covers (its root, `db/` and `recipes/lint-sweep/`). It is written 0600 through a file of the
-  run's own renamed into place, so a failed run leaves an earlier report as it
-  was, and only once every read succeeded.
+  covers (its root, `db/` and `recipes/lint-sweep/`). It is written 0600 through
+  a file of the run's own renamed into place, so a failed run leaves an earlier
+  report as it was, and only once every read succeeded.
 - **Upgrading a cron job.** The old script read `.env` and `.env.local` from its
   own directory, wherever it ran from; Bun reads them from the working
   directory. So `cd` into the directory holding the file (for the recipe's,

@@ -296,9 +296,8 @@
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
  *      moved onto the shim (SMD-2144, SMD-2139; brain-backup's and
  *      lint-sweep's since to db/backup.ts and db/lint-sweep.ts, SMD-3318),
- *      weekly-digest retired
- *      for the db/ verb db/weekly-digest.ts (SMD-2239), brain-smoke-test
- *      retired into deploy/smoke.sh (SMD-2103), and ob-graph's
+ *      weekly-digest retired for the db/ verb db/weekly-digest.ts (SMD-2239),
+ *      brain-smoke-test retired into deploy/smoke.sh (SMD-2103), and ob-graph's
  *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
  *      ports or retires each — a landed
  *      port fails until its entry goes, so the
