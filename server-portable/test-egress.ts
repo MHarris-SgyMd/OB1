@@ -521,7 +521,16 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   });
   // The second REST core: a mender of its own, the two taking turns under the leader lock.
   const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(), stdout: "pipe", stderr: "pipe" });
-  const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(), stdout: "pipe", stderr: "pipe" });
+  // The first, with the key to its coordinator's slot relay (SMD-3379 PR 3b-2): a stand-in coordinator that answers each
+  // ask `own` and records what the api's own process sends — api.ts asks for the socket (`relaySocket`), no other process.
+  const relayKey = "relay-key-of-this-brain-0123";
+  const relayed: { key: string | null; frames: { slot?: string; cls?: string }[] } = { key: null, frames: [] };
+  const relayStub = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    fetch: (req, srv) => { relayed.key = req.headers.get("x-brain-key"); return srv.upgrade(req) ? undefined : new Response("no", { status: 400 }); },
+    websocket: { message(ws, m) { const f = JSON.parse(String(m)); relayed.frames.push(f); if (f.slot === "ask" && f.cls === "background") ws.send(JSON.stringify({ slot: "own", id: f.id })); } },
+  });
+  const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: { ...childEnv(), OB1_SLOT_RELAY_KEY: relayKey, OB1_SLOT_RELAY_URL: `ws://127.0.0.1:${relayStub.port}/v1/relay` }, stdout: "pipe", stderr: "pipe" });
   const [childServed, apiServed] = await Promise.all([childPort(child, 20_000), childPort(api, 20_000)]);
   const serverPort = childServed.port, apiPort = apiServed.port;
   const mcp = mcpEntry(apiPort);
@@ -595,6 +604,9 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     assert(apiProvider?.reprobeS === 15 && ["unreachable", "answering"].includes(apiProvider.status ?? ""), `the REST core re-probes its provider, at the default 15 s, and its keyed /health says so (${JSON.stringify(apiProvider)})`);
     const restFound = await (await fetch(`${apiAt}/v1/search`, { method: "POST", headers: { "Content-Type": "application/json", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ query: restContent, limit: 5 }) })).text();
     assert(restMended && restFound.includes(madeBody.id!), "the second REST core gone, the first's own mender gives it its vector, and REST search finds it");
+    const slots = relayed.frames.map((f) => `${f.slot}${f.cls ? `:${f.cls}` : ""}`);
+    assert(relayed.key === relayKey && slots.includes("ask:background") && slots.includes("running:background") && slots.includes("done"),
+      `with OB1_SLOT_RELAY_KEY, the REST core's own process asks its coordinator's relay for its model calls, with the key: a background ask, its own share reported running, and done (${[...new Set(slots)].join(", ")})`);
   } finally {
     child.kill();
     api.kill();
@@ -603,6 +615,8 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     const codes = await Promise.all([child.exited, api.exited, mcp.exited]);
     clearTimeout(hung);
     provider?.stop(true);
+    void relayStub.stop(true);
+    assert(relayed.frames.some((f) => f.slot === "bye"), "and says bye to it as it stops, so the coordinator keeps none of its calls (SMD-3379 PR 3b-2, review pass 2)");
     const said = (await childServed.stdout.rest()) + (await new Response(child.stderr).text()) + (await apiServed.stdout.rest()) + (await new Response(api.stderr).text());
     const menderLines = said.split("\n").filter((l) => /vector mender/.test(l));
     // Down for 11 s at a 1 s interval, about six ticks, and two menders: the outage said once by each at most, not per tick.

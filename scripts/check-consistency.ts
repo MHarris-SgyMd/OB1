@@ -3260,6 +3260,7 @@ const NOT_FORWARDED: Record<string, string> = {
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
   OB1_SLOT_RELAY: "set by the coordinator alone, in the environment of each pass it starts with an IPC channel to its slot relay (SMD-3379 PR 3b-1) — the api has no channel, and a value forwarded from deploy/.env would have a process ask a relay that is not there",
+  OB1_SLOT_RELAY_URL: "where the api dials the coordinator's slot relay (SMD-3379 PR 3b-2): in the stack, always its own coordinator on the brain's network (slots.ts's RELAY_URL, ws://coordinator:8096/v1/relay); a checkout's api or a test sets it — forwarded from deploy/.env, a value could only point the api away from its own coordinator",
 };
 
 /**
@@ -7717,6 +7718,7 @@ function listenLoopbackFiles(): string[] | null {
     .filter((n) => existsSync(join(ROOT, n)) && statSync(join(ROOT, n)).isFile()).sort();
 }
 const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
+  ["db/test-coordinator.ts", 'Bun.serve({ port: 0, fetch: () => new Response("") })', "the port-taken row: it holds a port on every address, as the coordinator's relay listener binds in its container, so that listener finds it taken (SMD-3379 PR 3b-2)"],
   ["db/test-support.ts", "new Response(token)", "secondLoopback's probe: it stands for a server on every address, so a row can find an address that reaches one"],
   ["db/test-support.ts", 'OB1_LISTEN_HOST: "127.0.0.1", ...env', "serveChild's own default, which a case's env may override; each override is an object naming OB1_LISTEN_HOST, read here as a site of its own"],
   ["server-portable/test-rest.ts", "OB1_LISTEN_HOST: value", "[11b]'s refusing children: told a value that is no address, or none the host has, they exit before they serve"],
