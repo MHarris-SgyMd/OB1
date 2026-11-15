@@ -7857,6 +7857,92 @@ console.log("\n[36d] The operator's priority weights in the core and the words (
     `brain_info's Priority weights row: before 132, unread, built in, the operator's, the operator's refused, a refused one holding a null and a string; a read answering no setting throws (${lines.join(" | ")} | ${oddLine.slice(0, 90)} | ${badRead.join(",")})`);
 }
 
+console.log("\n[36e] The operator's work-claim cap in the core and the words (SMD-3606 PR 1b, migration 140): set_work_claim_cap passing the cap and the caller's key to the store, null clearing; its answer and its refusals (not an operator) said; the no-agent-id paths; an envelope the store cannot read a fault; its hint for a brain before 140 or a role without the grant; brain_info's row for each state of the cap");
+{
+  const { setWorkClaimCap } = await import("./core/claims.ts");
+  const { normaliseSetCap } = await import("./store.ts");
+  const { capSettingValue, workClaimCapLine } = await import("./brain-info.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ setWorkClaimCap: async (o: Record<string, unknown>) => { asked.push(o); return normaliseSetCap(answer); } }) });
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  // 140's envelopes, as the scratch brain answers them.
+  const setA = { ok: true, changed: true, cap: 10, previous: null, set_at: "2026-11-14T03:30:44.937044+00:00", set_by: "op-key" };
+  const sameA = { ok: true, changed: false, cap: 10, previous: 10, set_at: "2026-11-14T03:30:44.937044+00:00", set_by: "op-key" };
+  const clearA = { ok: true, changed: true, cap: null, previous: 10, set_at: null, set_by: null };
+  const agentA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may set the work-claim cap; op-key is agent" };
+  const nullA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: null, message: "only an operator key, named by its agent id, may set the work-claim cap; op-key is named by its name alone" };
+  const set = await setWorkClaimCap(core(setA) as never, P, { cap: 10 } as never);
+  const cleared = await setWorkClaimCap(core(clearA) as never, P, { cap: null } as never);
+  const same = await setWorkClaimCap(core(sameA) as never, P, { cap: 10 } as never);
+  const agent = await setWorkClaimCap(core(agentA) as never, P, { cap: 10 } as never);
+  const unclassified = await setWorkClaimCap(core(nullA) as never, P, { cap: 10 } as never);
+  const sent = asked.map((o) => JSON.stringify(o.cap));
+  const actor = asked[0]?.actor as Record<string, unknown> | undefined;
+  assert(sent[0] === "10" && sent[1] === "null" && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test",
+    `the cap reaches the store as given, null as a clear, with the caller's key, its agent id and the door as the actor (${sent.join(" | ")}; ${JSON.stringify(actor)})`);
+  assert(set.ok && set.value.changed && set.value.cap === 10 && set.value.setAt === "2026-11-14T03:30:44.937Z" && set.value.setBy === "op-key" && set.value.previous === null && set.value.caller === "op-key"
+      && cleared.ok && cleared.value.cap === null && cleared.value.previous === 10 && same.ok && same.value.changed === false
+      && !agent.ok && agent.refusal.code === "REFUSED_NOT_OPERATOR" && agent.refusal.kind === "agent" && agent.refusal.key === "op-key"
+      && !unclassified.ok && unclassified.refusal.code === "REFUSED_NOT_OPERATOR" && unclassified.refusal.kind === null,
+    `140's answers: set, cleared and unchanged as values; not an operator as REFUSED_NOT_OPERATOR with the key's kind (${JSON.stringify([set, cleared, same].map((o) => o.ok && o.value.changed))} ${JSON.stringify([agent, unclassified].map((o) => !o.ok && o.refusal.code))})`);
+  // An envelope 140 does not answer is a fault, never a value (an unknown error, no changed flag, a BAD_CAP without words).
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true }, { ok: false, error: "BAD_CAP" }, null].map((a) => { try { normaliseSetCap(a); return "read"; } catch { return "threw"; } });
+  assert(strays.every((s) => s === "threw"), `an envelope set_work_claim_cap does not answer throws (${strays.join(",")})`);
+  // No agent id: the registry away is CLAIM_CAP_UNATTRIBUTED (retryable, or not when an operator must act); a principal with none by design is named so; neither reaches the store, nor is told to classify a key that may be the operator's.
+  const before = asked.length;
+  const away = await setWorkClaimCap(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { cap: 10 } as never);
+  const stuck = await setWorkClaimCap(core(setA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { cap: 10 } as never);
+  const none = await setWorkClaimCap(core(setA) as never, { name: "op-key", scope: "write" } as never, { cap: 10 } as never);
+  const awayText = text(say.renderSetWorkClaimCap(away)), noneText = text(say.renderSetWorkClaimCap(none));
+  assert(asked.length === before && !away.ok && away.refusal.code === "CLAIM_CAP_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "CLAIM_CAP_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR"
+      && awayText === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && /reached the brain with none; call with the operator's own key\.$/.test(noneText) && !/set_agent_kind/.test(awayText + noneText),
+    `with no agent id nothing reaches the store: the registry away CLAIM_CAP_UNATTRIBUTED (retryable, or not when an operator must act), a principal with none named so (${awayText} | ${noneText})`);
+
+  const words = [set, cleared, same, agent, unclassified].map((o) => text(say.renderSetWorkClaimCap(o)));
+  assert(words[0] === "Set the per-holder cap on live work claims to 10: a new claim past it is refused CLAIM_LIMIT, a renewal of the holder's own never. Before: the built-in cap (50). brain_info shows the setting; null clears it."
+      && words[1] === "Cleared the per-holder cap on live work claims to the built-in cap (50): a new claim past it is refused CLAIM_LIMIT, a renewal of the holder's own never. Before: 10. brain_info shows the setting; null clears it."
+      && words[2] === "Unchanged: the per-holder cap on live work claims is already 10 (set 2026-11-14T03:30:44.937Z by op-key). Nothing was written."
+      && words[3].startsWith("Refused: only a key the operator classified `operator` may set the work-claim cap. This key, op-key, is classified agent")
+      && words[4].startsWith("Refused: only a key the operator classified `operator` may set the work-claim cap. This key, op-key, is unclassified. If it is the operator's own, classify it: SELECT set_agent_kind('op-key', 'operator')"),
+    `the words: the cap now and before, a clear, nothing written; the refusals naming the key's kind and its fix (${words.join(" | ")})`);
+  const sv = say.renderSetWorkClaimCap(set).structuredContent;
+  assert(sv.changed === true && sv.cap === 10 && sv.previous === null && sv.setAt === "2026-11-14T03:30:44.937Z" && sv.setBy === "op-key",
+    `the value carries the cap now and before, when and by which key (${JSON.stringify(sv)})`);
+
+  // The fault: a brain before 140 or a role without the grant is named for the write.
+  assert(/migration 140/.test(say.setCapHint("function set_work_claim_cap(integer, jsonb) does not exist")) && say.setCapHint("connection refused") === ""
+      && /the claims group's grants on work_claim_cap_settings/.test(say.setCapHint("permission denied for table work_claim_cap_settings")),
+    `set_work_claim_cap's hint names a brain before 140 and a role without the grant (${say.setCapHint("function set_work_claim_cap does not exist").slice(0, 60)})`);
+
+  // brain_info: the row for each state of the cap, and the reading of 140's jsonb.
+  const builtin = capSettingValue({ cap: 50, source: "builtin" });
+  const operator = capSettingValue({ cap: 10, source: "operator", set_at: "2026-11-14T03:30:44.937044+00:00", set_by: "op-key", refused: null });
+  const refusedC = capSettingValue({ cap: 200000, source: "operator", set_at: "2026-11-14T03:30:44.937044+00:00", set_by: "op-key", refused: "a cap above 100000 (200000)" });
+  const unreadC = { reason: "refused", message: "permission denied for table work_claim_cap_settings" } as never;
+  const lines = [
+    workClaimCapLine({ workClaimCap: null, unread: {} }),
+    workClaimCapLine({ workClaimCap: null, unread: { workClaimCap: unreadC } }),
+    workClaimCapLine({ workClaimCap: builtin, unread: {} }),
+    workClaimCapLine({ workClaimCap: operator, unread: {} }),
+    workClaimCapLine({ workClaimCap: refusedC, unread: {} }),
+  ];
+  const badRead = [{ cap: "x" }, { source: "operator" }, [], 3].map((r) => { try { capSettingValue(r); return "read"; } catch { return "threw"; } });
+  // A raw write's setter name and refusal are unbounded: the row cuts the name to 80 and the refusal to 300, as priorityWeightsLine's does (SMD-3606 PR 1b review).
+  const longCap = workClaimCapLine({ workClaimCap: capSettingValue({ cap: 7, source: "operator", set_at: "2026-11-14T03:30:44.937044+00:00", set_by: "k".repeat(200), refused: "r".repeat(1000) }), unread: {} });
+  assert(longCap.length < 700 && longCap.includes(` by ${"k".repeat(79)}…)`) && longCap.includes(`${"r".repeat(299)}…. An operator key`),
+    `brain_info's Work-claim cap row cuts the setter's name to 80 and the refusal to 300 (${longCap.length} characters)`);
+  assert(lines[0] === "built in (50) — migration 140 is not applied" && /^\? \(work_claim_cap_settings /.test(lines[1]) && lines[2] === "built in (50)"
+      && lines[3] === "the operator's: 10 (set 2026-11-14T03:30:44.937Z by op-key)"
+      && lines[4] === "the operator's, REFUSED, so every new claim fails: 200000 (set 2026-11-14T03:30:44.937Z by op-key): a cap above 100000 (200000). An operator key sets it again, or clears it, through set_work_claim_cap"
+      && badRead.every((r) => r === "threw"),
+    `brain_info's Work-claim cap row: before 140, unread, built in, the operator's, the operator's refused; a read answering no cap throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+}
+
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
   const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");
