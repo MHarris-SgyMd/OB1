@@ -425,7 +425,8 @@ const PROPOSING_NONE: readonly Verdict[] = VERDICTS.filter((x) => x !== "outdate
  * related top and an evolves top over the same two shares store one number (0.85 for 0.45 and 0.40 either way, where
  * converting an evolves after the choice stored 0.45 and 0.85), and the folded related outweighs a duplicate or an
  * unrelated the two words outweigh together (duplicate 0.45, related 0.20, evolves 0.30: related at 0.50), so a few pairs
- * version 4 called duplicate or unrelated are related. Not as capJudgement stores a capped pair, at P(related) alone:
+ * version 4 called duplicate or unrelated are related. A tie goes to the first in prompt 4's order (`best`): a folded
+ * related that ties a duplicate is related, one that ties an unrelated is not (review pass 3). Not as capJudgement stores a capped pair, at P(related) alone:
  * there the rest of the mass is about a third subject. The relation words' mass, which the pass's floor reads, is the
  * same folded or not. Rounded to four places, as verdictDistribution rounds H2O's.
  */

@@ -30632,23 +30632,43 @@ if (want("41")) {
     assert(fine === 0 && (await rowsOf("ZQ-64", "ZQ-65"))[0]?.origin === "found" && (comments.get("ZQ-65") ?? []).length === 1,
       `…and the next run finds that comment on the board and records it found, posting nothing again (exit ${fine})`);
 
-    // SMD-3306 PR 7b's review pass 2 (run-it): decide version 5 stores an evolves as related, so a pair posted as
-    // evolves is not posted again as related once re-judged, and its record still stands; one posted as related and
-    // judged evolves since is a new word, as before.
-    const y90 = await ticket(190, "a plan"), y91 = await ticket(191, "its next step");
-    const rel190 = await relate(y91, y90, "evolves", 0.7);
-    await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES ('ZQ-190', 'ZQ-191', 'evolves', 'ZQ-191', 'posted', 'c-pre-90', ARRAY[${rel190.id}::uuid])`;
-    const y92 = await ticket(192, "another plan"), y93 = await ticket(193, "its sequel");
-    const rel192 = await relate(y93, y92, "related", 0.7);
-    await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES ('ZQ-192', 'ZQ-193', 'related', 'ZQ-193', 'posted', 'c-pre-92', ARRAY[${rel192.id}::uuid])`;
-    const [rejudged, flipped] = [await relate(y91, y90, "related", 0.9), await relate(y93, y92, "evolves", 0.9)];
-    const chosen = await selectFindings(bsql);
-    const outcomeOf = async (a: string, word: string) => ((await FINDING_OUTCOMES_SQL(bsql)) as { ticket_a: string; word: string; stands: boolean | null }[]).find((r) => r.ticket_a === a && r.word === word)?.stands;
-    assert(rejudged.action === "replaced" && flipped.action === "replaced" && !chosen.some((f) => f.a === "ZQ-190") && chosen.some((f) => f.a === "ZQ-192" && f.word === "evolves")
-        && (await outcomeOf("ZQ-190", "evolves")) === true && (await outcomeOf("ZQ-192", "related")) === false,
-      `a pair posted as evolves and judged related since is not chosen again, its record standing; one posted related and judged evolves since is chosen, its related no longer standing (${JSON.stringify(chosen.filter((f) => /^ZQ-19[0-3]$/.test(f.a)).map((f) => [f.a, f.word]))})`);
-    await bsql`DELETE FROM board_findings_posted WHERE ticket_a IN ('ZQ-190', 'ZQ-192')`;
-    await bsql`DELETE FROM thoughts WHERE id IN (${y90.id}::uuid, ${y91.id}::uuid, ${y92.id}::uuid, ${y93.id}::uuid)`;
+    // In a function of its own (TS2563).
+    await (async () => {
+      // SMD-3306 PR 7b's review passes 2 and 3 (run-it): a word posted covers the words COVERS names for it, so the pair is
+      // not chosen again for them and its record still stands: related and evolves each other, a duplicate a related
+      // (decide version 5 folds an evolves into related, and a few duplicates). Nothing covers a duplicate or an outdates
+      // after an evolves (cold read, mutants: a posted evolves covering every word lived).
+      const pair = async (n: number, posted: string, judged: string | null) => {
+        const older = await ticket(n, "a plan"), newer = await ticket(n + 1, "what came of it");
+        const first = await relate(newer, older, posted === "outdates" ? "related" : posted, 0.7);
+        await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES (${`ZQ-${n}`}, ${`ZQ-${n + 1}`}, ${posted}, ${`ZQ-${n + 1}`}, 'posted', ${`c-pre-${n}`}, ARRAY[${first.id}::uuid])`;
+        const again = judged === null ? null : await relate(newer, older, judged, 0.9);
+        return { older, newer, again };
+      };
+      const covers = [await pair(190, "evolves", "related"), await pair(192, "related", "evolves"), await pair(194, "duplicate", "related")];
+      const notCovered = [await pair(196, "evolves", "duplicate"), await pair(198, "evolves", null)];
+      await propose(notCovered[1].older, notCovered[1].newer);
+      const marked = await pair(200, "related", null);
+      await bsql`DELETE FROM board_findings_posted WHERE ticket_a = 'ZQ-200'`;
+      comments.set("ZQ-200", ["ob1-finding ZQ-200 ZQ-201 evolves"]);
+      const chosen = await selectFindings(bsql);
+      const has = (a: string, w: string) => chosen.some((f) => f.a === a && f.word === w);
+      const standsOf = async (a: string, word: string) => ((await FINDING_OUTCOMES_SQL(bsql)) as { ticket_a: string; word: string; stands: boolean | null }[]).find((r) => r.ticket_a === a && r.word === word)?.stands;
+      assert([...covers, notCovered[0]].every((c) => c.again?.action === "replaced") && !has("ZQ-190", "related") && !has("ZQ-192", "evolves") && !has("ZQ-194", "related")
+          && (await standsOf("ZQ-190", "evolves")) === true && (await standsOf("ZQ-192", "related")) === true && (await standsOf("ZQ-194", "duplicate")) === true,
+        `a pair posted as evolves and judged related since, one posted related and judged evolves since, and one posted duplicate and judged related since are not chosen again, each record standing (${JSON.stringify(chosen.filter((f) => /^ZQ-(19\d|20\d)$/.test(f.a)).map((f) => [f.a, f.word]))})`);
+      assert(has("ZQ-196", "duplicate") && (await standsOf("ZQ-196", "evolves")) === false && has("ZQ-198", "outdates") && has("ZQ-200", "related"),
+        "…a pair posted as evolves and judged duplicate since is chosen, the evolves no longer standing; one posted as evolves with an outdates proposed since is chosen for it; a related no record covers is chosen");
+      const before = posts().length;
+      const mr = await run({ cap: 100 });
+      const postedOnMine = posts().slice(before).filter((o) => /^uuid-ZQ-(19\d|20\d)$/.test(String(o.vars.issueId))).map((o) => String(o.vars.issueId));
+      assert(mr.found.some((f) => f.a === "ZQ-200") && !postedOnMine.includes("uuid-ZQ-201") && !postedOnMine.includes("uuid-ZQ-200")
+          && JSON.stringify((await rowsOf("ZQ-200", "ZQ-201")).map((r) => [r.word, r.origin])) === JSON.stringify([["related", "found"]]),
+        `…and an evolves marker another brain left on the board covers a related: recorded found, not posted (review pass 3, run-it; posted on ${postedOnMine.join(",")})`);
+      await bsql`DELETE FROM board_findings_posted WHERE ticket_a IN ('ZQ-190', 'ZQ-192', 'ZQ-194', 'ZQ-196', 'ZQ-198', 'ZQ-200')`;
+      for (const c of [...covers, ...notCovered, marked]) await bsql`DELETE FROM thoughts WHERE id IN (${c.older.id}::uuid, ${c.newer.id}::uuid)`;
+      comments.delete("ZQ-200");
+    })();
 
     // A role: capture and structure are what the step needs; without INSERT on the record it is off, and a dry run needs the reads alone.
     const FROLE = "ob1_live_findings";
@@ -30691,7 +30711,7 @@ if (want("41")) {
 }
 
 if (want("42")) {
-  console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (every proposal gone, or a relation the judge closed or re-judged to another word within the window), open (a stale proposal too), unanswered (a relation the judge closed after the window too); the pass's own settle is no reviewer's no, open (a relation re-judged at its word still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
+  console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (every proposal gone, or a relation the judge closed or re-judged to a word its own does not cover within the window), open (a stale proposal too), unanswered (a relation the judge closed after the window too); the pass's own settle is no reviewer's no, open (a relation re-judged at its word, or at one it covers, still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
   const bsql = new SQL({ url: URL_!, max: 2 });
   const row = async (content: string, metadata: Record<string, unknown>) =>
     ((await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id, content_fingerprint AS fp`)[0]) as { id: string; fp: string };
@@ -30732,8 +30752,8 @@ if (want("42")) {
     await bsql`SELECT record_source_links(${t[28].id}::uuid, 'linear', '[]'::jsonb)`;
     // A link to one side from a third ticket answers nothing between the two.
     await link(t[10], "blocks", "ZR-21");
-    // Re-judged to another word: the judge no longer says related.
-    const rK = await relate(t[31], t[30], "related"); await told(30, 31, "related", [rK.id!], 5); await relate(t[31], t[30], "evolves");
+    // Re-judged to a word its own does not cover: the judge no longer says related (an evolves would, COVERS, SMD-3306 PR 7b).
+    const rK = await relate(t[31], t[30], "related"); await told(30, 31, "related", [rK.id!], 5); await relate(t[31], t[30], "duplicate");
     // Every proposal it named gone: withdrawn. A relation the judge closed after the window: unanswered (review pass 1).
     const pL = await propose(t[32], t[33]); await told(32, 33, "outdates", [pL], 5); await bsql`DELETE FROM supersession_proposals WHERE id = ${pL}::uuid`;
     const rM = await relate(t[35], t[34], "related"); await told(34, 35, "related", [rM.id!], 40); await relate(t[35], t[34], null);

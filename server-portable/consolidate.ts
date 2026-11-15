@@ -701,7 +701,10 @@ export function relationConfidence(j: Judgement): { confidence: number; mass: nu
   const units = (x: number | undefined) => Math.round((x ?? 0) * 10000);
   const own = j.foldedEvolves ? Math.round((units(p.related) + units(p.evolves)) / 100) / 100 : r2(p[j.verdict] ?? 0);
   if (j.verdict === "unrelated") return { confidence: own, mass: Math.min(1, own), source: "token" };
-  return { confidence: own, mass: Math.min(1, r2(RELATION_VERDICTS.reduce((m, w) => m + (p[w] ?? 0), 0))), source: "token" };
+  // The floor's mass in the same units, so a folded related is never stored at more than the mass that let it be,
+  // and a pair is not floored on how H2O split one sum between two words (review pass 3, cold read: related 0.4553
+  // and evolves 0.0897 read 0.55 and floored at 0.54).
+  return { confidence: own, mass: Math.min(1, Math.round(RELATION_VERDICTS.reduce((m, w) => m + units(p[w]), 0) / 100) / 100), source: "token" };
 }
 
 /** proposalConfidence uses the token distribution only when the alternatives naming a verdict held at least this share of the token's mass. */

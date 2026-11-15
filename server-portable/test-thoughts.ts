@@ -2122,10 +2122,20 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       && foldedEvolvesDecline.reason === `the writer found neither current: ${prop.reason}; evolves comes from the work threads (SMD-3306), so the pair is related`
       && F(p, prop, true).verdict === "outdates" && F(p, prop, true).foldedEvolves === undefined && decideJudgement(capP, null, false).verdict === "evolves",
     "…a writer's reason kept, the threads' words after it only where the fold moved the verdict; a standing proposal untouched; unfolded, version 4's reading");
+  // Review pass 3: the floor's mass summed in the confidence's units (cold read: 0.4553 + 0.0897 read 0.55 and floored at
+  // 0.54); a tie goes to the first verdict in prompt 4's order, so a folded related that ties a duplicate is related and
+  // one that ties an unrelated is not (mutant: the last on a tie lived).
+  const split = F({ unrelated: 0.4, related: 0.4553, evolves: 0.0897, duplicate: 0, outdates: 0.055 });
+  assert(relationConfidence(split).confidence === 0.55 && relationConfidence(split).mass === 0.55,
+    "…a folded related's mass in the confidence's units: never under the number it stores");
+  const tieDup = F({ unrelated: 0.1, related: 0.2, evolves: 0.2, duplicate: 0.4, outdates: 0.1 }), tieApart = F({ unrelated: 0.5, related: 0.25, evolves: 0.25, duplicate: 0, outdates: 0 });
+  assert(tieDup.verdict === "related" && relationConfidence(tieDup).confidence === 0.4 && /evolves comes from the work threads/.test(tieDup.reason) && tieApart.verdict === "unrelated" && relationConfidence(tieApart).confidence === 0.5,
+    "…a tie to the first in prompt 4's order: a folded related tying a duplicate is related, one tying an unrelated is not");
   // The cap keeps P(related) alone, and relates a duplicate (review pass 1, mutant), unfolded.
   const cappedDup = capJudgement(decideJudgement({ unrelated: 0.05, related: 0.1, evolves: 0.05, duplicate: 0.3, outdates: 0.5 }, null, false), "H");
-  assert(cappedDup.verdict === "related" && cappedDup.confidence === 0.1 && cappedDup.foldedEvolves === undefined,
-    "…the cap relates a duplicate at P(related), unfolded");
+  const cappedRel = capJudgement(decideJudgement({ unrelated: 0.05, related: 0.25, evolves: 0.15, duplicate: 0, outdates: 0.55 }, null, false), "F");
+  assert(cappedDup.verdict === "related" && cappedDup.confidence === 0.1 && cappedDup.foldedEvolves === undefined && cappedRel.foldedEvolves === undefined && relationConfidence(cappedRel).confidence === 0.25,
+    "…the cap relates a duplicate at P(related), unfolded, and a related it keeps stands at P(related) too (review pass 3, mutant: an unfolded related marked folded lived)");
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };

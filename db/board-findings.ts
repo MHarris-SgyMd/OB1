@@ -48,8 +48,9 @@
  * record (migration 087,
  * board_findings_posted) is per pair and WORD — outdates, related, evolves, duplicate — so a
  * relation a re-judge replaced at another score is not posted again, and a
- * pair posted as related is posted once more only when the judge says
- * something else about it. The comment carries the two identifiers, the word
+ * pair is posted once more only when the judge says something else about it
+ * that the words posted do not cover (COVERS: related and evolves each other,
+ * a duplicate a related). The comment carries the two identifiers, the word
  * and its direction, the judge's confidence, a proposal's one-line reason (a
  * code span: a link or a mention in it is shown, not rendered) and its id.
  * The judge relates thoughts, and a ticket's dated sections are rows of their
@@ -66,8 +67,9 @@
  * The comment's last line is a marker, `ob1-finding SMD-A SMD-B words`, read
  * back through normalised() since Linear returns markdown derived from its
  * rich text. Before posting, both tickets' comments are read: a marker naming
- * the pair and the word means another brain posted it, or this one did and
- * lost its row; that word is recorded as `found` and not posted. Each post
+ * the pair and the word, or one covering it, means another brain posted it,
+ * or this one did and lost its row; that word is recorded as `found` and not
+ * posted. Each post
  * holds one transaction-scoped advisory lock for the brain, re-reads the
  * record and re-counts the day's posts under it, and writes its rows after
  * Linear answers, in the same transaction — a post that fails records
@@ -135,6 +137,18 @@ const COMMENTS_READ = 250;
 const REASON_CHARS = 300;
 
 export type FindingWord = "outdates" | "related" | "evolves" | "duplicate";
+/**
+ * The later words a word posted on a pair covers, so the pair is not posted again for them (SMD-3306 PR 7b's review
+ * passes 2 and 3): related and evolves each ask the board to link the pair as related, the comment's same line, so
+ * neither is posted after the other; and a duplicate covers a related, the lesser ask, as decide version 5's fold makes
+ * a few pairs version 4 called duplicate related. A re-judge under version 5 would else post every pair a version 4 brain
+ * posted as evolves, or as a duplicate the fold turned related, again, ahead of new findings under the cap. Nothing
+ * covers an outdates or a duplicate. brain-info.ts's FINDING_OUTCOMES_SQL holds the same pairs (it may not import this
+ * file): a posted word stands while a word it covers does.
+ */
+export const COVERS: Readonly<Record<FindingWord, readonly FindingWord[]>> = { outdates: [], related: ["evolves"], evolves: ["related"], duplicate: ["related"] };
+/** Whether `words`, posted or on the board, cover `w`: hold it, or a word COVERS lets cover it. */
+export const covered = (words: ReadonlySet<FindingWord>, w: FindingWord): boolean => words.has(w) || [...words].some((x) => COVERS[x].includes(w));
 export const FINDING_WORDS: readonly FindingWord[] = ["outdates", "related", "evolves", "duplicate"];
 
 /** One proposal or relation between two ticket rows, as selectFindings reads it. */
@@ -437,11 +451,8 @@ const closed = (k: string) => `coalesce(coalesce(
 // tickets and their dated sections), and both identities are identifiers —
 // 079's identity alone also names a fork change record's or any capture's
 // `ticket`, whose text is not the board's, and a raw identity went into the
-// comment unescaped (review pass 1). A pair posted as evolves is posted, not
-// again as related: decide version 5 stores an evolves as related (SMD-3306
-// PR 7b), so a re-judge would else post every pair a version 4 brain posted
-// as evolves a second time, asking the same link, ahead of new findings under
-// the cap (its review pass 2, run-it).
+// comment unescaped (review pass 1). A word posted covers the words COVERS
+// names for it, in the record (and on the board, postFindings).
 const PAIR_RULE = `
      os = 'linear' AND ns = 'linear'
  AND ko ~ '^[A-Z][A-Z0-9]*-[0-9]+$' AND kn ~ '^[A-Z][A-Z0-9]*-[0-9]+$'
@@ -453,7 +464,7 @@ const PAIR_RULE = `
                     AND (coalesce(dh.metadata->>'ticket', dh.metadata->>'issue'), d.payload->>'target') IN ((ko, kn), (kn, ko)))
  AND NOT EXISTS (SELECT 1 FROM board_findings_posted b
                   WHERE b.ticket_a = least(ko, kn) AND b.ticket_b = greatest(ko, kn)
-                    AND (b.word = x.word OR (x.word = 'related' AND b.word = 'evolves')))`;
+                    AND (b.word = x.word OR (b.word, x.word) IN (${Object.entries(COVERS).flatMap(([w, later]) => later.map((x) => `('${w}', '${x}')`)).join(", ")})))`;
 
 const PROPOSALS = `
 SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,
@@ -691,9 +702,11 @@ export async function postFindings(opts: PostOptions): Promise<FindingsReport> {
       const outcome = await opts.sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(hashtext('ob1:board-findings'))`;
         const recorded = new Set(((await tx`SELECT word FROM board_findings_posted WHERE ticket_a = ${g0.a} AND ticket_b = ${g0.b}`) as { word: FindingWord }[]).map((r) => r.word));
-        const found = onlyWords(g0, new Set(groupWords(g0).filter((w) => onBoard.has(w) && !recorded.has(w))));
+        // A marker or a record covers the words COVERS names, as PAIR_RULE reads the record (review pass 3, run-it: an
+        // evolves marker another brain posted left a related posted again).
+        const found = onlyWords(g0, new Set(groupWords(g0).filter((w) => covered(onBoard, w) && !covered(recorded, w))));
         if (found) await record(tx, found, "found", null);
-        const g = onlyWords(g0, new Set(groupWords(g0).filter((w) => !onBoard.has(w) && !recorded.has(w))));
+        const g = onlyWords(g0, new Set(groupWords(g0).filter((w) => !covered(onBoard, w) && !covered(recorded, w))));
         const foundWords = found ? groupWords(found) : [];
         if (!g) return { kind: foundWords.length ? "found" : "settled", foundWords } as const;
         const today = await postedToday(tx);
