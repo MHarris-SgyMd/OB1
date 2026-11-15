@@ -470,8 +470,9 @@ bun --no-env-file deploy/federated/federated.ts down
   set) is kept for live calls, but background keeps at least one slot, so with
   `slots: 1` background and live share it.
 - **`bases` lists every base URL a brain reaches the server by**, such as
-  `http://host.containers.internal:11434/v1`. A call to any other base isn't
-  brokered.
+  `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
+  brain under Docker Engine on Linux). A call to any other base isn't
+  brokered: it runs on the brain's own share, unsaid.
 - **Two runtimes are measured, a shape each** (SMD-3379 PR 3b-3a):
   - **podman machine (macOS, rootful):** a container dials
     `host.containers.internal:<port>`, which reaches the host's loopback, so
@@ -489,8 +490,10 @@ bun --no-env-file deploy/federated/federated.ts down
     gateway, or an alias that resolves to IPv6 first. A brain dials from its
     own network, which a firewall may treat apart (a rule for `docker0`
     alone), so allow the brains' bridges too. CI measures this shape: the
-    stack's own coordinator container is granted a slot there. A remote
-    daemon (`DOCKER_HOST` not a local socket) is refused.
+    stack's own coordinator container is granted a slot there. A daemon of
+    another host (a `DOCKER_HOST` or a Docker context pointing elsewhere) is
+    refused. Where podman is installed beside Docker, pass `--runtime
+    docker` to each command: `federated.ts` takes podman first.
 
   `federated.ts` refuses any other runtime: Docker Desktop, rootless podman
   or Docker, podman on Linux.

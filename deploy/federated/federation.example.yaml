@@ -8,7 +8,7 @@
 #               machine, on the default bridge's gateway under Docker Engine
 #               on Linux; a brain's container reaches it at
 #               host.containers.internal:<port> (host.docker.internal under
-#               Docker);
+#               Docker Engine on Linux);
 #   lease_s     a grant held longer than this is taken back (default 900):
 #               longer than the longest model call a brain makes;
 #   warm_s      after a start, background calls wait this long while the
@@ -41,6 +41,7 @@ servers:
   ollama:
     bases:
       - http://host.containers.internal:11434/v1
+      # - http://host.docker.internal:11434/v1   # brains under Docker Engine on Linux
     slots: 3
     reserve: 1
   # The decide tier both brains reach (jev/h2o/README.md), one call at a time:
