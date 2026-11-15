@@ -26,7 +26,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, consolidatePassKey, decideJudgement, foldEvolves, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
@@ -2112,19 +2112,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(overDup.verdict === "related" && relationConfidence(overDup).confidence === 0.5 && /evolves comes from the work threads/.test(overDup.reason) && overApart.verdict === "related" && relationConfidence(overApart).confidence === 0.55
       && dupStands.verdict === "duplicate" && dupStands.foldedEvolves === undefined && relationConfidence(dupStands).confidence === 0.5,
     "…the folded related outweighs a duplicate or an unrelated the two words outweigh together; a duplicate over them both stands, its own share");
-  const surest = F({ unrelated: 0.002, related: 0.004, evolves: 0.99, duplicate: 0.002, outdates: 0.002 }), halfCent = F({ unrelated: 0.7151, related: 0.0001, evolves: 0.2849, duplicate: 0, outdates: 0 }, null, false);
+  const surest = F({ unrelated: 0.002, related: 0.004, evolves: 0.99, duplicate: 0.002, outdates: 0.002 }), halfCentApart = F({ unrelated: 0.7151, related: 0.0001, evolves: 0.2849, duplicate: 0, outdates: 0 });
   const parts = F({ unrelated: 0.1, related: 0.1234, evolves: 0.4321, duplicate: 0.1, outdates: 0.2445 });
-  assert(relationConfidence(surest).confidence === 0.99 && halfCent.verdict === "unrelated" && parts.confidence === 0.5555 && relationConfidence(parts).confidence === 0.56
-      && relationConfidence({ ...threaded, verdict: "related", probabilities: { verdict: { p: { ...capP, related: 0.0001, evolves: 0.2849 }, covered: 1 } } }).confidence === 0.29,
-    "…the surest evolves at 0.99, not 0.00; four places on the judgement, two on the relation, an exact half-cent rounded up (review pass 2, cold read: 0.0001 + 0.2849 read 0.28)");
+  assert(relationConfidence(surest).confidence === 0.99 && halfCentApart.verdict === "unrelated" && parts.confidence === 0.5555 && relationConfidence(parts).confidence === 0.56
+      && relationConfidence({ ...threaded, probabilities: { verdict: { p: { ...capP, related: 0.0001, evolves: 0.2849 }, covered: 1 } } }).confidence === 0.29,
+    "…the surest evolves at 0.99, not 0.00; four places on the judgement, two on the relation, an exact half-cent rounded up (review pass 2, cold read: 0.0001 + 0.2849 read 0.28), and its two shares under a larger unrelated stay unrelated");
   const foldedDecline = F(p, { ...prop, current: "none" }), foldedEvolvesDecline = F({ ...p, related: 0.05, evolves: 0.3 }, { ...prop, current: "none" });
   assert(foldedDecline.verdict === "related" && foldedDecline.reason === "the writer found neither current: " + prop.reason && foldedDecline.confidence === 0.35
       && foldedEvolvesDecline.reason === `the writer found neither current: ${prop.reason}; evolves comes from the work threads (SMD-3306), so the pair is related`
       && F(p, prop, true).verdict === "outdates" && F(p, prop, true).foldedEvolves === undefined && decideJudgement(capP, null, false).verdict === "evolves",
     "…a writer's reason kept, the threads' words after it only where the fold moved the verdict; a standing proposal untouched; unfolded, version 4's reading");
-  // Review pass 3: the floor's mass summed in the confidence's units (cold read: 0.4553 + 0.0897 read 0.55 and floored at
-  // 0.54); a tie goes to the first verdict in prompt 4's order, so a folded related that ties a duplicate is related and
-  // one that ties an unrelated is not (mutant: the last on a tie lived).
+  // Review pass 3: the floor's mass summed in the confidence's units (cold read: 0.4553 + 0.0897 read 0.55 and floored
+  // at 0.54); a tie goes to the first verdict in prompt 4's order, so a folded related that ties a duplicate is related
+  // and one that ties an unrelated is not (mutant: the last on a tie lived).
   const split = F({ unrelated: 0.4, related: 0.4553, evolves: 0.0897, duplicate: 0, outdates: 0.055 });
   assert(relationConfidence(split).confidence === 0.55 && relationConfidence(split).mass === 0.55,
     "…a folded related's mass in the confidence's units: never under the number it stores");

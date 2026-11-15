@@ -69,15 +69,15 @@
  * rich text. Before posting, both tickets' comments are read: a marker naming
  * the pair and the word, or one covering it, means another brain posted it,
  * or this one did and lost its row; that word is recorded as `found` and not
- * posted. Each post
- * holds one transaction-scoped advisory lock for the brain, re-reads the
- * record and re-counts the day's posts under it, and writes its rows after
- * Linear answers, in the same transaction — a post that fails records
- * nothing and the next run tries again; a run killed between Linear's answer
- * and the commit leaves the marker, which the next run finds. Board-sync
- * passes its census: a pair with a ticket off the board is not asked of
- * Linear, and a listed ticket the key cannot find is a failure. Without it
- * (the CLI), Linear's "Entity not found" is reported and asked again.
+ * posted. Each post holds one transaction-scoped advisory lock for the brain,
+ * re-reads the record and re-counts the day's posts under it, and writes its
+ * rows after Linear answers, in the same transaction — a post that fails
+ * records nothing and the next run tries again; a run killed between Linear's
+ * answer and the commit leaves the marker, which the next run finds.
+ * Board-sync passes its census: a pair with a ticket off the board is not
+ * asked of Linear, and a listed ticket the key cannot find is a failure.
+ * Without it (the CLI), Linear's "Entity not found" is reported and asked
+ * again.
  *
  * ── Bounded ──────────────────────────────────────────────────────────────────
  * At most OB1_FINDINGS_POST_CAP comments (5) in any 24 hours, counted from
@@ -141,10 +141,10 @@ export type FindingWord = "outdates" | "related" | "evolves" | "duplicate";
  * The later words a word posted on a pair covers, so the pair is not posted again for them (SMD-3306 PR 7b's review
  * passes 2 and 3): related and evolves each ask the board to link the pair as related, the comment's same line, so
  * neither is posted after the other; and a duplicate covers a related, the lesser ask, as decide version 5's fold makes
- * a few pairs version 4 called duplicate related. A re-judge under version 5 would else post every pair a version 4 brain
- * posted as evolves, or as a duplicate the fold turned related, again, ahead of new findings under the cap. Nothing
- * covers an outdates or a duplicate. brain-info.ts's FINDING_OUTCOMES_SQL holds the same pairs (it may not import this
- * file): a posted word stands while a word it covers does.
+ * a few pairs version 4 called duplicate related. A re-judge under version 5 would else post every pair a version 4
+ * brain posted as evolves, or as a duplicate the fold turned related, again, ahead of new findings under the cap.
+ * Nothing covers an outdates or a duplicate. brain-info.ts's FINDING_OUTCOMES_SQL holds the same pairs (it may not
+ * import this file): a posted word stands while a word it covers does.
  */
 export const COVERS: Readonly<Record<FindingWord, readonly FindingWord[]>> = { outdates: [], related: ["evolves"], evolves: ["related"], duplicate: ["related"] };
 /** Whether `words`, posted or on the board, cover `w`: hold it, or a word COVERS lets cover it. */
@@ -464,7 +464,7 @@ const PAIR_RULE = `
                     AND (coalesce(dh.metadata->>'ticket', dh.metadata->>'issue'), d.payload->>'target') IN ((ko, kn), (kn, ko)))
  AND NOT EXISTS (SELECT 1 FROM board_findings_posted b
                   WHERE b.ticket_a = least(ko, kn) AND b.ticket_b = greatest(ko, kn)
-                    AND (b.word = x.word OR (b.word, x.word) IN (${Object.entries(COVERS).flatMap(([w, later]) => later.map((x) => `('${w}', '${x}')`)).join(", ")})))`;
+                    AND (b.word = x.word OR (b.word, x.word) IN (${Object.entries(COVERS).flatMap(([w, later]) => later.map((l) => `('${w}', '${l}')`)).join(", ")})))`;
 
 const PROPOSALS = `
 SELECT 'proposal' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, least(ko, kn) AS a, greatest(ko, kn) AS b,

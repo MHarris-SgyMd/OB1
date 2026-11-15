@@ -342,10 +342,11 @@ export const DECIDE_PROMPT = [RELATION_QUESTION, ...OFFERED.map((v) => DESCRIPTI
  * H or F link, or an answer naming none of the four, caps the pair: related at most, and no supersession
  * (docs/subject-anchored-claims.md, rows 2 and 3; capJudgement). It asks the writer once more on those pairs, a
  * median 14.3 s of the 27B a pair on SMD-3203's 100. 5, the pass's (key `@p4d5`, SMD-3306 PR 7b): version 4, H2O's
- * evolves folded into related before a verdict is chosen (foldEvolves), and the link step asked only first: work threads give evolves (SMD-3306's
- * items 3 and 4), and row 2's cap guarded an evolves the pass no longer stores. On the canary's pairs the cap's
- * precision missed its bar, 0.686 against 0.7 (SMD-3203), and three rounds of asking it otherwise did not qualify
- * (SMD-3299); the threads need no cap, since a pair whose own subjects differ is never one thread.
+ * evolves folded into related before a verdict is chosen (foldEvolves), and the link step asked only first: work
+ * threads give evolves (SMD-3306's items 3 and 4), and row 2's cap guarded an evolves the pass no longer stores. On
+ * the canary's pairs the cap's precision missed its bar, 0.686 against 0.7 (SMD-3203), and three rounds of asking it
+ * otherwise did not qualify (SMD-3299); the threads need no cap, since a pair whose own subjects differ is never one
+ * thread.
  */
 export const DECIDE_VERSION = 5;
 
@@ -385,14 +386,17 @@ export type DecideNote = {
   /**
    * Since version 5: true when folding H2O's evolves into related changed the verdict stored, against the best verdict
    * that proposes nothing over H2O's own five (version 4's): an evolves, H2O's top or the best a gated, declined or
-   * failed outdates fell back to, or a duplicate or unrelated the folded related outweighs. A relation's recipe says so
-   * whatever its `top`.
+   * failed outdates fell back to, or a duplicate the folded related ties or outweighs, or an unrelated it outweighs.
+   * A relation's recipe says so whatever its `top`.
    */
   threaded?: true;
 };
 
 /** The best of the verdicts in `vs` by `p`, the first on a tie. */
 const best = (p: Record<string, number>, vs: readonly Verdict[]): Verdict => vs.reduce((a, v) => ((p[v] ?? 0) > (p[a] ?? 0) ? v : a), vs[0]);
+
+/** The verdicts that propose nothing, which a judgement falls back to. */
+const PROPOSING_NONE: readonly Verdict[] = VERDICTS.filter((x) => x !== "outdates");
 
 /**
  * The judgement H2O's distribution and the writer's answer come to. `p` is H2O's probability per verdict (the tier's
@@ -416,19 +420,17 @@ export function decideJudgement(p: Record<Verdict, number>, proposal: Proposal |
   return { verdict: v, supersedes: "unknown", confidence: q[v] ?? 0, reason: why, evidence: "", malformed: false, probabilities, ...(fold && v === "related" ? { foldedEvolves: true } : {}) };
 }
 
-/** The verdicts that propose nothing, which a judgement falls back to. */
-const PROPOSING_NONE: readonly Verdict[] = VERDICTS.filter((x) => x !== "outdates");
-
 /**
  * H2O's distribution as decide version 5 chooses from it: evolves folded into related (related + evolves, evolves 0),
  * so related stands for both words. Folded before the choice, not after (the maintainer's choice, review pass 2): a
  * related top and an evolves top over the same two shares store one number (0.85 for 0.45 and 0.40 either way, where
  * converting an evolves after the choice stored 0.45 and 0.85), and the folded related outweighs a duplicate or an
- * unrelated the two words outweigh together (duplicate 0.45, related 0.20, evolves 0.30: related at 0.50), so a few pairs
- * version 4 called duplicate or unrelated are related. A tie goes to the first in prompt 4's order (`best`): a folded
- * related that ties a duplicate is related, one that ties an unrelated is not (review pass 3). Not as capJudgement stores a capped pair, at P(related) alone:
- * there the rest of the mass is about a third subject. The relation words' mass, which the pass's floor reads, is the
- * same folded or not. Rounded to four places, as verdictDistribution rounds H2O's.
+ * unrelated the two words outweigh together (duplicate 0.45, related 0.20, evolves 0.30: related at 0.50), so a few
+ * pairs version 4 called duplicate or unrelated are related. A tie goes to the first in prompt 4's order (`best`): a
+ * folded related that ties a duplicate is related, one that ties an unrelated is not (review pass 3). Not as
+ * capJudgement stores a capped pair, at P(related) alone: there the rest of the mass is about a third subject. The
+ * relation words' mass, which the pass's floor reads, is the same folded or not. Rounded to four places, as
+ * verdictDistribution rounds H2O's.
  */
 export function foldEvolves(p: Record<Verdict, number>): Record<Verdict, number> {
   return { ...p, related: (Math.round((p.related ?? 0) * 10000) + Math.round((p.evolves ?? 0) * 10000)) / 10000, evolves: 0 };
@@ -491,10 +493,13 @@ async function writerExchange(cfg: EmbedConfig, messages: { role: "user"; conten
   return d?.choices?.[0]?.message?.content ?? "";
 }
 
-/** The writer's link step on a pair (version 4): what it answered, and whether that caps the pair, an H or F link or none read. */
-async function askLink(older: PairSide, newer: PairSide, cfg: EmbedConfig, asked: "first" | "after", signal?: AbortSignal): Promise<NonNullable<DecideNote["link"]>> {
+/**
+ * The writer's link step on a pair (since version 4), asked first, before any proposal (version 5 asks it nowhere
+ * else): what it answered, and whether that caps the pair, an H or F link or none read.
+ */
+async function askLink(older: PairSide, newer: PairSide, cfg: EmbedConfig, signal?: AbortSignal): Promise<NonNullable<DecideNote["link"]>> {
   const { link, via, reason } = parseLink(await askWriter(cfg, linkMessages({ older, newer }), signal));
-  return { model: cfg.judgeModel, asked, link: link ?? "unparsed", via, reason, capped: link !== "D" && link !== "N" };
+  return { model: cfg.judgeModel, asked: "first", link: link ?? "unparsed", via, reason, capped: link !== "D" && link !== "N" };
 }
 
 /**
@@ -525,13 +530,13 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   // Version 5: H2O's evolves folded into related before the choice, and the note marked where that moved the verdict.
   const folded = (proposal: Proposal | null, standing: boolean): Judgement => {
     const j = decideJudgement(p, proposal, standing, true);
-    if (j.verdict !== "outdates" && j.verdict !== decideJudgement(p, proposal, standing).verdict) note.threaded = true;
+    if (j.verdict !== "outdates" && j.verdict !== best(p, PROPOSING_NONE)) note.threaded = true;
     return j;
   };
   if (top === "outdates" && outdatesConfidence(p) >= floor) {
     // Row 3 (SMD-3203): a mediated pair proposes nothing, so the link step goes first, and a pair it caps is written
     // no proposal: it takes H2O's best verdict that proposes nothing, related at most.
-    note.link = await askLink(older, newer, cfg, "first", signal);
+    note.link = await askLink(older, newer, cfg, signal);
     if (note.link.capped) return { ...capJudgement(decideJudgement(p, null, false), note.link.link), decide: note };
     const proposal = parseProposal(await askWriter(cfg, writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule), signal));
     const standing = stands(proposal, older.content, newer.content, PASS_WRITER.twoSided, PASS_WRITER.v2Quotes);

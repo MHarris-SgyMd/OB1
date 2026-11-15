@@ -30634,13 +30634,13 @@ if (want("41")) {
 
     // In a function of its own (TS2563).
     await (async () => {
-      // SMD-3306 PR 7b's review passes 2 and 3 (run-it): a word posted covers the words COVERS names for it, so the pair is
-      // not chosen again for them and its record still stands: related and evolves each other, a duplicate a related
-      // (decide version 5 folds an evolves into related, and a few duplicates). Nothing covers a duplicate or an outdates
-      // after an evolves (cold read, mutants: a posted evolves covering every word lived).
+      // SMD-3306 PR 7b's review passes 2 and 3 (run-it): a word posted covers the words COVERS names for it, so the
+      // pair is not chosen again for them and its record still stands: related and evolves each other, a duplicate a
+      // related (decide version 5 folds an evolves into related, and a few duplicates). Nothing covers a duplicate or
+      // an outdates after an evolves (cold read, mutants: a posted evolves covering every word lived).
       const pair = async (n: number, posted: string, judged: string | null) => {
         const older = await ticket(n, "a plan"), newer = await ticket(n + 1, "what came of it");
-        const first = await relate(newer, older, posted === "outdates" ? "related" : posted, 0.7);
+        const first = await relate(newer, older, posted, 0.7);
         await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES (${`ZQ-${n}`}, ${`ZQ-${n + 1}`}, ${posted}, ${`ZQ-${n + 1}`}, 'posted', ${`c-pre-${n}`}, ARRAY[${first.id}::uuid])`;
         const again = judged === null ? null : await relate(newer, older, judged, 0.9);
         return { older, newer, again };
@@ -30752,7 +30752,8 @@ if (want("42")) {
     await bsql`SELECT record_source_links(${t[28].id}::uuid, 'linear', '[]'::jsonb)`;
     // A link to one side from a third ticket answers nothing between the two.
     await link(t[10], "blocks", "ZR-21");
-    // Re-judged to a word its own does not cover: the judge no longer says related (an evolves would, COVERS, SMD-3306 PR 7b).
+    // Re-judged to a word its own does not cover: the judge no longer says related (an evolves would, COVERS,
+    // SMD-3306 PR 7b).
     const rK = await relate(t[31], t[30], "related"); await told(30, 31, "related", [rK.id!], 5); await relate(t[31], t[30], "duplicate");
     // Every proposal it named gone: withdrawn. A relation the judge closed after the window: unanswered (review pass 1).
     const pL = await propose(t[32], t[33]); await told(32, 33, "outdates", [pL], 5); await bsql`DELETE FROM supersession_proposals WHERE id = ${pL}::uuid`;

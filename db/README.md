@@ -4747,30 +4747,29 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with
-  no evolves of its own. The tier's evolves is folded into related before
-  its best verdict is chosen (related + evolves), so a related stands at the
-  share of the word it now stands for, and the folded related outweighs a
-  duplicate or an unrelated the two words outweigh together (a tie below): a few pairs
-  version 4 called duplicate or unrelated are related. The relation words'
-  mass, which the floor reads, is the same folded or not, so a pair it
-  related before is related still. A pair evolves when the newer comes next
-  on the older's own subject's work thread, the edge migration 120 keeps
-  between consecutive thoughts of a thread (origin `thread`), not by a pair's
-  judgement. The link step is asked only first, on the tier's outdates at
-  the floor; version 4's check after an evolves goes with the evolves, so a
-  pair it capped at P(related) now stands at the folded share, among a
-  thought's strongest relations. A tie goes to the first verdict in prompt
-  4's order (unrelated, related, evolves, duplicate): a folded related that
-  ties a duplicate is related, and one that ties an unrelated is not. The
-  run's verdicts line counts no evolves, and a relation's note and dump line
-  say `threaded` where the fold moved the verdict. The board findings
-  ("Posted once", below) take a pair posted as evolves, or as a duplicate,
-  as posted for related, so a re-judge posts none of them again. An evolves version 4
-  stored stands until its pair is judged again: a new key pools every
-  thought, but a pair whose newer thought is superseded, or no longer among
-  its candidates, is not judged again, and its evolves stays in the counts
-  and the board findings.
+- **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with no
+  evolves of its own. The tier's evolves is folded into related before its best
+  verdict is chosen (related + evolves), so a related stands at the share of the
+  word it now stands for, and the folded related outweighs a duplicate or an
+  unrelated the two words outweigh together (a tie below): a few pairs version 4
+  called duplicate or unrelated are related. The relation words' mass, which the
+  floor reads, is the same folded or not, so a pair it related before is related
+  still. A pair evolves when the newer comes next on the older's own subject's
+  work thread, the edge migration 120 keeps between consecutive thoughts of a
+  thread (origin `thread`), not by a pair's judgement. The link step is asked
+  only first, on the tier's outdates at the floor; version 4's check after an
+  evolves goes with the evolves, so a pair it capped at P(related) now stands at
+  the folded share, among a thought's strongest relations. A tie goes to the
+  first verdict in prompt 4's order (unrelated, related, evolves, duplicate): a
+  folded related that ties a duplicate is related, and one that ties an
+  unrelated is not. The run's verdicts line counts no evolves, and a relation's
+  note and dump line say `threaded` where the fold moved the verdict. The board
+  findings ("Posted once", below) take a pair posted as evolves, or as a
+  duplicate, as posted for related, so a re-judge posts none of them again. An
+  evolves version 4 stored stands until its pair is judged again: a new key
+  pools every thought, but a pair whose newer thought is superseded, or no
+  longer among its candidates, is not judged again, and its evolves stays in the
+  counts and the board findings.
 - **Version 4** (`@p4d4`, SMD-3203): version 3, with the
   writer's **link step**, the mediated-pair test's step 2
   (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
@@ -4819,8 +4818,9 @@ tier gives each pair's verdict, not the judge:
   on, or a new decide version, starts a fresh pass: the tier again for every
   pooled thought's candidates, the link step for each outdates at the floor
   (and, under version 4, each evolves it would store), and the writer for
-  each outdates at the floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
-  about 3.8 s a pair.
+  each outdates at the floor not yet proposed that the link step leaves
+  uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at about
+  3.8 s a pair.
 - **Refused at start:** the run refuses with neither `OB1_CONSOLIDATE_DECIDER_URL`
   nor `OB1_JEV_BASE_URL` set, or, on the shared tier, with `OB1_JEV_MODEL` naming
   another model (SMD-3326).
@@ -7046,7 +7046,8 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   `evolves` each cover the other, since both ask the board to link the pair as
   related, and a `duplicate` covers a `related`, the lesser ask: decide
   version 5 folds an evolves into related, and turns a few pairs version 4
-  called duplicate related, so a re-judge posts none of them again. The comment's last line is a marker,
+  called duplicate related, so a re-judge posts none of them again. The
+  comment's last line is a marker,
   `ob1-finding SMD-A SMD-B words`, in letters, digits, hyphens and spaces:
   Linear keeps a comment as rich text and returns
   markdown derived from it, so the marker is read back with identifiers

@@ -1342,7 +1342,10 @@ export interface FindingRow {
    * last rejection were made; null for a relation.
    */
   proposals: { accepted: number; rejected: number; settled: number; reopened: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
-  /** A relation finding: whether a relation of its word, or of one it covers, still stands where a facet it named stood; null for outdates. */
+  /**
+   * A relation finding: whether a relation of its word, or of one it covers, still stands where a facet it named
+   * stood; null for outdates.
+   */
   stands: boolean | null;
   /**
    * Seconds from posting to when the judge took the finding back: for
