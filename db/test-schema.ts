@@ -21540,6 +21540,10 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
   const q = async <T = J>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T = J>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const code = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  // An earlier section may leave the priority projection drifted (142's [128] plants statements raw): rebuilt
+  // first, so a drift below is the forget's.
+  const driftBefore = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).n;
+  await db.query(`SELECT ob1_rebuild_priority_projection()`);
   const SECRET = "vault code 4417-ALPHA-125";
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('fg125-op', 'operator')`);
   const OP = { name: "fg125-op", scope: "write" };
@@ -21615,6 +21619,8 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
   await db.query(`INSERT INTO query_log (kind, tool, result_items) VALUES ('agenda', 'agenda', $1::jsonb)`, [JSON.stringify([{ kind: "item", key: O }, { kind: "item", key: T }, { kind: "item", key: item }, { kind: "ticket", key: "FG-126" }])]);
   await db.query(`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
                   VALUES ($1::uuid, 'linear', 'FG-128', 'the canonical', 'application/json', encode(sha256(convert_to('the canonical', 'UTF8')), 'hex'))`, [T]);
+  // 142's priority review: a finding on T and one on its item, which the forget deletes (merged after 139).
+  await db.query(`INSERT INTO priority_findings (kind, item_kind, item_key, window_days) VALUES ('stale', 'thought', $1, 30), ('overdue', 'item', $2, 30)`, [T, item]);
   const events = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit WHERE thought_id = $1::uuid`, [T])).n;
   assert(rel.ok !== false && deliv.event !== undefined && events === 3,
     `the fixture: a relation recorded, T a deliverable, T's capture and its two edits in the log (${JSON.stringify(rel).slice(0, 60)} | ${JSON.stringify(deliv).slice(0, 80)} | ${events})`);
@@ -21667,7 +21673,7 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
   assert(live.ent === 0 && live.snap === 0 && JSON.stringify(live.ledger) === JSON.stringify(ans.removed),
     `rebuild_derived reached the live thought's entity and snapshot vector, and the ledger holds the answer's counts (${JSON.stringify(live).slice(0, 160)})`);
   assert(ans.ok === true && removed.relations === 1 && removed.inactive_citations === 1 && removed.derived_refs === 2
-      && removed.page_sections === 2 && removed.priority_statements === 4 && removed.item_proposals === 2 && removed.item_reasons === 1 && removed.items === 1
+      && removed.page_sections === 2 && removed.priority_statements === 4 && removed.priority_findings === 2 && removed.item_proposals === 2 && removed.item_reasons === 1 && removed.items === 1
       && removed.item_events >= 1 && removed.query_log_rows === 3 && removed.deliverable_events >= 1 && removed.audit_events === events + 1
       && JSON.stringify(ans.irreproducible) === JSON.stringify([C, page].sort()) && JSON.stringify(ans.pages) === JSON.stringify([page, page2].sort()) && ans.gone === false
       && JSON.stringify(ans.twins) === "[]" && Array.isArray(ans.outside) && (ans.outside as string[]).length === 5,
@@ -21715,6 +21721,7 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
     SELECT 'thoughts' AS t, count(*)::int AS n FROM thoughts WHERE id = $1::uuid OR derived_from @> jsonb_build_array($1::text)
     UNION ALL SELECT 'thought_facets', count(*)::int FROM thought_facets WHERE payload->>'target' = $1::text OR payload->>'source_id' = $1::text OR thought_id = $1::uuid
     UNION ALL SELECT 'priority_assertions', count(*)::int FROM priority_assertions WHERE item_key = $1::text OR due_ref_key = $1::text OR item_key = $2::text OR due_ref_key = $2::text
+    UNION ALL SELECT 'priority_findings', count(*)::int FROM priority_findings WHERE item_key IN ($1::text, $2::text)
     UNION ALL SELECT 'priority_current', count(*)::int FROM priority_current WHERE item_key IN ($1::text, $2::text)
     UNION ALL SELECT 'open_item_events', count(*)::int FROM open_item_events WHERE origin_thought_id = $1::uuid OR item_id::text = $2::text
     UNION ALL SELECT 'open_item_close_proposals', count(*)::int FROM open_item_close_proposals WHERE evidence_thought_id = $1::uuid
@@ -21737,7 +21744,7 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
             (SELECT count(*)::int FROM ob1_deliverable_projection_drift()) AS d,
             (SELECT level FROM priority_of(jsonb_build_array(jsonb_build_object('kind', 'thought', 'key', $1::text)))) AS lvl`, [T]);
   assert(drift.p === 0 && drift.i === 0 && drift.d === 0 && drift.lvl === null,
-    `no projection drifts, and priority_of answers unknown for the forgotten thought (${JSON.stringify(drift)})`);
+    `no projection drifts, and priority_of answers unknown for the forgotten thought (${JSON.stringify(drift)}; ${driftBefore} drifted before this section, rebuilt)`);
 
   // The ledger, and the text refused on its way back — on capture and on edit — unless reinstated.
   const led = await one<{ n: number; fps: string[]; who: string | null }>(`SELECT count(*)::int AS n, max(fingerprints::text)::text[] AS fps, max(actor_name) AS who FROM thought_forgotten WHERE thought_id = $1::uuid`, [T]);
