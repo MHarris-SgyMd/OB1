@@ -10,7 +10,7 @@ import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
 import { EVIDENCE_LIMITS, META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import { PRIORITY_KINDS } from "../priority-kinds.ts";
+import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS } from "../priority-kinds.ts";
 import { VERIFY_STATUSES } from "../deliverables.ts";
 import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN, type PriorityWeights } from "../store.ts";
 
@@ -765,6 +765,41 @@ export const SPECS = {
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
       key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
+    },
+  },
+  // The priority review's findings (SMD-3671 PR 2, migration 142): sleep proposes them, an operator decides each.
+  list_priority_findings: {
+    title: "List Priority Findings",
+    description:
+      "List the priority review's findings: statements sleep's scan (ob1_priority_review, migration 142) proposes an operator review — stale (a level the brain's own keys stated over the window ago, 60 days, on an item nobody has touched since), overdue (an unsettled item past its due time), disagree (the operator's level and the source's, Linear's, two or more apart) and settled (a level left on an item that has since settled). Nothing changes a priority until an operator decides one (review_priority_finding). Pending by default, the oldest found first; `status` lists accepted, rejected or moot ones (moot: its condition no longer holds), or all, the pending first, then the rest most recently decided or mooted first; `kind` one kind alone. Each finding names its item (a ticket and its own rows are one item), the statements it is about, its evidence, when it was found, and for a decided one who decided it, the note and what the decision wrote. `total` counts every finding matching; the list is cut to `limit`. A brain before migration 142 faults, naming it.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      status: z.enum([...FINDING_STATUSES, "all"]).optional().default("pending").describe("pending (the default), accepted, rejected, moot, or all"),
+      kind: z.enum(FINDING_KINDS).optional().describe("One kind alone: stale, overdue, disagree or settled; omit for every kind"),
+      limit: z.number().int().min(1).max(200).optional().default(20).describe("Findings listed, 1-200 (default 20); `total` counts them all"),
+    },
+  },
+  // SMD-3671 PR 2 (migration 142): an operator's decision on a finding. The gate past the scope is the database's: the
+  // key's registry kind by its agent id, which the server does not hold.
+  review_priority_finding: {
+    title: "Review Priority Finding",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). Decide a pending finding list_priority_findings listed, by its id. `accept` says the outcome: `level` (0 none to 5 critical; the item's current level re-confirms it, keeping your statement's terms), optionally with `due_at`, stated as your own statement on the item — or `clear: true`, which closes your own statement there (refused when you hold none: state 0 to outrank another maker's). A settled item's finding is accepted by clearing, or by stating 0. `reject` changes nothing. Either holds the same finding back for its window while its statements are those decided on, and records your key, your `note` and what was written; the statement is yours in the item's history (priority_history). Refused: a key not classified operator; a finding decided or moot already, nothing of yours to clear, or the writer refusing the outcome (REFUSED_FINDING_DECISION, the finding left pending); arguments that do not go together (REFUSED_FINDING_INPUT): a level, a due time and clear go with accept alone, a due time with a level.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // An accept states or clears the operator's own statement; the one it replaces or closes stays in the history.
+      destructiveHint: false,
+      // A second decision on the same finding is refused: it is no longer pending.
+      idempotentHint: false,
+    },
+    inputSchema: {
+      id: UUID_ARG.describe("The finding's id, as list_priority_findings gives it"),
+      decision: z.enum(["accept", "reject"]).describe("accept: state `level` (with `due_at`), or `clear`; reject: change nothing"),
+      level: z.number().int().min(0).max(5).optional().describe("Accept only: the level to state, 0 none to 5 critical"),
+      due_at: PRIORITY_TIME.optional().describe("Accept with a level only: when it is due, a time with its offset (2027-03-01T17:00:00Z), or a date (by the end of that day: the next day's start in UTC)"),
+      clear: z.boolean().optional().describe("Accept only, instead of a level: true closes your own statement on the item"),
+      note: z.string().trim().min(1).max(2000).refine(NO_NUL, "may not hold a NUL character").optional().describe("Recorded with the decision, up to 2000 characters"),
     },
   },
   // SMD-4193 PR 2 (migration 132): the operator's weights, which every read takes as its defaults. The gate past the

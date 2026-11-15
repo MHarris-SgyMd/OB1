@@ -7943,6 +7943,151 @@ console.log("\n[36e] The operator's work-claim cap in the core and the words (SM
     `brain_info's Work-claim cap row: before 140, unread, built in, the operator's, the operator's refused; a read answering no cap throws (${lines.join(" | ")} | ${badRead.join(",")})`);
 }
 
+console.log("\n[36f] The priority review's findings in the core and the words (SMD-3671 PR 2, migration 142): the list passing its filters to the store and a row read from its evidence; a decision's arguments that do not go together refused before the store, a date due at its day's end, the id lower-cased and the key's scope in the envelope; each of 142's answers as a value or its refusal; the no-agent-id paths; an envelope the store cannot read a fault; the words and values; the hint for a brain before 142; brain_info's row");
+{
+  const { listPriorityFindings, reviewPriorityFinding } = await import("./core/findings.ts");
+  const { normalisePriorityFinding, normaliseReviewFinding } = await import("./store.ts");
+  const { priorityFindingsValue, priorityFindingsLine } = await import("./brain-info.ts");
+  const { refusalValue } = await import("./core/refusal.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const F = "4f1c9a52-0b8e-4d6e-9a0b-1c2d3e4f5a6b", T = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", A = "11111111-2222-4333-8444-555555555555";
+  // 142's rows and envelopes, as the scratch brain answers them.
+  const staleRow = { id: F, kind: "stale", item_kind: "thought", item_key: T, status: "pending", window_days: 60, found_at: new Date("2026-11-10T00:00:00Z"), refreshed_at: new Date("2026-11-12T00:00:00Z"),
+    moot_at: null, decided_at: null, decided_by: null, decision_note: null, outcome: null, suppressed_until: null,
+    evidence: { last_activity: "2026-09-01T00:00:00+00:00", window_days: 60, statements: [{ id: A, level: 4, maker: "rival", asserted_at: "2026-09-01T00:00:00+00:00" }] } };
+  const disagreeRow = { ...staleRow, kind: "disagree", item_kind: "ticket", item_key: "SMD-3671", status: "rejected", decided_at: new Date("2026-11-13T00:00:00Z"), decided_by: "op-key",
+    decision_note: "Linear is right", suppressed_until: new Date("2027-01-12T00:00:00Z"),
+    evidence: { operator: { id: A, level: 4, maker: "op-key" }, source: { id: T, level: 1, maker: "linear" } } };
+  const overdueRow = { ...staleRow, kind: "overdue", status: "moot", moot_at: new Date("2026-11-14T00:00:00Z"), evidence: { due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 } };
+  const listAsked: Record<string, unknown>[] = [];
+  const listCore = { door: "test", store: async () => ({ listPriorityFindings: async (o: Record<string, unknown>) => { listAsked.push(o); return { total: 7, findings: [staleRow, disagreeRow, overdueRow].map((r) => normalisePriorityFinding(r)) }; } }) };
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  const listed = await listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3 } as never);
+  const pendingOnly = await listPriorityFindings(listCore as never, P, { status: "pending", limit: 20 } as never);
+  const [s0, d0, o0] = listed.ok ? listed.value.findings : [];
+  const badRows = [{ ...staleRow, kind: "late" }, { ...staleRow, status: "open" }, { ...staleRow, item_kind: "board" }].map((r) => { try { normalisePriorityFinding(r); return "read"; } catch { return "threw"; } });
+  assert(JSON.stringify(listAsked) === JSON.stringify([{ status: null, kind: "stale", limit: 3 }, { status: "pending", kind: null, limit: 20 }])
+      && listed.ok && listed.value.status === "all" && listed.value.kind === "stale" && listed.value.total === 7 && pendingOnly.ok && pendingOnly.value.kind === null
+      && s0.foundAt === "2026-11-10T00:00:00.000Z" && s0.statements.length === 1 && s0.statements[0].level === 4 && s0.statements[0].maker === "rival" && s0.statements[0].assertedAt === "2026-09-01T00:00:00.000Z" && s0.statements[0].role === null
+      && d0.statements.map((s) => `${s.role}:${s.level}:${s.maker}`).join() === "operator:4:op-key,source:1:linear" && d0.decidedBy === "op-key" && d0.note === "Linear is right" && d0.suppressedUntil === "2027-01-12T00:00:00.000Z"
+      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.every((r) => r === "threw"),
+    `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, a disagreement's operator and source, an overdue one's none; a kind, status or item 142 does not write throws (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
+
+  const listText = text(say.renderPriorityFindings(listed));
+  const emptyText = text(say.renderPriorityFindings({ ok: true, value: { status: "pending", kind: "overdue", total: 0, findings: [] } }));
+  assert(listText.split("\n")[0] === "7 priority findings of kind stale, the first 3 listed (raise limit, up to 200, for more):"
+      && listText.includes(`- stale finding ${F} on thought ${T}: urgent (4) by rival (stated 2026-09-01T00:00:00.000Z) (assertion ${A}), stated over 60 days ago, its last activity 2026-09-01T00:00:00+00:00. Pending since 2026-11-10T00:00:00.000Z.`)
+      && listText.includes(`- disagree finding ${F} on ticket SMD-3671: the operator's urgent (4) by op-key (assertion ${A}) against the source's low (1) by linear (assertion ${T}). Rejected by op-key at 2026-11-13T00:00:00.000Z: "Linear is right"; held back until 2027-01-12T00:00:00.000Z.`)
+      && listText.includes(`- overdue finding ${F} on thought ${T}: past its due time `) && listText.includes(", at high (3). Moot since 2026-11-14T00:00:00.000Z (its condition no longer holds).")
+      && listText.endsWith("An operator key decides each with review_priority_finding: accept with a level (or clear), or reject. Nothing changes a priority until then.")
+      && emptyText === "No pending priority findings of kind overdue."
+      && JSON.stringify(say.renderPriorityFindings(listed).structuredContent) === JSON.stringify(listed.ok && listed.value),
+    `the list's words: the count and the cut, each finding's kind, item, what it found and where its decision stands, the way to decide; none matching; the value is the answer (${listText.slice(0, 400)} | ${emptyText})`);
+
+  // The decision. The store answers what it is given; each call's arguments and the actor are recorded.
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ reviewPriorityFinding: async (o: Record<string, unknown>) => { asked.push(o); return normaliseReviewFinding(answer); } }) });
+  const assertion = (level: number) => ({ id: A, item: { kind: "thought", key: T }, level, due_at: null, not_before: null, due_ref: null, reason: "review of a stale finding", inferred: false,
+    maker: { name: "op-key", agent_id: "a1", kind: "operator", trust: "operator", scope: "write", source: false }, tier: 1, tier_name: "operator", asserted_at: "2026-11-15T10:00:00Z", closed_at: null, close_reason: null, closed_by: null });
+  const decided = (status: string, answer: unknown) => ({ ok: true, id: F, kind: "stale", item: { kind: "thought", key: T }, status, answer, suppressed_until: "2027-01-14T10:00:00+00:00" });
+  const assertedA = decided("accepted", { outcome: "asserted", code: null, assertion: assertion(2), replaced: null, winner: assertion(2), item: { kind: "thought", key: T }, closed: [] });
+  const unchangedA = decided("accepted", { outcome: "unchanged", code: null, assertion: assertion(2), replaced: null, winner: assertion(2) });
+  const clearedA = decided("accepted", { outcome: "cleared", code: null, assertion: { ...assertion(4), closed_at: "2026-11-15T10:00:00Z", close_reason: "cleared" }, replaced: null, winner: null });
+  const rejectedA = decided("rejected", null);
+  const R = (input: Record<string, unknown>, answer: unknown = rejectedA, principal: unknown = P) => reviewPriorityFinding(core(answer) as never, principal as never, { id: F, ...input } as never);
+  const shapes = await Promise.all([
+    R({ decision: "accept" }), R({ decision: "accept", level: 2, clear: true }), R({ decision: "reject", level: 2 }), R({ decision: "reject", clear: true }),
+    R({ decision: "reject", due_at: "2027-03-01" }), R({ decision: "accept", clear: true, due_at: "2027-03-01" }),
+  ]);
+  const passes = await Promise.all([R({ decision: "reject", clear: false }), R({ decision: "accept", level: 0 }, assertedA), R({ decision: "accept", clear: true }, clearedA)]);
+  assert(asked.length === 3 && shapes.map((o) => (!o.ok && o.refusal.code === "REFUSED_FINDING_INPUT" ? o.refusal.problem : "?")).join() === "ACCEPT_NEEDS_OUTCOME,ACCEPT_NEEDS_OUTCOME,BAD_OUTCOME,BAD_OUTCOME,BAD_OUTCOME,BAD_OUTCOME"
+      && passes.every((o) => o.ok),
+    `arguments that do not go together refused before the store (accept with neither or both of level and clear; a level, clear or due time on a reject; a due time without a level), and what goes together reaches it (${shapes.map((o) => !o.ok && o.refusal.code).join(",")}; ${asked.length} asked)`);
+
+  asked.length = 0;
+  const dated = await R({ id: F.toUpperCase(), decision: "accept", level: 3, due_at: "2027-03-01", note: "a note" }, assertedA);
+  const timed = await R({ decision: "accept", level: 3, due_at: "2027-03-01T17:00:00+01:00" }, assertedA);
+  const asCapture = await R({ decision: "reject" }, { ok: false, error: "NOT_WRITE_SCOPE", message: "hook states no write scope; a decision is a write on any item" }, { name: "hook", scope: "capture", agentId: "a2" });
+  const actor = asked[0]?.actor as Record<string, unknown> | undefined;
+  assert(asked[0]?.id === F && asked[0]?.dueAt === "2027-03-02T00:00:00.000Z" && asked[0]?.level === 3 && asked[0]?.note === "a note" && asked[0]?.scope === "write" && asked[0]?.decision === "accept"
+      && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test" && asked[1]?.dueAt === "2027-03-01T17:00:00+01:00" && asked[2]?.scope === "capture"
+      && dated.ok && timed.ok && !asCapture.ok && asCapture.refusal.code === "WRITE_SCOPE_REQUIRED" && asCapture.refusal.key === "hook",
+    `the id lower-cased, a date due by the end of its day, a time as given, the caller's key, agent id and door as the actor, its scope in the envelope; 142's NOT_WRITE_SCOPE as WRITE_SCOPE_REQUIRED (${JSON.stringify(asked.map((a) => [a.id, a.dueAt, a.scope]))})`);
+
+  const refusedBy = async (answer: unknown) => { const o = await R({ decision: "reject" }, answer); return o.ok ? null : o.refusal; };
+  const [agentR, foundR, mootR, clearR, writerR, settledR] = await Promise.all([
+    refusedBy({ ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may decide a priority finding; op-key is agent" }),
+    refusedBy({ ok: false, error: "NOT_FOUND", message: `no priority finding ${F}` }),
+    refusedBy({ ok: false, error: "NOT_PENDING", status: "moot", message: `finding ${F} is moot, not pending` }),
+    refusedBy({ ok: false, error: "NOTHING_TO_CLEAR", answer: { outcome: "nothing_to_clear" }, message: "the operator holds no statement here to clear; state a level instead (0 for none) to outrank another maker's" }),
+    refusedBy({ ok: false, error: "WRITER_REFUSED", answer: { outcome: "refused", code: "ITEM_NOT_FOUND", message: "no such ticket" }, message: "the writer refused the outcome (ITEM_NOT_FOUND); the finding stays pending" }),
+    refusedBy({ ok: false, error: "BAD_OUTCOME", message: "a settled item's finding is accepted by clearing, or by stating 0 (none)" }),
+  ]);
+  assert(agentR?.code === "REFUSED_NOT_OPERATOR" && agentR.kind === "agent" && foundR?.code === "NOT_FOUND" && foundR.id === F
+      && mootR?.code === "REFUSED_FINDING_DECISION" && mootR.problem === "NOT_PENDING" && mootR.status === "moot"
+      && clearR?.code === "REFUSED_FINDING_DECISION" && clearR.problem === "NOTHING_TO_CLEAR" && clearR.writerCode === undefined
+      && writerR?.code === "REFUSED_FINDING_DECISION" && writerR.problem === "WRITER_REFUSED" && writerR.writerCode === "ITEM_NOT_FOUND"
+      && settledR?.code === "REFUSED_FINDING_INPUT" && settledR.problem === "BAD_OUTCOME" && /settled item/.test(settledR.message)
+      && JSON.stringify(refusalValue(writerR)) === JSON.stringify({ code: "REFUSED_FINDING_DECISION", retryable: false, id: F, problem: "WRITER_REFUSED", writerCode: "ITEM_NOT_FOUND" })
+      && JSON.stringify(refusalValue(mootR)) === JSON.stringify({ code: "REFUSED_FINDING_DECISION", retryable: false, id: F, problem: "NOT_PENDING", status: "moot" })
+      && JSON.stringify(refusalValue(settledR)) === JSON.stringify({ code: "REFUSED_FINDING_INPUT", retryable: false, problem: "BAD_OUTCOME" }),
+    `142's refusals: NOT_OPERATOR with the key's kind, NOT_FOUND naming the finding, NOT_PENDING with its status, NOTHING_TO_CLEAR, WRITER_REFUSED with the writer's code, a settled finding's BAD_OUTCOME; each value its tokens alone, never the words (${[agentR, foundR, mootR, clearR, writerR, settledR].map((r) => r && ("problem" in r ? r.problem : r.code)).join(",")})`);
+  // An envelope 142 does not answer is a fault, never a value.
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, { ...rejectedA, kind: "late" }, { ...assertedA, answer: { outcome: "maybe" } }, null]
+    .map((a) => { try { normaliseReviewFinding(a); return "read"; } catch { return "threw"; } });
+  assert(strays.every((s) => s === "threw"), `an envelope review_priority_finding does not answer throws (${strays.join(",")})`);
+  // No agent id: the registry away is PRIORITY_UNATTRIBUTED; a principal with none by design is named so; neither reaches the store.
+  asked.length = 0;
+  const away = await R({ decision: "reject" }, rejectedA, { name: "op-key", scope: "write", agentUnresolved: "unreachable" });
+  const none = await R({ decision: "reject" }, rejectedA, { name: "op-key", scope: "write" });
+  assert(asked.length === 0 && !away.ok && away.refusal.code === "PRIORITY_UNATTRIBUTED" && away.refusal.retryable === true
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR" && none.refusal.unidentified === true
+      && text(say.renderReviewPriorityFinding(away)) === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && /^Refused: only a key the operator classified `operator` may decide a priority finding, known by its agent id, and this call \(op-key\) reached the brain with none; call with the operator's own key\.$/.test(text(say.renderReviewPriorityFinding(none))),
+    `with no agent id nothing reaches the store: the registry away PRIORITY_UNATTRIBUTED, a principal with none named so (${away.ok || away.refusal.code} ${none.ok || none.refusal.code})`);
+
+  const [asserted, unchanged, cleared, rejected] = await Promise.all([R({ decision: "accept", level: 2 }, assertedA), R({ decision: "accept", level: 2 }, unchangedA), R({ decision: "accept", clear: true }, clearedA), R({ decision: "reject" }, rejectedA)]);
+  const words = [asserted, unchanged, cleared, rejected].map((o) => text(say.renderReviewPriorityFinding(o)));
+  const held = " The same finding is held back until 2027-01-14T10:00:00.000Z while its statements stand.";
+  const stmt = `medium (2) by op-key at the operator tier: "review of a stale finding" (assertion ${A}, 2026-11-15T10:00:00.000Z)`;
+  assert(asserted.ok && asserted.value.outcome === "asserted" && asserted.value.assertion?.level === 2 && asserted.value.caller === "op-key" && cleared.ok && cleared.value.closed.length === 1 && rejected.ok && rejected.value.outcome === null
+      && words[0] === `Accepted the stale finding ${F} on thought ${T}: stated ${stmt}. Yours is the item's winner.${held}`
+      && words[1] === `Accepted the stale finding ${F} on thought ${T}: your statement already says this — ${stmt} — so it stands re-confirmed and nothing was written to it. Yours is the item's winner.${held}`
+      && words[2] === `Accepted the stale finding ${F} on thought ${T}: cleared your statement, urgent (4) (assertion ${A}), which stays in the history. No statement on it stands now: its priority is unknown.${held}`
+      && words[3] === `Rejected the stale finding ${F} on thought ${T}: no priority was changed.${held}`,
+    `the words: a level stated, re-confirmed, a clear, a reject, each holding the finding back (${words.join(" | ")})`);
+  const refusalWords = [agentR, foundR, mootR, clearR, writerR, settledR].map((r) => text(say.renderReviewPriorityFinding({ ok: false, refusal: r } as never)));
+  assert(refusalWords[0].startsWith("Refused: only a key the operator classified `operator` may decide a priority finding. This key, op-key, is classified agent")
+      && refusalWords[1] === `Refused: the brain holds no priority finding ${F}; list_priority_findings gives each one's id.`
+      && refusalWords[2] === `Refused: finding ${F} is moot already, not pending (its condition no longer holds); list_priority_findings with status moot shows it.`
+      && refusalWords[3] === `Refused: you hold no statement on the item to clear, so nothing was decided and finding ${F} stays pending. State a level instead (0 for none) to outrank another maker's.`
+      && refusalWords[4] === `Refused: the writer refused the outcome (ITEM_NOT_FOUND), so nothing was decided and finding ${F} stays pending.`
+      && refusalWords[5] === "Refused: a settled item's finding is accepted by clearing, or by stating 0 (none).",
+    `the refusals' words (${refusalWords.join(" | ")})`);
+
+  // The fault: a brain before 142, or a role without the grant, named.
+  assert(/migration 142 \(db\/migrations\/142_priority_findings\.sql\) is not applied$/.test(say.findingsHint('relation "priority_findings" does not exist'))
+      && /migration 142/.test(say.findingsHint("function review_priority_finding(uuid, text, integer, timestamp with time zone, boolean, text, jsonb) does not exist"))
+      && /the priority group's grants on priority_findings/.test(say.findingsHint("permission denied for table priority_findings")) && say.findingsHint("connection refused") === "",
+    `the findings' hint names a brain before 142 and a role without the grant (${say.findingsHint('relation "priority_findings" does not exist')})`);
+
+  // brain_info: the row for each state, and the read's value.
+  const value = priorityFindingsValue({ pending: 3, oldest_s: 3 * 86400 + 5, stale: 2, overdue: 0, disagree: 1, settled: 0, decided_30d: 4 });
+  const lines = [
+    priorityFindingsLine({ priorityFindings: null, unread: {} }),
+    priorityFindingsLine({ priorityFindings: null, unread: { priorityFindings: { reason: "refused", message: "permission denied for table priority_findings" } as never } }),
+    priorityFindingsLine({ priorityFindings: priorityFindingsValue({ pending: 0, oldest_s: null, stale: 0, overdue: 0, disagree: 0, settled: 0, decided_30d: 0 }), unread: {} }),
+    priorityFindingsLine({ priorityFindings: value, unread: {} }),
+  ];
+  const badRead = [undefined, { pending: "x" }, { pending: 1, oldest_s: "soon", stale: 1, overdue: 0, disagree: 0, settled: 0, decided_30d: 0 }].map((r) => { try { priorityFindingsValue(r as never); return "read"; } catch { return "threw"; } });
+  assert(value.oldestPendingS === 259205 && value.byKind.disagree === 1 && value.decided30d === 4
+      && lines[0] === "no table — migration 142 is not applied" && /^\? \(priority_findings /.test(lines[1]) && lines[2] === "none pending"
+      && /^3 pending \(2 stale, 1 disagree; the oldest found 3 d ago\) — list_priority_findings lists them; 4 decided in the last 30 days$/.test(lines[3])
+      && badRead.every((r) => r === "threw"),
+    `brain_info's Priority findings row: before 142, unread, none pending, pending by kind with the oldest's age and the decided; a read answering no counts throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+}
+
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
   const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");

@@ -70,6 +70,10 @@
       "scope": "read"
     },
     {
+      "name": "list_priority_findings",
+      "scope": "read"
+    },
+    {
       "name": "item_history",
       "scope": "read"
     },
@@ -151,6 +155,10 @@
     },
     {
       "name": "set_work_claim_cap",
+      "scope": "write"
+    },
+    {
+      "name": "review_priority_finding",
       "scope": "write"
     },
     {

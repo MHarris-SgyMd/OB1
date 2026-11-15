@@ -458,7 +458,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -5038,6 +5038,34 @@ if (configFailed) {
             else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
               : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
+          }
+        }
+
+        // The priority review's findings (SMD-3671 PR 2, migration 142): what
+        // sleep's scan proposed and no operator has decided, from the record's
+        // own read (brain-info.ts), so this row and brain_info say one thing. A
+        // queue, not a fault: it never warns for pending findings, only when the
+        // table could not be read. The priority row says what the role's grants
+        // on it fail.
+        {
+          const f = facts.priorityFindings;
+          if (f === null) {
+            const u = facts.unread.priorityFindings;
+            if (!u) add("priority findings", "skip", "not checked — priority_findings does not exist (migration 142 not applied)");
+            else if (u.reason === "refused")
+              add("priority findings", "warn", `could not verify: ${u.message}`,
+                  "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
+            else if (u.reason === "invisible")
+              add("priority findings", "warn", `could not verify: ${u.message}`, "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
+            else add("priority findings", "warn", `could not verify: ${u.message}`,
+                     u.reason === "timeout"
+                       ? "A migration or a long transaction may hold priority_findings; run preflight again once it has finished."
+                       : "The check reads priority_findings; the message says why it failed.");
+          } else if (f.pending === 0) {
+            add("priority findings", "ok", `none pending${f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : ""}`);
+          } else {
+            const kinds = (["stale", "overdue", "disagree", "settled"] as const).filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`).join(", ");
+            add("priority findings", "ok", `${f.pending} pending (${kinds}), the oldest found ${f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`} — an operator key reviews them: list_priority_findings, then review_priority_finding for each`);
           }
         }
 

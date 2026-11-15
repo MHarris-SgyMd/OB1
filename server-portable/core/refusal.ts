@@ -21,7 +21,7 @@ import type { ProposalSelection } from "./list-cursor.ts";
  */
 export type Refusal =
   // The read tools.
-  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought, reset_capture_stamp: no such thought; job_status: no such job for this key; review_supersession_proposal: no such proposal, or a thought it names is gone
+  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought, reset_capture_stamp: no such thought; job_status: no such job for this key; review_supersession_proposal: no such proposal, or a thought it names is gone; review_priority_finding: no such finding (142)
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_THREAD_INPUT"; retryable: false; problem: "key_or_id" | "key_shape" | "after_needs_key"; value?: string } // thread (SMD-3306 PR 7a-2a): neither or both of key and id; a key that is no subject key (value: it, in the text alone); after without key
@@ -99,7 +99,7 @@ export type Refusal =
   | { code: "CONFIRM_NOT_YOURS"; retryable: false; item: string } // a capture-only key may dismiss a proposed item, never confirm it
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
   // Deliverables (134, SMD-1715 PR 2): the writers' refusals. NOT_FOUND above answers a thought deleted under a capture.
-  | { code: "WRITE_SCOPE_REQUIRED"; retryable: false; key: string } // a key without write scope reaching a deliverable writer — met by the core's own callers alone (the manifest gives no other key the writers)
+  | { code: "WRITE_SCOPE_REQUIRED"; retryable: false; key: string } // a key without write scope reaching a deliverable writer, or deciding a priority finding (142's NOT_WRITE_SCOPE) — met by the core's own callers alone (the manifest gives no other key the writers)
   | { code: "SPEC_NOT_FOUND"; retryable: false; spec: string; left?: string } // capture_deliverable: the spec names no thought; left: the thought a fresh capture wrote before the record found the spec gone, which stays, named by no deliverable
   | { code: "SPEC_IS_SELF"; retryable: false; id: string } // capture_deliverable: the content is the spec's own text, and a thought cannot be its own spec
   | { code: "ALREADY_A_DELIVERABLE"; retryable: false; id: string; recordedBy: string; spec: string; checkpoint: string } // the thought is a deliverable recorded by another key, or at another spec or checkpoint
@@ -115,6 +115,13 @@ export type Refusal =
   // unblocks_many_at), message its words, naming the weight; `unranked`: search_thoughts given weights with neither
   // priority_weight above 0 nor min_priority, so nothing would read them. `named`: the weights the refusal names.
   | { code: "REFUSED_WEIGHTS"; retryable: false; problem: "rule" | "unranked"; message: string; named: string[] }
+  // review_priority_finding (142, SMD-3671 PR 2): `problem` is 142's own error. REFUSED_FINDING_INPUT, a decision's
+  // arguments that do not go together (the core refuses each first, and 142 refuses a settled finding's level above 0);
+  // REFUSED_FINDING_DECISION, the finding's state: decided or moot already (`status`), nothing of the operator's to
+  // clear, or the writer refusing the outcome (`writerCode`, its own code), the finding left pending. `message`: 142's
+  // words, or the core's.
+  | { code: "REFUSED_FINDING_INPUT"; retryable: false; problem: FindingInputProblem; message: string }
+  | { code: "REFUSED_FINDING_DECISION"; retryable: false; id: string; problem: "NOT_PENDING" | "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; message: string; status?: "accepted" | "rejected" | "moot"; writerCode?: string }
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
   | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
@@ -133,6 +140,8 @@ export type Refusal =
 
 /** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder, times and whether the caller's own key holds it — never its label, another key's free text, nor anything that proves ownership. */
 export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string; ownKey: boolean };
+/** A priority finding's decision whose arguments do not go together (142's errors, SMD-3671 PR 2). */
+export type FindingInputProblem = "BAD_DECISION" | "BAD_NOTE" | "ACCEPT_NEEDS_OUTCOME" | "BAD_OUTCOME";
 /** What a decision does not take (SMD-3338), as the CLI refuses it: a direction or force on a reject, or a note beginning with the pass's own marker (067). */
 export type ReviewArgumentProblem = "direction_on_reject" | "force_on_reject" | "note_marker";
 
@@ -257,6 +266,9 @@ const FACTS: Facts = {
   ORDER_UNAVAILABLE: none,
   // The weights it names, from the known names alone: the database's words ride the text.
   REFUSED_WEIGHTS: (r) => ({ problem: r.problem, named: r.named }),
+  // 142's error as a token, the finding's status and the writer's code: its words ride the text.
+  REFUSED_FINDING_INPUT: (r) => ({ problem: r.problem }),
+  REFUSED_FINDING_DECISION: (r) => ({ id: r.id, problem: r.problem, ...(r.status ? { status: r.status } : {}), ...(r.writerCode ? { writerCode: r.writerCode } : {}) }),
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),

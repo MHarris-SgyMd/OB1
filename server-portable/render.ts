@@ -32,6 +32,8 @@ import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KE
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
+import type { FindingReviewCode, FindingReviewed, FindingsListed } from "./core/findings.ts";
+import type { FindingStatement, PriorityFinding } from "./store.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
@@ -2458,6 +2460,92 @@ export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, Priority
     ...v.history.map((a) => historyLine(a, v.item)),
   ].join("\n"),
   priorityRefusal, AS_JSON);
+
+// ── The priority review's findings (SMD-3671 PR 2, migration 142) ───────────
+// Each reply's value is its JSON (AS_JSON), as the priority replies': a finding's evidence, its makers' names and the
+// operator's note are data a reader of the value needs. In the text they are words a key gave, cut to one line.
+
+/** A statement a finding is about: its level, maker, when it was made and its id. */
+const findingStatementText = (s: FindingStatement) =>
+  `${s.level === null ? "a level" : levelText(s.level)}${s.maker ? ` by ${oneLine(snipText(s.maker, 80))}` : ""}${s.assertedAt ? ` (stated ${s.assertedAt})` : ""} (assertion ${s.id})`;
+/** What a finding found, from its evidence, in its kind's words. */
+function findingWhat(f: PriorityFinding): string {
+  const e = f.evidence;
+  const said = f.statements.map(findingStatementText).join("; ");
+  if (f.kind === "stale") {
+    const last = typeof e.last_activity === "string" ? `its last activity ${e.last_activity}` : "no activity known on it";
+    return `${said || "a statement"}, stated over ${f.windowDays} days ago, ${last}`;
+  }
+  if (f.kind === "overdue") {
+    const level = typeof e.level === "number" ? `, at ${levelText(e.level)}` : "";
+    return `past its due time ${typeof e.due_at === "string" ? dueText(e.due_at) : "(not read)"}${level}${e.due_from === "due_ref" ? " (taken through a due reference to another item)" : ""}`;
+  }
+  if (f.kind === "disagree") {
+    const op = f.statements.find((s) => s.role === "operator"), src = f.statements.find((s) => s.role === "source");
+    return op && src ? `the operator's ${findingStatementText(op)} against the source's ${findingStatementText(src)}` : said;
+  }
+  return `${said || "a statement"} left on it, though it has settled`;
+}
+/** Where a finding's decision stands: pending, moot since when, or decided by whom, when, with what note, holding it back how long. */
+const findingState = (f: PriorityFinding) =>
+  f.status === "pending" ? `pending since ${f.foundAt}`
+  : f.status === "moot" ? `moot since ${f.mootAt ?? "?"} (its condition no longer holds)`
+  : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`;
+const findingLine = (f: PriorityFinding) => {
+  const state = findingState(f);
+  return `- ${f.kind} finding ${f.id} on ${itemText(f.item)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
+};
+
+export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => render(o, (v) => {
+  const which = `${v.status === "all" ? "" : `${v.status} `}priority finding`;
+  const of = v.kind ? ` of kind ${v.kind}` : "";
+  if (v.total === 0) return `No ${which}s${of}.`;
+  return [
+    `${v.total} ${which}${v.total === 1 ? "" : "s"}${of}${v.findings.length < v.total ? `, the first ${v.findings.length} listed (raise limit, up to 200, for more)` : ""}:`,
+    ...v.findings.map(findingLine),
+    ...(v.findings.some((f) => f.status === "pending")
+      ? ["An operator key decides each with review_priority_finding: accept with a level (or clear), or reject. Nothing changes a priority until then."] : []),
+  ].join("\n");
+}, unknownRefusal, AS_JSON);
+
+export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingReviewCode>): Reply {
+  return render(o, (v) => {
+    const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${v.kind} finding ${v.id} on ${itemText(v.item)}`;
+    const held = v.suppressedUntil ? ` The same finding is held back until ${v.suppressedUntil} while its statements stand.` : "";
+    const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, v.item);
+    if (v.status === "rejected") return `${lead}: no priority was changed.${held}`;
+    if (v.outcome === "cleared") {
+      return `${lead}: cleared your statement${v.closed.length > 1 ? `s — ${closedList(v.closed, v.item)} —` : v.closed.length ? `, ${closedList(v.closed, v.item)},` : ""} which stay${v.closed.length > 1 ? "" : "s"} in the history.${winner}${held}`;
+    }
+    const said = v.assertion ? statementText(v.assertion) : "?";
+    return v.outcome === "unchanged"
+      ? `${lead}: your statement already says this — ${said} — so it stands re-confirmed and nothing was written to it.${winner}${held}`
+      : `${lead}: stated ${said}.${v.closed.length ? ` It replaces your earlier statement${v.closed.length === 1 ? "" : "s"}, ${closedList(v.closed, v.item)}, which stay${v.closed.length === 1 ? "s" : ""} in the history.` : ""}${winner}${held}`;
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may decide a priority finding, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may decide a priority finding.")
+    : r.code === "PRIORITY_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a priority finding is decided by the operator's write key.`
+    : r.code === "NOT_FOUND" ? `Refused: the brain holds no priority finding ${r.id}; list_priority_findings gives each one's id.`
+    : r.code === "REFUSED_FINDING_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}.`
+    : r.code === "REFUSED_FINDING_DECISION"
+      ? r.problem === "NOT_PENDING"
+        ? `Refused: finding ${r.id} is ${r.status ?? "decided"} already, not pending${r.status === "moot" ? " (its condition no longer holds)" : ""}; list_priority_findings with status ${r.status ?? "all"} shows it.`
+        : r.problem === "NOTHING_TO_CLEAR"
+        ? `Refused: you hold no statement on the item to clear, so nothing was decided and finding ${r.id} stays pending. State a level instead (0 for none) to outrank another maker's.`
+        : `Refused: the writer refused the outcome${r.writerCode ? ` (${r.writerCode})` : ""}, so nothing was decided and finding ${r.id} stays pending.`
+    : unknownRefusal(r),
+  AS_JSON);
+}
+
+/** The findings' fault: a database before 142 holds neither the table nor the function, or the server's role lacks the grant. */
+export const findingsHint = (msg: string): string =>
+  /priority_findings|review_priority_finding/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 142 (db/migrations/142_priority_findings.sql) is not applied"
+    : /permission denied for (?:table priority_findings|function review_priority_finding)/i.test(msg)
+    ? " — the server's role needs the priority group's grants on priority_findings (migration 142; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
 
 
 // ── Open items (SMD-3665 PR 2, migration 117) ────────────────────────────────

@@ -325,9 +325,17 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
   assert(unsayable.isError && unsayable.sc.code === "FAILED" && unsayable.text.startsWith("Error: "), `a value that does not render: FAILED, coded (${JSON.stringify(unsayable.sc).slice(0, 80)})`);
   answer = () => ok({});
   // tools/list in index.ts's registration order.
-  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "thread", "relations", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "task_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "reset_capture_stamp", "append_thought_evidence", "review_supersession_proposal", "retry_failed", "release_stale_leases", "run_worker", "claim_work", "renew_claim", "release_claim", "list_claims", "set_work_claim_cap", "set_priority", "clear_priority", "set_priority_weights", "priority_history", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "item_history", "list_items", "capture_deliverable", "verify_deliverable", "deliverable_history", "agenda", "plan_context", "job_status", "scan_thoughts"];
-  const listed = (((await rpc("tools/list", {}, "write-raw")).body?.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map((t) => t.name);
+  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "thread", "relations", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "task_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "reset_capture_stamp", "append_thought_evidence", "review_supersession_proposal", "retry_failed", "release_stale_leases", "run_worker", "claim_work", "renew_claim", "release_claim", "list_claims", "set_work_claim_cap", "set_priority", "clear_priority", "set_priority_weights", "priority_history", "list_priority_findings", "review_priority_finding", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "item_history", "list_items", "capture_deliverable", "verify_deliverable", "deliverable_history", "agenda", "plan_context", "job_status", "scan_thoughts"];
+  type ListedTool = { name: string; annotations?: { readOnlyHint?: boolean; idempotentHint?: boolean; destructiveHint?: boolean } };
+  const tools = ((await rpc("tools/list", {}, "write-raw")).body?.result as { tools?: ListedTool[] } | undefined)?.tools ?? [];
+  const listed = tools.map((t) => t.name);
   assert(same(listed, order), `tools/list in index.ts's order (${listed.slice(0, 4).join(",")}…)`);
+  // The priority review's findings (SMD-3671 PR 2): the list a read, the decision a write a second call is refused, and a read key sees the list alone.
+  const findingTools = Object.fromEntries(tools.filter((t) => /priority_finding/.test(t.name)).map((t) => [t.name, t.annotations]));
+  const readerSees = (((await rpc("tools/list", {}, "read-raw")).body?.result as { tools?: ListedTool[] } | undefined)?.tools ?? []).map((t) => t.name).filter((n) => /priority_finding/.test(n));
+  assert(findingTools.list_priority_findings?.readOnlyHint === true && findingTools.review_priority_finding?.readOnlyHint === false
+      && findingTools.review_priority_finding?.idempotentHint === false && findingTools.review_priority_finding?.destructiveHint === false && same(readerSees, ["list_priority_findings"]),
+    `list_priority_findings read-only, review_priority_finding a write neither idempotent nor destructive; a read key lists the first alone (${JSON.stringify(findingTools)} ${readerSees.join(",")})`);
   // /health decided by the first key the REST core knows, as index.ts authenticates the first.
   const record = { version: "1.0.0", store: "sql" };
   answer = () => record;

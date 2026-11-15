@@ -2088,6 +2088,19 @@ else {
   const CONS = consolidateKey("other-judge");
   assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out) && /✓\s+proposals\s+none pending\s*$/m.test(noRecord.out),
          `with no consolidation rows and no proposals both checks are ok and say so (${row(noRecord.out, "proposals")})`);
+  // The priority review's findings (SMD-3671 PR 2, migration 142): none pending is ok; a pending one is counted by kind
+  // with its age, ok still — a queue an operator decides, not a fault; before 142, a skip saying why.
+  assert(/^\s*✓\s+priority findings\s+none pending\s*$/m.test(noRecord.out), `with no findings the priority findings row is ok and says so (${row(noRecord.out, "priority findings")})`);
+  const [pf] = await claims`INSERT INTO priority_findings (kind, item_kind, item_key, evidence, window_days, found_at, refreshed_at)
+                            VALUES ('overdue', 'ticket', 'SMD-99971', '{}'::jsonb, 60, now() - interval '3 days', now()) RETURNING id::text AS id`;
+  const pfPending = await run(SQL_ENV);
+  await claims`DELETE FROM priority_findings WHERE id = ${pf.id}::uuid`;
+  await claims.unsafe("ALTER TABLE priority_findings RENAME TO priority_findings_away_pf");
+  const pre142 = await run(SQL_ENV);
+  await claims.unsafe("ALTER TABLE priority_findings_away_pf RENAME TO priority_findings");
+  assert(pfPending.code === 0 && /^\s*✓\s+priority findings\s+1 pending \(1 overdue\), the oldest found 3 d ago — an operator key reviews them: list_priority_findings, then review_priority_finding for each\s*$/m.test(pfPending.out)
+      && /^\s*·\s+priority findings\s+not checked — priority_findings does not exist \(migration 142 not applied\)\s*$/m.test(pre142.out),
+         `…a pending finding counted by kind with its age, ok; before 142 a skip (${row(pfPending.out, "priority findings")} | ${row(pre142.out, "priority findings")})`);
   // The pool's universe is thoughts with entities AND a vector; give three a vector for the count.
   await claims.unsafe(`UPDATE thoughts SET embedding = ('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector WHERE id IN ('${ids[0]}', '${ids[1]}', '${ids[2]}')`);
   await claims`SELECT record_thought_entities(${ids[0]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
@@ -3375,6 +3388,14 @@ else {
       await claims.unsafe("REVOKE SELECT ON thought_facets FROM ob1_pf_capture");
       const noFacets = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       await claims.unsafe("GRANT SELECT ON thought_facets TO ob1_pf_capture");
+      // The priority findings row (SMD-3671 PR 2): without SELECT on priority_findings it warns with the priority group's
+      // grant, never skips as if 142 were not applied.
+      await claims.unsafe("REVOKE SELECT ON priority_findings FROM ob1_pf_capture");
+      const noFindings = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON priority_findings TO ob1_pf_capture");
+      assert(/^\s*!\s+priority findings\s+could not verify: permission denied for table priority_findings/m.test(noFindings.out)
+             && /^\s*→ Grant the priority group \(SMD-3663\): cd db && bun migrate\.ts --url <the owner's connection string> --grant <role> --groups priority/.test(fix(noFindings.out, "priority findings")),
+        `…and without SELECT on priority_findings the priority findings row warns with the priority group's grant, not a skip (${row(noFindings.out, "priority findings").trim().slice(0, 160)})`);
       const threadsRowOut = row(noFacets.out, "threads");
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);

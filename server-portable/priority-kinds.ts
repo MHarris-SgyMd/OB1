@@ -5,3 +5,10 @@
 
 export const PRIORITY_KINDS = ["thought", "ticket", "entity", "item"] as const;
 export type PriorityKind = (typeof PRIORITY_KINDS)[number];
+
+// The priority review's findings (migration 142, SMD-3671): what a finding is about, and where its decision stands —
+// the list's filters and the store's read of a row, here for the same reason.
+export const FINDING_KINDS = ["stale", "overdue", "disagree", "settled"] as const;
+export type FindingKind = (typeof FINDING_KINDS)[number];
+export const FINDING_STATUSES = ["pending", "accepted", "rejected", "moot"] as const;
+export type FindingStatus = (typeof FINDING_STATUSES)[number];

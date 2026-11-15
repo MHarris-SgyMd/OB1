@@ -134,6 +134,9 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     priority_history: { kind: "entity", key: ID },
     // The operator's weights (SMD-4193 PR 2): the weights ride the POST body.
     set_priority_weights: { weights: { overdue: 3, unblocks_many_at: 2, count_inferred: true } },
+    // The priority review's findings (SMD-3671 PR 2): the list's filters ride the query string; the finding the path, the decision the body.
+    list_priority_findings: { status: "all", kind: "disagree", limit: 7 },
+    review_priority_finding: { id: ID, decision: "accept", level: 3, due_at: "2027-03-01T17:00:00+01:00", note: "a note & more?" },
     // Open items (SMD-3665 PR 2): an item's or a proposal's id in the path; a null rides the PATCH body to clear.
     open_item: { text: "call the dentist & more?", owner: "me", due_at: "2027-03-01", origin_thought: ID, plugin_row: "task-1", proposed: true },
     update_item: { id: ID, text: "call the dentist", owner: null, due_at: "2027-03-02T09:00:00+01:00" },

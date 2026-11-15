@@ -21,7 +21,7 @@ import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
-import { PRIORITY_KINDS, type PriorityKind } from "./priority-kinds.ts";
+import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS, type FindingKind, type FindingStatus, type PriorityKind } from "./priority-kinds.ts";
 import type { ItemAnswer, ItemListRow, ItemRecord, ItemStatus } from "./open-items.ts";
 import type { DeliverableAnswer, DeliverableRecord, VerifyStatus } from "./deliverables.ts";
 
@@ -1561,6 +1561,92 @@ export function normaliseSetCap(r: unknown): SetCapResult {
   throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
+export { FINDING_KINDS, FINDING_STATUSES, type FindingKind, type FindingStatus };
+/**
+ * A statement a priority finding is about (migration 142, SMD-3671), from its evidence: a stale or settled finding's
+ * `statements`, or a disagreement's operator and source (`role`). An overdue finding's evidence names a due time, not
+ * statements, so it lists none. A field the evidence lacks is null.
+ */
+export type FindingStatement = { id: string; level: number | null; maker: string | null; assertedAt: string | null; role: "operator" | "source" | null };
+/**
+ * One priority finding as the list reads it (migration 142's priority_findings row): its kind, its item (keyed by its
+ * pool: a ticket and its own rows are one item), its status, the statements it is about, its evidence as the scan
+ * wrote it, its window, when it was found, last refreshed, mooted and decided, who decided it (a key's name), the
+ * operator's note, the writer's answer to an accept (`outcome`), and until when the decision holds the same finding
+ * back.
+ */
+export type PriorityFinding = {
+  id: string; kind: FindingKind; item: PriorityItem; status: FindingStatus; statements: FindingStatement[];
+  evidence: Record<string, unknown>; windowDays: number; foundAt: string; refreshedAt: string; mootAt: string | null;
+  decidedAt: string | null; decidedBy: string | null; note: string | null; outcome: Record<string, unknown> | null; suppressedUntil: string | null;
+};
+
+/** A finding's statements from its evidence (see FindingStatement); anything the scan did not write there is left out. */
+function findingStatements(evidence: Record<string, unknown>): FindingStatement[] {
+  const one = (v: unknown, role: FindingStatement["role"]): FindingStatement | null => {
+    const s = v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+    if (!s || typeof s.id !== "string") return null;
+    const at = typeof s.asserted_at === "string" && !Number.isNaN(Date.parse(s.asserted_at)) ? new Date(s.asserted_at).toISOString() : null;
+    return { id: s.id, level: typeof s.level === "number" ? s.level : null, maker: typeof s.maker === "string" ? s.maker : null, assertedAt: at, role };
+  };
+  const listed = Array.isArray(evidence.statements) ? evidence.statements.map((s) => one(s, null)) : [one(evidence.operator, "operator"), one(evidence.source, "source")];
+  return listed.filter((s): s is FindingStatement => s !== null);
+}
+
+/** One priority_findings row as the list reads it. A kind, status or item 142 does not write is a fault. */
+export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
+  const item = priorityItemOf({ kind: r.item_kind, key: r.item_key });
+  if (!(FINDING_KINDS as readonly unknown[]).includes(r.kind) || !(FINDING_STATUSES as readonly unknown[]).includes(r.status) || !item || typeof r.id !== "string") {
+    throw new Error(`priority_findings answered a row this server cannot read: ${JSON.stringify({ kind: r.kind, status: r.status, item_kind: r.item_kind })}`);
+  }
+  const obj = (v: unknown): Record<string, unknown> | null => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+  const evidence = obj(r.evidence) ?? {};
+  return {
+    id: r.id, kind: r.kind as FindingKind, item, status: r.status as FindingStatus, statements: findingStatements(evidence), evidence,
+    windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
+    decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
+    note: typeof r.decision_note === "string" ? r.decision_note : null, outcome: obj(r.outcome), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
+  };
+}
+
+/**
+ * review_priority_finding's answer (142, SMD-3671). Decided: the finding's id, kind, item and status now, the writer's
+ * answer to an accept (assert_priority's or clear_priority's; null for a reject), and until when the decision holds the
+ * same finding back. Refused, by 142's error: NOT_OPERATOR (`kind` the key's registry kind), NOT_PENDING (`status`
+ * the finding's), NOTHING_TO_CLEAR and WRITER_REFUSED (`writerCode` the writer's own code, if it named one), and the
+ * rest in `message` alone.
+ */
+export type ReviewFindingResult =
+  | { ok: true; id: string; kind: FindingKind; item: PriorityItem; status: "accepted" | "rejected"; answer: PriorityAnswer | null; suppressedUntil: string | null }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "NOT_PENDING"; status: FindingStatus; message: string }
+  | { ok: false; error: "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; writerCode: string | null; message: string }
+  | { ok: false; error: "NOT_WRITE_SCOPE" | "NOT_FOUND" | FindingInputError; message: string };
+/** 142's refusals of a decision's arguments: the schema and the core refuse each first but BAD_OUTCOME's settled rule. */
+export type FindingInputError = "BAD_DECISION" | "BAD_NOTE" | "ACCEPT_NEEDS_OUTCOME" | "BAD_OUTCOME";
+const FINDING_PLAIN_ERRORS = new Set(["NOT_WRITE_SCOPE", "NOT_FOUND", "BAD_DECISION", "BAD_NOTE", "ACCEPT_NEEDS_OUTCOME", "BAD_OUTCOME"]);
+
+/** review_priority_finding's jsonb (142) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const what = "review_priority_finding";
+  if (o?.ok === true && typeof o.id === "string" && (o.status === "accepted" || o.status === "rejected") && (FINDING_KINDS as readonly unknown[]).includes(o.kind)) {
+    const item = priorityItemOf(o.item);
+    if (!item) throw new Error(`${what} answered an item this server cannot read`);
+    return { ok: true, id: o.id, kind: o.kind as FindingKind, item, status: o.status, answer: o.answer == null ? null : normalisePriorityAnswer(o.answer, what), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null) };
+  }
+  const message = word(o?.message) ?? "";
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message };
+  if (o?.ok === false && o.error === "NOT_PENDING" && (FINDING_STATUSES as readonly unknown[]).includes(o.status)) return { ok: false, error: "NOT_PENDING", status: o.status as FindingStatus, message };
+  if (o?.ok === false && (o.error === "NOTHING_TO_CLEAR" || o.error === "WRITER_REFUSED")) {
+    const a = o.answer !== null && typeof o.answer === "object" ? (o.answer as Record<string, unknown>) : {};
+    return { ok: false, error: o.error, writerCode: word(a.code) ?? word(a.error), message };
+  }
+  if (o?.ok === false && FINDING_PLAIN_ERRORS.has(o.error as string)) return { ok: false, error: o.error as "NOT_FOUND", message };
+  throw new Error(`${what} answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
 /**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
@@ -2585,6 +2671,18 @@ export interface ThoughtStore {
    */
   setWorkClaimCap(opts: { cap: number | null; actor?: Actor }): Promise<SetCapResult>;
   /**
+   * The priority review's findings (migration 142, SMD-3671): those of one status (null: every one) and kind (null:
+   * every kind), the pending oldest found first, then the rest most recently decided or mooted first; `total` counts
+   * every one matching, the list cut to `limit`. One statement. A database before 142 throws.
+   */
+  listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number }): Promise<{ total: number; findings: PriorityFinding[] }>;
+  /**
+   * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
+   * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent
+   * id, with write scope (the envelope states the key's) — and every rule of the decision. A database before 142 throws.
+   */
+  reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult>;
+  /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
    * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
@@ -2961,7 +3059,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, listPriorityFindings: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 

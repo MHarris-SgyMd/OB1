@@ -27,7 +27,7 @@ import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normalisePriorityFinding, normaliseReviewFinding, type FindingKind, type FindingStatus, type PriorityFinding, type ReviewFindingResult, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1213,6 +1213,31 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT set_work_claim_cap(${opts.cap}, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseSetCap(rows[0]?.r);
+  }
+
+  // SMD-3671 PR 2: 142's findings, one statement. `total` is the window's count over every row matching, read before
+  // the limit cuts them; no row matching reads 0. The pending oldest found first (the queue's order), then the rest
+  // most recently decided or mooted first.
+  async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number }): Promise<{ total: number; findings: PriorityFinding[] }> {
+    const rows = await this.sql`
+      SELECT f.id::text AS id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days, f.found_at, f.refreshed_at, f.moot_at,
+             f.decided_at, f.decided_by, f.decision_note, f.outcome, f.suppressed_until, count(*) OVER ()::int AS total
+        FROM priority_findings f
+       WHERE (${opts.status}::text IS NULL OR f.status = ${opts.status}::text)
+         AND (${opts.kind}::text IS NULL OR f.kind = ${opts.kind}::text)
+       ORDER BY f.status <> 'pending', CASE WHEN f.status = 'pending' THEN f.found_at END, COALESCE(f.decided_at, f.moot_at) DESC NULLS LAST, f.id
+       LIMIT ${opts.limit}::int` as Record<string, unknown>[];
+    return { total: rows.length ? Number(rows[0].total) : 0, findings: rows.map(normalisePriorityFinding) };
+  }
+
+  // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142
+  // reads: write scope alone decides), every value a bind parameter.
+  async reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult> {
+    const envelope = opts.actor ? { ...actorPayload(opts.actor), ...(opts.scope ? { scope: opts.scope } : {}) } : null;
+    const rows = await this.sql`
+      SELECT review_priority_finding(${opts.id}::uuid, ${opts.decision}::text, ${opts.level ?? null}::int, ${opts.dueAt ?? null}::timestamptz,
+                                     ${opts.clear === true}::boolean, ${opts.note ?? null}::text, ${envelope}::jsonb) AS r`;
+    return normaliseReviewFinding(rows[0]?.r);
   }
 
   // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope, the

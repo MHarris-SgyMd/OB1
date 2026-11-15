@@ -1303,7 +1303,7 @@ so end a ticket's claims, as it can already mislabel `moved`.
 A key states how much an item matters, and every statement is kept (migration 116,
 SMD-3663; `docs/priority.md`). An item is a thought (its id), a ticket (its key) or an
 entity (its id), addressed by its kind and key, or an open item (`item`, its id: migration
-117, SMD-3665). Three tools reach it, each over REST and MCP alike:
+117, SMD-3665). These tools reach it, each over REST and MCP alike:
 
 - **`set_priority`** (`POST /v1/priorities/{kind}/{key}`, capture scope): a level, 0
   none to 5 critical, and optionally `due_at`, `not_before`, `due_ref` (another item
@@ -1357,6 +1357,35 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   was the one standing, and nothing was written; a replaced setting stays as history.
   `brain_info`'s `database.workClaimCap` shows the standing cap — built in, the
   operator's, or the operator's refused.
+- **`list_priority_findings`** (`GET /v1/priority-findings`, read scope; SMD-3671 PR 2,
+  migration 142): the priority review's findings, which sleep's scan proposes —
+  `stale`, `overdue`, `disagree` and `settled` (`db/README.md`, migration 142). `status`
+  (`pending` by default, `accepted`, `rejected`, `moot` or `all`), `kind` (one of the
+  four) and `limit` (1 to 200, 20 by default). The answer is `{status, kind, total,
+  findings}`: `total` counts every finding matching, the list cut to `limit`, with no
+  cursor. The pending come oldest found first; the rest most recently decided or
+  mooted first. Each finding is `{id, kind, item: {kind, key}, status, statements,
+  evidence, windowDays, foundAt, refreshedAt, mootAt, decidedAt, decidedBy, note,
+  outcome, suppressedUntil}`: `statements` are the evidence's (a stale or settled
+  finding's statements; a disagreement's operator and source, each with its `role`; an
+  overdue finding names a due time, so none), `outcome` what an accept's writer
+  answered. A brain before 142 faults (500), the MCP text naming the migration.
+- **`review_priority_finding`** (`POST /v1/priority-findings/{id}/review`, write scope;
+  SMD-3671 PR 2, migration 142): an operator's decision on a pending finding.
+  `decision` is `accept` or `reject`; an accept takes `level` (0 to 5, with `due_at`
+  if wanted, a time with its offset or a date) or `clear: true`; `note` up to 2000
+  characters. An accept states the operator's own statement on the item through
+  `assert_priority` (the same level re-confirms it, keeping its terms), or closes the
+  operator's own statement there through `clear_priority`; a reject writes nothing.
+  Either holds the same finding back for its window while its statements are those
+  decided on. Past the scope, the database admits a key the operator classified
+  `operator`, by its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR`
+  (403), and while the registry cannot give the key's agent id `PRIORITY_UNATTRIBUTED`
+  (503), as `set_priority_weights` answers. The answer is `{id, kind, item, status,
+  outcome, assertion, closed, winner, suppressedUntil, caller}`: `outcome` is
+  `asserted`, `unchanged` (re-confirmed) or `cleared`, null for a reject. Arguments
+  that do not go together are refused before the brain is asked; the schema refuses
+  a level off the scale, a note too long or an id that is no uuid (`REFUSED_INPUT`).
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while
@@ -1376,6 +1405,12 @@ caller; a hook's principal is capture-scoped.
 | `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
 | `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Said after 116/117 answer ITEM_NOT_YOURS, so a plugin's call 117 grants goes through (SMD-3665 PR 2). A principal with no agent id by design (a plugin hook's) is answered by 116/117. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
 | `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
+| `REFUSED_FINDING_INPUT` | 400 | `review_priority_finding`'s arguments do not go together: `problem` is 142's error — `ACCEPT_NEEDS_OUTCOME` (an accept with neither a level nor clear, or both), `BAD_OUTCOME` (a level, a due time or clear on a reject, a due time without a level, or a settled finding accepted with a level above 0), `BAD_DECISION` or `BAD_NOTE`. The server refuses all but the settled rule before the brain is asked. |
+| `REFUSED_FINDING_DECISION` | 409 | The finding's state refuses the decision, which decided nothing: `problem` `NOT_PENDING` (decided or moot already, `status` which), `NOTHING_TO_CLEAR` (the operator holds no statement on the item; state 0 to outrank another maker's), or `WRITER_REFUSED` (the writer refused the outcome, `writerCode` its code, such as `ITEM_NOT_FOUND`); the finding stays pending but for `NOT_PENDING`. |
+
+`review_priority_finding` also answers `NOT_FOUND` (404) for a finding not there, and
+`WRITE_SCOPE_REQUIRED` (403) for a key without write scope met through a caller of the
+core's own (142's `NOT_WRITE_SCOPE`).
 
 Each writer is one statement, its own READ COMMITTED transaction holding its item's
 lock (116's rule); the history reads the winner and the statements in one statement.
