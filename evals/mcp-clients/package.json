@@ -2,7 +2,7 @@
   "name": "ob1-mcp-client-probe",
   "private": true,
   "type": "module",
-  "comment": "The scratch MCP server behind docs/mcp-client-refresh.md (SMD-4344): it records which revision a client offers and what makes it list tools again. Not the brain's server, and no suite runs it. It pins the SDK at the version the measurements were made with, ahead of the brain's own pin (SMD-4342).",
+  "comment": "The scratch MCP server behind the client-refresh measurements (SMD-4344; probe.ts names the doc): it records which revision a client offers and what makes it list tools again. Not the brain's server, and no suite runs it. It pins the SDK at the version the measurements were made with, ahead of the brain's own pin (SMD-4342).",
   "dependencies": {
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/server": "2.4.0",
