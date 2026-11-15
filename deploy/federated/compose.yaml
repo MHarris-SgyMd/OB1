@@ -47,7 +47,7 @@ services:
       ob1.broker-sha256: ${FEDERATED_BROKER_SHA256:?run deploy/federated/federated.ts}
       ob1.registry-sha256: ${FEDERATED_REGISTRY_SHA256:?run deploy/federated/federated.ts}
     ports:
-      - "127.0.0.1:${FEDERATED_PORT:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}"
+      - "${FEDERATED_HOST:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${FEDERATED_PORT:?run deploy/federated/federated.ts}/health"]
       interval: 10s
