@@ -1830,7 +1830,7 @@ function selfCheck(): Promise<number> {
     // A forgotten ticket stays out though named (SMD-1723 review pass 8): listed forgotten, nothing written.
     const forgotBrain = fakeBrain({ K: { content: text, metadata: withFacets, supersedes: null, created_at: null } });
     const forgotWriter: Writer = { ...onlyWriter, store: forgotBrain.store, fingerprintOf: forgotBrain.fingerprintOf, holderOf: forgotBrain.holderOf };
-    const repForgot = await runPass({ gql: board, readRows: async () => forgotBrain.brainRows(), readForgotten: async () => new Set([identityHash("SMD-2000")]), writer: forgotWriter, initiative: "Open Brain", full: false, only: ["SMD-2000"] });
+    const repForgot = await runPass({ gql: board, readRows: async () => forgotBrain.brainRows(), readForgotten: async () => new Set([identityHash("SMD-2000")]), writer: forgotWriter, initiative: rep.initiative, full: false, only: ["SMD-2000"] });
     ok(JSON.stringify(repForgot.forgotten) === '["SMD-2000"]' && repForgot.tally.captured === 0 && forgotBrain.writes.length === 0 && repForgot.errors.length === 0,
       `--only a forgotten ticket: left out, listed forgotten, nothing written (${JSON.stringify(repForgot.forgotten)}; ${forgotBrain.writes.length} write(s); ${JSON.stringify(repForgot.errors)})`);
     // The pass hands the ledger's set to the ticket's parts (SMD-1723 review pass 8: a pass that kept it to the plan
@@ -1847,7 +1847,7 @@ function selfCheck(): Promise<number> {
     const secCaptures: string[] = [];
     const secWriter: Writer = { ...onlyWriter, fingerprintOf: secBrain.fingerprintOf, holderOf: secBrain.holderOf, holderOfIdentity: async () => null, structure: async () => {},
       store: { ...secBrain.store, captureThought: async (o) => { if (o.derivedFrom) secCaptures.push("section"); return secBrain.store.captureThought(o); } } };
-    const repSec = await runPass({ gql: sectionedBoard, readRows: async () => secBrain.brainRows(), readForgotten: async () => new Set([identityHash(secPart.identity.key)]), writer: secWriter, initiative: "Open Brain", full: false, only: ["SMD-1936"] });
+    const repSec = await runPass({ gql: sectionedBoard, readRows: async () => secBrain.brainRows(), readForgotten: async () => new Set([identityHash(secPart.identity.key)]), writer: secWriter, initiative: rep.initiative, full: false, only: ["SMD-1936"] });
     ok(secCaptures.length === 0 && repSec.derived.refused === 1 && repSec.errors.length === 0,
       `a pass over a ticket whose dated section the brain forgot leaves the section out (${secCaptures.length} section capture(s); ${JSON.stringify(repSec.derived)}; ${JSON.stringify(repSec.errors)})`);
     // A claimed row for another ticket beside an unadopted hand capture: the pass reads the headers because something is missing, and adopts (fourth review pass).
