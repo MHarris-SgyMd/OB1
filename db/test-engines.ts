@@ -869,6 +869,15 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
     const direct = numberProblem("--f", Number(raw), rule);
     ok((typeof scanned === "number" ? null : scanned.error) === direct, `readNumber("${raw}") and numberProblem(${raw}) agree (${JSON.stringify(scanned)})`);
   }
+  // SMD-4308: the engines' one option reader — the copy each numbers() held.
+  const { flagList, optionReader } = await import("./cli.ts");
+  const spec = { workers: "one", "min-sim": "one" } as const;
+  const hints = { workers: "<n>" };
+  const read = optionReader(spec, hints);
+  ok(read("--workers", null, 2) === 2 && read("--workers", undefined, 2) === 2 && read("--workers", 3, 2) === 3 && read("--min-sim", 0.5, 0, { min: -1, max: 1, fraction: true }) === 0.5 && read("--workers", 0, 2, { min: 0 }) === 0,
+     "optionReader gives the default for an absent option and the option when its rule holds (a rule of its own, a fraction and 0 included)");
+  ok(read("--workers", 0, 2) === `--workers must be a decimal integer >= 1\n${flagList(spec, hints)}` && read("--workers", 9, 2, { min: 1, max: 8 }) === `--workers must be a decimal integer >= 1 and <= 8\n${flagList(spec, hints)}`,
+     "…and refuses a broken rule in numberProblem's words with the script's flag list under them, the default rule a whole number >= 1");
 }
 
 // ---------------------------------------------------------------------------
