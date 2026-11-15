@@ -177,7 +177,7 @@
 --   one of its columns or to PUBLIC (review pass 7) — is granted SELECT on
 --   the ledger: after 139 a capture reads it, so a role without it cannot write
 --   a thought at all. MINOR under the version rules.
---   test-schema [128], test-upgrade [20cf].
+--   test-schema [129], test-upgrade [20cg].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 034 (query_log), 042 (citations), 053

@@ -86,6 +86,8 @@ const TABLES = [
   "priority_sources",
   // 132's operator's weights (SMD-4193 PR 2): no foreign key either way; its CASCADE takes its triggers.
   "priority_weight_settings",
+  // 142's priority findings (SMD-3671): no foreign key either way — a finding names its statements by id.
+  "priority_findings",
   // 117's open items (SMD-3665): no foreign key either way — an event, a
   // projection row and a proposal name their item by id, not a reference —
   // so their place is free. Each CASCADE takes the helpers whose arguments or
@@ -462,6 +464,10 @@ const FUNCTIONS = [
   "ob1_priority_closed_json(uuid[])",
   // 141 (SMD-4241): the prunes' spare test and a merge's priority step.
   "ob1_entity_has_open_priority(uuid)",
+  // 142 (SMD-3671): the priority review's scan, its activity read and the operator's decision.
+  "ob1_priority_activity(text, text)",
+  "ob1_priority_review(integer, timestamp with time zone)",
+  "review_priority_finding(uuid, text, integer, timestamp with time zone, boolean, text, jsonb)",
   "ob1_priority_merge_entity(uuid, uuid)",
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row

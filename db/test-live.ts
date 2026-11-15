@@ -26219,6 +26219,10 @@ if (want("38")) {
     const noneMs = Date.now() - noneAt;
     assert(wholeDrained === 0 && noneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)) && noneReads === 0 && noneMs < 5_000,
       `a one-shot run that finds no work exits 0 at its first read, no live read made, within 5 s, no period begun (exit ${noneCode} in ${noneMs} ms; ${noneReads} live read(s); ${lines.filter((l) => /idle|working/.test(l)).map((l) => l.trim()).join(" | ")})`);
+    // The priority review runs at an idle read too, whether or not a pass has work (SMD-3671): a brain with nothing to
+    // extract is the one whose priorities go stale (review pass 1).
+    assert(lines.some((l) => /^ {2}\[priority review\] \d+ found, \d+ still standing, \d+ moot, \d+ held back by a decision; \d+ pending$/.test(l)),
+      `a one-shot run that finds no work still runs the priority review at its first read (${lines.filter((l) => /priority review/.test(l)).map((l) => l.trim()).join(" | ") || "no review line"})`);
     // A one-shot run whose work goes while the gate holds it — the claim another
     // process finishes — ends with 0 once a read finds none, the rescan's
     // included (review pass 1: past its first read, it idled on for ever).

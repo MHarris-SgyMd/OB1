@@ -771,7 +771,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // amendment in 055's gate, the refusal of a forgotten text on thoughts,
   // 116's, 117's and 134's guards admitting the forget's deletes, and
   // forget_thought — refusing by name without 016, 034, 053, 055, 060, 064,
-  // 067, 116, 117, 123 or 134 ([20cf]);
+  // 067, 116, 117, 123 or 134 ([20cg]);
   // 140 adds the per-holder claim cap — a table, two
   // refusing triggers and eight functions, claim_work redefined to count a
   // holder's live claims under a per-holder lock and refuse CLAIM_LIMIT past the
@@ -781,12 +781,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // prune_orphan_entities carried) and moves a merge's statements and due
   // references through ob1_priority_merge_entity (136's merge_entities and
   // 056's apply_entity_type_gate carried), refusing by name without 016,
-  // 056, 061, 116, 133 or 136 ([20ce]) — all recorded by the
+  // 056, 061, 116, 133 or 136 ([20ce]); 142 adds priority_findings, the
+  // priority review's scan and an operator's decision, refusing by name
+  // without 046, 068, 116, 117, 122 or 133 ([20cf]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 112, `030 is among the last one hundred and twelve migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 113, `030 is among the last one hundred and thirteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5352,16 +5354,18 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
     `applied, the file moves no thought nor audit row; an operator's High and an agent's Urgent on one thought, the operator's the winner (${op.outcome}, ${bot.assertion?.tier_name}, ${bot.winner?.maker.name})`);
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["priority"] });
   // 117's open items join the group (SELECT on open_items and open_item_events), 132's operator's weights (SELECT,
-  // INSERT and UPDATE on priority_weight_settings), and 133's thought_sources (SELECT: a ticket's row is its ticket's to
-  // the writers): the statements are the group's whole list.
-  assert(grants.length === 8 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
+  // INSERT and UPDATE on priority_weight_settings), 133's thought_sources (SELECT: a ticket's row is its ticket's to
+  // the writers) and 142's findings (SELECT, INSERT and UPDATE on priority_findings): the statements are the group's
+  // whole list.
+  assert(grants.length === 9 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
          && grants[1] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO "ob1_upgrade_probe";`
          && grants[2] === `GRANT SELECT ON priority_sources TO "ob1_upgrade_probe";`
          && grants[3] === `GRANT SELECT, INSERT, UPDATE ON priority_weight_settings TO "ob1_upgrade_probe";`
-         && grants[4] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`
-         && grants[5] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[6] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`
-         && grants[7] === `GRANT SELECT ON thought_sources TO "ob1_upgrade_probe";`,
-    `--grant's priority group: SELECT, INSERT and UPDATE on the assertions, all four on the projection, SELECT alone on the sources and on the entities an assertion may name, SELECT, INSERT and UPDATE on the operator's weights, SELECT on the source rows (${grants.join("; ")})`);
+         && grants[4] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_findings TO "ob1_upgrade_probe";`
+         && grants[5] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`
+         && grants[6] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[7] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`
+         && grants[8] === `GRANT SELECT ON thought_sources TO "ob1_upgrade_probe";`,
+    `--grant's priority group: SELECT, INSERT and UPDATE on the assertions, all four on the projection, SELECT alone on the sources and on the entities an assertion may name, SELECT, INSERT and UPDATE on the operator's weights and on the review's findings, SELECT on the source rows (${grants.join("; ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the116 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM priority_assertions`)[0].n);
   const drift = Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
@@ -6785,7 +6789,50 @@ console.log("\n[20ce] Migration 141: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cf] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a priority writer holding the item's lock is waited for; a close decision in flight is waited for, its copied reason blanked; a re-apply a no-op (SMD-1723)");
+console.log("\n[20cf] Migration 142: onto a populated brain at the file before it — refused by name without 122's ob1_item_settled, nothing made; then applied: the scan finds the disagreement a statement written at the file before left, one pending finding, and a second scan none new; a role holding the priority group before 142 gains its grant on priority_findings; a re-apply a no-op (SMD-3671)");
+{
+  const the142 = MIGRATIONS.find((f) => /^\d{3}_priority_findings\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the142 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const OP = JSON.stringify({ name: "upgrade-op", via: "open-brain", scope: "write" });
+  // Before 142: a note the operator states 4 on and its source 1, two tiers apart.
+  const note = String((await sql`INSERT INTO thoughts (content) VALUES ('upgrade 142: a note two tiers disagree on') RETURNING id`)[0].id);
+  await sql`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+    VALUES ('thought', ${note}, 1, 'upgrade-source', 'ingested', 'ingested', 'write', true, 2, now())`;
+  await sql`SELECT assert_priority('thought', ${note}, 4, NULL, NULL, NULL, NULL, NULL, false, (${OP}::text)::jsonb)`;
+  // A role holding the priority group's grants before 142.
+  const OLD = "ob1_test_priority_old_142";
+  await sql.unsafe(`DROP ROLE IF EXISTS ${OLD}`);
+  await sql.unsafe(`CREATE ROLE ${OLD} NOLOGIN; GRANT SELECT, INSERT ON priority_assertions TO ${OLD}`);
+
+  // Without 122's ob1_item_settled: refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_item_settled(text, text) RENAME TO ob1_item_settled_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the142 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_item_settled_away(text, text) RENAME TO ob1_item_settled`;
+  const made = async () => (await sql`SELECT to_regclass('priority_findings') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 142 needs 122 \(ob1_item_settled\); this schema lacks it/.test(without) && !(await made()),
+    `without 122's ob1_item_settled the file is refused by name; nothing made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the142 });
+  const first = (await sql`SELECT ob1_priority_review() AS r`)[0].r as { found: number; pending: number };
+  const second = (await sql`SELECT ob1_priority_review() AS r`)[0].r as { found: number; refreshed: number; pending: number };
+  const rows = (await sql`SELECT kind, status FROM priority_findings WHERE item_key = ${note}`) as { kind: string; status: string }[];
+  const granted = (await sql`SELECT has_table_privilege(${OLD}, 'priority_findings', 'INSERT') AND has_table_privilege(${OLD}, 'priority_findings', 'UPDATE') AND has_table_privilege(${OLD}, 'priority_findings', 'DELETE')
+                               AND has_table_privilege(${OLD}, 'priority_findings', 'SELECT') AS g`)[0].g as boolean;
+  assert(await made() && first.found === 1 && second.found === 0 && second.refreshed === 1 && rows.length === 1 && rows[0].kind === "disagree" && rows[0].status === "pending" && granted,
+    `applied: the scan finds the operator's 4 against the source's 1 written before, one pending finding, and a second scan none new; the role holding the priority group gains the findings' grant (${JSON.stringify(first)})`);
+
+  // A re-apply is a no-op: the finding stands, the scan answers as before.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the142 });
+  const again = (await sql`SELECT ob1_priority_review() AS r`)[0].r as { found: number; pending: number };
+  assert(again.found === 0 && again.pending === first.pending, `a re-apply is a no-op: the finding stands and the scan finds nothing new (${JSON.stringify(again)})`);
+  await sql.unsafe(`DROP OWNED BY ${OLD}; DROP ROLE ${OLD}`);
+  await sql.close();
+}
+
+console.log("\n[20cg] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a priority writer holding the item's lock is waited for; a close decision in flight is waited for, its copied reason blanked; a re-apply a no-op (SMD-1723)");
 {
   const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
@@ -6832,7 +6879,7 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
 
   // A race, on two connections (review pass 1): while a forget of R runs, a capture of R's earlier text waits on the
   // fingerprint lock the forget holds; after the commit it is refused OB005, nothing written. (Another store's racing
-  // write is swept by a second forget: test-schema [128].)
+  // write is swept by a second forget: test-schema [129].)
   const r = String((await sql`SELECT (upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb)->>'id') AS id`)[0].id);
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
