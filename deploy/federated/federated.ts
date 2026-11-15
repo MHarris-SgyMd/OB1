@@ -25,15 +25,16 @@
 //     address), so the key (a 401 before any upgrade) is the guard there, as it is against the containers. `up` then
 //     has a container on the default bridge dial the broker at the alias and fails naming why where none answers (a
 //     firewall, a daemon whose host-gateway-ip is not the bridge's, an IPv6 alias); a brain dials from its own network,
-//     which a firewall may treat apart. A daemon of another host (its name not this host's: a DOCKER_HOST or a context)
-//     is refused: the gateway would be its, not this host's.
+//     which a firewall may treat apart. A gateway that is no address of this host's (a daemon of another host by a
+//     DOCKER_HOST or a context, or this run in a container) is refused. A daemon restarted with another bridge address
+//     leaves the broker's old address unbound: run `up` again.
 // Any other runtime is refused.
 //
 // --no-env-file: as edge.ts's, since Bun would load a .env in the working directory, and deploy/.env holds a brain's
 // secrets.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { hostname } from "node:os";
+import { networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 import { factsFrom, type Facts } from "../edge/edge.ts";
 import { bunEnvProblem, listens, PS_ARGS, containersIn, holds, reason, shellQuote } from "../instance.ts";
@@ -59,7 +60,7 @@ export function measured(f: Facts): { ok: boolean; why: string; shape?: Shape } 
   if (f.engine === "podman" && f.platform === "darwin" && !f.rootless) return { ok: true, shape: LOOPBACK, why: "podman machine on macOS, rootful: brains reach the broker at host.containers.internal, its port on the host's loopback" };
   if (f.engine === "docker" && f.platform === "linux" && f.osType === "linux" && !f.desktop && !f.rootless) return { ok: true, shape: GATEWAY, why: "Docker Engine on Linux, rootful: brains reach the broker at host.docker.internal, its port on the default bridge's gateway" };
   const what = f.engine === "unknown" ? `${f.runtime}, whose engine did not say what it is` : `${f.engine === "podman" ? "podman" : f.desktop ? "Docker Desktop" : "Docker Engine"}${f.rootless ? ", rootless," : ""} on ${f.platform}`;
-  const docker = f.engine === "podman" && f.platform === "linux" ? " — with Docker Engine beside it, pass --runtime docker" : "";
+  const docker = f.engine === "podman" && f.platform === "linux" && f.runtime !== "docker" ? " — with Docker Engine beside it, pass --runtime docker" : "";
   return { ok: false, why: `${what}: no shape of the federated coordinator was measured there — a brain's container must reach the broker's port at its host alias (deploy/federated/federated.ts names the two measured)${docker}` };
 }
 
@@ -73,14 +74,16 @@ export function gatewayFrom(out: string): { host: string } | { why: string } {
   return private4 ? { host: private4 } : { why: `the default bridge's gateway ${v4[0]} is no private or shared (100.64.0.0/10) address: the broker is published only on one of those` };
 }
 
-/** Why the Docker daemon may not be this host's, or "": its own name (`docker info`'s Name, the daemon's host's
- *  hostname) not this host's — a DOCKER_HOST, a context or DOCKER_CONTEXT pointing elsewhere alike; a local daemon by
- *  any socket passes (review pass 2 of 3b-3a: DOCKER_HOST alone missed contexts and refused tcp://127.0.0.1). */
-export function remoteDaemon(daemonName: string, here: string): string {
-  const short = (n: string) => n.trim().toLowerCase().split(".")[0];
-  if (!daemonName.trim()) return "the Docker daemon did not say its host's name (docker info), so whether it is this host's cannot be told: the gateway shape publishes on the daemon's bridge";
-  return short(daemonName) === short(here) ? "" : `the Docker daemon is ${daemonName.trim()}'s, not this host's (${here}): the gateway shape publishes on the daemon's bridge, which would be that host's — run federated.ts on the daemon's own host (a DOCKER_HOST or a Docker context points it elsewhere)`;
+/** Why the daemon's bridge gateway is not this host's, or "": the shape needs the gateway to be an address of this
+ *  host's own (`addresses`, os.networkInterfaces()'s), since the port is checked and dialled here — a daemon of another
+ *  host (a DOCKER_HOST, a Docker context), or a client in a container, is refused; a local daemon by any socket passes
+ *  (review passes 2 and 3 of 3b-3a: DOCKER_HOST alone missed contexts; the daemon's name told hosts apart by name). */
+export function remoteGateway(gateway: string, addresses: readonly string[]): string {
+  return addresses.includes(gateway) ? "" : `the default bridge's gateway ${gateway} is no address of this host's: the daemon is another host's (a DOCKER_HOST or a Docker context points it elsewhere), or this runs in a container — run federated.ts on the daemon's own host`;
 }
+
+/** This host's IPv4 addresses, every interface's. */
+const hostAddresses = () => Object.values(networkInterfaces()).flat().filter((a) => !!a && a.family === "IPv4").map((a) => a!.address);
 
 /** The environment compose runs in: the shell's, less anything that would steer compose or the project's settings,
  *  then the project's. */
@@ -177,17 +180,19 @@ async function main(cmd: string, args: string[]) {
   // Where the port goes: the host's loopback, or the default bridge's gateway, read now (a daemon restarted with another
   // bridge address moves it).
   let host = "127.0.0.1";
+  let unknown = false;
   if (shape?.name === "gateway") {
-    const n = spawn([o.runtime, "info", "--format", "{{.Name}}"]);
-    const remote = remoteDaemon(n.ok ? n.out : "", hostname());
-    if (remote) refusals.push(remote);
     const g = spawn([o.runtime, "network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"]);
     const got = g.ok ? gatewayFrom(g.out) : { why: `${o.runtime} network inspect bridge failed: ${reason(g.err)}` };
-    if ("why" in got) refusals.push(got.why); else host = got.host;
+    if ("why" in got) { refusals.push(got.why); unknown = true; }
+    else {
+      const remote = remoteGateway(got.host, hostAddresses());
+      if (remote) { refusals.push(remote); unknown = true; } else host = got.host;
+    }
   }
-  // The port: free, or this project's broker's — asked only where the host address is known (review pass 2 of 3b-3a: a
-  // gateway unread left the loopback asked, a refusal of no use).
-  if (refusals.length) { for (const x of refusals) console.error(x); process.exit(2); }
+  // The port: free, or this project's broker's — asked only where its address is known and this host's (review passes 2
+  // and 3 of 3b-3a: a gateway unread left the loopback asked; an exit before it for any refusal hid the port's).
+  if (unknown) { for (const x of refusals) console.error(x); process.exit(2); }
   const listing = spawn([o.runtime, ...PS_ARGS]);
   const ours = listing.ok && containersIn(listing.out).some((c) => c.project === PROJECT && c.state === "running" && holds(c.ports, { hostIp: host, port: registry.port, protocol: "tcp" }));
   if (!ours && await listens(host, registry.port)) refusals.push(`${host}:${registry.port} (broker.port) already answers, and not as this broker: stop it, or set broker.port in the registry to a free port`);
@@ -223,8 +228,11 @@ function selfCheck() {
     ["rootless podman, rootless Docker Engine, Docker Desktop and podman on Linux are refused, naming why", !measured(facts({ rootless: true })).ok && !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", rootless: true })).ok
       && !measured(facts({ engine: "docker", desktop: true })).ok && (() => { const m = measured(facts({ platform: "linux" })); return !m.ok && /podman on linux: no shape/.test(m.why); })()],
     ["the gateway is the bridge's private or shared IPv4 one; none, or any other, refused", (() => { const a = gatewayFrom("172.17.0.1 \n"), b = gatewayFrom("fd00::1 10.200.0.1 "), c = gatewayFrom(" "), d = gatewayFrom("203.0.113.1 "), e = gatewayFrom("100.64.0.1 "), f = gatewayFrom("100.128.0.1 "), g = gatewayFrom("127.0.0.1 "); return "host" in a && a.host === "172.17.0.1" && "host" in b && b.host === "10.200.0.1" && "why" in c && "why" in d && /no private or shared/.test(d.why) && "host" in e && e.host === "100.64.0.1" && "why" in f && "why" in g; })()],
-    ["a daemon of another host is refused for the gateway shape, by its own name; this host's, by any socket, is not", /is box's, not this host's/.test(remoteDaemon("box\n", "runner-1")) && remoteDaemon("runner-1\n", "runner-1") === "" && remoteDaemon("Runner-1.local", "runner-1.example") === "" && /cannot be told/.test(remoteDaemon("", "runner-1"))],
-    ["podman on Linux is refused pointing at --runtime docker", (() => { const m = measured(facts({ platform: "linux" })); return !m.ok && /--runtime docker/.test(m.why); })()],
+    ["a gateway that is no address of this host's is refused (another host's daemon, a client in a container); one of its own is not", /no address of this host's/.test(remoteGateway("172.17.0.1", ["127.0.0.1", "10.1.0.4"])) && remoteGateway("172.17.0.1", ["127.0.0.1", "172.17.0.1", "10.1.0.4"]) === ""],
+    ["podman on Linux is refused pointing at --runtime docker, unless docker is that podman (podman-docker)", (() => { const m = measured(facts({ platform: "linux" })), s = measured(facts({ runtime: "docker", platform: "linux" })); return !m.ok && /--runtime docker/.test(m.why) && !s.ok && !/--runtime docker/.test(s.why); })()],
+    ["Docker Engine whose OS type is not linux is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", osType: "windows" })).ok],
+    ["a re-up under the gateway shape knows its own port: ps's binding on the gateway address is this broker's", (() => { const line = `abc|ob1-federated-slots-1|172.17.0.1:8095->8095/tcp|${PROJECT}|slots|running|||`; const c = containersIn(line)[0]; return !!c && c.project === PROJECT && holds(c.ports, { hostIp: "172.17.0.1", port: 8095, protocol: "tcp" }) && !holds(c.ports, { hostIp: "127.0.0.1", port: 8095, protocol: "tcp" }); })()],
+    ["down's and logs' placeholder settings name every value compose.yaml requires", (() => { const need = [...readFileSync(COMPOSE, "utf8").matchAll(/\$\{([A-Z_]+):\?/g)].map((m) => m[1]); const e = composeEnv({}, { port: 1 }, BROKER, "down", "down", "127.0.0.1"); return need.length > 0 && need.every((k) => typeof e[k] === "string" && e[k] !== ""); })()],
     ["the gateway shape's proof dials host.docker.internal at host-gateway, with the broker's own image", (() => { const a = probeArgs("docker", "img@sha256:x", 8095); return a.join(" ").includes("--add-host host.docker.internal:host-gateway") && a.includes("img@sha256:x") && a.at(-1) === "http://host.docker.internal:8095/health"; })()],
     ["compose's environment drops the shell's COMPOSE_* and FEDERATED_* and sets the project's own, the port's host the loopback unless given", (() => { const e = composeEnv({ PATH: "/bin", COMPOSE_FILE: "x", FEDERATED_PORT: "1", FEDERATED_HOST: "0.0.0.0", DOCKER_HOST: "unix:///x" }, { port: 8095 }, "/r.yaml", "b", "r"); const g = composeEnv({}, { port: 8095 }, "/r.yaml", "b", "r", "172.17.0.1"); return e.PATH === "/bin" && e.DOCKER_HOST === "unix:///x" && !("COMPOSE_FILE" in e) && e.FEDERATED_HOST === "127.0.0.1" && g.FEDERATED_HOST === "172.17.0.1" && e.FEDERATED_PORT === "8095" && e.FEDERATED_REGISTRY === "/r.yaml" && e.FEDERATED_BROKER_SHA256 === "b" && e.FEDERATED_REGISTRY_SHA256 === "r"; })()],
     ["a minted key is marked, its lines read as a registry's brain, and the key finds it", minted.key.startsWith(KEY_PREFIX) && minted.key.length === KEY_PREFIX.length + 64 && !!reg && brainOf(reg.brains, minted.key)?.name === "canary" && !minted.lines.includes(minted.key)],

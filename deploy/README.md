@@ -490,9 +490,11 @@ bun --no-env-file deploy/federated/federated.ts down
     gateway, or an alias that resolves to IPv6 first. A brain dials from its
     own network, which a firewall may treat apart (a rule for `docker0`
     alone), so allow the brains' bridges too. CI measures this shape: the
-    stack's own coordinator container is granted a slot there. A daemon of
-    another host (a `DOCKER_HOST` or a Docker context pointing elsewhere) is
-    refused. Where podman is installed beside Docker, pass `--runtime
+    stack's own coordinator container is granted a slot there. A gateway
+    that is no address of this host's (a `DOCKER_HOST` or a Docker context
+    pointing at another host's daemon, or `federated.ts` run in a container)
+    is refused. A daemon restarted with another bridge address leaves the
+    broker's old address unbound: run `up` again. Where podman is installed beside Docker, pass `--runtime
     docker` to each command: `federated.ts` takes podman first.
 
   `federated.ts` refuses any other runtime: Docker Desktop, rootless podman

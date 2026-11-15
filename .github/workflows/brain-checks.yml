@@ -4224,6 +4224,9 @@ jobs:
           grep -F "Docker Engine on Linux, rootful: brains reach the broker at host.docker.internal, its port on the default bridge's gateway" /tmp/federated-check.out
           bun --no-env-file federated/federated.ts up --registry federated/federation.ci.yaml --runtime docker | tee /tmp/federated-up.out
           grep -F 'a container reached the broker at host.docker.internal:8095' /tmp/federated-up.out
+          # Again, as an operator does after a registry change: its own port on the gateway is known as its own.
+          bun --no-env-file federated/federated.ts up --registry federated/federation.ci.yaml --runtime docker | tee /tmp/federated-reup.out
+          grep -F 'a container reached the broker at host.docker.internal:8095' /tmp/federated-reup.out
           gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')
           [ "$(curl -s --max-time 5 "http://$gw:8095/health" || true)" = ok ] || { echo "the broker does not answer on the bridge's gateway $gw" >&2; exit 1; }
           # A brain's coordinator: its image, its networks (data, egress) and its host-gateway entry, as compose runs it.
@@ -4242,6 +4245,9 @@ jobs:
           own=$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | grep -v -e "^$gw$" -e '^172\.1[6-9]\.' -e '^172\.2[0-9]\.' -e '^172\.3[01]\.' | head -1 || true)
           [ -n "$own" ] || { echo "the runner names no address of its own outside the bridges, so the refusal below proves nothing" >&2; exit 1; }
           if curl -s --max-time 3 "http://$own:8095/health" > /dev/null; then echo "the broker answers on the runner's own address $own" >&2; exit 1; fi
+          # down, as the operator runs it, leaves nothing of the project.
+          bun --no-env-file federated/federated.ts down --runtime docker
+          [ -z "$(docker ps -aq --filter label=com.docker.compose.project=ob1-federated)" ] || { echo "federated.ts down left the project's containers" >&2; exit 1; }
 
       # SMD-2287 PR 5a: the server image just built carries the MCP server as a
       # REST client (mcp-server/) and its client (rest-client/), each with its
