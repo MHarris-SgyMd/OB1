@@ -5789,6 +5789,38 @@ the bound on a lock wait (a held table, and a held REINDEX under an unbounded
 count), a role that may not read a table, a report that cannot be written, and
 the refusals.
 
+### `backfill-metadata.ts`
+
+```bash
+bun backfill-metadata.ts --url postgres://…             # both passes, a dry run: what would be written
+bun backfill-metadata.ts --url … --apply                # write
+bun backfill-metadata.ts --url … --pass type --apply    # one pass
+#   --pass type|sensitivity (both)   --apply (none: a dry run)   --limit N (rows written; 0: none)   --batch N (rows a page reads; 500)   --statement-timeout SECONDS (60; 0: none)
+#   exits 0 the run ended · 1 a read or a write failed (rows already written stay) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+```
+
+`recipes/thought-enrichment`'s `backfill-type.mjs` and `backfill-sensitivity.mjs`
+(SMD-2139), one script on the core's metadata (SMD-3318). The core has neither
+the `type` nor the `sensitivity_tier` column those wrote, so both passes write
+metadata keys through `update_thought`, each row's keys in one call: one audit
+event, the row locked, a row written since its page was read left for the next
+run (`if_unchanged_since`), and a row whose metadata is SQL NULL counted, not
+written (update_thought merges no patch into it). The **type** pass writes a
+`metadata.type` the capture would have written otherwise (another case or
+spacing, or an alias such as `todo` or `fact`) as the capture's type, by its
+own rule (`server-portable/thoughts.ts`'s `canonicalType`), an alias's words in
+`type_raw`; a type naming none of the capture's is counted and left, and so is
+a row an importer owns (trust `ingested`), whose next sync would write its own
+value back. The **sensitivity** pass reads a thought whose
+`metadata.sensitivity_tier` is absent, empty or `standard` against the recipe's
+patterns and writes `restricted` or `personal`, the key `db/weekly-digest.ts`
+reads to keep a thought out of its model calls; a tier is never lowered, and a
+thought's text is never printed. Pages are read by key, one statement each, so
+a run holds no snapshot or lock for its length. test-live [51] holds a dry run
+writing nothing, each pass's writes and audit events, the cases left, a second
+run writing nothing, `--pass`, `--limit` and the refusals. The recipe's
+`enrich-thoughts.mjs` becomes SMD-2298's re-tag worker (SMD-3318 PR 3b).
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.

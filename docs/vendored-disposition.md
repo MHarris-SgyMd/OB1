@@ -135,7 +135,7 @@ fails CI"):**
 Thirty scripts in twenty-one recipes reached the brain as PostgREST clients at the decision
 (twenty in thirteen remain — `obsidian-vault-import`'s and `local-ollama-embeddings`'
 retired, SMD-2137 and SMD-2138, `brain-backup`'s and `lint-sweep`'s on the shim, SMD-2144 — since `db/backup.ts` and `db/lint-sweep.ts`, SMD-3318 —
-`thought-enrichment`'s three, SMD-2139, `weekly-digest`'s retired, SMD-2239, and
+`thought-enrichment`'s three, SMD-2139 — its two backfills since `db/backfill-metadata.ts`, SMD-3318 — `weekly-digest`'s retired, SMD-2239, and
 `brain-smoke-test`'s, SMD-2103, and `ob-graph`'s with the recipe, SMD-2920, their rows kept as the record) —
 `${SUPABASE_URL}/rest/v1/<table>` or `/rest/v1/rpc/<fn>` with a service-role `apikey`
 from a `.mjs` / `.js` / `.ts` `fetch`, or supabase-py's `create_client` from a `.py` — and
@@ -194,7 +194,9 @@ script may stop requiring it. The first two ports landed with SMD-2144 — `brai
 `lint-sweep`, both read-only, driven in `db/test-live.ts` [26] against a real Postgres (both have
 since moved to `db/`: `db/backup.ts`, driven in [50], and `db/lint-sweep.ts`, in [26], SMD-3318); the first
 writers with SMD-2139 — `thought-enrichment`'s three backfills, `type`, `sensitivity_tier` and
-metadata through `.update().eq()`, never content or vector, driven in [29]; `weekly-digest`,
+metadata through `.update().eq()`, never content or vector, driven in [29] (the type and
+sensitivity backfills since one `db/` script, `db/backfill-metadata.ts`, writing metadata keys
+through `update_thought`, driven in [51], SMD-3318); `weekly-digest`,
 the third read-only script at the decision, left the class: a sink posting thought text to Telegram,
 it is now the `db/` verb `db/weekly-digest.ts` behind the egress gate — both the synthesis and the
 Telegram send pass the gate — rather than a shim port (SMD-2239; the orchestration ADR's decision 9,
@@ -248,7 +250,7 @@ nothing.
 | `provenance-chains` | `backfill.mjs` (1), `eval.mjs` (1); `mcp-tools.ts` takes an injected client and test-writes drives it on the shim (SMD-1524) | `thoughts` (PATCH); `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` (`schemas/provenance-chains`' functions) over `/rpc/`; `eval.mjs` writes metadata (reads either URL name) | a REST-core client (SMD-3216; was onto the shim) | SMD-2142 |
 | `readwise-import` | `import-readwise.py` (2, supabase-py) | `upsert_thought`, `readwise_books`, `thoughts` (UPDATE of two columns) | port onto the ingestion contract | SMD-2149 |
 | `source-filtering` | `backfill-metadata.ts` (2) | `thoughts` (PATCH of metadata) | a REST-core client (SMD-3216; was onto the shim) | SMD-2021 |
-| `thought-enrichment` | `enrich-thoughts.mjs` (0; was 4), `backfill-type.mjs` (0; was 1), `backfill-sensitivity.mjs` (0; was 1) | `thoughts` (an update of metadata, `type`, `sensitivity_tier`) | on the shim since SMD-2139; the first writers — `SUPABASE_URL` a `postgres://` string, the key ignored, a refused write ends the run; a stopgap until SMD-1930's runner | SMD-2139 |
+| `thought-enrichment` | `enrich-thoughts.mjs` (0; was 4), `backfill-type.mjs` (0; was 1), `backfill-sensitivity.mjs` (0; was 1) | `thoughts` (an update of metadata, `type`, `sensitivity_tier`) | on the shim since SMD-2139; the first writers — `SUPABASE_URL` a `postgres://` string, the key ignored, a refused write ends the run. The two backfills are `db/backfill-metadata.ts` now, metadata keys through `update_thought` (SMD-3318 PR 3a); `enrich-thoughts.mjs` goes to SMD-2298's re-tag worker (PR 3b) | SMD-2139, SMD-3318 |
 | `typed-edge-classifier` | `classify-edges.mjs` (1) | `thoughts`, `thought_entities` (016's on a migrated brain — above), `thought_edges`; `thought_edges_upsert` (reads `OPEN_BRAIN_URL`) | a REST-core client (SMD-3216; was onto the shim) | SMD-2141 |
 | `weekly-digest` | `weekly-digest.mjs` (gone) | `thoughts` (read) → Telegram | **retired**: a sink, rebuilt as the `db/` verb `db/weekly-digest.ts` behind the egress gate (both the synthesis and the Telegram send pass it) — the `.mjs` is gone, the README is a pointer | SMD-2239 ✅ |
 | `wiki-synthesis` | `scripts/synthesize-wiki.mjs` (1), `scripts/backfill-gmail-wikis.mjs` (1) | `synthesize-wiki.mjs` reads `thoughts` and writes files; `backfill-gmail-wikis.mjs` reads `thoughts` and `thought_edges`, captures through `upsert_thought` — a raw `POST /thoughts` when the function is absent — and DELETEs pages (both read `OPEN_BRAIN_URL`) | a REST-core client (SMD-3216; was onto the shim); page deletes through `delete_thought` | SMD-2143 |
@@ -455,7 +457,7 @@ remaining drafts are unreferenced markdown working-notes.
 | `research-to-decision-workflow` | keep + audited | Workflow composing canonical OB1 skills into decision pipelines. |
 | `schema-aware-routing` | keep + audited *(own-project)* + SMD-1798 | Metadata-routing pattern that creates **its own five tables in its own project** (README-annotated; guard check 10 counted exception; CI BYPASS_1524, SMD-1524). Its `alter column embedding` / raw inserts target its own `thoughts`, not core. README uses supabase-js → SMD-1798. |
 | `source-filtering` | keep + audited → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2021) | Source-tag filtering + metadata backfill for early imports. |
-| `thought-enrichment` | keep + audited → **on the shim (SMD-2139)** | Retroactive LLM classification + sensitivity backfills; `type`, `sensitivity_tier` and metadata through the shim, never content or vector; SMD-1930 re-expresses them as transforms. |
+| `thought-enrichment` | keep + audited → **on the shim (SMD-2139)** → **the backfills to `db/` (SMD-3318)** | Retroactive LLM classification + sensitivity backfills; `type`, `sensitivity_tier` and metadata through the shim, never content or vector. The type and sensitivity backfills are `db/backfill-metadata.ts` (metadata keys through `update_thought`); the classification goes to SMD-2298's re-tag worker (SMD-1930 was canceled). |
 | `typed-edge-classifier` | keep + audited → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2141) | Opus/Haiku classifier populating the kept `thought_edges` (`typed-reasoning-edges`); SMD-1253 lineage. |
 | `vercel-neon-telegram` | keep + audited *(own-database)* | Alternative Vercel + Neon + Telegram stack building **its own Neon brain** (guard OWN_DATABASE line 1409; `sql/001`/`002` owned as NEON). Its `match_thoughts` is its own install, not a clobber. Uses the Vercel AI SDK (no supabase-js). |
 | `weekly-digest` | keep (pointer) → **SMD-2126 → SMD-2239 done**: retired for the `db/` verb | Scheduled importance-ranked digest to Telegram — a sink, so brain content leaves only through the egress gate. Rebuilt as `db/weekly-digest.ts` (the synthesis and the Telegram send are each gated); the `weekly-digest.mjs` script is gone and the recipe README points at the verb. Since SMD-2653 the verb reads no `importance`: it takes a share of each day and writer in the window. |

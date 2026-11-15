@@ -37,7 +37,7 @@ The rewrite is one line; a file that still reaches `Deno.*` is refused at triage
 + import { createClient } from "../../compat/supabase-sql/index.ts";
 ```
 
-A file written for the shim by hand — one that spoke PostgREST through `fetch` and was ported (`recipes/thought-enrichment`'s three scripts through their `lib/brain.mjs`, SMD-2139; `recipes/brain-backup/backup-brain.mjs` and `recipes/lint-sweep/lint-sweep.js` were the first, SMD-2144, and are `db/backup.ts` and `db/lint-sweep.ts` now, SMD-3318) — is told apart by the missing `MIGRATED OFF SUPABASE` banner alone (each carries an `// ob1-fork` header, which is description, not the test): the triage lists it as a hand port and `--revert`, with or without a path, names it and leaves it alone — it has no supabase-js import to go back to.
+A file written for the shim by hand — one that spoke PostgREST through `fetch` and was ported (`recipes/thought-enrichment/enrich-thoughts.mjs` through its `lib/brain.mjs`, SMD-2139 — its two sibling backfills are `db/backfill-metadata.ts` now, SMD-3318; `recipes/brain-backup/backup-brain.mjs` and `recipes/lint-sweep/lint-sweep.js` were the first, SMD-2144, and are `db/backup.ts` and `db/lint-sweep.ts` now, SMD-3318) — is told apart by the missing `MIGRATED OFF SUPABASE` banner alone (each carries an `// ob1-fork` header, which is description, not the test): the triage lists it as a hand port and `--revert`, with or without a path, names it and leaves it alone — it has no supabase-js import to go back to.
 
 ### 2. Point it at Postgres
 
