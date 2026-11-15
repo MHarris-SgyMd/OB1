@@ -4,17 +4,19 @@
 //
 //   bun install && bun probe.ts        serve on 127.0.0.1:$PORT (default 8765), log to $LOG (default ./probe.jsonl)
 //   bun selfcheck.ts                   prove it with the SDK's own client
-//   ./run-claude-code.sh mcp toggle    one headless Claude Code session against it
+//   ./run-claude-code.sh mcp toggle    one headless Claude Code session against it, the change made inside one turn
+//   ./run-claude-code-turns.sh mcp toggle-quiet   the same over two turns, the change made between them
 //
 //   /mcp        both eras: 2026-07-28 through createMcpHandler, 2025-era stateless
 //   /legacy     2025-era only, stateless, POST only: the brain's wiring today
 //   /session    2025-era only, with sessions and a GET stream
+//
+//   /control/toggle        add or remove the tool `probe_extra`, and notify: listen streams and open sessions
 //   /control/toggle-quiet  change the tool set and tell nobody
-//   /control/drop     cut every open listen stream and change the tool set, as a restart would
-//   /control/toggle   add or remove the tool `probe_extra`, and notify: listen streams and open sessions
-//   /control/expire   forget every 2025-era session, so its next request is answered 404
-//   /control/ttl?ms=N the ttlMs answered on tools/list (2026-07-28 only)
-//   /control/state    what the probe holds
+//   /control/drop          cut every open listen stream and change the tool set, as a restart would
+//   /control/expire        forget every 2025-era session, so its next request is answered 404
+//   /control/ttl?ms=N      the ttlMs answered on tools/list (2026-07-28 only)
+//   /control/state         what the probe holds
 import { appendFileSync } from "node:fs";
 import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 
@@ -35,6 +37,18 @@ const log = (line: Record<string, unknown>): void => {
   console.log(JSON.stringify(full));
 };
 
+/** The tools a server holds, by name: the SDK keeps no public list of them. */
+const toolsOf = (server: McpServer): Record<string, { remove(): void } | undefined> => (server as unknown as { _registeredTools: Record<string, { remove(): void }> })._registeredTools;
+const addExtra = (server: McpServer): void => {
+  // A session left on the other set by a quiet change already holds it.
+  if (toolsOf(server).probe_extra) return;
+  server.registerTool("probe_extra", { description: "Present only in tool set B.", inputSchema: {} }, async () => ({ content: [{ type: "text" as const, text: "probe_extra answered" }] }));
+};
+const dropExtra = (server: McpServer): void => {
+  toolsOf(server).probe_extra?.remove();
+};
+
+/** A server for one request or one session, holding the tool set as it stands now. */
 function build(): McpServer {
   const server = new McpServer({ name: "client-probe", version: "0.0.1" }, { cacheHints: { "tools/list": { ttlMs, cacheScope: "private" } } });
   server.registerTool("probe_time", { description: "Says the probe's time and which tool set it serves.", inputSchema: {} }, async () => ({
@@ -57,17 +71,6 @@ async function stateless(req: Request): Promise<Response> {
   res.headers.delete("mcp-session-id");
   return res;
 }
-
-/** The tools a server holds, by name: the SDK keeps no public list of them. */
-const toolsOf = (server: McpServer): Record<string, { remove(): void } | undefined> => (server as unknown as { _registeredTools: Record<string, { remove(): void }> })._registeredTools;
-const addExtra = (server: McpServer): void => {
-  // A session left on the other set by a quiet change already holds it.
-  if (toolsOf(server).probe_extra) return;
-  server.registerTool("probe_extra", { description: "Present only in tool set B.", inputSchema: {} }, async () => ({ content: [{ type: "text" as const, text: "probe_extra answered" }] }));
-};
-const dropExtra = (server: McpServer): void => {
-  toolsOf(server).probe_extra?.remove();
-};
 
 const HEADERS = ["user-agent", "accept", "content-type", "origin", "mcp-protocol-version", "mcp-method", "mcp-name", "mcp-session-id", "last-event-id"];
 const META = "io.modelcontextprotocol/";
