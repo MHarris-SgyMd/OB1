@@ -36,7 +36,7 @@ import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemH
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
 import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
-import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
+import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
@@ -2002,6 +2002,30 @@ export function renderSetPriorityWeights(o: Outcome<WeightsSet, WeightsSetCode>)
     : unknownRefusal(r),
   (v) => ({ changed: v.changed, weights: v.weights, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
 }
+
+// ── set_work_claim_cap (SMD-3606 PR 1b, migration 140) ───────────────────────
+export function renderSetWorkClaimCap(o: Outcome<CapSet, CapSetCode>): Reply {
+  return render(o, (v) => {
+    const now = v.cap === null ? "the built-in cap (50)" : `${v.cap}`;
+    if (!v.changed) return `Unchanged: the per-holder cap on live work claims is already ${now}${v.cap !== null && v.setAt ? ` (set ${v.setAt}${v.setBy ? ` by ${snipText(v.setBy, 80)}` : ""})` : ""}. Nothing was written.`;
+    const before = v.previous === null ? "the built-in cap (50)" : `${v.previous}`;
+    return `${v.cap === null ? "Cleared" : "Set"} the per-holder cap on live work claims to ${now}: a new claim past it is refused CLAIM_LIMIT, a renewal of the holder's own never. Before: ${before}. brain_info shows the setting; null clears it.`;
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may set the work-claim cap, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the work-claim cap.")
+    : r.code === "CLAIM_CAP_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : unknownRefusal(r),
+  (v) => ({ changed: v.changed, cap: v.cap, previous: v.previous, setAt: v.setAt, setBy: v.setBy }));
+}
+
+/** set_work_claim_cap's fault: a database before 140 has no such function, or the server's role lacks the grant. */
+export const setCapHint = (msg: string): string =>
+  /set_work_claim_cap/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 140 (db/migrations/140_work_claim_cap.sql) is not applied"
+    : /permission denied for table work_claim_cap_settings/i.test(msg)
+    ? " — the server's role needs the claims group's grants on work_claim_cap_settings (migration 140; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
 
 /** set_priority_weights' fault: a database before 132 has no such function. */
 export const setWeightsHint = (msg: string): string =>

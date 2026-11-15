@@ -43,6 +43,7 @@ export const OPERATIONS = {
   set_item_status: { method: "POST", path: "/v1/items/{id}/status" },
   set_priority: { method: "POST", path: "/v1/priorities/{kind}/{key}" },
   set_priority_weights: { method: "POST", path: "/v1/priority-weights" },
+  set_work_claim_cap: { method: "POST", path: "/v1/work-claim-cap" },
   task_status: { method: "GET", path: "/v1/status" },
   thought_changes: { method: "GET", path: "/v1/changes" },
   thought_stats: { method: "GET", path: "/v1/stats" },

@@ -784,6 +784,26 @@ export const SPECS = {
       weights: PRIORITY_WEIGHTS.describe("The weights every read takes as its defaults, by name; the rest stay built in. {} clears them"),
     },
   },
+  // SMD-3606 PR 1b (migration 140): the operator's per-holder claim cap. The gate past the scope is the database's: the
+  // key's registry kind by its agent id, which the server does not hold.
+  set_work_claim_cap: {
+    title: "Set Work Claim Cap",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). Set the per-holder cap on how many live work claims one key may hold at once — the backstop claim_work enforces, so no runaway or buggy agent hoards the board (SMD-3606). The cap is per holder (a key's agent id, or its name where it has none) and counts only live claims (unreleased and unexpired), so a lapsed claim frees a slot; a new claim past it is refused CLAIM_LIMIT, while a renewal of the holder's own claim is never capped. The default is 50; `null` clears the setting, so the built-in 50 stands. The setting replaces the one standing, which stays in the brain's history; `brain_info` shows the one standing. The reply gives the cap now and before (`changed` false: it was the one standing, and nothing was written). A cap outside 1 to 100000 is refused; any key not classified operator is refused.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // The setting it replaces stays as a history row.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      // The 1..100000 range mirrors migration 140's ob1_work_claim_cap_refusal: a fast REFUSED_INPUT here before the DB,
+      // and the match setWorkClaimCap relies on to keep BAD_CAP unreachable (core/claims.ts). A migration that changes the
+      // DB range must change this literal too, or a cap this admits but 140 rejects throws there as a divergence fault.
+      cap: z.number().int().min(1).max(100000).nullable().describe("The per-holder cap on live work claims (1 to 100000); null clears the setting so the built-in 50 stands"),
+    },
+  },
   // Open items (SMD-3665 PR 2, migration 117): a to-do, a commitment or a plugin's task — its id, status and history.
   open_item: {
     title: "Open Item",

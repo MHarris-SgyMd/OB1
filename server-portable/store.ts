@@ -1539,6 +1539,29 @@ export function normaliseSetWeights(r: unknown): SetWeightsResult {
 }
 
 /**
+ * set_work_claim_cap's answer (140, SMD-3606). `changed` false: the cap given was the one standing, nothing written.
+ * `cap` is the setting now (null: none, the built-in cap stands), `previous` the one it replaced. Refused: NOT_OPERATOR
+ * (not a key the registry classifies operator by its agent id; `kind` what it is), BAD_CAP (`message` in 140's words).
+ */
+export type SetCapResult =
+  | { ok: true; changed: boolean; cap: number | null; previous: number | null; setAt: string | null; setBy: string | null }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "BAD_CAP"; message: string };
+
+/** set_work_claim_cap's jsonb (140) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseSetCap(r: unknown): SetCapResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  if (o?.ok === true && typeof o.changed === "boolean") {
+    return { ok: true, changed: o.changed, cap: num(o.cap), previous: num(o.previous), setAt: isoTimestampOrNull(o.set_at), setBy: word(o.set_by) };
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
+  if (o?.ok === false && o.error === "BAD_CAP" && typeof o.message === "string") return { ok: false, error: "BAD_CAP", message: o.message };
+  throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
  * is the database's, which quotes the argument it could not read, cut. Any other
@@ -2556,6 +2579,12 @@ export interface ThoughtStore {
    */
   setPriorityWeights(opts: { weights: Partial<PriorityWeights> | null; actor?: Actor }): Promise<SetWeightsResult>;
   /**
+   * The operator sets the per-holder cap on live work claims (migration 140's set_work_claim_cap, SMD-3606): a whole
+   * number, or null to clear it so the built-in cap stands. The function decides who may — a key the registry classifies
+   * operator, by its agent id — and checks the cap in 140's words. A database before 140 throws.
+   */
+  setWorkClaimCap(opts: { cap: number | null; actor?: Actor }): Promise<SetCapResult>;
+  /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
    * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
@@ -2932,7 +2961,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 

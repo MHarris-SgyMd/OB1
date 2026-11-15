@@ -47,7 +47,7 @@ export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "o
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
 /** The tables the read asks after: the counted ones, the config, the ledger, where consolidation's findings stand (SMD-2680) and what became of those posted to the board (SMD-2682). */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings"] as const;
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -180,6 +180,13 @@ export interface DatabaseFacts {
    * (`unread` names it). Not a stats read.
    */
   priorityWeights: { standing: PriorityWeightSetting | null } | null;
+  /**
+   * The operator's per-holder cap on live work claims (SMD-3606 PR 1b, migration 140): `cap` the effective cap,
+   * `source` built-in or operator, `setAt`/`setBy` who set a standing one, and `refused` what is wrong with a stored
+   * cap (every new claim fails while it stands), from work_claim_cap_setting(). Null when the table is absent (no
+   * `unread` entry: before 140, the built-in 50) or not read (`unread` names it). Not a stats read.
+   */
+  workClaimCap: WorkClaimCapSetting | null;
   /**
    * What became of the findings db/board-findings.ts posted to the board
    * (087, SMD-2682): each (ticket pair, word) this brain posted, as accepted,
@@ -1680,12 +1687,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'supersession_proposals', to_regclass('supersession_proposals') IS NOT NULL,
                'thought_facets', to_regclass('thought_facets') IS NOT NULL,
                'board_findings_posted', to_regclass('board_findings_posted') IS NOT NULL,
-               'priority_weight_settings', to_regclass('priority_weight_settings') IS NOT NULL) AS resolved,
+               'priority_weight_settings', to_regclass('priority_weight_settings') IS NOT NULL,
+               'work_claim_cap_settings', to_regclass('work_claim_cap_settings') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -1718,6 +1726,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       relations: null,
       threads: null,
       priorityWeights: null,
+      workClaimCap: null,
       findings: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
@@ -1787,6 +1796,14 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         table: "priority_weight_settings",
         read: async (sp) => { facts.priorityWeights = { standing: weightSettingValue((await sp`SELECT priority_weight_setting() AS s`)[0]?.s) }; },
         clear: () => { facts.priorityWeights = null; },
+      },
+      // The operator's per-holder claim cap (SMD-3606 PR 1b, migration 140): read by 140's function, which gives the
+      // effective cap and what is wrong with a stored one without raising.
+      {
+        field: "workClaimCap",
+        table: "work_claim_cap_settings",
+        read: async (sp) => { facts.workClaimCap = capSettingValue((await sp`SELECT work_claim_cap_setting() AS s`)[0]?.s); },
+        clear: () => { facts.workClaimCap = null; },
       },
       // Not a stats read either: preflight's threads row reads it (SMD-3306 PR 7a-2c). Bounded: two index walks of at
       // most THREAD_CENSUS_BOUND rows each, and the thoughts they name.
@@ -1987,6 +2004,24 @@ export function weightSettingValue(r: unknown): PriorityWeightSetting | null {
   if (!o || !w) throw new Error("the priority weights read answered no setting");
   const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
   return { weights: w, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
+}
+
+/**
+ * The operator's per-holder cap on live work claims (SMD-3606 PR 1b, migration 140): the effective cap, whether it is
+ * built in or the operator's, who set a standing one, and `refused` what is wrong with a stored cap (every new claim
+ * fails while it stands), else null.
+ */
+export type WorkClaimCapSetting = { cap: number; source: "builtin" | "operator"; setAt: string | null; setBy: string | null; refused: string | null };
+/**
+ * work_claim_cap_setting()'s jsonb → the record's setting. It always gives a cap (the built-in 50 when none stands), so
+ * no cap at all throws, as the weights read does. A refused stored cap is the one this row exists to say.
+ */
+export function capSettingValue(r: unknown): WorkClaimCapSetting | null {
+  if (r === null || r === undefined) return null;
+  const o = typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null;
+  if (!o || typeof o.cap !== "number") throw new Error("the work-claim cap read answered no setting");
+  const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
+  return { cap: o.cap, source: o.source === "operator" ? "operator" : "builtin", setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
 }
 
 /** The threads' census as the record carries it: its counts, and no key (see DatabaseFacts.threads). */
@@ -2445,6 +2480,21 @@ export function priorityWeightsLine(db: Pick<DatabaseSummary, "priorityWeights" 
     : `the operator's, REFUSED, so every ranked priority read fails: ${set} (${when}): ${cut(s.refused, 300)}. An operator key sets them again, or clears them with {}, through set_priority_weights`;
 }
 
+/** The operator's per-holder claim cap (SMD-3606 PR 1b): built in, the operator's, or the operator's refused (every new claim fails). */
+export function workClaimCapLine(db: Pick<DatabaseSummary, "workClaimCap" | "unread">): string {
+  const c = db.workClaimCap;
+  if (c === null) {
+    const u = db.unread.workClaimCap;
+    return u ? `? (${deniedObject(u.message)?.name ?? "work_claim_cap_settings"} ${unreadWords(u)})` : "built in (50) — migration 140 is not applied";
+  }
+  if (c.source === "builtin") return `built in (${c.cap})`;
+  const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  const when = `set ${c.setAt ?? "?"}${c.setBy ? ` by ${cut(JSON.stringify(c.setBy).slice(1, -1), 80)}` : ""}`;
+  return c.refused === null
+    ? `the operator's: ${c.cap} (${when})`
+    : `the operator's, REFUSED, so every new claim fails: ${c.cap} (${when}): ${cut(c.refused, 300)}. An operator key sets it again, or clears it, through set_work_claim_cap`;
+}
+
 /**
  * The Threads row (SMD-3306 PR 7a-2c): the threads and whether every key read is linked, how far a bounded census read,
  * or why it was not read.
@@ -2654,6 +2704,7 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
   lines.push(row("Proposals", proposalsLine(db)));
   lines.push(row("Threads", threadsLine(db)));
   lines.push(row("Priority weights", priorityWeightsLine(db)));
+  lines.push(row("Work-claim cap", workClaimCapLine(db)));
   if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));
   const calls = modelCallsLine(db);
