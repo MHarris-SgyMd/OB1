@@ -19,7 +19,8 @@ import { appendFileSync } from "node:fs";
 import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 
 const PORT = Number(process.env.PORT ?? 8765);
-const HOST = process.env.HOST ?? "127.0.0.1";
+// Loopback only, and not a setting: the probe has no auth.
+const HOST = "127.0.0.1";
 const LOG = process.env.LOG ?? `${import.meta.dir}/probe.jsonl`;
 
 let extra = false;
