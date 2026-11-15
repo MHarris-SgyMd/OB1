@@ -6880,23 +6880,30 @@ console.log("\n[20cf] Migration 139: onto a populated brain at the file before i
     `an edit committed while the forget waited on the row: its text in the ledger, refused after (${inLedger}; ${editedBack})`);
 
   // A priority writer holding the item's lock (review pass 7): the forget takes each item's lock before it deletes
-  // the item's statements, so it waits for the writer, as 116's writers wait for one another.
+  // the item's statements, so it waits for the writer, as 116's writers wait for one another. The writer then takes a
+  // share lock on the thought's row, as a capture-scoped assert_priority does (138): the forget takes the priority
+  // locks before its row lock, so neither waits on the other (review pass 8: taken after it, the two deadlocked).
   const pr = String((await sql`SELECT (upsert_thought(${"upgrade 139: a thought with a priority"}, '{}'::jsonb)->>'id') AS id`)[0].id);
   await sql`SELECT assert_priority('thought', ${pr}, 4, NULL, NULL, NULL, NULL, 'upgrade 139', false, (${ACT}::text)::jsonb)`;
   const lockHolder = new SQL({ url: URL_, max: 1 });
-  let prForget: Promise<unknown> = Promise.resolve(null);
+  const codeOf = (e: unknown) => String((e as { errno?: string }).errno ?? (e as { code?: string }).code ?? (e as Error).message);
+  let prForget: Promise<string> = Promise.resolve("not started");
   const prSettled: string[] = [];
   let prWaited = false;
+  let share = "not run";
   await lockHolder.begin(async (tx) => {
     await tx`SELECT ob1_priority_lock('thought', ${pr})`;
-    prForget = sql`SELECT forget_thought(${pr}::uuid, (${ACT}::text)::jsonb) AS r`.then((x) => x).finally(() => prSettled.push("forget"));  // started now
+    prForget = sql`SELECT forget_thought(${pr}::uuid, (${ACT}::text)::jsonb) AS r`
+      .then((x) => String(((x as { r: { ok: boolean } }[])[0].r).ok), codeOf).finally(() => prSettled.push("forget"));  // started now
     await new Promise((res) => setTimeout(res, 400));
     prWaited = prSettled.length === 0;  // read before the commit releases it
-  });
-  await prForget;
+    share = await tx`SELECT 1 FROM thoughts WHERE id = ${pr}::uuid FOR SHARE`.then(() => "taken", codeOf);
+  }).catch((e) => { share = `${share}; the writer's transaction: ${codeOf(e)}`; });
+  const prAnswer = await prForget;
   await lockHolder.close();
   const prLeft = Number((await sql`SELECT count(*)::int AS c FROM priority_assertions WHERE item_key = ${pr}`)[0].c);
-  assert(prWaited && prLeft === 0, `a priority writer holding the thought's lock: the forget waited for it, then deleted the statement (${prWaited}, ${prLeft})`);
+  assert(prWaited && share === "taken" && prAnswer === "true" && prLeft === 0,
+    `a priority writer holding the thought's lock, then a share lock on its row: the forget waited for it, neither deadlocked, then the statement deleted (${prWaited}, ${share}, ${prAnswer}, ${prLeft})`);
 
   // A close decision in flight (review pass 6): it copies the proposal's reason onto the item's status event and holds
   // the proposal; the forget locks the proposals citing its thought first, so it waits, then blanks the copy.

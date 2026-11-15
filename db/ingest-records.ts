@@ -96,7 +96,7 @@ import { priorityWritersProblem } from "./priority-writers.ts";
 import { LINEAR_SYSTEM, linearAdapter, renderIssue, SAMPLE_ISSUE, WATERMARK_KEY } from "./ingest-linear.ts";
 import { markdownAdapter, markdownFiles, MARKDOWN_SYSTEM } from "./ingest-markdown.ts";
 import { ItemsRefusal, parseItems, PIPELINE_META_KEYS, RESERVED_SYSTEMS, SAMPLE_ITEM, SAMPLE_LINE } from "./ingest-items.ts";
-import { IdentityHeld, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
+import { IdentityHeld, identityHash, recordStructure, runName as structureRunName, type Structure, type StructureResult } from "./ingest-structure.ts";
 import { commandLine } from "./cli.ts";
 import { databaseUrl, openSql } from "./connect.ts";
 
@@ -559,14 +559,21 @@ export async function upsertRecord(sql: SQL, doc: Doc, run: string = runName(), 
       // word for a row that is this very ticket (run-it, test-live [22]).
       // record_thought_source's IDENTITY_HELD stays the backstop for the race
       // between this look and the write.
-      // A record the brain forgot (139, SMD-1723): its row's id is in the
-      // ledger and no row stands there (one reinstated does). Asked by id,
-      // so an edited record — a new text the refusal would not know — stays
-      // forgotten too (review pass 7: it came back on its next edit).
+      // A record the brain forgot (139, SMD-1723): the whole record, not its
+      // text alone (the maintainer, review pass 8), so an edited record — a
+      // new text the refusal would not know — stays out too. Known by this
+      // row's id, or by its identity when another writer's row was the one
+      // forgotten (the board sync's, under an id of its own: review pass 8);
+      // left out while no row stands at either (one reinstated does).
       const [fg] = (await tx`SELECT to_regclass('thought_forgotten') IS NOT NULL AS has`) as { has: boolean }[];
       if (fg?.has) {
-        const [f] = (await tx`SELECT EXISTS (SELECT 1 FROM thought_forgotten WHERE thought_id = ${doc.id}::uuid)
-                                 AND NOT EXISTS (SELECT 1 FROM thoughts WHERE id = ${doc.id}::uuid) AS gone`) as { gone: boolean }[];
+        const sys = doc.structure?.identity.system ?? null;
+        const key = doc.structure?.identity.key ?? null;
+        const [f] = (await tx`SELECT (EXISTS (SELECT 1 FROM thought_forgotten WHERE thought_id = ${doc.id}::uuid)
+                                      OR (${sys}::text IS NOT NULL AND EXISTS (SELECT 1 FROM thought_forgotten g
+                                            WHERE g.evidence->'source'->>'system' = ${sys}::text AND g.evidence->'source'->>'identity_sha256' = ${key === null ? null : identityHash(key)}::text)))
+                                 AND NOT EXISTS (SELECT 1 FROM thoughts WHERE id = ${doc.id}::uuid)
+                                 AND (${sys}::text IS NULL OR source_thought(${sys}::text, ${key}::text) IS NULL) AS gone`) as { gone: boolean }[];
         if (f?.gone) return { outcome: "forgotten" };
       }
       if (doc.structure) {

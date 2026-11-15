@@ -2544,8 +2544,8 @@ store gave up; a thought deleted first is forgotten from what remains. A capture
 of one of its texts waits for a running forget and is refused after (`OB005`);
 another store's write that lands beside a forget is swept by a second
 `forget_thought` of the same id. A thought another cites is refused `CITED`, as
-a delete is; the operator detaches first, deleting it with
-`delete_thought(id, actor, true)`, then forgets it. Each call also deletes every
+a delete is, unless the caller detaches (`forget_thought(id, actor, true)`):
+the citing rows are deleted with the rest. Each call also deletes every
 bare orphan entity (no mention, edge, priority statement or merge record): once
 an entity's mentions are gone, whose it was can't be told. Every event of it in `thought_audit` is redacted in place
 through the log's third named amendment, `redact`: each text becomes the marker
@@ -2555,11 +2555,14 @@ stay. The amendment takes only a deleted
 thought's events under the forget's own setting, once. `thought_forgotten` records
 each forgetting, append-only; a capture or edit to a forgotten text is refused
 `OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought already
-holds that text. The ledger keeps the record a thought was ingested as:
-`sync-linear.ts` leaves a forgotten ticket out of its plan (not missing, not
-fetched, no drift in `--audit`), and `ingest-records.ts` counts a record the
-brain forgot as `forgotten` by its id, so one edited at its source stays out
-too; both go on. It runs under READ COMMITTED alone, taking each item's priority
+holds that text. The whole record a thought was ingested as is forgotten too:
+the ledger keeps its identity as a sha256, and `sync-linear.ts` leaves a
+forgotten ticket out of its plan (not missing, not fetched, no drift in
+`--audit`, `--only` included) and a forgotten section out of its parts, while
+`ingest-records.ts` counts a record the brain forgot, by its id or its
+identity, as `forgotten`; edits at the source included, until a row stands
+there again. A thought deleted before it is forgotten has lost its record:
+detach with `forget_thought`, not `delete_thought`. It runs under READ COMMITTED alone, taking each item's priority
 lock before deleting its statements, as the priority writers do. A twin holding the same text keeps
 it and is named. Thoughts derived from the forgotten one, and every page whose own log names it
 (its earlier renders, and a section once built on it whose revision keeps the

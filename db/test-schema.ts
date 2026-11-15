@@ -84,6 +84,7 @@ import {
   supabaseIsmsIn,
   UPDATE_THOUGHT_SIGNATURE_9,
 } from "./config.mjs";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buffersOf, COLUMN_COMMENT_SQL, communitySchemaFiles, CONTRIB_DIR, CONTRIB_SCHEMA_FILES, createAssert, FUNCTION_COMMENT_SQL, ISO_RE, SAMPLE_STATEMENT, sampleStatementOf, SCHEMA_FILES_FIRST, SCHEMAS_DIR, seededRandom, TABLE_COMMENT_SQL, TID_PROBE } from "./test-support.ts";
@@ -21183,9 +21184,11 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
             (SELECT canonical_agent_id::text FROM thought_audit WHERE thought_id = $1::uuid ORDER BY seq DESC LIMIT 1) AS a,
             f.actor_name AS ln, f.actor_agent_id::text AS la, f.evidence->'source' AS src
        FROM thought_forgotten f WHERE f.thought_id = $1::uuid`, [T]);
-  assert(JSON.stringify(ans.source) === JSON.stringify({ system: "linear", identity: "FG-128" }) && JSON.stringify(tomb.src) === JSON.stringify(ans.source)
+  const fg128 = createHash("sha256").update("FG-128", "utf8").digest("hex");
+  assert(JSON.stringify(ans.source) === JSON.stringify({ system: "linear", identity_sha256: fg128 }) && JSON.stringify(tomb.src) === JSON.stringify(ans.source)
+      && !JSON.stringify(ans).includes("FG-128")
       && tomb.ln === "fg125-op" && tomb.ln === tomb.n && tomb.la === tomb.a,
-    `the record it was ingested as named in the answer and the ledger; the ledger's actor the tombstone's (${JSON.stringify(ans.source)} | ${JSON.stringify(tomb)})`);
+    `the record it was ingested as named in the answer and the ledger by its identity's sha256, the identity itself nowhere in either; the ledger's actor the tombstone's (${JSON.stringify(ans.source)} | ${JSON.stringify(tomb)})`);
 
   // Nowhere holds the text.
   const text = await q<{ t: string; n: number }>(`
@@ -21347,6 +21350,20 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
       && dLeft.cites === 0 && dLeft.ent === 0,
     `cited, then detached by the delete, then forgotten: the detached citation deleted, the entity only it named pruned (${dCited.error}; ${JSON.stringify(detached)}; ${JSON.stringify(dGone.removed)}; ${JSON.stringify(dLeft)})`);
 
+  // Detached by the forget itself (review pass 8): the citing row deleted with the rest, the row still standing when
+  // the record it was ingested as is read, so the ledger keeps it — delete_thought first had taken thought_sources' row.
+  const X = await thought(`cited, then forgotten with detach: ${SECRET}-X`);
+  const xCiter = await thought("a thought that cites X");
+  await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'citation', jsonb_build_object('text', $3::text, 'stance', 'stated', 'source_id', $2::text))`, [xCiter, X, `per X: ${SECRET}-X`]);
+  await db.query(`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+                  VALUES ($1::uuid, 'linear', 'FG-128X', 'cx', 'application/json', encode(sha256(convert_to('cx', 'UTF8')), 'hex'))`, [X]);
+  const xRefused = await forget(X);
+  const xGone = (await one<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb, true) AS r`, [X, ACT])).r;
+  const xLeft = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE payload::text LIKE '%' || $1 || '%'`, [`${SECRET}-X`])).n;
+  assert(xRefused.error === "CITED" && xGone.ok === true && xGone.gone === false && (xGone.removed as Record<string, number>).detached_citations === 1 && xLeft === 0
+      && JSON.stringify(xGone.source) === JSON.stringify({ system: "linear", identity_sha256: createHash("sha256").update("FG-128X", "utf8").digest("hex") }),
+    `cited, refused, then forgotten with detach: the citing row deleted, the record it was ingested as kept in the ledger (${xRefused.error}; ${JSON.stringify(xGone.removed)}; ${JSON.stringify(xGone.source)}; ${xLeft})`);
+
   // A write that raced the forget (the maintainer, review pass 2: a second forget sweeps it): planted after T's
   // forget — a statement on T, an orphan event on the item it took, a close proposal citing it, a page section built
   // on it, a thought derived from it — the second call takes each and writes a ledger row; a third is FORGOTTEN.
@@ -21403,7 +21420,7 @@ console.log("\n[128] Migration 139: forget a thought — refused CITED while an 
   // A re-apply is a no-op: the ledger kept, the refusal still standing.
   await reapply(file.slice(0, 4));
   const ledAfter = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_forgotten`)).n;
-  assert(ledAfter === 5 && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]) === "OB005",
+  assert(ledAfter === 6 && await code(`INSERT INTO thoughts (content) VALUES ($1)`, [`note: ${SECRET}`]) === "OB005",
     `a re-apply keeps the ledger and the refusal (${ledAfter})`);
 }
 
