@@ -784,7 +784,7 @@ export const SPECS = {
   review_priority_finding: {
     title: "Review Priority Finding",
     description:
-      "Operator only: a key the operator classified `operator` (set_agent_kind). Decide a pending finding list_priority_findings listed, by its id. `accept` says the outcome: `level` (0 none to 5 critical; the item's current level re-confirms it, keeping your statement's terms), optionally with `due_at`, stated as your own statement on the item — or `clear: true`, which closes your own statement there (refused when you hold none: state 0 to outrank another maker's). A settled item's finding is accepted by clearing, or by stating 0. `reject` changes nothing. Either holds the same finding back for its window while its statements are those decided on, and records your key, your `note` and what was written; the statement is yours in the item's history (priority_history). Refused: a key not classified operator; a finding decided or moot already, nothing of yours to clear, or the writer refusing the outcome (REFUSED_FINDING_DECISION, the finding left pending); arguments that do not go together (REFUSED_FINDING_INPUT): a level, a due time and clear go with accept alone, a due time with a level.",
+      "Operator only: a key the operator classified `operator` (set_agent_kind). Decide a pending finding list_priority_findings listed, by its id. `accept` says the outcome: `level` (0 none to 5 critical), optionally with `due_at`, stated as your own statement on the item — the level your own statement there already has re-confirms it, keeping its start, its due reference, its reason when you give no note, and its due time while still ahead; any other level is a new statement — or `clear: true`, which closes your own statement there (refused when you hold none: state 0 to outrank another maker's). A settled item's finding is accepted by clearing, or by stating 0. `reject` changes nothing. Either holds the same finding back for its window while its statements are those decided on, and records your key, your `note` and what was written; the statement is yours in the item's history (priority_history). Refused: a key not classified operator; a finding decided or moot already, nothing of yours to clear, or the writer refusing the outcome (REFUSED_FINDING_DECISION, the finding left pending); arguments that do not go together (REFUSED_FINDING_INPUT): a level, a due time and clear go with accept alone, a due time with a level.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,
@@ -799,6 +799,8 @@ export const SPECS = {
       level: z.number().int().min(0).max(5).optional().describe("Accept only: the level to state, 0 none to 5 critical"),
       due_at: PRIORITY_TIME.optional().describe("Accept with a level only: when it is due, a time with its offset (2027-03-01T17:00:00Z), or a date (by the end of that day: the next day's start in UTC)"),
       clear: z.boolean().optional().describe("Accept only, instead of a level: true closes your own statement on the item"),
+      // 142 counts the note's characters (length(text): code points). So does zod 4's max on a string (its
+      // codePointLength past the UTF-16 count), so a character past the BMP is one here too: test-rest-sql [24] holds both.
       note: z.string().trim().min(1).max(2000).refine(NO_NUL, "may not hold a NUL character").optional().describe("Recorded with the decision, up to 2000 characters"),
     },
   },

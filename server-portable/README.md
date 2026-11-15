@@ -1369,7 +1369,8 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   outcome, suppressedUntil}`: `statements` are the evidence's (a stale or settled
   finding's statements; a disagreement's operator and source, each with its `role`; an
   overdue finding names a due time, so none), `outcome` what an accept's writer
-  answered. A brain before 142 faults (500), the MCP text naming the migration.
+  answered, in the shape `review_priority_finding`'s reply gives it (null for a
+  reject). A brain before 142 faults (500), the MCP text naming the migration.
 - **`review_priority_finding`** (`POST /v1/priority-findings/{id}/review`, write scope;
   SMD-3671 PR 2, migration 142): an operator's decision on a pending finding.
   `decision` is `accept` or `reject`; an accept takes `level` (0 to 5, with `due_at`
@@ -1385,7 +1386,10 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   outcome, assertion, closed, winner, suppressedUntil, caller}`: `outcome` is
   `asserted`, `unchanged` (re-confirmed) or `cleared`, null for a reject. Arguments
   that do not go together are refused before the brain is asked; the schema refuses
-  a level off the scale, a note too long or an id that is no uuid (`REFUSED_INPUT`).
+  a level off the scale, a note past 2000 characters (counted as 142 counts them, a
+  character past the BMP one) or an id that is no uuid (`REFUSED_INPUT`). A due time
+  Postgres cannot read (a year 0000, or past 9999) is `REFUSED_PRIORITY_INPUT` with
+  problem `time`, as `set_priority` answers it.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while

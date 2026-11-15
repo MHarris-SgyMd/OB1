@@ -3471,16 +3471,27 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     const dueAlone = await review(stale!, { decision: "accept", clear: true, due_at: "2027-03-01" });
     const offScale = await review(stale!, { decision: "accept", level: 7 });
     const longNote = await review(stale!, { decision: "reject", note: "n".repeat(2001) });
+    // 142 counts characters, not UTF-16 units: 2001 characters past the BMP are refused by the schema too.
+    const longWide = await review(stale!, { decision: "reject", note: String.fromCodePoint(0x1f600).repeat(2001) });
     const badId = await rest("POST", "/v1/priority-findings/not-a-uuid/review", { decision: "reject" });
     const noOutcomeM = await mcp("review_priority_finding", { id: stale, decision: "accept" });
     assert(noOutcome.status === 400 && noOutcome.body.code === "REFUSED_FINDING_INPUT" && noOutcome.body.problem === "ACCEPT_NEEDS_OUTCOME"
         && both.status === 400 && both.body.problem === "ACCEPT_NEEDS_OUTCOME" && onReject.status === 400 && onReject.body.problem === "BAD_OUTCOME"
         && dueAlone.status === 400 && dueAlone.body.problem === "BAD_OUTCOME"
         && offScale.status === 400 && offScale.body.code === "REFUSED_INPUT" && longNote.status === 400 && longNote.body.code === "REFUSED_INPUT"
-        && badId.status === 400 && badId.body.code === "REFUSED_INPUT"
+        && badId.status === 400 && badId.body.code === "REFUSED_INPUT" && longWide.status === 400 && longWide.body.code === "REFUSED_INPUT"
         && noOutcomeM.isError && /^Refused: accepting says what to do: a level to state \(the same one re-confirms it\), or clear, not both\.$/.test(noOutcomeM.text)
         && await pendingStill(stale!),
       `arguments that do not go together refused 400 REFUSED_FINDING_INPUT (ACCEPT_NEEDS_OUTCOME twice, BAD_OUTCOME twice), a level of 7, a note of 2001 and an id that is no uuid 400 REFUSED_INPUT by the schema; the finding still pending (${[noOutcome, both, onReject, dueAlone].map((a) => `${a.status}/${a.body.problem}`).join(" ")} ${offScale.status} ${longNote.status} ${badId.status})`);
+
+    // A due time Postgres cannot read is set_priority's refusal, the finding left pending: year 0000's day's end, and
+    // 9999's, a year past Postgres's text (+010000).
+    const year0 = await review(stale!, { decision: "accept", level: 2, due_at: "0000-01-01" });
+    const year9999 = await review(stale!, { decision: "accept", level: 2, due_at: "9999-12-31" });
+    const setYear0 = await rest("POST", `/v1/priorities/thought/${thought}`, { level: 2, due_at: "0000-01-01" });
+    assert([year0, year9999].every((a) => a.status === 400 && a.body.code === "REFUSED_PRIORITY_INPUT" && a.body.problem === "time")
+        && setYear0.status === 400 && setYear0.body.code === "REFUSED_PRIORITY_INPUT" && setYear0.body.problem === "time" && await pendingStill(stale!),
+      `a due time Postgres cannot read, 0000-01-01 or 9999-12-31: 400 REFUSED_PRIORITY_INPUT (time), as set_priority answers it; the finding still pending (${year0.status}/${year0.body.code}/${year0.body.problem} ${year9999.status}/${year9999.body.problem} set ${setYear0.status}/${setYear0.body.problem})`);
 
     const writerNo = await review(missing.id, { decision: "accept", level: 3 });
     const writerNoM = await mcp("review_priority_finding", { id: missing.id, decision: "accept", level: 3 });
@@ -3504,12 +3515,15 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
         && againM.text === `Refused: finding ${stale} is accepted already, not pending; list_priority_findings with status accepted shows it.`,
       `the operator's accept over MCP states its level 2 at the operator tier, the item's winner now; the finding accepted by writer with the note, held back; a second decision 409 NOT_PENDING (accepted) (${accepted.text.slice(0, 160)} ${row.status} ${winner?.level}/${winner?.tierName} ${again.status}/${again.body.problem})`);
 
-    const rejected = await review(missing.id, { decision: "reject", note: "[24] Linear is right" });
+    // A note of 1200 characters past the BMP, 2400 UTF-16 units, is within 142's 2000 characters: taken, and kept whole.
+    const wideNote = `[24] Linear is right ${String.fromCodePoint(0x1f600).repeat(1200)}`;
+    const rejected = await review(missing.id, { decision: "reject", note: wideNote });
+    const keptNote = (await sql`SELECT decision_note FROM priority_findings WHERE id = ${missing.id}::uuid`)[0]?.decision_note;
     const nothing = await review(unheld.id, { decision: "accept", clear: true });
     const nothingM = await mcp("review_priority_finding", { id: unheld.id, decision: "accept", clear: true });
     const absent = await review("00000000-0000-4000-8000-0000000000aa", { decision: "reject" });
     const absentM = await mcp("review_priority_finding", { id: "00000000-0000-4000-8000-0000000000AA", decision: "reject" });
-    assert(rejected.status === 200 && rejected.body.status === "rejected" && rejected.body.outcome === null && rejected.body.assertion === null && typeof rejected.body.suppressedUntil === "string"
+    assert(rejected.status === 200 && keptNote === wideNote && rejected.body.status === "rejected" && rejected.body.outcome === null && rejected.body.assertion === null && typeof rejected.body.suppressedUntil === "string"
         && nothing.status === 409 && nothing.body.problem === "NOTHING_TO_CLEAR" && await pendingStill(unheld.id)
         && /^Refused: you hold no statement on the item to clear, so nothing was decided/.test(nothingM.text)
         && absent.status === 404 && absent.body.code === "NOT_FOUND" && absentM.sc.code === "NOT_FOUND"
@@ -3523,11 +3537,13 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     const info = await rest("GET", "/v1/brain");
     const infoM = await mcp("brain_info", {});
     const pf = ((info.body.database ?? {}) as Record<string, unknown>).priorityFindings as { pending: number; byKind: Record<string, number>; decided30d: number; oldestPendingS: number | null } | null | undefined;
+    const byKind = Object.fromEntries((await sql`SELECT kind, count(*)::int AS n FROM priority_findings WHERE status = 'pending' GROUP BY kind`).map((r: { kind: string; n: number }) => [r.kind, r.n]));
     const [counts] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS p, count(*) FILTER (WHERE status = 'pending' AND kind = 'disagree')::int AS d,
                                       count(*) FILTER (WHERE decided_at >= now() - interval '30 days')::int AS dec FROM priority_findings`;
     assert(decidedRow?.status === "accepted" && decidedRow.decidedBy === "writer" && decidedRow.note === "[24] reviewed: medium now" && decidedRow.outcome?.outcome === "asserted"
+        && (decidedRow.outcome?.assertion as { tierName?: string; level?: number } | undefined)?.tierName === "operator" && (decidedRow.outcome?.assertion as { level?: number }).level === 2
         && all.status === "all" && all.total === allTotal && all.findings.length === 1 && all.findings[0].status === "pending"
-        && pf != null && pf.pending === counts.p && pf.byKind.disagree === counts.d && pf.decided30d === counts.dec && counts.dec >= 2 && typeof pf.oldestPendingS === "number" && pf.oldestPendingS >= 86_000
+        && pf != null && pf.pending === counts.p && pf.byKind.disagree === counts.d && ["stale", "overdue", "disagree", "settled"].every((k) => pf.byKind[k] === (byKind[k] ?? 0)) && (byKind.stale ?? 0) > 1 && pf.decided30d === counts.dec && counts.dec >= 2 && typeof pf.oldestPendingS === "number" && pf.oldestPendingS >= 86_000
         && new RegExp(`Priority findings:\\s+${counts.p} pending \\(`).test(infoM.text) && infoM.text.includes(`decided in the last 30 days`),
       `accepted ones listed with who decided, the note and the writer's answer; all counted in full, the pending first; brain_info's priorityFindings and its row count the pending, by kind, and the decided in 30 days (${decidedRow?.status} ${all.total}/${allTotal} ${JSON.stringify(pf)} ${JSON.stringify(counts)})`);
 

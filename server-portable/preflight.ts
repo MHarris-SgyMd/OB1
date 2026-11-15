@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -5048,25 +5048,8 @@ if (configFailed) {
         // table could not be read. The priority row says what the role's grants
         // on it fail.
         {
-          const f = facts.priorityFindings;
-          if (f === null) {
-            const u = facts.unread.priorityFindings;
-            if (!u) add("priority findings", "skip", "not checked — priority_findings does not exist (migration 142 not applied)");
-            else if (u.reason === "refused")
-              add("priority findings", "warn", `could not verify: ${u.message}`,
-                  "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
-            else if (u.reason === "invisible")
-              add("priority findings", "warn", `could not verify: ${u.message}`, "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
-            else add("priority findings", "warn", `could not verify: ${u.message}`,
-                     u.reason === "timeout"
-                       ? "A migration or a long transaction may hold priority_findings; run preflight again once it has finished."
-                       : "The check reads priority_findings; the message says why it failed.");
-          } else if (f.pending === 0) {
-            add("priority findings", "ok", `none pending${f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : ""}`);
-          } else {
-            const kinds = (["stale", "overdue", "disagree", "settled"] as const).filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`).join(", ");
-            add("priority findings", "ok", `${f.pending} pending (${kinds}), the oldest found ${f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`} — an operator key reviews them: list_priority_findings, then review_priority_finding for each`);
-          }
+          const r = priorityFindingsRow(facts.priorityFindings, facts.unread.priorityFindings);
+          add("priority findings", r.status, r.detail, r.fix);
         }
 
         // The work threads (SMD-3306 PR 7a-2c): whether each thread's edges (120)

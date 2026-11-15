@@ -1234,9 +1234,16 @@ export class SqlStore implements ThoughtStore {
   // reads: write scope alone decides), every value a bind parameter.
   async reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult> {
     const envelope = opts.actor ? { ...actorPayload(opts.actor), ...(opts.scope ? { scope: opts.scope } : {}) } : null;
-    const rows = await this.sql`
-      SELECT review_priority_finding(${opts.id}::uuid, ${opts.decision}::text, ${opts.level ?? null}::int, ${opts.dueAt ?? null}::timestamptz,
-                                     ${opts.clear === true}::boolean, ${opts.note ?? null}::text, ${envelope}::jsonb) AS r`;
+    // A due time Postgres cannot read, or a 22023 the writer inside raises, is set_priority's refusal (PriorityRefused),
+    // not the store's fault: the same input answers the same through both.
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT review_priority_finding(${opts.id}::uuid, ${opts.decision}::text, ${opts.level ?? null}::int, ${opts.dueAt ?? null}::timestamptz,
+                                       ${opts.clear === true}::boolean, ${opts.note ?? null}::text, ${envelope}::jsonb) AS r` as Record<string, unknown>[];
+    } catch (e) {
+      throw priorityRefusedOr(e);
+    }
     return normaliseReviewFinding(rows[0]?.r);
   }
 

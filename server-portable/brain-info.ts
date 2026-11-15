@@ -18,8 +18,11 @@
 // deadline keeps what was read and names the rest. (A transaction per read,
 // each with its own budget, added past one deadline and lost every fact at it.)
 //
-// No imports: the SQL client is taken structurally rather than from "bun", so a
-// suite can hand it a fake.
+// No imports but priority-kinds.ts, a leaf that imports nothing (142's finding
+// kinds, SMD-3671 PR 2, one list): the SQL client is taken structurally rather
+// than from "bun", so a suite can hand it a fake.
+
+import { FINDING_KINDS, type FindingKind } from "./priority-kinds.ts";
 
 /** A tagged-template SQL client — Bun's `SQL`, structurally. */
 export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<any[]>;
@@ -1118,16 +1121,18 @@ const PROPOSALS_SQL = (sql: SqlTag) => sql`
     FROM supersession_proposals p
    WHERE p.status IN ('pending', 'stale')`;
 
-/** The priority review's findings (SMD-3671 PR 2): the pending by kind, the oldest pending one's age, and the decided in 30 days. */
+/**
+ * The priority review's findings (SMD-3671 PR 2): the pending by kind, the oldest pending one's age, and the decided in
+ * 30 days — the rows it counts alone: decided findings stay as history, so the table grows while these do not.
+ */
 const PRIORITY_FINDINGS_SQL = (sql: SqlTag) => sql`
   SELECT count(*) FILTER (WHERE f.status = 'pending')::int AS pending,
          extract(epoch FROM now() - min(f.found_at) FILTER (WHERE f.status = 'pending'))::float8 AS oldest_s,
-         count(*) FILTER (WHERE f.status = 'pending' AND f.kind = 'stale')::int AS stale,
-         count(*) FILTER (WHERE f.status = 'pending' AND f.kind = 'overdue')::int AS overdue,
-         count(*) FILTER (WHERE f.status = 'pending' AND f.kind = 'disagree')::int AS disagree,
-         count(*) FILTER (WHERE f.status = 'pending' AND f.kind = 'settled')::int AS settled,
+         (SELECT COALESCE(jsonb_object_agg(k.kind, k.n), '{}'::jsonb)
+            FROM (SELECT p.kind, count(*)::int AS n FROM priority_findings p WHERE p.status = 'pending' GROUP BY p.kind) k) AS by_kind,
          count(*) FILTER (WHERE f.decided_at >= now() - interval '30 days')::int AS decided_30d
-    FROM priority_findings f`;
+    FROM priority_findings f
+   WHERE f.status = 'pending' OR f.decided_at >= now() - interval '30 days'`;
 
 /** The pending rows that pair two tickets the board does not link. */
 const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
@@ -1327,17 +1332,42 @@ export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest
  * number of seconds for the oldest pending one (found_at defaults to the scan's now, which a clock moved back can leave
  * ahead of the read's: held at 0).
  */
-export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: { stale: number; overdue: number; disagree: number; settled: number }; decided30d: number };
-export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unknown; stale?: unknown; overdue?: unknown; disagree?: unknown; settled?: unknown; decided_30d?: unknown } | undefined): PriorityFindingsFact {
+export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number>; decided30d: number };
+export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unknown; by_kind?: unknown; decided_30d?: unknown } | undefined): PriorityFindingsFact {
   if (!row) throw new Error("the priority findings read answered no row");
   const pending = countOf("priority findings", row.pending);
   const age = row.oldest_s == null ? null : Number(row.oldest_s);
   if (age !== null && !Number.isFinite(age)) throw new Error("the priority findings read answered an age that is not a number");
-  const n = (v: unknown) => countOf("priority findings", v);
+  const by = row.by_kind !== null && typeof row.by_kind === "object" && !Array.isArray(row.by_kind) ? (row.by_kind as Record<string, unknown>) : null;
+  if (!by) throw new Error("the priority findings read answered no counts by kind");
   return {
     pending, oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)),
-    byKind: { stale: n(row.stale), overdue: n(row.overdue), disagree: n(row.disagree), settled: n(row.settled) }, decided30d: n(row.decided_30d),
+    // Each of 142's kinds, none pending a 0: a kind the scan does not write is no count here.
+    byKind: Object.fromEntries(FINDING_KINDS.map((k) => [k, countOf("priority findings", by[k] ?? 0)])) as Record<FindingKind, number>,
+    decided30d: countOf("priority findings", row.decided_30d),
   };
+}
+
+/**
+ * The priority findings, in one wording for brain_info's row and preflight's (SMD-3671 PR 2): ok with the pending by
+ * kind and the oldest's age, and the decided in 30 days; a skip before 142; a warning when the read was refused or did
+ * not answer — a queue, not a fault, so pending findings never warn. A function of the fact alone, as threadsRow is.
+ */
+export function priorityFindingsRow(f: PriorityFindingsFact | null, u: Unread | undefined): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
+  if (f === null) {
+    if (!u) return { status: "skip", detail: "not checked — priority_findings does not exist (migration 142 not applied)" };
+    if (u.reason === "refused")
+      return { status: "warn", detail: `could not verify: ${u.message}`,
+               fix: "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role)." };
+    if (u.reason === "invisible") return { status: "warn", detail: `could not verify: ${u.message}`, fix: "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it." };
+    return { status: "warn", detail: `could not verify: ${u.message}`,
+             fix: u.reason === "timeout" ? "A migration or a long transaction may hold priority_findings; run preflight again once it has finished." : "The check reads priority_findings; the message says why it failed." };
+  }
+  const decided = f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : "";
+  if (f.pending === 0) return { status: "ok", detail: `none pending${decided}` };
+  const kinds = FINDING_KINDS.filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`).join(", ");
+  const oldest = f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`;
+  return { status: "ok", detail: `${f.pending} pending (${kinds}), the oldest found ${oldest}${decided} — an operator key reviews them: list_priority_findings, then review_priority_finding for each` };
 }
 
 /** The standing relations as the record carries them. */
@@ -1843,8 +1873,8 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         read: async (sp) => { facts.workClaimCap = capSettingValue((await sp`SELECT work_claim_cap_setting() AS s`)[0]?.s); },
         clear: () => { facts.workClaimCap = null; },
       },
-      // The priority review's findings (SMD-3671 PR 2, migration 142): a handful of rows, moot ones pruned past their
-      // window. Not a stats read: preflight's priority findings row reads it.
+      // The priority review's findings (SMD-3671 PR 2, migration 142): the pending and the decided in 30 days alone, as
+      // decided ones stay as history. Not a stats read: preflight's priority findings row reads it.
       {
         field: "priorityFindings",
         table: "priority_findings",
@@ -2493,10 +2523,8 @@ export function priorityFindingsLine(db: Pick<DatabaseSummary, "priorityFindings
     const u = db.unread.priorityFindings;
     return u ? `? (${deniedObject(u.message)?.name ?? "priority_findings"} ${unreadWords(u)})` : "no table — migration 142 is not applied";
   }
-  const decided = f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : "";
-  if (f.pending === 0) return `none pending${decided}`;
-  const kinds = (["stale", "overdue", "disagree", "settled"] as const).filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`).join(", ");
-  return `${f.pending} pending (${kinds}; the oldest found ${f.oldestPendingS === null ? "?" : `${ago(f.oldestPendingS)} ago`}) — list_priority_findings lists them${decided}`;
+  // Read, the words are preflight's row's (priorityFindingsRow): one wording.
+  return priorityFindingsRow(f, undefined).detail;
 }
 
 /** The Vectors row: how many thoughts wait for a vector, none, or why not read (SMD-2889). */

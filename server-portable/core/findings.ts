@@ -9,10 +9,10 @@
 // turns 142's answers into values and refusals.
 
 import type { Principal } from "../auth.ts";
-import type { FindingKind, FindingStatus, PriorityAssertion, PriorityFinding, PriorityItem } from "../store.ts";
-import { endOfDay } from "../priority-scale.ts";
+import { PriorityRefused, type FindingKind, type FindingStatus, type PriorityAssertion, type PriorityFinding, type PriorityItem } from "../store.ts";
+import { dueBy } from "../priority-scale.ts";
 import type { Ctx } from "./context.ts";
-import { unattributedAs, writerScope } from "./caller.ts";
+import { asked, unattributedAs, writerScope } from "./caller.ts";
 import { ok, refuse, type FindingInputProblem, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
@@ -38,10 +38,7 @@ export type FindingReviewed = {
   outcome: "asserted" | "unchanged" | "cleared" | null; assertion: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null;
   suppressedUntil: string | null; caller: string;
 };
-export type FindingReviewCode = "REFUSED_NOT_OPERATOR" | "PRIORITY_UNATTRIBUTED" | "WRITE_SCOPE_REQUIRED" | "NOT_FOUND" | "REFUSED_FINDING_INPUT" | "REFUSED_FINDING_DECISION";
-
-/** A date alone is a due time's end of that day, as set_priority reads one (SMD-3778). */
-const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export type FindingReviewCode = "REFUSED_NOT_OPERATOR" | "PRIORITY_UNATTRIBUTED" | "WRITE_SCOPE_REQUIRED" | "NOT_FOUND" | "REFUSED_FINDING_INPUT" | "REFUSED_FINDING_DECISION" | "REFUSED_PRIORITY_INPUT";
 const inputRefused = (problem: FindingInputProblem, message: string) => refuse({ code: "REFUSED_FINDING_INPUT", retryable: false, problem, message });
 
 /**
@@ -69,10 +66,13 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
   if (away) return away;
   if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true });
   const id = input.id.toLowerCase();
-  const r = await (await ctx.store()).reviewPriorityFinding({
-    id, decision: input.decision, level: input.level, dueAt: input.due_at === undefined ? undefined : BARE_DATE.test(input.due_at) ? endOfDay(input.due_at) : input.due_at,
+  // A date alone is due by the end of that day, as set_priority reads one (SMD-3778). A due time Postgres cannot read,
+  // or a 22023 of the writer 142 calls, is set_priority's refusal, the same input answered the same.
+  const r = await asked(PriorityRefused, async () => (await ctx.store()).reviewPriorityFinding({
+    id, decision: input.decision, level: input.level, dueAt: dueBy(input.due_at),
     clear: input.clear, note: input.note, actor: actorOf(ctx, principal), scope: writerScope(principal),
-  });
+  }));
+  if (r instanceof PriorityRefused) return refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: r.problem, message: r.message });
   if (!r.ok) {
     switch (r.error) {
       case "NOT_OPERATOR": return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: r.kind });

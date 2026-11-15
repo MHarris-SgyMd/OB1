@@ -8,6 +8,7 @@
 import type { Citation, ClaimProblem, PriorityItem, PriorityProblem } from "../store.ts";
 import type { ItemProblem } from "../open-items.ts";
 import type { StandingFlag } from "../standing.ts";
+import type { FindingInputError } from "../priority-kinds.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
 /**
@@ -140,8 +141,8 @@ export type Refusal =
 
 /** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder, times and whether the caller's own key holds it — never its label, another key's free text, nor anything that proves ownership. */
 export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string; ownKey: boolean };
-/** A priority finding's decision whose arguments do not go together (142's errors, SMD-3671 PR 2). */
-export type FindingInputProblem = "BAD_DECISION" | "BAD_NOTE" | "ACCEPT_NEEDS_OUTCOME" | "BAD_OUTCOME";
+/** A priority finding's decision whose arguments do not go together (142's errors, SMD-3671 PR 2): priority-kinds.ts's one list. */
+export type FindingInputProblem = FindingInputError;
 /** What a decision does not take (SMD-3338), as the CLI refuses it: a direction or force on a reject, or a note beginning with the pass's own marker (067). */
 export type ReviewArgumentProblem = "direction_on_reject" | "force_on_reject" | "note_marker";
 

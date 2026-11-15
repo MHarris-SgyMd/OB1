@@ -12,3 +12,6 @@ export const FINDING_KINDS = ["stale", "overdue", "disagree", "settled"] as cons
 export type FindingKind = (typeof FINDING_KINDS)[number];
 export const FINDING_STATUSES = ["pending", "accepted", "rejected", "moot"] as const;
 export type FindingStatus = (typeof FINDING_STATUSES)[number];
+/** 142's refusals of a decision's arguments: the store reads them, and the core refuses each first but BAD_OUTCOME's settled rule. */
+export const FINDING_INPUT_ERRORS = ["BAD_DECISION", "BAD_NOTE", "ACCEPT_NEEDS_OUTCOME", "BAD_OUTCOME"] as const;
+export type FindingInputError = (typeof FINDING_INPUT_ERRORS)[number];

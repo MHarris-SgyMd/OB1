@@ -2529,6 +2529,7 @@ export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingR
     : r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a priority finding is decided by the operator's write key.`
     : r.code === "NOT_FOUND" ? `Refused: the brain holds no priority finding ${r.id}; list_priority_findings gives each one's id.`
     : r.code === "REFUSED_FINDING_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}.`
+    : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
     : r.code === "REFUSED_FINDING_DECISION"
       ? r.problem === "NOT_PENDING"
         ? `Refused: finding ${r.id} is ${r.status ?? "decided"} already, not pending${r.status === "moot" ? " (its condition no longer holds)" : ""}; list_priority_findings with status ${r.status ?? "all"} shows it.`

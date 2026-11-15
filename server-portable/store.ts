@@ -21,7 +21,7 @@ import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
-import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS, type FindingKind, type FindingStatus, type PriorityKind } from "./priority-kinds.ts";
+import { FINDING_INPUT_ERRORS, FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS, type FindingInputError, type FindingKind, type FindingStatus, type PriorityKind } from "./priority-kinds.ts";
 import type { ItemAnswer, ItemListRow, ItemRecord, ItemStatus } from "./open-items.ts";
 import type { DeliverableAnswer, DeliverableRecord, VerifyStatus } from "./deliverables.ts";
 
@@ -1561,7 +1561,7 @@ export function normaliseSetCap(r: unknown): SetCapResult {
   throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
-export { FINDING_KINDS, FINDING_STATUSES, type FindingKind, type FindingStatus };
+export { FINDING_INPUT_ERRORS, FINDING_KINDS, FINDING_STATUSES, type FindingInputError, type FindingKind, type FindingStatus };
 /**
  * A statement a priority finding is about (migration 142, SMD-3671), from its evidence: a stale or settled finding's
  * `statements`, or a disagreement's operator and source (`role`). An overdue finding's evidence names a due time, not
@@ -1572,13 +1572,14 @@ export type FindingStatement = { id: string; level: number | null; maker: string
  * One priority finding as the list reads it (migration 142's priority_findings row): its kind, its item (keyed by its
  * pool: a ticket and its own rows are one item), its status, the statements it is about, its evidence as the scan
  * wrote it, its window, when it was found, last refreshed, mooted and decided, who decided it (a key's name), the
- * operator's note, the writer's answer to an accept (`outcome`), and until when the decision holds the same finding
+ * operator's note, the writer's answer to an accept (`outcome`, read as review_priority_finding's answer is: one shape on
+ * the contract; null for a reject or a finding not decided), and until when the decision holds the same finding
  * back.
  */
 export type PriorityFinding = {
   id: string; kind: FindingKind; item: PriorityItem; status: FindingStatus; statements: FindingStatement[];
   evidence: Record<string, unknown>; windowDays: number; foundAt: string; refreshedAt: string; mootAt: string | null;
-  decidedAt: string | null; decidedBy: string | null; note: string | null; outcome: Record<string, unknown> | null; suppressedUntil: string | null;
+  decidedAt: string | null; decidedBy: string | null; note: string | null; outcome: PriorityAnswer | null; suppressedUntil: string | null;
 };
 
 /** A finding's statements from its evidence (see FindingStatement); anything the scan did not write there is left out. */
@@ -1605,7 +1606,7 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
     id: r.id, kind: r.kind as FindingKind, item, status: r.status as FindingStatus, statements: findingStatements(evidence), evidence,
     windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
     decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
-    note: typeof r.decision_note === "string" ? r.decision_note : null, outcome: obj(r.outcome), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
+    note: typeof r.decision_note === "string" ? r.decision_note : null, outcome: r.outcome == null ? null : normalisePriorityAnswer(r.outcome, "priority_findings' outcome"), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
   };
 }
 
@@ -1622,9 +1623,7 @@ export type ReviewFindingResult =
   | { ok: false; error: "NOT_PENDING"; status: FindingStatus; message: string }
   | { ok: false; error: "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; writerCode: string | null; message: string }
   | { ok: false; error: "NOT_WRITE_SCOPE" | "NOT_FOUND" | FindingInputError; message: string };
-/** 142's refusals of a decision's arguments: the schema and the core refuse each first but BAD_OUTCOME's settled rule. */
-export type FindingInputError = "BAD_DECISION" | "BAD_NOTE" | "ACCEPT_NEEDS_OUTCOME" | "BAD_OUTCOME";
-const FINDING_PLAIN_ERRORS = new Set(["NOT_WRITE_SCOPE", "NOT_FOUND", "BAD_DECISION", "BAD_NOTE", "ACCEPT_NEEDS_OUTCOME", "BAD_OUTCOME"]);
+const FINDING_PLAIN_ERRORS = new Set<string>(["NOT_WRITE_SCOPE", "NOT_FOUND", ...FINDING_INPUT_ERRORS]);
 
 /** review_priority_finding's jsonb (142) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
 export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
@@ -2679,7 +2678,8 @@ export interface ThoughtStore {
   /**
    * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
    * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent
-   * id, with write scope (the envelope states the key's) — and every rule of the decision. A database before 142 throws.
+   * id, with write scope (the envelope states the key's) — and every rule of the decision. A due time Postgres cannot
+   * read, or a 22023 of the writer inside, throws PriorityRefused, as assert_priority's does. A database before 142 throws.
    */
   reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult>;
   /**

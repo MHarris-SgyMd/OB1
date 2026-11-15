@@ -7947,7 +7947,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
 {
   const { listPriorityFindings, reviewPriorityFinding } = await import("./core/findings.ts");
   const { normalisePriorityFinding, normaliseReviewFinding } = await import("./store.ts");
-  const { priorityFindingsValue, priorityFindingsLine } = await import("./brain-info.ts");
+  const { priorityFindingsValue, priorityFindingsLine, priorityFindingsRow } = await import("./brain-info.ts");
   const { refusalValue } = await import("./core/refusal.ts");
   const say = await import("./render.ts");
   const text = (r: { content: { text: string }[] }) => r.content[0].text;
@@ -7959,6 +7959,15 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   const disagreeRow = { ...staleRow, kind: "disagree", item_kind: "ticket", item_key: "SMD-3671", status: "rejected", decided_at: new Date("2026-11-13T00:00:00Z"), decided_by: "op-key",
     decision_note: "Linear is right", suppressed_until: new Date("2027-01-12T00:00:00Z"),
     evidence: { operator: { id: A, level: 4, maker: "op-key" }, source: { id: T, level: 1, maker: "linear" } } };
+  const acceptedRow = { ...staleRow, status: "accepted", decided_at: new Date("2026-11-14T00:00:00Z"), decided_by: "op-key", suppressed_until: new Date("2027-01-13T00:00:00Z"),
+    outcome: { outcome: "asserted", code: null, item: { kind: "thought", key: T }, closed: [], replaced: null, winner: null,
+      assertion: { id: A, item: { kind: "thought", key: T }, level: 2, due_at: null, not_before: null, due_ref: null, reason: "review of a stale finding", inferred: false,
+        maker: { name: "op-key", agent_id: "a1", kind: "operator", trust: "operator", scope: "write", source: false }, tier: 1, tier_name: "operator", asserted_at: "2026-11-14T00:00:00Z", closed_at: null, close_reason: null, closed_by: null } } };
+  const readOutcome = normalisePriorityFinding(acceptedRow).outcome;
+  const badOutcome = (() => { try { normalisePriorityFinding({ ...acceptedRow, outcome: { outcome: "maybe" } }); return "read"; } catch { return "threw"; } })();
+  assert(readOutcome?.outcome === "asserted" && readOutcome.assertion?.tierName === "operator" && readOutcome.assertion.assertedAt === "2026-11-14T00:00:00.000Z" && !("tier_name" in (readOutcome.assertion as object))
+      && normalisePriorityFinding(staleRow).outcome === null && badOutcome === "threw",
+    `a decided finding's outcome read as the review's answer is (camelCase, its times ISO), none null, one 142 does not write a fault (${JSON.stringify(readOutcome?.assertion)?.slice(0, 120)} ${badOutcome})`);
   const overdueRow = { ...staleRow, kind: "overdue", status: "moot", moot_at: new Date("2026-11-14T00:00:00Z"), evidence: { due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 } };
   const listAsked: Record<string, unknown>[] = [];
   const listCore = { door: "test", store: async () => ({ listPriorityFindings: async (o: Record<string, unknown>) => { listAsked.push(o); return { total: 7, findings: [staleRow, disagreeRow, overdueRow].map((r) => normalisePriorityFinding(r)) }; } }) };
@@ -8015,7 +8024,8 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && dated.ok && timed.ok && !asCapture.ok && asCapture.refusal.code === "WRITE_SCOPE_REQUIRED" && asCapture.refusal.key === "hook",
     `the id lower-cased, a date due by the end of its day, a time as given, the caller's key, agent id and door as the actor, its scope in the envelope; 142's NOT_WRITE_SCOPE as WRITE_SCOPE_REQUIRED (${JSON.stringify(asked.map((a) => [a.id, a.dueAt, a.scope]))})`);
 
-  const refusedBy = async (answer: unknown) => { const o = await R({ decision: "reject" }, answer); return o.ok ? null : o.refusal; };
+  // A throw is no refusal: the row fails, not the suite.
+  const refusedBy = async (answer: unknown) => { try { const o = await R({ decision: "reject" }, answer); return o.ok ? null : o.refusal; } catch { return null; } };
   const [agentR, foundR, mootR, clearR, writerR, settledR] = await Promise.all([
     refusedBy({ ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may decide a priority finding; op-key is agent" }),
     refusedBy({ ok: false, error: "NOT_FOUND", message: `no priority finding ${F}` }),
@@ -8033,6 +8043,13 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && JSON.stringify(refusalValue(mootR)) === JSON.stringify({ code: "REFUSED_FINDING_DECISION", retryable: false, id: F, problem: "NOT_PENDING", status: "moot" })
       && JSON.stringify(refusalValue(settledR)) === JSON.stringify({ code: "REFUSED_FINDING_INPUT", retryable: false, problem: "BAD_OUTCOME" }),
     `142's refusals: NOT_OPERATOR with the key's kind, NOT_FOUND naming the finding, NOT_PENDING with its status, NOTHING_TO_CLEAR, WRITER_REFUSED with the writer's code, a settled finding's BAD_OUTCOME; each value its tokens alone, never the words (${[agentR, foundR, mootR, clearR, writerR, settledR].map((r) => r && ("problem" in r ? r.problem : r.code)).join(",")})`);
+  // A due time Postgres cannot read, or a 22023 of the writer inside, is set_priority's refusal, not a fault.
+  const { PriorityRefused } = await import("./store.ts");
+  const refusedTime = await reviewPriorityFinding({ door: "test", store: async () => ({ reviewPriorityFinding: async () => { throw new PriorityRefused("time", "due_at or not_before is no time Postgres can read: date/time field value out of range"); } }) } as never,
+    P, { id: F, decision: "accept", level: 2, due_at: "0000-01-01" } as never).catch((e: unknown) => ({ ok: true as const, value: String(e) }));
+  assert(!refusedTime.ok && refusedTime.refusal.code === "REFUSED_PRIORITY_INPUT" && refusedTime.refusal.problem === "time"
+      && text(say.renderReviewPriorityFinding(refusedTime)) === "Refused: due_at or not_before is no time Postgres can read: date/time field value out of range",
+    `a time Postgres cannot read: REFUSED_PRIORITY_INPUT (time), as set_priority answers it (${refusedTime.ok || refusedTime.refusal.code})`);
   // An envelope 142 does not answer is a fault, never a value.
   const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, { ...rejectedA, kind: "late" }, { ...assertedA, answer: { outcome: "maybe" } }, null]
     .map((a) => { try { normaliseReviewFinding(a); return "read"; } catch { return "threw"; } });
@@ -8057,7 +8074,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && words[2] === `Accepted the stale finding ${F} on thought ${T}: cleared your statement, urgent (4) (assertion ${A}), which stays in the history. No statement on it stands now: its priority is unknown.${held}`
       && words[3] === `Rejected the stale finding ${F} on thought ${T}: no priority was changed.${held}`,
     `the words: a level stated, re-confirmed, a clear, a reject, each holding the finding back (${words.join(" | ")})`);
-  const refusalWords = [agentR, foundR, mootR, clearR, writerR, settledR].map((r) => text(say.renderReviewPriorityFinding({ ok: false, refusal: r } as never)));
+  const refusalWords = [agentR, foundR, mootR, clearR, writerR, settledR].map((r) => (r ? text(say.renderReviewPriorityFinding({ ok: false, refusal: r } as never)) : "no refusal"));
   assert(refusalWords[0].startsWith("Refused: only a key the operator classified `operator` may decide a priority finding. This key, op-key, is classified agent")
       && refusalWords[1] === `Refused: the brain holds no priority finding ${F}; list_priority_findings gives each one's id.`
       && refusalWords[2] === `Refused: finding ${F} is moot already, not pending (its condition no longer holds); list_priority_findings with status moot shows it.`
@@ -8073,19 +8090,35 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
     `the findings' hint names a brain before 142 and a role without the grant (${say.findingsHint('relation "priority_findings" does not exist')})`);
 
   // brain_info: the row for each state, and the read's value.
-  const value = priorityFindingsValue({ pending: 3, oldest_s: 3 * 86400 + 5, stale: 2, overdue: 0, disagree: 1, settled: 0, decided_30d: 4 });
+  // The kinds as the SQL groups them, a kind with none absent: each of 142's four read, none a 0.
+  const read = (r: unknown) => { try { return priorityFindingsValue(r as never); } catch { return null; } };
+  const value = read({ pending: 4, oldest_s: 3 * 86400 + 5, by_kind: { stale: 2, disagree: 1, settled: 1 }, decided_30d: 4 }) ?? { pending: -1, oldestPendingS: null, byKind: { stale: 0, overdue: 0, disagree: 0, settled: 0 }, decided30d: 0 };
   const lines = [
     priorityFindingsLine({ priorityFindings: null, unread: {} }),
     priorityFindingsLine({ priorityFindings: null, unread: { priorityFindings: { reason: "refused", message: "permission denied for table priority_findings" } as never } }),
-    priorityFindingsLine({ priorityFindings: priorityFindingsValue({ pending: 0, oldest_s: null, stale: 0, overdue: 0, disagree: 0, settled: 0, decided_30d: 0 }), unread: {} }),
+    priorityFindingsLine({ priorityFindings: read({ pending: 0, oldest_s: null, by_kind: {}, decided_30d: 0 }), unread: {} }),
     priorityFindingsLine({ priorityFindings: value, unread: {} }),
   ];
-  const badRead = [undefined, { pending: "x" }, { pending: 1, oldest_s: "soon", stale: 1, overdue: 0, disagree: 0, settled: 0, decided_30d: 0 }].map((r) => { try { priorityFindingsValue(r as never); return "read"; } catch { return "threw"; } });
-  assert(value.oldestPendingS === 259205 && value.byKind.disagree === 1 && value.decided30d === 4
+  const badRead = [undefined, { pending: "x", by_kind: {} }, { pending: 1, oldest_s: "soon", by_kind: { stale: 1 }, decided_30d: 0 }, { pending: 1, oldest_s: 5, decided_30d: 0 }, { pending: 1, oldest_s: 5, by_kind: { stale: "one" }, decided_30d: 0 }]
+    .map((r) => { try { priorityFindingsValue(r as never); return "read"; } catch { return "threw"; } });
+  const reviews = "an operator key reviews them: list_priority_findings, then review_priority_finding for each";
+  assert(value.oldestPendingS === 259205 && JSON.stringify(value.byKind) === JSON.stringify({ stale: 2, overdue: 0, disagree: 1, settled: 1 }) && value.decided30d === 4
       && lines[0] === "no table — migration 142 is not applied" && /^\? \(priority_findings /.test(lines[1]) && lines[2] === "none pending"
-      && /^3 pending \(2 stale, 1 disagree; the oldest found 3 d ago\) — list_priority_findings lists them; 4 decided in the last 30 days$/.test(lines[3])
+      && lines[3] === `4 pending (2 stale, 1 disagree, 1 settled), the oldest found 3 d ago; 4 decided in the last 30 days — ${reviews}`
       && badRead.every((r) => r === "threw"),
-    `brain_info's Priority findings row: before 142, unread, none pending, pending by kind with the oldest's age and the decided; a read answering no counts throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+    `brain_info's Priority findings row: before 142, unread, none pending, pending by kind in 142's order with the oldest's age and the decided; a read answering no counts throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+  // Preflight's row and brain_info's are one wording (priorityFindingsRow): each state, and an age not known.
+  const rows = [
+    priorityFindingsRow(null, undefined),
+    priorityFindingsRow(null, { reason: "refused", message: "permission denied for table priority_findings" } as never),
+    priorityFindingsRow(null, { reason: "timeout", message: "canceling statement due to lock timeout" } as never),
+    priorityFindingsRow(value, undefined),
+    priorityFindingsRow({ ...value, oldestPendingS: null, decided30d: 0 }, undefined),
+  ];
+  assert(rows[0].status === "skip" && rows[0].detail === "not checked — priority_findings does not exist (migration 142 not applied)"
+      && rows[1].status === "warn" && /--groups priority/.test(rows[1].fix ?? "") && rows[2].status === "warn" && /long transaction/.test(rows[2].fix ?? "")
+      && rows[3].status === "ok" && rows[3].detail === lines[3] && rows[4].detail === `4 pending (2 stale, 1 disagree, 1 settled), the oldest found at an unknown time — ${reviews}`,
+    `preflight's row: a skip before 142, a refusal and a timeout warned with their fixes, the pending ok in brain_info's words (${rows.map((r) => `${r.status}: ${r.detail.slice(0, 60)}`).join(" | ")})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
