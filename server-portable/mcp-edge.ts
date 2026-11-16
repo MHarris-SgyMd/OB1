@@ -372,6 +372,30 @@ export function parsedBody(bodyText: string | null): ParsedBody {
   }
 }
 
+/** Where a 2026-07-28 request carries its revision: this key of `params._meta`, the request's envelope. */
+const ENVELOPE_REVISION = "io.modelcontextprotocol/protocolVersion";
+
+/**
+ * The MCP revision a request names (SMD-4363), for its line: its envelope's,
+ * the body being a 2026-07-28 request's word on itself; else its
+ * `MCP-Protocol-Version` header's, which a 2025-era request carries once it
+ * has initialized; else what an `initialize` offers; else `unnamed`, a
+ * 2025-era request sent with no header (the 2025 revisions ask for the header
+ * and have a server assume 2025-03-26 without one; this line says it was not
+ * named). A batch is read by its header alone. The value is
+ * the caller's string: telemetry.ts writes it only if it is a revision it knows.
+ */
+export function revisionOf(headers: Headers, body: ParsedBody): string {
+  const header = headers.get("mcp-protocol-version");
+  const message = body && !Array.isArray(body.value) ? body.value as { method?: unknown; params?: { protocolVersion?: unknown; _meta?: unknown } | null } | null : null;
+  const params = typeof message?.params === "object" ? message.params : null;
+  const meta = typeof params?._meta === "object" && params._meta !== null ? params._meta as Record<string, unknown> : null;
+  const enveloped = meta?.[ENVELOPE_REVISION];
+  if (typeof enveloped === "string") return enveloped;
+  if (header !== null) return header;
+  return message?.method === "initialize" && typeof params?.protocolVersion === "string" ? params.protocolVersion : "unnamed";
+}
+
 /** What the request's JSON line (telemetry.ts) reads from its body. */
 export type RequestParts = { rpc?: string; tool?: string; toolCalls: number };
 

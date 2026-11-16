@@ -1059,6 +1059,33 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   const nearModern = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw", { modern: true });
   assert(nearLegacy.status === 200 && nearLegacy.body?.result !== undefined && same(replyOf(nearModern), replyOf(nearLegacy)) && nearModern.status === 200, `a 3 MiB call, either revision: answered by its tool (${nearLegacy.status}, ${nearModern.status})`);
 
+  // The line says which revision each request named (SMD-4363): a 2026-07-28 request's envelope; a 2025-era request's
+  // header once it has one; what an initialize offers; `unnamed` with none; `other` for a string that is no revision
+  // this server serves. Read for a request refused at the key too. Never the caller's own text.
+  {
+    const revOf = async (method: string, params: unknown, key: string | undefined, opts: RpcOpts = {}) => { await rpc(method, params, key, opts); return last().rev; };
+    const offered = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } };
+    const got = {
+      modern: await revOf("tools/list", {}, "read-raw", { modern: true }),
+      modernKeyless: await revOf("server/discover", {}, undefined, { modern: true }),
+      legacyBare: await revOf("tools/list", {}, "read-raw"),
+      legacyHeader: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "2025-06-18" } }),
+      initialize: await revOf("initialize", offered, "read-raw"),
+      notServed: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2027-01-01" }, envelope: { "io.modelcontextprotocol/protocolVersion": "2027-01-01" } }),
+      madeUp: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "the private thought" } }),
+      // The envelope against a header that disagrees (the handler refuses the request): the body is the request's word on itself.
+      crossed: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2025-06-18" } }),
+    };
+    assert(same(got, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
+      `each line's \`rev\`: the envelope's, a keyless request's too, and over a header that disagrees; a 2025-era header's, an initialize's offer, \`unnamed\` with none, \`other\` for a revision not served and for a made-up string (${JSON.stringify(got)})`);
+    assert(!lines.some((l) => JSON.stringify(l).includes("private") || JSON.stringify(l).includes("2027")), "…and nothing of a caller's own text on any line");
+    // The list telemetry.ts holds is the installed SDK's: a bump that serves another revision fails here, not in a dashboard.
+    const { MCP_REVISIONS } = await import("../server-portable/telemetry.ts");
+    const { SUPPORTED_PROTOCOL_VERSIONS } = await import("@modelcontextprotocol/server");
+    const served = [MODERN, ...SUPPORTED_PROTOCOL_VERSIONS, "unnamed"].sort();
+    assert(same([...MCP_REVISIONS].sort(), served), `the revisions a line may name are the SDK's 2025-era list, 2026-07-28 and \`unnamed\` (${[...MCP_REVISIONS].sort().join(", ")} against ${served.join(", ")})`);
+  }
+
   // A request the SDK's rule cannot place goes to the handler, which refuses it in its own words: a 2025-era
   // `initialize` under a 2026-07-28 header was served before this, and is a 400 now.
   const mixed = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } }, "read-raw", { headers: { "mcp-protocol-version": MODERN } });

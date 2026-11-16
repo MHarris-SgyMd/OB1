@@ -203,8 +203,10 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   budget as `index.ts`'s was: point a monitor at `/health`.
 
 **Every request's line** is this server's own, `door: "mcp"`, as `index.ts` wrote it
-(SMD-1849): the route as a template, the JSON-RPC method and tool, the key's name once
-known, how it ended — a batch its worst call, a call that never ran `unrun`, a client
+(SMD-1849): the route as a template, the JSON-RPC method and tool, the MCP revision
+the request named (`rev`, SMD-4363: `2026-07-28`, a 2025-era revision, `unnamed` for
+a 2025-era request with no version header, `other` for any other string), the key's
+name once known, how it ended — a batch its worst call, a call that never ran `unrun`, a client
 gone `abandoned`, a stall `stalled` — and the bytes a stream wrote. The REST core's
 lines are its own process's.
 
