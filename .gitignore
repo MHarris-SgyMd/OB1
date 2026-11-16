@@ -69,3 +69,11 @@ recipes/*/data/
 /backup/
 /db/backup/
 /recipes/brain-backup/backup/
+
+# db/lint-sweep.ts's default report (SMD-3318): ./lint-report-<date>.md under
+# the working directory — the repo root's or db/'s from a checkout, or
+# recipes/lint-sweep's for a cron job kept where the recipe's script ran. Its
+# previews are thought text — never to be committed.
+/lint-report-*.md
+/db/lint-report-*.md
+/recipes/lint-sweep/lint-report-*.md

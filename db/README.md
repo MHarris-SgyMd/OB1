@@ -194,24 +194,24 @@ acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed.
 
 **Stop the server and any re-embed or extraction worker first, let any backup
-(`db/backup.ts`, `pg_dump`) finish — its lock keeps a migration that alters a
-table it reads waiting, and the brain's reads and writes of that table behind
-it, until the 10 s lock timeout fails the run — and connect directly, not
-through a transaction-mode pooler:** the migrator sets session
-state (the lock timeout, the pgvector search path) and takes locks across
-statements. It sets a 10 s lock timeout for everything it does — for the
+or sweep (`db/backup.ts`, `pg_dump`, `db/lint-sweep.ts`) finish — its lock
+keeps a migration that alters a table it reads waiting, and the brain's reads
+and writes of that table behind it, until the 10 s lock timeout fails the run —
+and connect directly, not through a transaction-mode pooler:** the migrator
+sets session state (the lock timeout, the pgvector search path) and takes locks
+across statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
-rather than freezing it and every reader behind it. 001 and 003
-take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
-`OB1_TRGM_INDEX` is on and the index is absent; 023's and 050's backfill calls
-run again and take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on
-a first apply; they write nothing when no row is waiting); 055's locks the audit
-rows it fills and then builds its partial index over `thought_audit` (SHARE,
-tens of milliseconds); 025 re-validates its constraints over the table. 021's
-evidence backfill runs as written, the acceptances out of its sight (above);
-030, reached after it in the same transaction, finds nothing of 021's to take
-back and corrects the own-key labels an earlier paste of the body left
-(SMD-1193, SMD-1421).
+rather than freezing it and every reader behind it. 001 and 003 take ACCESS
+EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if `OB1_TRGM_INDEX`
+is on and the index is absent; 023's and 050's backfill calls run again and
+take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on a first
+apply; they write nothing when no row is waiting); 055's locks the audit rows
+it fills and then builds its partial index over `thought_audit` (SHARE, tens of
+milliseconds); 025 re-validates its constraints over the table. 021's evidence
+backfill runs as written, the acceptances out of its sight (above); 030,
+reached after it in the same transaction, finds nothing of 021's to take back
+and corrects the own-key labels an earlier paste of the body left (SMD-1193,
+SMD-1421).
 
 ### 6. Plugin migrations (SMD-2310)
 
@@ -5817,6 +5817,45 @@ a brain with no companion table, the CLI's defaults, and a failed rename. Loaded
 what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
 brings a brain back.
 
+## A quality audit of the brain (SMD-3318)
+
+### `lint-sweep.ts`
+
+```bash
+bun lint-sweep.ts --url postgres://…                         # both tiers; ./lint-report-YYYY-MM-DD.md
+bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
+#   --tier 1|2|all (all; 3 is refused until SMD-3318 PR 2b)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
+#   exits 0 report written · 1 a read or the write failed (no report) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+```
+
+Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read in
+one REPEATABLE READ, READ ONLY transaction. Tier 1: the thoughts' row count and
+rows with no fingerprint (exact), and in the 2,000 newest the thoughts with no
+topics, tags or people, with more than 10 tags, or with empty or
+over-20,000-character content once trimmed of what a preview drops or
+collapses; a metadata list's entries are those the brain shows. Tier 2: in the
+500 newest, the thoughts no `thought_entities` row mentions, and the
+`ob1_entities` with no edge (exact). The recipe's two `importance` checks and
+its fingerprint groups are gone: the core has no `importance` (SMD-3661), and
+migration 003's partial unique index makes a set fingerprint unique (a twin of
+a fingerprinted thought's content keeps none, among the rows the no-fingerprint
+count counts). A thought with no `created_at`, or an infinite one, is in no
+sample, and counted; each tier reads its sample once, ordered by `created_at`
+alone, so ties at its edge cost nothing. The transaction's first statement
+locks the tables the tiers read (ACCESS SHARE, as pg_dump does), under
+`--statement-timeout` (60 s), which the whole-table counts lift; every lock
+wait, the counts' included, is bounded by the same value (`lock_timeout`). Keep
+a sweep apart from an upgrade: an `ALTER` of those tables waits for it, and
+their traffic behind the `ALTER`. The markdown report is written 0600 through a
+file of the run's own renamed into place, once every read succeeded. Tier 3, a
+model's reading of sampled thoughts, follows in SMD-3318 PR 2b through the
+provider and the egress gate. test-live [26] holds every count against a
+planted table (undated and infinite rows, non-array metadata, and each
+threshold's edge among it), the report's previews made safe and its path rules,
+the bound on a lock wait (a held table, and a held REINDEX under an unbounded
+count), a role that may not read a table, a report that cannot be written, and
+the refusals.
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
@@ -7299,7 +7338,7 @@ page, which Brain Checks writes on every push to main (SMD-3614).
 
 ```bash
 bun test-schema.ts                          # PGlite, no container
-./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
