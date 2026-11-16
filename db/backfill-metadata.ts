@@ -15,7 +15,8 @@
  * neither column: a thought's type is `metadata.type`, and its tier
  * `metadata.sensitivity_tier`, the key the import recipes set and
  * `db/weekly-digest.ts` reads. So both passes write the metadata key; where
- * the column exists they write it too, as the recipe did, for that schema's
+ * the column exists they write it too, as the recipe wrote it (by the rules
+ * below, which differ from the recipe's where they say so), for that schema's
  * readers (its search and stats functions, the bio worker, ops views). The
  * recipe's third script, enrich-thoughts, is SMD-2298's re-tag worker
  * (SMD-3318 PR 3b).
@@ -28,22 +29,29 @@
  * alias's words kept in `type_raw` as the capture keeps them. A type that
  * names none of them (an importer's `decision`, consolidation's `synthesis`)
  * is counted and left: the capture would have coerced it to `observation`,
- * which loses what it said. A row an importer owns (its trust `ingested`) is
- * left too: its type is the importer's facet, and its next sync would write
- * it back. Where the `type` column exists, the recipe's rule writes it: a row
- * whose column says `reference` takes its metadata type (as the capture
- * names it) when that is one of the recipe's eight and not `reference`.
+ * which loses what it said. A row an importer owns (its trust `ingested`)
+ * keeps its key too: its type is the importer's facet, and its next sync would
+ * write it back. Where the `type` column exists — an importer's row's
+ * included, which no import writes — the recipe's rule writes it, on the type
+ * as the capture names it: a row whose column says `reference` takes that type
+ * when it is one of the recipe's eight and not `reference`. The recipe read
+ * the type as written, so `Task`, `todo` and `contact` now set the column
+ * where they were skipped.
  *
- * sensitivity: a thought's text is read against the recipe's patterns (below):
- * the first restricted pattern that matches makes it `restricted`, else any
- * personal one `personal`. Each place — the metadata key, and the column where
- * it exists — takes that tier when it is higher than what the place says
- * (absent, empty and `standard`, in any case, are lowest; then `personal`,
- * then `restricted`); a tier is never lowered, `standard` never written, and a
- * place holding something else (a number, `secret`) is left. A thought whose
- * places both say `restricted` is not read. The run prints a thought's id and
- * the patterns' labels, never its text (an API key, a card number), where the
- * recipe printed 80 characters of each.
+ * sensitivity: a thought's text is read against the recipe's patterns
+ * (`db/sensitivity.ts`, shared with weekly-digest): the first restricted
+ * pattern that matches makes it `restricted`, else any personal one
+ * `personal`. Each place — the metadata key, and the column where it exists —
+ * takes the highest of that tier and the other place's when it is higher than
+ * what the place says (absent, empty and `standard`, in any case, are lowest;
+ * then `personal`, then `restricted`), so neither reads lower than the other; a
+ * tier is never lowered, `standard` never written, and a place holding
+ * something else (a number, `secret`) is left. (The recipe read only a column
+ * of exactly `standard`, empty or NULL, and never raised `personal`.) A thought
+ * whose places both say `restricted` is not read. The run prints a thought's id
+ * and where its tier came from (the patterns' labels, or the other place),
+ * never its text (an API key, a card number), where the recipe printed 80
+ * characters of each.
  *
  * ── What a run guarantees ───────────────────────────────────────────────────
  * Without --apply nothing is written: the run says what would be. With it, a
@@ -56,15 +64,19 @@
  * double-encoding) merges no patch: its keys are counted, not written (its
  * columns are). The table is read by key, a page (--batch, 500) a statement,
  * each statement bounded by --statement-timeout (60 s; 0 for none), so a run's
- * reads never hold a snapshot or a lock for its length. --limit stops after
+ * reads never hold a snapshot or a lock for its length; a page holds its rows'
+ * whole text, so a brain of long documents takes a smaller --batch (500 rows
+ * of 1 MB is about a gigabyte). --limit stops after
  * that many rows written (or, in a dry run, that would be). The database the
  * URL names is the one written: a connection that reached another (PGDATABASE)
  * is refused, exit 2. Exit 0 a run that ended, 1 one that failed (the reason
  * printed; rows already written stay written), 2 a refusal.
  *
  * A write moves the row's `updated_at`; its actor stamp (who wrote the
- * thought, its trust) stays, as on any edit that keeps the text, and the
- * audit event names `backfill-metadata`. Run it between re-embed passes, as
+ * thought, its trust) stays, as on any edit that keeps the text. A key's write
+ * appends an audit event naming `backfill-metadata`; a column's alone appends
+ * none (the audit records the core's columns, not a community schema's), as
+ * the recipe's raw column writes did not. Run it between re-embed passes, as
  * the recipe's README said of its own. A role needs what `bun db/migrate.ts
  * --grant <role>` gives (update_thought reads `ob1_agents` and `ob1_config`).
  */
@@ -73,6 +85,7 @@ import type { SQL } from "bun";
 import { canonicalType } from "../server-portable/thoughts.ts";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, openSql, reachedDatabaseRefusal } from "./connect.ts";
+import { RANK, sensitivityOf, TIER_OF_RANK, tierRank } from "./sensitivity.ts";
 
 /** The rows a page reads, by default. */
 const BATCH = 500;
@@ -84,49 +97,6 @@ const STATEMENT_TIMEOUT_S = 60;
 const ACTOR = { name: "backfill-metadata", via: "db/backfill-metadata.ts" };
 /** The recipe's types for the `type` column (backfill-type.mjs's VALID_TYPES). */
 const COLUMN_TYPES: ReadonlySet<string> = new Set(["idea", "task", "person_note", "reference", "decision", "lesson", "meeting", "journal"]);
-
-/**
- * The recipe's patterns (`recipes/thought-enrichment/sensitivity-patterns.json`,
- * copied whole): [source, flags, label]. None is global, so a test keeps no
- * state between thoughts.
- */
-export const PATTERNS: { readonly restricted: readonly (readonly [string, string, string])[]; readonly personal: readonly (readonly [string, string, string])[] } = {
-  restricted: [
-    ["\\b\\d{3}-?\\d{2}-?\\d{4}\\b", "", "ssn_pattern"],
-    ["\\b[A-Z]{1,2}\\d{6,9}\\b", "", "passport_pattern"],
-    ["\\b\\d{8,17}\\b[^\\n]{0,80}\\b(account|routing|iban)\\b", "i", "bank_account"],
-    ["\\b(account|routing)\\b[^\\n]{0,80}\\b\\d{8,17}\\b", "i", "bank_account"],
-    ["\\b(sk-|pk_live_|sk_live_|ghp_|gho_|AKIA)[A-Za-z0-9]{10,}", "i", "api_key"],
-    ["\\bpassword\\s*[:=]\\s*\\S+", "i", "password_value"],
-    ["\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b", "", "credit_card"],
-  ],
-  personal: [
-    ["\\b\\d+\\s*mg\\b(?!\\s*\\/\\s*(dL|kg|L|ml))", "i", "medication_dosage"],
-    ["\\b(pregabalin|metoprolol|losartan|lisinopril|aspirin|atorvastatin|sertraline|metformin|gabapentin|prednisone|insulin|warfarin)\\b", "i", "drug_name"],
-    ["\\b(glucose|a1c|cholesterol|blood pressure|bp|hrv|bmi)\\b[^\\n]{0,80}\\b\\d+", "i", "health_measurement"],
-    ["\\b(diagnosed|diagnosis|prediabetic|diabetic|arrhythmia|ablation)\\b", "i", "medical_condition"],
-    ["\\b(salary|income|net worth|401k|ira|portfolio)\\b[^\\n]{0,80}\\b\\$?\\d", "i", "financial_detail"],
-    ["\\b\\$\\d{3,}[,\\d]*\\b", "i", "financial_amount"],
-  ],
-};
-const RESTRICTED = PATTERNS.restricted.map(([source, flags, label]) => [new RegExp(source, flags), label] as const);
-const PERSONAL = PATTERNS.personal.map(([source, flags, label]) => [new RegExp(source, flags), label] as const);
-
-/** A thought's tier by the patterns, with the labels that set it: the first restricted match alone, else every personal one. */
-export function sensitivityOf(text: string): { tier: "restricted" | "personal" | "standard"; labels: string[] } {
-  for (const [re, label] of RESTRICTED) if (re.test(text)) return { tier: "restricted", labels: [label] };
-  const labels = PERSONAL.filter(([re]) => re.test(text)).map(([, label]) => label);
-  return labels.length ? { tier: "personal", labels: [...new Set(labels)] } : { tier: "standard", labels: [] };
-}
-
-/** A tier's rank: 0 absent, empty or standard (any case), 1 personal, 2 restricted; null for anything else, which is left. */
-export function tierRank(v: unknown): number | null {
-  if (v === null || v === undefined) return 0;
-  if (typeof v !== "string") return null;
-  const t = v.trim().toLowerCase();
-  return t === "" || t === "standard" ? 0 : t === "personal" ? 1 : t === "restricted" ? 2 : null;
-}
-const RANK = { standard: 0, personal: 1, restricted: 2 } as const;
 
 export type Pass = "type" | "sensitivity";
 
@@ -147,7 +117,10 @@ interface Counts {
   /** Rows written (or, in a dry run, that would be). */
   written: number;
   type: { canonical: number; column: number; unknown: number; importers: number; listed: string[]; unknownValues: Map<string, number> };
-  sensitivity: { restricted: number; personal: number; standard: number; column: number; listed: string[] };
+  sensitivity: { restricted: number; personal: number; standard: number; keys: number; columns: number; listed: string[] };
+  /** The enhanced-thoughts columns the run writes. */
+  typeCol: boolean;
+  tierCol: boolean;
   /** Keys not written: the row's metadata not a JSON object. */
   notObject: number;
   /** Pages read that held rows. */
@@ -176,7 +149,8 @@ export async function run(opts: BackfillOptions): Promise<number> {
   const c: Counts = {
     scanned: 0, written: 0, notObject: 0, pages: 0, moved: 0, gone: 0, limited: false,
     type: { canonical: 0, column: 0, unknown: 0, importers: 0, listed: [], unknownValues: new Map() },
-    sensitivity: { restricted: 0, personal: 0, standard: 0, column: 0, listed: [] },
+    sensitivity: { restricted: 0, personal: 0, standard: 0, keys: 0, columns: 0, listed: [] },
+    typeCol: false, tierCol: false,
   };
   try {
     const [{ db }] = (await sql.unsafe("SELECT pg_catalog.current_database() AS db")) as { db: string }[];
@@ -191,6 +165,8 @@ export async function run(opts: BackfillOptions): Promise<number> {
     const cols = new Set(((await sql`SELECT column_name AS c FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name IN ('type', 'sensitivity_tier')`) as { c: string }[]).map((r) => r.c));
     const typeCol = doType && cols.has("type"), tierCol = doSensitivity && cols.has("sensitivity_tier");
+    c.typeCol = typeCol;
+    c.tierCol = tierCol;
     w.out(`[backfill-metadata] database ${db}, passes ${opts.passes.join(", ")}, ${opts.apply ? "writing" : "a dry run (--apply writes)"}${typeCol || tierCol ? `; the ${[typeCol ? "type" : "", tierCol ? "sensitivity_tier" : ""].filter(Boolean).join(" and ")} column${typeCol && tierCol ? "s" : ""} too` : ""}`);
     // The page's columns, fixed strings named by the probe above; a row's text only when the sensitivity pass may write a
     // place (not when every place it has already says restricted).
@@ -231,15 +207,17 @@ export async function run(opts: BackfillOptions): Promise<number> {
           if (typeCol && row.col_type === "reference" && columnType !== null && columnType !== "reference" && COLUMN_TYPES.has(columnType)) colPatch.type = columnType;
         }
         let tier: ReturnType<typeof sensitivityOf> | null = null;
+        let target = 0, source = "";
         if (doSensitivity && row.content !== null) {
           tier = sensitivityOf(row.content);
-          if (tier.tier === "standard") c.sensitivity.standard++;
-          else {
-            const metaRank = tierRank(row.meta_tier);
-            if (metaRank !== null && RANK[tier.tier] > metaRank) patch.sensitivity_tier = tier.tier;
-            const colRank = tierCol ? tierRank(row.col_tier) : null;
-            if (colRank !== null && RANK[tier.tier] > colRank) colPatch.sensitivity_tier = tier.tier;
-          }
+          // Each place takes the highest of the patterns' tier and the other place's, so neither reads lower than the
+          // other; a place holding a tier this does not rank is left.
+          const metaRank = tierRank(row.meta_tier);
+          const colRank = tierCol ? tierRank(row.col_tier) : null;
+          target = Math.max(RANK[tier.tier], metaRank ?? 0, colRank ?? 0);
+          source = RANK[tier.tier] === target ? tier.labels.join(", ") : metaRank === target ? "the key's tier" : "the column's tier";
+          if (metaRank !== null && target > metaRank) patch.sensitivity_tier = TIER_OF_RANK[target];
+          if (colRank !== null && target > colRank) colPatch.sensitivity_tier = TIER_OF_RANK[target];
         }
         // Metadata that is not an object merges no patch (update_thought's `||`): its keys are counted and dropped.
         if (!isObject && Object.keys(patch).length) {
@@ -248,6 +226,7 @@ export async function run(opts: BackfillOptions): Promise<number> {
         }
         if (Object.keys(patch).length === 0 && Object.keys(colPatch).length === 0) {
           c.scanned++;
+          if (tier?.tier === "standard") c.sensitivity.standard++;
           continue;
         }
         if (limit && c.written >= limit) {
@@ -269,12 +248,13 @@ export async function run(opts: BackfillOptions): Promise<number> {
           if (c.type.listed.length < LISTED) c.type.listed.push(`  - ${row.id}: ${JSON.stringify(String(row.type).slice(0, 40))} → ${patch.type}`);
         }
         if (colPatch.type) c.type.column++;
-        if (tier && (patch.sensitivity_tier || colPatch.sensitivity_tier)) {
-          if (tier.tier === "restricted") c.sensitivity.restricted++;
+        if (patch.sensitivity_tier || colPatch.sensitivity_tier) {
+          if (TIER_OF_RANK[target] === "restricted") c.sensitivity.restricted++;
           else c.sensitivity.personal++;
-          if (colPatch.sensitivity_tier) c.sensitivity.column++;
-          if (c.sensitivity.listed.length < LISTED) c.sensitivity.listed.push(`  - ${row.id}: ${tier.tier} (${tier.labels.join(", ")})`);
-        }
+          if (patch.sensitivity_tier) c.sensitivity.keys++;
+          if (colPatch.sensitivity_tier) c.sensitivity.columns++;
+          if (c.sensitivity.listed.length < LISTED) c.sensitivity.listed.push(`  - ${row.id}: ${TIER_OF_RANK[target]} (${source})`);
+        } else if (tier?.tier === "standard") c.sensitivity.standard++;
       }
       after = rows[rows.length - 1].id;
       if (rows.length < batch) break;
@@ -323,14 +303,15 @@ async function writeRow(sql: SQL, row: PageRow, patch: Record<string, string>, c
 function report(w: Writer, opts: BackfillOptions, c: Counts): void {
   const would = opts.apply ? "written" : "would be written";
   if (opts.passes.includes("type")) {
-    w.out(`[type] ${c.type.canonical} ${would} as the capture's type${c.type.column ? ` (and ${c.type.column} type column${c.type.column === 1 ? "" : "s"} from a type the recipe names)` : ""}; ${c.type.unknown} naming no type, left; ${c.type.importers} an importer's, left`);
+    w.out(`[type] ${c.type.canonical} ${would} as the capture's type${c.typeCol ? ` (and ${c.type.column} type column${c.type.column === 1 ? "" : "s"} from a type the recipe names)` : ""}; ${c.type.unknown} naming no type, left; ${c.type.importers} an importer's key, left`);
     for (const l of c.type.listed) w.out(l);
     if (c.type.canonical > c.type.listed.length) w.out(`  - …and ${c.type.canonical - c.type.listed.length} more`);
     const unknown = [...c.type.unknownValues].sort((a, b) => b[1] - a[1]).slice(0, LISTED);
     if (unknown.length) w.out(`  naming no type: ${unknown.map(([v, n]) => `${JSON.stringify(v)} ×${n}`).join(", ")}`);
   }
   if (opts.passes.includes("sensitivity")) {
-    w.out(`[sensitivity] ${c.sensitivity.restricted} restricted and ${c.sensitivity.personal} personal ${would}${c.sensitivity.column ? ` (${c.sensitivity.column} into the sensitivity_tier column)` : ""}; ${c.sensitivity.standard} read as standard, left`);
+    const k = c.sensitivity.keys, col = c.sensitivity.columns;
+    w.out(`[sensitivity] ${c.sensitivity.restricted} restricted and ${c.sensitivity.personal} personal ${would} (${k} key${k === 1 ? "" : "s"}${c.tierCol ? `, ${col} column${col === 1 ? "" : "s"}` : ""}); ${c.sensitivity.standard} read as standard, left`);
     for (const l of c.sensitivity.listed) w.out(l);
     const more = c.sensitivity.restricted + c.sensitivity.personal - c.sensitivity.listed.length;
     if (more > 0) w.out(`  - …and ${more} more`);

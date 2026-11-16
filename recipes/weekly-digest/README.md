@@ -35,9 +35,10 @@ TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=… \
 
 The verb keeps the recipe's behaviour — a `--window` of days, the
 `restricted`/`personal` sensitivity exclusion, by a row's
-`metadata.sensitivity_tier` or by the column where a brain has it (on a brain
-without the column, the key alone: `bun db/backfill-metadata.ts` sets it from
-the recipe's patterns; `--no-sensitivity-filter` sends every row), and
+`metadata.sensitivity_tier`, by the column where a brain has it, or by the
+sensitivity patterns over its whole text (`db/sensitivity.ts`, the ones
+`bun db/backfill-metadata.ts` tags with), so an untagged capture is held back
+too (`--no-sensitivity-filter` sends every row), and
 `--output telegram|stdout|file` —
 and adds the gate: both the LLM synthesis and the Telegram send are decided by
 the egress policy, so brain content leaves only when an operator opts the digest

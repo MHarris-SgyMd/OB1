@@ -13,7 +13,7 @@
  * default deny the send is refused; a matching OB1_EGRESS_ALLOW term lets it
  * through; a local endpoint (the drop-the-gate mutant) always would. The
  * DB-backed behavior (the sensitivity filter, the stub that records zero requests)
- * lives in test-live.ts [20b].
+ * lives in test-live.ts [36] and [51].
  */
 
 import { resolveEgressPolicy, mayLeaveBox, type EgressSubject } from "../server-portable/egress.ts";

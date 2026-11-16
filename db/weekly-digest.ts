@@ -54,17 +54,20 @@
  * the run says so.
  *
  * ── Sensitivity ─────────────────────────────────────────────────────────────
- * Rows tagged `restricted` (always) and `personal` (unless --include-personal)
- * are excluded, by `metadata.sensitivity_tier` — the import recipes' facet
- * (SMD-2493) and `db/backfill-metadata.ts`'s tier — and, where a brain has
- * `schemas/enhanced-thoughts`' `sensitivity_tier` column, by the column too,
- * whichever says so; NULL and every other tier are kept. A brain without the
- * column filters on the key alone: until SMD-3318 it refused to run rather
- * than read a core brain, whose only tier is the key. --no-sensitivity-filter
- * says, in as many words, to send everything.
+ * Rows `restricted` (always) and `personal` (unless --include-personal) are
+ * excluded three ways, whichever says so: by `metadata.sensitivity_tier` (the
+ * import recipes' facet, SMD-2493, and `db/backfill-metadata.ts`'s tier); by
+ * `schemas/enhanced-thoughts`' `sensitivity_tier` column, where a brain has it
+ * (each compared in any case, trimmed); and by the sensitivity patterns
+ * (`db/sensitivity.ts`, the backfill's) over each remaining row's whole text,
+ * so a thought captured since the backfill last ran is held back too — the
+ * capture tags no tier. Other tiers are kept. Until SMD-3318 a brain without
+ * the column refused to run. --no-sensitivity-filter says, in as many words,
+ * to send everything.
  */
 
 import { commandLine } from "./cli.ts";
+import { sensitivityOf } from "./sensitivity.ts";
 import { databaseUrl, openSql, closeThenExit } from "./connect.ts";
 import { providerCall, providerEndpoint, refuseRedirect, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
@@ -90,6 +93,9 @@ const SYNTHESIZE_INPUT_CAP = 80;
 // keeps each group's newest, so a cut drops the later turns (each group's oldest
 // rows), never a day or a writer.
 const FETCH_HARD_CAP = 5000;
+// The rows whose whole text one statement reads for the sensitivity patterns: a window of long documents is read a
+// batch at a time, never whole (SMD-3318).
+const PATTERN_BATCH = 100;
 // The most effective_priority reads in one call (122's limit): the window is read in chunks of it.
 const PRIORITY_READ_MAX = 1000;
 
@@ -322,13 +328,16 @@ export function chunkForTelegram(text: string, limit = TELEGRAM_CHUNK_LIMIT): st
  * The window's rows, each numbered by its turn (pickForDigest), in turn order and
  * capped, so a cap reached on a busy window drops later turns, not whole
  * days or writers. `restricted` (always) and `personal` (unless
- * includePersonal) are excluded by the row's `metadata.sensitivity_tier`, and
- * by the column where it exists, unless the filter was waived.
+ * includePersonal) are excluded by the row's `metadata.sensitivity_tier`, by
+ * the column where it exists, and by the patterns over the row's whole text
+ * (read in batches of PATTERN_BATCH, so a page of long documents is not held
+ * at once), unless the filter was waived. `patternExcluded` counts the rows the
+ * patterns alone held back.
  */
 export async function readThoughts(
   sql: SQL,
   opts: { windowDays: number; includePersonal: boolean; noSensitivityFilter: boolean },
-): Promise<{ rows: DigestThought[]; more: boolean }> {
+): Promise<{ rows: DigestThought[]; more: boolean; patternExcluded: number }> {
   const [cols] = await sql`
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has_sensitivity`;
@@ -350,8 +359,8 @@ export async function readThoughts(
     // The tier a row's metadata carries counts as the column's does: an import
     // through the ingestion pipeline sets the facet, and the column keeps its
     // default 'standard' (SMD-2493). Without the column the key is the tier.
-    if (hasSensitivity) where += " AND (sensitivity_tier IS NULL OR sensitivity_tier <> ALL($2))";
-    where += " AND (metadata->>'sensitivity_tier' IS NULL OR metadata->>'sensitivity_tier' <> ALL($2))";
+    if (hasSensitivity) where += " AND (sensitivity_tier IS NULL OR lower(btrim(sensitivity_tier)) <> ALL($2))";
+    where += " AND (metadata->>'sensitivity_tier' IS NULL OR lower(btrim(metadata->>'sensitivity_tier')) <> ALL($2))";
     params.push(sql.array(excluded, "TEXT"));
   }
 
@@ -367,7 +376,17 @@ export async function readThoughts(
     params,
   )) as DigestThought[];
   const more = rows.length > FETCH_HARD_CAP;
-  return { rows: more ? rows.slice(0, FETCH_HARD_CAP) : rows, more };
+  const kept = more ? rows.slice(0, FETCH_HARD_CAP) : rows;
+  if (!filter || kept.length === 0) return { rows: kept, more, patternExcluded: 0 };
+  // The patterns over each kept row's whole text (the prompt reads 280 characters; a secret can sit past them).
+  const held = new Set<string>();
+  const tiers = new Set(opts.includePersonal ? ["restricted"] : ["restricted", "personal"]);
+  for (let i = 0; i < kept.length; i += PATTERN_BATCH) {
+    const ids = kept.slice(i, i + PATTERN_BATCH).map((r) => String(r.id));
+    const texts = (await sql.unsafe("SELECT id::text AS id, content FROM thoughts WHERE id = ANY($1::uuid[])", [sql.array(ids, "TEXT")])) as { id: string; content: string }[];
+    for (const t of texts) if (tiers.has(sensitivityOf(t.content).tier)) held.add(t.id);
+  }
+  return { rows: kept.filter((r) => !held.has(String(r.id))), more, patternExcluded: held.size };
 }
 
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 500);
@@ -550,6 +569,9 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   }
 
   const read = await readThoughts(sql, args);
+  if (read.patternExcluded > 0) {
+    console.error(`  left out ${read.patternExcluded} thought(s) the sensitivity patterns rate ${args.includePersonal ? "restricted" : "restricted or personal"} that no tier marks (bun db/backfill-metadata.ts --apply tags them)`);
+  }
   if (args.noSensitivityFilter) {
     console.error(
       "  ⚠  --no-sensitivity-filter: every row in the window (including any restricted/personal) will be synthesized and may leave the box.",
