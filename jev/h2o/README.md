@@ -225,14 +225,17 @@ when that P(outdates) clears the floor: under it a proposal could not be
 recorded, and the pair takes the relation H2O's distribution gives at the
 floor, as a quote that fails does, else its edge is closed. Since version 4
 (SMD-3203) the writer is first asked the mediated-pair test's link step
-(`docs/subject-anchored-claims.md`) about such a pair, and about an evolves the
-pass would store. A pair linked only through a third subject, or by one thought
-naming the other's subject in passing, is related at most, and no proposal is
-written for it.
+(`docs/subject-anchored-claims.md`) about such a pair, and version 4 about an
+evolves the pass would store. A pair linked only through a third subject, or by
+one thought naming the other's subject in passing, is related at most, and no
+proposal is written for it. Since version 5 (SMD-3306) the pass folds H2O's
+evolves into related before it chooses: a work thread's edges give evolves, so
+the link step is asked only of an outdates at the floor.
 
 **The record rule** (decide version 2, shelved 2026-10-18; the pass runs version
-4, version 1's writer with its quotes read without markdown and asked only at
-the floor, SMD-3151, behind the link step, SMD-3203) came from
+5, version 1's writer with its quotes read without markdown and asked only at
+the floor, SMD-3151, behind the link step, SMD-3203, H2O's evolves stored as
+related, SMD-3306) came from
 the canary's first proposals.
 There, 38 of 48 outdated a Linear ticket, 35 of those tickets already said Done,
 and 23 gave the ticket's work being completed as the whole reason. The
@@ -318,7 +321,7 @@ To try it by hand instead:
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.
-- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d4`, so turning
+- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d5`, so turning
   decide mode on, or moving to a new decide version, starts a fresh pass over
   the pool. Proposals are reviewed as
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or

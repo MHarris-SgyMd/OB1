@@ -69,6 +69,7 @@ import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
+import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, closedClaimsStep, formatClosedClaims, groupTicketRows, priorityStep, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import type { Ingested } from "./ingest-contract.ts";
@@ -19504,10 +19505,11 @@ if (want("16")) {
   // with decide mode's lineage, a related pair is a relation with no writer
   // call, so is an outdates under the floor, and a writer's "none" leaves
   // neither. Since decide version 4 (SMD-3203) the writer's link step comes
-  // first on an outdates at the floor and after on an evolves the pass would
-  // store: an F link leaves the gateway pair no proposal, and an H link stores
-  // the pager pair's evolves as related. A start without the tier, or with the
-  // tier held to another model, is refused before anything is claimed.
+  // first on an outdates at the floor: an F link leaves the gateway pair no
+  // proposal. Since version 5 (SMD-3306 PR 7b) the pager pair's evolves is
+  // stored as related, the work threads giving evolves, and no link step is
+  // asked after it. A start without the tier, or with the tier held to another
+  // model, is refused before anything is claimed.
   {
     const DECIDER = "h2o-stub", WRITER = "stub-writer";
     const DKEY = decideKey(DECIDER, WRITER);
@@ -19551,8 +19553,8 @@ if (want("16")) {
         const prompt = body.messages?.[0]?.content ?? "";
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
         writerModels.add(String(body.model));
-        // Decide version 4's link step (SMD-3203): the gateway pair's thoughts share only a third subject, and the
-        // pager pair's one names the other's subject in passing; the rest are direct.
+        // Decide version 4's link step (SMD-3203): the gateway pair's thoughts share only a third subject; the rest are
+        // direct. The pager pair's evolves asks none since version 5: were it asked, its H link would cap it.
         if (prompt.endsWith(LINK_ANSWER)) {
           linkCalls++;
           const link = /gateway/.test(thoughtsIn(prompt)) ? { link: "F", via: "release 4", reason: "both report release 4's state" }
@@ -19613,6 +19615,7 @@ if (want("16")) {
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
+          && banner.some((l) => /^\s*decide: .*an evolves is stored as related, folded into it before the choice, the work threads giving evolves \(OB1_CONSOLIDATE_DECIDER/.test(l))
           && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 12 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0 && linkCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
 
@@ -19657,27 +19660,28 @@ if (want("16")) {
         `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
       // Decide version 4 (SMD-3203): the gateway pair, an outdates at the floor whose link step finds F, is written no
       // proposal and takes the tier's related, capped, under the floor, and its stale proposal is settled, the note
-      // saying the link step capped it; the pager pair, an evolves the pass would store, is asked the link step after,
-      // and its H link stores it related at the tier's P(related), at the same floor.
+      // saying the link step capped it. Version 5 (SMD-3306 PR 7b): the pager pair, an evolves the pass would store, is
+      // stored related at the tier's P(related) + P(evolves), at the same floor, its note marked, no link step asked.
       const [gateAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${gateProp}::uuid`) as { status: string; review_note: string | null }[];
       const cappedNote = passSettledNote("judged again after a text moved — related, capped by the writer's link step (an F link, SMD-3203)", DKEY);
-      type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
+      type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; threaded?: boolean; writer?: unknown } } } };
       const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
       const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
-      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null })
+      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null; threaded?: boolean | null })
         .find((l) => l.newer === n && l.older === o);
       const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
       assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
           && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
-          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
-          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.asked === "after" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
-        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
-      assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
+          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link === undefined && pager.recipe.judged.decide.threaded === true
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.8 && pagerDump?.verdict === "related" && pagerDump.threaded === true && (gateDump?.threaded ?? null) === null && (pagerDump.link ?? null) === null && (pagerDump.asked ?? null) === null
+          && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
+        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so); the pager pair's evolves is stored as related at the tier's P(related) + P(evolves), its note marked, no link step asked (version 5); and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
+      assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 3 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
           && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
-          && /decide: the writer's link step asked on 4 pair\(s\) — 2 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out),
-        `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and the evolves the pass would store, and the writer only about the two the link step found direct, as the judge's model with the part rule and not the record rule, and the run's summary counts each (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: the/.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"})`);
+          && /decide: the writer's link step asked on 3 pair\(s\) — 1 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out),
+        `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and not the evolves (version 5), and the writer only about the two the link step found direct, as the judge's model with the part rule and not the record rule, and the run's summary counts each (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: the/.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
       assert(dclaims.succeeded === 12 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
 
@@ -20173,6 +20177,36 @@ if (want("19")) {
   const patched = await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } });
   assert(patched.outcome === "patched" && (await sql`SELECT metadata->>'file' AS f FROM thoughts WHERE id = ${docs[2].id}::uuid`)[0].f === "test-note-a", `a record whose text stands and whose metadata gained a key is 'patched' (${patched.outcome})`);
   assert((await upsertRecord(sql, { ...edited, meta: { file: "test-note-a" } })).outcome === "unchanged", "…and the same record again is 'unchanged' — a key already held is not a patch");
+
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    // 139 (SMD-1723): a record whose text was forgotten is 'forgotten' — counted and named, nothing written — not an
+    // error that ends the run (review pass 4: every later run ended at it too).
+    const forgottenDoc = mk("fork", "1139", "a record forgotten later, SMD-1723");
+    const firstGo = (await upsertRecord(sql, forgottenDoc)).outcome;
+    await sql`SELECT forget_thought(${forgottenDoc.id}::uuid)`;
+    const secondGo = (await upsertRecord(sql, forgottenDoc)).outcome;
+    assert(firstGo === "inserted" && secondGo === "forgotten", `a record whose text was forgotten comes back 'forgotten', not a crash (${firstGo}, ${secondGo})`);
+    // …and edited since at its source, a text the refusal never saw: still forgotten, by its id (review pass 7), nothing written.
+    const editedGo = (await upsertRecord(sql, { ...forgottenDoc, content: "a record forgotten later, SMD-1723, edited at its source" })).outcome;
+    const editedRows = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${forgottenDoc.id}::uuid`)[0].c);
+    assert(editedGo === "forgotten" && editedRows === 0, `a forgotten record edited at its source stays forgotten, by its id (${editedGo}, ${editedRows} row(s))`);
+    // A ticket the board sync wrote, under an id of its own, forgotten: the sync reads it from the ledger by its
+    // identity's hash (review pass 7), and an ingest of the same ticket — under the ingester's id, its text edited —
+    // stays out by that identity too (review pass 8: it came back).
+    const [ticketRow] = await sql`INSERT INTO thoughts (content) VALUES (${"a ticket forgotten later, SMD-1723"}) RETURNING id::text AS id`;
+    await sql`INSERT INTO thought_sources (thought_id, system, identity, canonical, media_type, canonical_hash)
+              VALUES (${ticketRow.id}::uuid, 'linear', 'FG-1139', 'c', 'application/json', encode(sha256(convert_to('c', 'UTF8')), 'hex'))`;
+    const beforeForget = (await readForgottenIdentities(sql, "linear")).has(identityHash("FG-1139"));
+    await sql`SELECT forget_thought(${ticketRow.id}::uuid)`;
+    const afterForget = (await readForgottenIdentities(sql, "linear")).has(identityHash("FG-1139"));
+    const viaIngest: Doc = { ...mk("linear", "FG-1139", "a ticket forgotten later, SMD-1723, edited in Linear"),
+      structure: { identity: { system: "linear", key: "FG-1139" }, canonical: { text: "c2", mediaType: "application/json" }, links: [], mentions: [] } as unknown as Doc["structure"] };
+    const ingestGo = (await upsertRecord(sql, viaIngest)).outcome;
+    const ingestRows = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${viaIngest.id}::uuid`)[0].c);
+    assert(!beforeForget && afterForget && ingestGo === "forgotten" && ingestRows === 0,
+      `the board sync reads a forgotten ticket from the ledger, and an ingest of it under another id, edited, stays out by its identity (${beforeForget}, ${afterForget}, ${ingestGo}, ${ingestRows})`);
+  })();
 
   // A different record whose content is byte-identical to one already stored
   // collides on the partial-unique content_fingerprint index → skipped, not a crash.
@@ -30674,6 +30708,44 @@ if (want("41")) {
     assert(fine === 0 && (await rowsOf("ZQ-64", "ZQ-65"))[0]?.origin === "found" && (comments.get("ZQ-65") ?? []).length === 1,
       `…and the next run finds that comment on the board and records it found, posting nothing again (exit ${fine})`);
 
+    // In a function of its own (TS2563).
+    await (async () => {
+      // SMD-3306 PR 7b's review passes 2 and 3 (run-it): a word posted covers the words COVERS names for it, so the
+      // pair is not chosen again for them and its record still stands: related and evolves each other, a duplicate a
+      // related (decide version 5 folds an evolves into related, and a few duplicates). Nothing covers a duplicate or
+      // an outdates after an evolves (cold read, mutants: a posted evolves covering every word lived).
+      const pair = async (n: number, posted: string, judged: string | null) => {
+        const older = await ticket(n, "a plan"), newer = await ticket(n + 1, "what came of it");
+        const first = await relate(newer, older, posted, 0.7);
+        await bsql`INSERT INTO board_findings_posted (ticket_a, ticket_b, word, posted_on, origin, comment_id, finding_ids) VALUES (${`ZQ-${n}`}, ${`ZQ-${n + 1}`}, ${posted}, ${`ZQ-${n + 1}`}, 'posted', ${`c-pre-${n}`}, ARRAY[${first.id}::uuid])`;
+        const again = judged === null ? null : await relate(newer, older, judged, 0.9);
+        return { older, newer, again };
+      };
+      const covers = [await pair(190, "evolves", "related"), await pair(192, "related", "evolves"), await pair(194, "duplicate", "related")];
+      const notCovered = [await pair(196, "evolves", "duplicate"), await pair(198, "evolves", null)];
+      await propose(notCovered[1].older, notCovered[1].newer);
+      const marked = await pair(200, "related", null);
+      await bsql`DELETE FROM board_findings_posted WHERE ticket_a = 'ZQ-200'`;
+      comments.set("ZQ-200", ["ob1-finding ZQ-200 ZQ-201 evolves"]);
+      const chosen = await selectFindings(bsql);
+      const has = (a: string, w: string) => chosen.some((f) => f.a === a && f.word === w);
+      const standsOf = async (a: string, word: string) => ((await FINDING_OUTCOMES_SQL(bsql)) as { ticket_a: string; word: string; stands: boolean | null }[]).find((r) => r.ticket_a === a && r.word === word)?.stands;
+      assert([...covers, notCovered[0]].every((c) => c.again?.action === "replaced") && !has("ZQ-190", "related") && !has("ZQ-192", "evolves") && !has("ZQ-194", "related")
+          && (await standsOf("ZQ-190", "evolves")) === true && (await standsOf("ZQ-192", "related")) === true && (await standsOf("ZQ-194", "duplicate")) === true,
+        `a pair posted as evolves and judged related since, one posted related and judged evolves since, and one posted duplicate and judged related since are not chosen again, each record standing (${JSON.stringify(chosen.filter((f) => /^ZQ-(19\d|20\d)$/.test(f.a)).map((f) => [f.a, f.word]))})`);
+      assert(has("ZQ-196", "duplicate") && (await standsOf("ZQ-196", "evolves")) === false && has("ZQ-198", "outdates") && has("ZQ-200", "related"),
+        "…a pair posted as evolves and judged duplicate since is chosen, the evolves no longer standing; one posted as evolves with an outdates proposed since is chosen for it; a related no record covers is chosen");
+      const before = posts().length;
+      const mr = await run({ cap: 100 });
+      const postedOnMine = posts().slice(before).filter((o) => /^uuid-ZQ-(19\d|20\d)$/.test(String(o.vars.issueId))).map((o) => String(o.vars.issueId));
+      assert(mr.found.some((f) => f.a === "ZQ-200") && !postedOnMine.includes("uuid-ZQ-201") && !postedOnMine.includes("uuid-ZQ-200")
+          && JSON.stringify((await rowsOf("ZQ-200", "ZQ-201")).map((r) => [r.word, r.origin])) === JSON.stringify([["related", "found"]]),
+        `…and an evolves marker another brain left on the board covers a related: recorded found, not posted (review pass 3, run-it; posted on ${postedOnMine.join(",")})`);
+      await bsql`DELETE FROM board_findings_posted WHERE ticket_a IN ('ZQ-190', 'ZQ-192', 'ZQ-194', 'ZQ-196', 'ZQ-198', 'ZQ-200')`;
+      for (const c of [...covers, ...notCovered, marked]) await bsql`DELETE FROM thoughts WHERE id IN (${c.older.id}::uuid, ${c.newer.id}::uuid)`;
+      comments.delete("ZQ-200");
+    })();
+
     // A role: capture and structure are what the step needs; without INSERT on the record it is off, and a dry run needs the reads alone.
     const FROLE = "ob1_live_findings";
     const fUrl = URL_!.replace(/\/\/[^@]*@/, `//${FROLE}:ob1findings@`);
@@ -30715,7 +30787,7 @@ if (want("41")) {
 }
 
 if (want("42")) {
-  console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (every proposal gone, or a relation the judge closed or re-judged to another word within the window), open (a stale proposal too), unanswered (a relation the judge closed after the window too); the pass's own settle is no reviewer's no, open (a relation re-judged at its word still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
+  console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (every proposal gone, or a relation the judge closed or re-judged to a word its own does not cover within the window), open (a stale proposal too), unanswered (a relation the judge closed after the window too); the pass's own settle is no reviewer's no, open (a relation re-judged at its word, or at one it covers, still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
   const bsql = new SQL({ url: URL_!, max: 2 });
   const row = async (content: string, metadata: Record<string, unknown>) =>
     ((await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id, content_fingerprint AS fp`)[0]) as { id: string; fp: string };
@@ -30756,8 +30828,9 @@ if (want("42")) {
     await bsql`SELECT record_source_links(${t[28].id}::uuid, 'linear', '[]'::jsonb)`;
     // A link to one side from a third ticket answers nothing between the two.
     await link(t[10], "blocks", "ZR-21");
-    // Re-judged to another word: the judge no longer says related.
-    const rK = await relate(t[31], t[30], "related"); await told(30, 31, "related", [rK.id!], 5); await relate(t[31], t[30], "evolves");
+    // Re-judged to a word its own does not cover: the judge no longer says related (an evolves would, COVERS,
+    // SMD-3306 PR 7b).
+    const rK = await relate(t[31], t[30], "related"); await told(30, 31, "related", [rK.id!], 5); await relate(t[31], t[30], "duplicate");
     // Every proposal it named gone: withdrawn. A relation the judge closed after the window: unanswered (review pass 1).
     const pL = await propose(t[32], t[33]); await told(32, 33, "outdates", [pL], 5); await bsql`DELETE FROM supersession_proposals WHERE id = ${pL}::uuid`;
     const rM = await relate(t[35], t[34], "related"); await told(34, 35, "related", [rM.id!], 40); await relate(t[35], t[34], null);

@@ -16,8 +16,32 @@
  */
 
 import type { SQL } from "bun";
+import { createHash } from "node:crypto";
 import type { Identity, Ingested } from "./ingest-contract.ts";
 import { structuredRecipe } from "../server-portable/lineage.ts";
+
+/**
+ * A record's identity as migration 139's ledger keeps it (SMD-1723): the
+ * sha256 of the identity, hex — as forget_thought writes it, from
+ * thought_sources, and as the text's fingerprints are kept.
+ */
+export function identityHash(identity: string): string {
+  return createHash("sha256").update(identity, "utf8").digest("hex");
+}
+
+/**
+ * The records of `system` the brain forgot (forget_thought, migration 139),
+ * as identityHash values: the whole record is forgotten, so a sync or an
+ * ingest leaves it out until a row stands at that identity again (reinstated).
+ * Empty on a brain before 139.
+ */
+export async function readForgottenIdentities(sql: SQL, system: string): Promise<Set<string>> {
+  const [r] = (await sql`SELECT to_regclass('thought_forgotten') IS NOT NULL AS has`) as { has: boolean }[];
+  if (!r?.has) return new Set();
+  const rows = (await sql`SELECT DISTINCT f.evidence->'source'->>'identity_sha256' AS h FROM thought_forgotten f
+                           WHERE f.evidence->'source'->>'system' = ${system} AND f.evidence->'source'->>'identity_sha256' IS NOT NULL`) as { h: string }[];
+  return new Set(rows.map((x) => x.h));
+}
 
 /** What a record that came through an adapter carries beside its row: the canonical, the links and the structured mentions. */
 export type Structure = Pick<Ingested, "identity" | "canonical" | "links" | "mentions">;
