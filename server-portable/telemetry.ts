@@ -325,7 +325,7 @@ function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error:
       "gen_ai.operation.name": toolCall ? "execute_tool" : undefined,
       "gen_ai.tool.name": toolCall ? tool : undefined,
       "ob1.door": c.door,
-      // Only what mcp.method.name cannot say: a batch, or a method outside the schema's.
+      // Only what mcp.method.name cannot say: a batch, or a method the line's rpc writes `other`.
       "ob1.rpc": mcpMethod === undefined ? c.rpc : undefined,
       "ob1.tool": tool,
       "ob1.agent": c.agent,
