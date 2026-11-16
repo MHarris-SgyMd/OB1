@@ -2504,8 +2504,14 @@ export const ROLE_GRANTS = Object.freeze({
     // from PUBLIC: EXECUTE is all a role needs to forget, and the stores it
     // reaches stay the owner's. Soft as the rest of this group — without it
     // the operation is refused with this grant named, and preflight's
-    // `forget definer` row says so; every other write goes on.
+    // `forget definer` row says so; every other write goes on. 143 carries
+    // it from 139's function to the wrapper; a role granted before 143 is
+    // granted again.
     Object.freeze({ function: "forget_thought(uuid, jsonb, boolean)", privileges: Object.freeze(["EXECUTE"]),  since: "143" }),
+    // Preflight's `forgotten` row reads every store forget_thought reaches through 143's ob1_forget_leftovers, which
+    // runs as its owner too: the query log, the priority and item tables need no read grant of this role's. Soft:
+    // without it the row says it could not verify.
+    Object.freeze({ function: "ob1_forget_leftovers()", privileges: Object.freeze(["EXECUTE"]),  since: "143" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's

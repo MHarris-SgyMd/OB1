@@ -57,9 +57,11 @@ const provider = Bun.serve({
 
 const WRITE = "w".repeat(64);
 const READ = "r".repeat(64);
+const CAPTURE = "c".repeat(64);
 process.env.MCP_ACCESS_KEYS = [
   `laptop:write:${hashKey(WRITE)}`,
   `viewer:read:${hashKey(READ)}`,
+  `hook:capture:${hashKey(CAPTURE)}`,
 ].join(",");
 delete process.env.MCP_ACCESS_KEY;
 
@@ -87,6 +89,7 @@ const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch }
 const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 const writer = mcpClient(BASE, WRITE);
 const viewer = mcpClient(BASE, READ);
+const hook = mcpClient(BASE, CAPTURE);
 const sql = new SQL({ url: URL_, max: 2 });
 
 const LONG = "A decision recorded at length. " + "Filler that pads this note well past one chunk window. ".repeat(12) + "The conclusion: we chose the zeppelin.";
@@ -581,15 +584,21 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
       && !embeddedTexts.slice(asked).includes(SECRET) && askedBetween === embeddedTexts.length,
     `its text refused FORGOTTEN on capture and on edit, the provider never asked (${recapture.text.slice(0, 60)})`);
 
+  // A capture-only key is told the text was forgotten, and not when: in the text and in the values (review pass 1).
+  const hooked = await full("capture_thought", { content: SECRET }, hook);
+  const untimed = (r: { text: string; sc: Record<string, unknown> }) => r.sc.code === "FORGOTTEN" && !("forgottenAt" in r.sc) && /this text was forgotten \(forget_thought\)/.test(r.text) && !/forgotten on /.test(r.text);
+  assert(hooked.isError && untimed(hooked), `a capture-only key's capture of it: FORGOTTEN, no time in the values or the text (${hooked.text.slice(0, 70)})`);
+
   // A brain without 143's ledger check: the trigger's OB005 is the same refusal, not a fault — after the embedding.
   await sql`DROP FUNCTION ob1_text_forgotten_at(text)`;
   const raised = await full("capture_thought", { content: SECRET });
   const raisedEdit = await full("update_thought", { id: other, content: SECRET });
+  const raisedHook = await full("capture_thought", { content: SECRET }, hook);
   const migration143 = await Bun.file(new URL("../db/migrations/143_forget_thought_definer.sql", import.meta.url)).text();
   await sql.unsafe(migration143);
   assert(raised.isError && raised.sc.code === "FORGOTTEN" && typeof raised.sc.forgottenAt === "string" && raisedEdit.isError && raisedEdit.sc.code === "FORGOTTEN"
-      && embeddedTexts.slice(asked).includes(SECRET),
-    `without the ledger check the trigger's OB005 is refused FORGOTTEN, with its time, on capture and on edit (${raised.text.slice(0, 60)})`);
+      && raisedHook.isError && untimed(raisedHook) && embeddedTexts.slice(asked).includes(SECRET),
+    `without the ledger check the trigger's OB005 is refused FORGOTTEN, with its time, on capture and on edit — and without it to a capture-only key (${raised.text.slice(0, 60)} | ${raisedHook.text.slice(0, 50)})`);
 
   // Again: FORGOTTEN. An id the log never held: NOT_FOUND.
   const again = await full("forget_thought", { id, confirm: id });

@@ -4905,12 +4905,12 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
   // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600); since 143
-  // forget_thought, granted by the server group (SMD-1723).
+  // forget_thought and ob1_forget_leftovers, granted by the server group (SMD-1723).
   const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
   const lockedOids = new Set(await fnOids(lockedFns));
   const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
-  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 2,
-    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, 118's release in closedclaims and 143's forget_thought in server — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 3,
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, 118's release in closedclaims and 143's forget_thought and ob1_forget_leftovers in server — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -10528,7 +10528,9 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure) AS "lifeBody",
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS "stateBody",
            (SELECT prorows::int FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure) AS rows`);
-  const secdef = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'ob1\\_%' AND prosecdef`))[0].n;
+  // 143's ob1_forget_leftovers is the one ob1_* definer by design (SMD-1723 PR 2: preflight reads every store a forget
+  // reaches as its owner); 068's projection is none.
+  const secdef = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'ob1\\_%' AND proname <> 'ob1_forget_leftovers' AND prosecdef`))[0].n;
   assert(await cols("ob1_ticket_head") === "issue_key uuid, issue text, head_id uuid, status text, status_type text, synced_at text"
       && await cols("ob1_superseded_by") === "old_id uuid, new_id uuid" && cat.fks === 0
       && /md5\(\(metadata ->> 'issue'::text\)\)\)::uuid\)+ WHERE \(metadata \? 'issue'::text\)/.test(cat.idx ?? "")
@@ -21935,12 +21937,16 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
   const q = async <T = J>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T = J>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const code = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
-  // Roles made before the file is applied: one that may delete a thought, which the apply grants EXECUTE; one that
-  // may only read, which it does not; one given EXECUTE by hand and nothing else.
-  await db.exec(`CREATE ROLE ob1_fg130_deleter NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_deleter; GRANT SELECT, DELETE ON thoughts TO ob1_fg130_deleter;
+  // Roles made before the file is applied: one granted EXECUTE on 139's function (as the server group grants it),
+  // which the apply carries to the wrapper; one that may delete a thought, which it does not (a delete can be undone
+  // from the log, a forget cannot: review pass 1); one that may only read; one given EXECUTE by hand after.
+  await db.exec(`CREATE ROLE ob1_fg130_granted NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_granted;
+                 CREATE ROLE ob1_fg130_deleter NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_deleter; GRANT SELECT, DELETE ON thoughts TO ob1_fg130_deleter;
                  CREATE ROLE ob1_fg130_reader NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_reader; GRANT SELECT ON thoughts TO ob1_fg130_reader;
                  CREATE ROLE ob1_fg130_exec NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_exec`);
-  // [129] re-applied 139, which put back a function running as its caller: 143 now, as the shipped tree has it.
+  // [129] re-applied 139, which put back a function running as its caller, the wrapper's grants on it: 143 now, as
+  // the shipped tree has it, taking that function as the body and carrying its grantees to the wrapper.
+  await db.exec(`GRANT EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) TO ob1_fg130_granted`);
   await reapply(file.slice(0, 4));
   await db.exec(`GRANT EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) TO ob1_fg130_exec`);
   const SIG = "forget_thought(uuid, jsonb, boolean)";
@@ -21965,8 +21971,13 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
       && fn.body !== null && fn.bodyDef === false && /^search_path=.*\bpublic\b.*, pg_temp$/.test(path) && /migration 143/i.test(fn.c ?? ""),
     `forget_thought a SECURITY DEFINER wrapper over 139's body, its search_path ending in pg_temp, each of the ${wanted.length} runtime ob1.* settings emptied for the call but ob1.actor, its comment naming 143 (${path}; not emptied: ${unpinned.join(", ") || "none"})`);
   const may = async (role: string) => (await one<{ y: boolean }>(`SELECT has_function_privilege($1, $2, 'EXECUTE') AS y`, [role, SIG])).y;
-  assert(!/(^|[{,])=X/.test(fn.acl ?? "") && await may("ob1_fg130_deleter") && !(await may("ob1_fg130_reader")) && !(await may("public")),
-    `EXECUTE is not PUBLIC's; the apply granted it to a role that may delete a thought and not to one that may only read (${fn.acl})`);
+  const leftoversFn = await one<{ def: boolean; granted: boolean; pub: boolean }>(`SELECT p.prosecdef AS def,
+      has_function_privilege('ob1_fg130_granted', p.oid, 'EXECUTE') AS granted,
+      EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0) AS pub
+    FROM pg_proc p WHERE p.oid = to_regprocedure('ob1_forget_leftovers()')`);
+  assert(!/(^|[{,])=X/.test(fn.acl ?? "") && await may("ob1_fg130_granted") && !(await may("ob1_fg130_deleter")) && !(await may("ob1_fg130_reader")) && !(await may("public"))
+      && leftoversFn.def === true && leftoversFn.granted === true && leftoversFn.pub === false,
+    `EXECUTE is not PUBLIC's; the apply carried 139's function's grantee to the wrapper, and not a role that may only delete or read; ob1_forget_leftovers its owner's, granted alike (${fn.acl}; ${JSON.stringify(leftoversFn)})`);
 
   const ACT = JSON.stringify({ name: "fg130-op", scope: "write" });
   const thought = async (content: string) => (await one<{ id: string }>(
@@ -22013,6 +22024,34 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
   assert(shadowed.err === null && shadowed.r?.ok === true && bLed === 1
       && shadowed.after.a === "backfill" && shadowed.after.f === "00000000-0000-4000-8000-000000000130",
     `a caller's temporary thought_forgotten first on its path takes no row (the brain's ledger has it); its ob1.audit_amend and ob1.forgetting are its own after the call (${shadowed.err}; ${bLed}; ${JSON.stringify(shadowed.after)})`);
+
+  // Every emptied setting, set by the caller first: none is seen inside the call (a probe on the ledger's insert, the
+  // body's last write, reads them; the forget's own setting is its id there), and each is the caller's after. The body
+  // restores two of them itself, so only a probe of all of them tells the wrapper's work (review pass 1).
+  await db.exec(`CREATE TABLE zz_fg130_seen (name text, value text);
+    CREATE FUNCTION zz_fg130_probe() RETURNS trigger LANGUAGE plpgsql AS $p$
+    BEGIN
+      INSERT INTO zz_fg130_seen SELECT n, current_setting(n, true) FROM unnest(${"$"}${"$"}{${wanted.map((w) => `"${w}"`).join(",")}}${"$"}${"$"}::text[]) n;
+      RETURN NULL;
+    END $p$;
+    CREATE TRIGGER zz_fg130_probe AFTER INSERT ON thought_forgotten FOR EACH ROW EXECUTE FUNCTION zz_fg130_probe()`);
+  const S = await thought("fg130: the thought forgotten by a caller who set every setting first");
+  let afterAll: Record<string, string> = {};
+  let settingsErr: string | null = null;
+  try {
+    await db.transaction(async (tx) => {
+      await tx.query(`SET LOCAL ROLE ob1_fg130_exec`);
+      for (const w of wanted) await tx.query(`SELECT set_config($1, 'carried', true)`, [w]);
+      await tx.query(`SELECT forget_thought($1::uuid, $2::jsonb)`, [S, ACT]);
+      afterAll = Object.fromEntries((await tx.query<{ n: string; v: string }>(`SELECT n, current_setting(n, true) AS v FROM unnest($1::text[]) n`, [wanted])).rows.map((r) => [r.n, r.v]));
+    });
+  } catch (e) { settingsErr = String((e as { code?: string }).code ?? (e as Error).message); }
+  const seen = await q<{ name: string; value: string }>(`SELECT name, value FROM zz_fg130_seen`);
+  const carriedIn = seen.filter((r) => r.value === "carried").map((r) => r.name);
+  const notBack = wanted.filter((w) => afterAll[w] !== "carried");
+  await db.exec(`DROP TRIGGER zz_fg130_probe ON thought_forgotten; DROP FUNCTION zz_fg130_probe(); DROP TABLE zz_fg130_seen`);
+  assert(settingsErr === null && seen.length === wanted.length && carriedIn.length === 0 && notBack.length === 0,
+    `each of the ${wanted.length} settings the caller set is unseen inside the call and its own again after (${settingsErr ?? "ok"}; carried in: ${carriedIn.join(", ") || "none"}; not given back: ${notBack.join(", ") || "none"})`);
 
   // ob1_forgetting reads a setting that is no uuid as none, never raising: '' (what a forget's own set_config leaves
   // in a session, and the wrapper's) and a word; 139's raised 22P02 in every guard asking it.
@@ -22073,11 +22112,16 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
   const before = await left(C);
   await db.query(`INSERT INTO query_log (kind, tool, query, result_ids) VALUES ('search', 'search_thoughts', 'fg130', ARRAY[$1::uuid, gen_random_uuid()])`, [C]);
   await db.query(`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', $1::uuid)`, [C]);
+  // …and an event of it not redacted, and a vector at its text's fingerprint (review pass 1: one store alone was raced).
+  await db.query(`INSERT INTO thought_audit (thought_id, action, diff) VALUES ($1::uuid, 'update', '{}'::jsonb)`, [C]);
+  const cFp = (await one<{ f: string }>(`SELECT fingerprints[1] AS f FROM thought_forgotten WHERE thought_id = $1::uuid`, [C])).f;
+  await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ($1, 'fg130', $2::vector, $3)`,
+    [cFp, `[${new Array(EMBEDDING_DIM).fill(0).join(",")}]`, EMBEDDING_DIM]);
   const raced = await left(C);
   const again = (await one<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [C, ACT])).r;
   const after = await left(C);
-  assert(before === "" && raced === "query_log:2" && again.ok === true && after === "",
-    `ob1_forget_leftovers names nothing for a thought forgotten whole, the query log's two rows once a raced write names it, and nothing once a second forget swept them (${before}; ${raced}; ${again.ok}; ${after})`);
+  assert(before === "" && raced === "query_log:2,snapshot_vectors:1,thought_audit:1" && again.ok === true && after === "",
+    `ob1_forget_leftovers names nothing for a thought forgotten whole, the query log's two rows, the event and the vector once raced writes left them, and nothing once a second forget swept them (${before}; ${raced}; ${again.ok}; ${after})`);
   // A thought standing again under its id (reinstated) is the operator's: skipped whole.
   await db.transaction(async (tx) => {
     await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
@@ -22091,9 +22135,12 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
   const re = await one<{ def: boolean; acl: string | null }>(`SELECT prosecdef AS def, proacl::text AS acl FROM pg_proc WHERE oid = $1::regprocedure`, [SIG]);
   assert(re.def === true && !/(^|[{,])=X/.test(re.acl ?? "") && await may("ob1_fg130_exec") && await code(`SELECT 1`) === "taken",
     `a re-apply keeps the definer and the grants (${re.acl})`);
-  await db.exec(`REVOKE ALL ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM ob1_fg130_exec, ob1_fg130_deleter;
-                 REVOKE ALL ON thoughts FROM ob1_fg130_deleter, ob1_fg130_reader; REVOKE ALL ON SCHEMA public FROM ob1_fg130_deleter, ob1_fg130_reader, ob1_fg130_exec;
-                 DROP ROLE ob1_fg130_deleter; DROP ROLE ob1_fg130_reader`);
+  await db.exec(`REVOKE ALL ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM ob1_fg130_exec, ob1_fg130_granted;
+                 REVOKE ALL ON FUNCTION ob1_forget_thought_body(uuid, jsonb, boolean) FROM ob1_fg130_granted;
+                 REVOKE ALL ON FUNCTION ob1_forget_leftovers() FROM ob1_fg130_exec, ob1_fg130_granted;
+                 REVOKE ALL ON thoughts FROM ob1_fg130_deleter, ob1_fg130_reader;
+                 REVOKE ALL ON SCHEMA public FROM ob1_fg130_deleter, ob1_fg130_reader, ob1_fg130_exec, ob1_fg130_granted;
+                 DROP ROLE ob1_fg130_deleter; DROP ROLE ob1_fg130_reader; DROP ROLE ob1_fg130_granted`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

@@ -1322,7 +1322,7 @@ export function normaliseForget(r: unknown): ForgetResult {
     return {
       ok: true,
       id: String(o.id),
-      forgottenAt: isoTimestampOpt(o.forgotten_at) ?? String(o.forgotten_at ?? ""),
+      forgottenAt: isoTimestampOpt(o.forgotten_at) ?? (() => { throw new Error(`forget_thought answered no forgotten_at: ${JSON.stringify(r)?.slice(0, 120)}`); })(),
       gone: o.gone === true,
       orphanEntities: count(o.orphan_entities),
       removed,
@@ -1335,10 +1335,11 @@ export function normaliseForget(r: unknown): ForgetResult {
       outside: ids(o.outside),
     };
   }
+  if (typeof o.error !== "string") throw new Error(`forget_thought refused with no error word: ${JSON.stringify(r)?.slice(0, 120)}`);
   const cited = o.error === "CITED" ? normaliseMutation(o) : undefined;
   return {
     ok: false,
-    error: typeof o.error === "string" ? o.error : "NOT_FOUND",
+    error: o.error,
     forgottenAt: isoTimestampOpt(o.forgotten_at),
     orphanEntities: typeof o.orphan_entities === "number" ? o.orphan_entities : undefined,
     ...(cited && !cited.ok ? { citedBy: cited.citedBy, citations: cited.citations } : {}),

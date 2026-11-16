@@ -2523,12 +2523,14 @@ PostgreSQL refuses a custom setting there to an owner that is not a superuser.
 `ob1_forgetting()` now reads its setting through a cast that cannot raise: 139's
 raised `22P02` in every guard once a forget had left the setting empty in a
 session. `EXECUTE` is revoked
-from PUBLIC and granted to every role that may delete a thought, and to the
-**server** grant group. `ob1_text_forgotten_at(text)` answers when a text was
+from PUBLIC and is the **server** grant group's: a grant 139's function held is
+carried to the wrapper, and a role granted before 143 is granted again (not every
+role that may delete a thought: a delete can be undone from the log, a forget
+cannot). `ob1_text_forgotten_at(text)` answers when a text was
 forgotten, by 139's refusal rule, so the server refuses a forgotten text before it
 pays for an embedding; `ob1_forget_leftovers()` lists every forgotten thought a
 store still holds the id or text of, a write that raced the forget, which
-preflight's `forgotten` row names. A re-applied 139 puts its body back under
+preflight's `forgotten` row names; it reads each store once, as its owner. A re-applied 139 puts its body back under
 `forget_thought`, running as its caller, until 143 is re-applied: preflight's
 `forget definer` row says so. Needs 139 and 142; a re-apply is a no-op. test-schema [130], test-upgrade
 [20ch].
@@ -3139,7 +3141,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
-| | `forget_thought(uuid, jsonb, boolean)` (143) | `EXECUTE` — `forget_thought`, which runs as its owner since 143 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 143 granted it to every role that may delete a thought |
+| | `forget_thought(uuid, jsonb, boolean)` (143) | `EXECUTE` — `forget_thought`, which runs as its owner since 143 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 143 carries a grant 139's function held to the wrapper; a role granted before 143 needs `--grant` again |
+| | `ob1_forget_leftovers()` (143) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |

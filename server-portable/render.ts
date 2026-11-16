@@ -1947,18 +1947,19 @@ const removedText = (removed: Record<string, number>): string => {
 export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
   return render(o, (v) => {
     const lines = [
-      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting, and the same text is refused if captured again.`,
+      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
       `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
     ];
     if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync from now on.`);
     if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
     if (v.pages.length) lines.push(`Pages to review — an earlier render may hold its text: ${v.pages.join(", ")}.`);
-    if (v.twins.length) lines.push(`Standing thoughts that keep the same text (not forgotten): ${v.twins.join(", ")}.`);
+    if (v.twins.length) lines.push(`Standing thoughts that keep the same text (not forgotten), so a capture of it lands on them rather than being refused: ${v.twins.join(", ")}.`);
     if (v.outside.length) lines.push(`Outside the brain's reach: ${v.outside.join("; ")}.`);
     return lines.join("\n");
   }, forgetRefusal, (v) => ({
     id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
-    removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins,
+    // REST's arrays renamed, the guard holding a key ending in Ids to uuids.
+    removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins, itemIds: v.itemIds, proposalIds: v.proposalIds,
     ...(v.source ? { source: { system: v.source.system, identitySha256: v.source.identitySha256 } } : {}),
   }));
 }
@@ -2124,7 +2125,9 @@ export const forgetHint = (msg: string): string =>
     ? " — the server's database role needs EXECUTE on forget_thought (migration 143): cd db && bun migrate.ts --grant <role> --url $DATABASE_URL"
     : /forget_thought/.test(msg) && /does not exist|could not find/i.test(msg)
       ? " — migration 139 (db/migrations/139_forget_thought.sql) is not applied"
-      : "";
+      : /permission denied for (table|relation|sequence)/i.test(msg)
+        ? " — forget_thought ran as the server's database role, which holds no privilege on that store: apply migration 143 (db/migrations/143_forget_thought_definer.sql), which makes it run as its owner"
+        : "";
 
 // ── append_thought_evidence (SMD-2690 PR 3b) ─────────────────────────────────
 

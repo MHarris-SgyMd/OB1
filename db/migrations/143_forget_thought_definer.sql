@@ -45,11 +45,16 @@
 --        the brain without being a superuser a custom setting on a function
 --        ("permission denied to set parameter", test-upgrade's leg migrating
 --        as such a role), and the migrations may run as one;
---      * EXECUTE revoked from PUBLIC, and granted to every role that may
---        delete a thought (DELETE on thoughts: delete_thought's privilege),
---        and to the `server` grant group in db/config.mjs.
+--      * EXECUTE revoked from PUBLIC, and granted to each role 139's function
+--        was granted EXECUTE (the `server` grant group's, db/config.mjs):
+--        not to every role that may delete a thought, since a delete can be
+--        undone from the log and a forget cannot (review pass 1). A role
+--        `--grant`ed before 143 holds no such grant: it is granted again.
 --      The body keeps 139's ACL: a role calling it directly runs it as
 --      itself and needs every store's privilege, as before 143.
+--      One call leaves each emptied setting defined, '' where it was unset,
+--      for the rest of a pooled session: a reader must take '' as unset
+--      (every reader does; 2 below is the one that raised).
 --   2. ob1_forgetting() reads its setting through a cast that cannot raise.
 --      139's guarded the cast with a CASE that PostgreSQL may evaluate past:
 --      once the setting existed in a session (a forget's own set_config, or
@@ -64,7 +69,13 @@
 --   4. ob1_forget_leftovers(): one row per forgotten thought and store still
 --      holding its id or text — (thought_id, store, n). The stores are the
 --      ones forget_thought reaches. A thought standing again under its id
---      (reinstated) is skipped whole.
+--      (reinstated) is skipped whole. Each store is read once for every
+--      forgotten id at a time, by the forms its indexes serve (a first form
+--      counted per id took 12 s at 40 ids and 300,000 logged searches:
+--      review pass 1). SECURITY DEFINER, as the forget is, so the server's
+--      role need not read the query log to run preflight's row; EXECUTE is
+--      the `server` group's, granted as forget_thought's is. It answers
+--      ids, store names and counts alone.
 --
 -- RE-APPLYING 139
 --   139's CREATE OR REPLACE puts its body back under forget_thought, running
@@ -160,18 +171,21 @@ $path$;
 
 REVOKE EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM PUBLIC;
 
+-- Each role granted EXECUTE on 139's function, now the body, by name (the
+-- server group's grant: a role --grant'ed after this PR, or the wrapper's
+-- grantees when a re-applied 139 took its place) keeps it on the wrapper;
+-- PUBLIC's and the owner's are not carried. Granted again on a re-apply,
+-- a no-op.
 DO $grant$
 DECLARE
   v_role record;
 BEGIN
-  -- The roles that may delete a thought may forget one; the owner and
-  -- superusers need no grant, nor the predefined roles.
   FOR v_role IN
-    SELECT r.rolname
-      FROM pg_roles r
-     WHERE NOT r.rolsuper AND r.rolname NOT LIKE 'pg\_%'
-       AND r.oid <> (SELECT c.relowner FROM pg_class c WHERE c.oid = 'thoughts'::regclass)
-       AND has_table_privilege(r.oid, 'thoughts', 'DELETE')
+    SELECT DISTINCT r.rolname
+      FROM pg_proc p, aclexplode(p.proacl) a, pg_roles r
+     WHERE p.oid = to_regprocedure('ob1_forget_thought_body(uuid, jsonb, boolean)')
+       AND a.privilege_type = 'EXECUTE' AND a.grantee <> 0 AND a.grantee <> p.proowner
+       AND r.oid = a.grantee
      ORDER BY r.rolname
   LOOP
     EXECUTE format('GRANT EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) TO %I', v_role.rolname);
@@ -218,7 +232,7 @@ AS $$
     WHEN current_setting('ob1.reinstate_forgotten', true) = 'on' OR NOT EXISTS (SELECT 1 FROM thought_forgotten) THEN NULL
     ELSE (SELECT max(f.forgotten_at)
             FROM thought_forgotten f, (SELECT content_fingerprint_of(p_content) AS fp) x
-           WHERE x.fp = ANY(f.fingerprints)
+           WHERE f.fingerprints @> ARRAY[x.fp]
              AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.content_fingerprint = x.fp))
   END
 $$;
@@ -232,62 +246,120 @@ CREATE OR REPLACE FUNCTION ob1_forget_leftovers()
 RETURNS TABLE (thought_id uuid, store text, n bigint)
 LANGUAGE sql
 STABLE
+SECURITY DEFINER
 AS $$
   WITH g AS (
     -- Each forgotten thought not standing again (a reinstated one is the
-    -- operator's), with every item and fingerprint any of its rows names.
-    SELECT f.thought_id AS id,
-           array_agg(DISTINCT i) FILTER (WHERE i IS NOT NULL) AS items,
-           array_agg(DISTINCT p) FILTER (WHERE p IS NOT NULL) AS fps
-      FROM thought_forgotten f
-      LEFT JOIN LATERAL (SELECT jsonb_array_elements_text(f.evidence->'item_ids') AS i
-                          WHERE jsonb_typeof(f.evidence->'item_ids') = 'array') it ON true
-      LEFT JOIN LATERAL unnest(f.fingerprints) p ON true
+    -- operator's).
+    SELECT DISTINCT f.thought_id AS id FROM thought_forgotten f
      WHERE NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = f.thought_id)
-     GROUP BY f.thought_id
-  ), counts AS (
-    SELECT g.id, 'thought_audit'::text AS store,
-           (SELECT count(*) FROM thought_audit a WHERE a.thought_id = g.id AND a.redacted_at IS NULL) AS n FROM g
-    UNION ALL SELECT g.id, 'derived_from',
-           (SELECT count(*) FROM thoughts t WHERE jsonb_typeof(t.derived_from) = 'array' AND t.derived_from @> jsonb_build_array(g.id::text)) FROM g
-    UNION ALL SELECT g.id, 'relation_facets',
-           (SELECT count(*) FROM thought_facets x WHERE x.kind = 'relation' AND x.payload->>'target' = g.id::text) FROM g
-    UNION ALL SELECT g.id, 'citations',
-           (SELECT count(*) FROM thought_facets x WHERE x.kind = 'citation'
-              AND (x.payload->>'source_id' = g.id::text OR x.payload->>'source_deleted_id' = g.id::text)) FROM g
-    UNION ALL SELECT g.id, 'query_log',
-           (SELECT count(*) FROM query_log q
-             WHERE g.id = ANY(q.result_ids) OR q.target_id = g.id
-                OR (jsonb_typeof(q.result_items) = 'array'
-                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(q.result_items) e
-                                 WHERE e->>'id' = g.id::text OR e->>'key' = g.id::text OR e->>'key' = ANY(COALESCE(g.items, '{}'))))) FROM g
-    UNION ALL SELECT g.id, 'page_sections',
-           (SELECT count(*) FROM page_sections s
-             WHERE g.id = ANY(s.evidence_thought_ids) OR g.id = ANY(COALESCE(s.pending_evidence_thought_ids, '{}'::uuid[]))) FROM g
-    UNION ALL SELECT g.id, 'priority_statements',
-           (SELECT count(*) FROM priority_assertions pa
-             WHERE (pa.item_kind = 'thought' AND pa.item_key = g.id::text)
-                OR (pa.due_ref_kind = 'thought' AND pa.due_ref_key = g.id::text)
-                OR (pa.item_kind = 'item' AND pa.item_key = ANY(COALESCE(g.items, '{}')))
-                OR (pa.due_ref_kind = 'item' AND pa.due_ref_key = ANY(COALESCE(g.items, '{}')))) FROM g
-    UNION ALL SELECT g.id, 'priority_findings',
-           (SELECT count(*) FROM priority_findings pf
-             WHERE (pf.item_kind = 'thought' AND pf.item_key = g.id::text)
-                OR (pf.item_kind = 'item' AND pf.item_key = ANY(COALESCE(g.items, '{}')))) FROM g
-    UNION ALL SELECT g.id, 'open_items',
-           (SELECT count(*) FROM open_items i WHERE i.origin_thought_id = g.id OR i.item_id::text = ANY(COALESCE(g.items, '{}'))) FROM g
-    UNION ALL SELECT g.id, 'item_events',
-           (SELECT count(*) FROM open_item_events e WHERE e.origin_thought_id = g.id OR e.item_id::text = ANY(COALESCE(g.items, '{}'))) FROM g
-    UNION ALL SELECT g.id, 'item_proposals',
-           (SELECT count(*) FROM open_item_close_proposals p WHERE p.evidence_thought_id = g.id OR p.item_id::text = ANY(COALESCE(g.items, '{}'))) FROM g
-    UNION ALL SELECT g.id, 'deliverable_events',
-           (SELECT count(*) FROM deliverable_events d WHERE d.thought_id = g.id) FROM g
-    UNION ALL SELECT g.id, 'snapshot_vectors',
-           (SELECT count(*) FROM ob1_embedding_snapshot s
-             WHERE s.content_fingerprint = ANY(COALESCE(g.fps, '{}'))
-               AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.content_fingerprint = s.content_fingerprint)) FROM g
+  ), ids AS (
+    SELECT COALESCE(array_agg(g.id), '{}') AS a, COALESCE(array_agg(g.id::text), '{}') AS t FROM g
+  ), it AS (
+    -- The items its ledger rows took, each with its thought.
+    SELECT DISTINCT f.thought_id AS id, i.item
+      FROM thought_forgotten f JOIN g ON g.id = f.thought_id,
+           jsonb_array_elements_text(CASE WHEN jsonb_typeof(f.evidence->'item_ids') = 'array' THEN f.evidence->'item_ids' ELSE '[]'::jsonb END) i(item)
+  ), fp AS (
+    SELECT DISTINCT f.thought_id AS id, u.fp
+      FROM thought_forgotten f JOIN g ON g.id = f.thought_id, unnest(f.fingerprints) u(fp)
+  ), keyed AS (
+    -- What an agenda entry may name: a forgotten thought by id or key, or an item its ledger took by key.
+    SELECT g.id::text AS k, g.id FROM g UNION SELECT it.item, it.id FROM it
+  ), entries AS MATERIALIZED (
+    -- The logged agendas' entries, expanded once and only when something was forgotten.
+    SELECT q.id AS q, e.v->>'id' AS eid, e.v->>'key' AS ekey
+      FROM query_log q,
+           jsonb_array_elements(CASE WHEN jsonb_typeof(q.result_items) = 'array' THEN q.result_items ELSE '[]'::jsonb END) e(v)
+     WHERE jsonb_typeof(q.result_items) = 'array' AND EXISTS (SELECT 1 FROM g)
+  ), hit (id, store, k) AS (
+    -- One row per thought, store and row holding it; each store read once.
+    SELECT a.thought_id, 'thought_audit', a.id::text FROM thought_audit a, ids
+     WHERE a.thought_id = ANY(ids.a) AND a.redacted_at IS NULL
+    UNION ALL
+    SELECT r.v::uuid, 'derived_from', t.id::text FROM thoughts t, ids,
+           jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.derived_from) = 'array' THEN t.derived_from ELSE '[]'::jsonb END) r(v)
+     WHERE jsonb_typeof(t.derived_from) = 'array' AND t.derived_from ?| ids.t AND r.v = ANY(ids.t)
+    UNION ALL
+    SELECT (x.payload->>'target')::uuid, 'relation_facets', x.id::text FROM thought_facets x, ids
+     WHERE x.kind = 'relation' AND x.payload->>'target' = ANY(ids.t)
+    UNION ALL
+    SELECT (x.payload->>'source_id')::uuid, 'citations', x.id::text FROM thought_facets x, ids
+     WHERE x.kind = 'citation' AND x.payload->>'source_id' = ANY(ids.t)
+    UNION ALL
+    SELECT (x.payload->>'source_deleted_id')::uuid, 'citations', x.id::text FROM thought_facets x, ids
+     WHERE x.kind = 'citation' AND x.payload->>'source_deleted_id' = ANY(ids.t)
+    UNION ALL
+    SELECT r.v, 'query_log', q.id::text FROM query_log q, ids, unnest(q.result_ids) r(v)
+     WHERE q.result_ids && ids.a AND r.v = ANY(ids.a)
+    UNION ALL
+    SELECT q.target_id, 'query_log', q.id::text FROM query_log q, ids WHERE q.target_id = ANY(ids.a)
+    UNION ALL
+    SELECT g.id, 'query_log', x.q::text FROM entries x JOIN g ON g.id::text = x.eid
+    UNION ALL
+    SELECT kk.id, 'query_log', x.q::text FROM entries x JOIN keyed kk ON kk.k = x.ekey
+    UNION ALL
+    SELECT u.v, 'page_sections', s.id::text FROM page_sections s, ids,
+           unnest(s.evidence_thought_ids || COALESCE(s.pending_evidence_thought_ids, '{}'::uuid[])) u(v)
+     WHERE (s.evidence_thought_ids && ids.a OR s.pending_evidence_thought_ids && ids.a) AND u.v = ANY(ids.a)
+    UNION ALL
+    SELECT pa.item_key::uuid, 'priority_statements', pa.id::text FROM priority_assertions pa, ids
+     WHERE pa.item_kind = 'thought' AND pa.item_key = ANY(ids.t)
+    UNION ALL
+    SELECT pa.due_ref_key::uuid, 'priority_statements', pa.id::text FROM priority_assertions pa, ids
+     WHERE pa.due_ref_kind = 'thought' AND pa.due_ref_key = ANY(ids.t)
+    UNION ALL
+    SELECT it.id, 'priority_statements', pa.id::text FROM priority_assertions pa JOIN it ON pa.item_kind = 'item' AND pa.item_key = it.item
+    UNION ALL
+    SELECT it.id, 'priority_statements', pa.id::text FROM priority_assertions pa JOIN it ON pa.due_ref_kind = 'item' AND pa.due_ref_key = it.item
+    UNION ALL
+    SELECT pf.item_key::uuid, 'priority_findings', pf.id::text FROM priority_findings pf, ids
+     WHERE pf.item_kind = 'thought' AND pf.item_key = ANY(ids.t)
+    UNION ALL
+    SELECT it.id, 'priority_findings', pf.id::text FROM priority_findings pf JOIN it ON pf.item_kind = 'item' AND pf.item_key = it.item
+    UNION ALL
+    SELECT i.origin_thought_id, 'open_items', i.item_id::text FROM open_items i, ids WHERE i.origin_thought_id = ANY(ids.a)
+    UNION ALL
+    SELECT it.id, 'open_items', i.item_id::text FROM open_items i JOIN it ON i.item_id::text = it.item
+    UNION ALL
+    SELECT e.origin_thought_id, 'item_events', e.id::text FROM open_item_events e, ids WHERE e.origin_thought_id = ANY(ids.a)
+    UNION ALL
+    SELECT it.id, 'item_events', e.id::text FROM open_item_events e JOIN it ON e.item_id::text = it.item
+    UNION ALL
+    SELECT p.evidence_thought_id, 'item_proposals', p.id::text FROM open_item_close_proposals p, ids WHERE p.evidence_thought_id = ANY(ids.a)
+    UNION ALL
+    SELECT it.id, 'item_proposals', p.id::text FROM open_item_close_proposals p JOIN it ON p.item_id::text = it.item
+    UNION ALL
+    SELECT d.thought_id, 'deliverable_events', d.id::text FROM deliverable_events d, ids WHERE d.thought_id = ANY(ids.a)
+    UNION ALL
+    SELECT fp.id, 'snapshot_vectors', s.content_fingerprint || '/' || s.embedding_model FROM ob1_embedding_snapshot s JOIN fp ON s.content_fingerprint = fp.fp
+     WHERE NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.content_fingerprint = s.content_fingerprint)
   )
-  SELECT c.id, c.store, c.n FROM counts c WHERE c.n > 0 ORDER BY c.id, c.store
+  SELECT h.id, h.store, count(DISTINCT h.k) FROM hit h GROUP BY h.id, h.store ORDER BY h.id, h.store
 $$;
+
+DO $leftovers$
+DECLARE
+  v_path text;
+  v_role record;
+BEGIN
+  SELECT string_agg(quote_ident(s), ', ' ORDER BY o) INTO v_path
+    FROM unnest(current_schemas(false)) WITH ORDINALITY u(s, o);
+  EXECUTE format('ALTER FUNCTION ob1_forget_leftovers() SET search_path = %s, pg_temp', v_path);
+  EXECUTE 'REVOKE EXECUTE ON FUNCTION ob1_forget_leftovers() FROM PUBLIC';
+  -- forget_thought's grantees, as the server group grants both.
+  FOR v_role IN
+    SELECT DISTINCT r.rolname
+      FROM pg_proc p, aclexplode(p.proacl) a, pg_roles r
+     WHERE p.oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')
+       AND a.privilege_type = 'EXECUTE' AND a.grantee <> 0 AND a.grantee <> p.proowner
+       AND r.oid = a.grantee
+     ORDER BY r.rolname
+  LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION ob1_forget_leftovers() TO %I', v_role.rolname);
+  END LOOP;
+END
+$leftovers$;
+
 COMMENT ON FUNCTION ob1_forget_leftovers() IS
-  'One row per forgotten thought (thought_forgotten) and store still holding its id or text: (thought_id, store, n). The stores forget_thought reaches — thought_audit (an event not redacted), derived_from, relation facets, citations, the query log, page sections, priority statements and findings, open items, their events and close proposals (on the thought or on the items its ledger rows took), deliverable events, the snapshot''s vectors at its fingerprints (no standing thought holding them). A thought standing again under its id is skipped. A write that raced the forget leaves these (SMD-4299): forget_thought again sweeps them. Preflight''s forgotten row reads it. Migration 143 / SMD-1723.';
+  'One row per forgotten thought (thought_forgotten) and store still holding its id or text: (thought_id, store, n). The stores forget_thought reaches — thought_audit (an event not redacted), derived_from, relation facets, citations, the query log, page sections, priority statements and findings, open items, their events and close proposals (on the thought or on the items its ledger rows took), deliverable events, the snapshot''s vectors at its fingerprints (no standing thought holding them). A thought standing again under its id is skipped. Each store read once for every forgotten id. SECURITY DEFINER, its search_path pinned; EXECUTE the server group''s. A write that raced the forget leaves these (SMD-4299): forget_thought again sweeps them. Preflight''s forgotten row reads it. Migration 143 / SMD-1723.';

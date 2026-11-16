@@ -449,6 +449,9 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
   return { days: PROPOSALS_WARN_DAYS, problem: `OB1_PROPOSALS_WARN_DAYS is ${JSON.stringify(raw.slice(0, 40))}, not whole days from 1 to 3650` };
 }
 
+/** How long preflight's `forgotten` row may read the stores (SMD-1723 PR 2): it gates the start. */
+const FORGOTTEN_TIMEOUT_MS = 10_000;
+
 // Every check the direct-connection block owns, in the order the SQL path reports them.
 // A throw anywhere in that block lands in one catch, and a check that prints
 // nothing looks like one that passed — so the catch reports each of these
@@ -3356,11 +3359,18 @@ if (configFailed) {
           if (!fd?.has_143) {
             add("forgotten", "skip", fd ? "not checked — ob1_forget_leftovers does not exist (migration 143 not applied)" : "not checked — forget_thought could not be read (the row above)");
           } else {
-            const left = await sql.unsafe(`SELECT thought_id::text AS id, store, n::int AS n FROM ob1_forget_leftovers()`)
-              .then((r) => r as { id: string; store: string; n: number }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
-            if (!Array.isArray(left)) {
+            // Bounded: preflight gates the start, and the read is every store's (review pass 1 measured 12 s at
+            // 300,000 logged searches before it read each store once).
+            const left = await sql.begin(async (tx) => {
+              await tx.unsafe(`SET LOCAL statement_timeout = '${FORGOTTEN_TIMEOUT_MS}ms'`);
+              return (await tx.unsafe(`SELECT thought_id::text AS id, store, n::int AS n FROM ob1_forget_leftovers()`)) as { id: string; store: string; n: number }[];
+            }).then((r) => r, (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+            if (!Array.isArray(left) && (left as { errno?: string }).errno === "57014") {
+              add("forgotten", "warn", `not checked: reading every store forget_thought reaches took longer than ${FORGOTTEN_TIMEOUT_MS / 1000} s`,
+                  "Run it by hand, unbounded: SELECT thought_id, store, n FROM ob1_forget_leftovers(); a row is a forgotten thought a store still holds, which forget_thought again sweeps.");
+            } else if (!Array.isArray(left)) {
               add("forgotten", "warn", `could not verify: ${left.message}`,
-                "ob1_forget_leftovers reads every store forget_thought reaches; a role lacking SELECT on one (the query log's, the priority group's, the items group's, the pages group's) cannot run it. The message names the table.");
+                "ob1_forget_leftovers reads every store forget_thought reaches, as its owner (migration 143); a role without EXECUTE on it is granted the server group: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server.");
             } else if (left.length) {
               const byId = new Map<string, string[]>();
               for (const r of left) byId.set(r.id, [...(byId.get(r.id) ?? []), `${r.store} ${r.n}`]);
