@@ -12,7 +12,7 @@
  * (type:digest, source:weekly-digest) and the worker key is the actor. Under the
  * default deny the send is refused; a matching OB1_EGRESS_ALLOW term lets it
  * through; a local endpoint (the drop-the-gate mutant) always would. The
- * DB-backed behavior (the fail-closed read, the stub that records zero requests)
+ * DB-backed behavior (the sensitivity filter, the stub that records zero requests)
  * lives in test-live.ts [20b].
  */
 
@@ -302,10 +302,10 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const opts = { windowDays: 7, includePersonal: false, noSensitivityFilter: false };
   const full = window(5001);
   const over = await readThoughts(full.sql, opts);
-  ok(!over.failClosed && over.rows.length === 5000 && over.more === true, `a window past 5,000 is read to 5,000 and said to hold more (${over.failClosed ? "" : `${over.rows.length}, ${over.more}`})`);
+  ok(over.rows.length === 5000 && over.more === true, `a window past 5,000 is read to 5,000 and said to hold more (${over.rows.length}, ${over.more})`);
   ok(/left\(content, 280\) AS content/.test(full.asked[0] ?? "") && /LIMIT 5001\b/.test(full.asked[0] ?? ""), "the text is read only as far as the prompt reads it");
   const under = await readThoughts(window(5000).sql, opts);
-  ok(!under.failClosed && under.rows.length === 5000 && under.more === false, "a window of exactly 5,000 is all read, with nothing more said");
+  ok(under.rows.length === 5000 && under.more === false, "a window of exactly 5,000 is all read, with nothing more said");
 }
 
 // ---------------------------------------------------------------------------

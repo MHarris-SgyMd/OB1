@@ -1,21 +1,24 @@
 #!/usr/bin/env bun
 /**
- * backfill-metadata.ts — two backfills of a thought's metadata, written
- * through update_thought (SMD-3318 PR 3a).
+ * backfill-metadata.ts — two backfills of a thought's type and sensitivity
+ * tier, written through update_thought, and into `schemas/enhanced-thoughts`'
+ * columns where a brain has them (SMD-3318 PR 3a).
  *
- *   bun db/backfill-metadata.ts --url postgres://…           # both passes, a dry run: what would be written
- *   bun db/backfill-metadata.ts --url … --apply              # write it
- *   bun db/backfill-metadata.ts --url … --pass type --apply  # one pass
+ *   DATABASE_URL=postgres://… bun db/backfill-metadata.ts   # both passes, a dry run: what would be written
+ *   bun db/backfill-metadata.ts --apply                     # write it (DATABASE_URL from the env or ./.env)
+ *   bun db/backfill-metadata.ts --pass type --apply         # one pass
  *
  * This is the `db/` home for `recipes/thought-enrichment`'s
- * `backfill-type.mjs` and `backfill-sensitivity.mjs`, which wrote the
- * `type` and `sensitivity_tier` columns `schemas/enhanced-thoughts` adds,
- * through compat/supabase-sql (SMD-2139), which retires (SMD-3216). The core
- * has neither column: a thought's type is `metadata.type`, and the one reader
- * of a sensitivity tier, `db/weekly-digest.ts`'s egress filter, reads
- * `metadata.sensitivity_tier` beside the column. So both passes write
- * metadata keys. The recipe's third script, enrich-thoughts, is SMD-2298's
- * re-tag worker (SMD-3318 PR 3b).
+ * `backfill-type.mjs` and `backfill-sensitivity.mjs`, which wrote the `type`
+ * and `sensitivity_tier` columns `schemas/enhanced-thoughts` adds, through
+ * compat/supabase-sql (SMD-2139), which retires (SMD-3216). The core has
+ * neither column: a thought's type is `metadata.type`, and its tier
+ * `metadata.sensitivity_tier`, the key the import recipes set and
+ * `db/weekly-digest.ts` reads. So both passes write the metadata key; where
+ * the column exists they write it too, as the recipe did, for that schema's
+ * readers (its search and stats functions, the bio worker, ops views). The
+ * recipe's third script, enrich-thoughts, is SMD-2298's re-tag worker
+ * (SMD-3318 PR 3b).
  *
  * ── The passes ──────────────────────────────────────────────────────────────
  * type: a `metadata.type` the capture would have written otherwise — another
@@ -27,34 +30,43 @@
  * is counted and left: the capture would have coerced it to `observation`,
  * which loses what it said. A row an importer owns (its trust `ingested`) is
  * left too: its type is the importer's facet, and its next sync would write
- * it back. The recipe's pass copied `metadata.type` into the column for rows
- * stamped `reference`; with no column, this is what is left of it.
+ * it back. Where the `type` column exists, the recipe's rule writes it: a row
+ * whose column says `reference` takes its metadata type (as the capture
+ * names it) when that is one of the recipe's eight and not `reference`.
  *
- * sensitivity: a thought whose `metadata.sensitivity_tier` is absent, empty
- * or `standard` is read against the recipe's patterns (below): the first
- * restricted pattern that matches makes it `restricted`, else any personal
- * one `personal`, and that tier is written. A tier is never lowered, and
- * `standard` is never written: no tier and `standard` read alike. The run
- * prints a thought's id and the patterns' labels, never its text (an API key,
- * a card number), where the recipe printed 80 characters of each.
+ * sensitivity: a thought's text is read against the recipe's patterns (below):
+ * the first restricted pattern that matches makes it `restricted`, else any
+ * personal one `personal`. Each place — the metadata key, and the column where
+ * it exists — takes that tier when it is higher than what the place says
+ * (absent, empty and `standard`, in any case, are lowest; then `personal`,
+ * then `restricted`); a tier is never lowered, `standard` never written, and a
+ * place holding something else (a number, `secret`) is left. A thought whose
+ * places both say `restricted` is not read. The run prints a thought's id and
+ * the patterns' labels, never its text (an API key, a card number), where the
+ * recipe printed 80 characters of each.
  *
  * ── What a run guarantees ───────────────────────────────────────────────────
- * Without --apply nothing is written: the run says what would be. With it,
- * each row's keys go in one update_thought call (both passes' at once), so
- * the write is the core's: one audit event, the row locked, and a row
- * written since the page read it (update_thought's if_unchanged_since) is
- * left for the next run and counted. A row whose metadata is SQL NULL merges
- * no patch (update_thought's rule since 009): counted, not written. The
- * table is read by key, a page (--batch, 500) a statement, each statement
- * bounded by --statement-timeout (60 s; 0 for none), so a run's reads never
- * hold a snapshot or a lock for its length. --limit stops after that many
- * rows written (or, in a dry run, that would be). The database the URL names
- * is the one written: a connection that reached another (PGDATABASE) is
- * refused, exit 2. Exit 0 a run that ended, 1 one that failed (the reason
+ * Without --apply nothing is written: the run says what would be. With it, a
+ * row's writes are one transaction: its metadata keys (both passes' at once)
+ * in one update_thought call — one audit event, the row locked — then its
+ * columns. A row written since its page read it (update_thought's
+ * if_unchanged_since, on COALESCE(updated_at, created_at) as the function
+ * compares it) is left for the next run and counted. Metadata that is not a
+ * JSON object (SQL NULL, a JSON null, an array, a string from an old
+ * double-encoding) merges no patch: its keys are counted, not written (its
+ * columns are). The table is read by key, a page (--batch, 500) a statement,
+ * each statement bounded by --statement-timeout (60 s; 0 for none), so a run's
+ * reads never hold a snapshot or a lock for its length. --limit stops after
+ * that many rows written (or, in a dry run, that would be). The database the
+ * URL names is the one written: a connection that reached another (PGDATABASE)
+ * is refused, exit 2. Exit 0 a run that ended, 1 one that failed (the reason
  * printed; rows already written stay written), 2 a refusal.
  *
- * Every write moves the row's `updated_at` and its actor stamp: run it
- * between re-embed passes, as the recipe's README said of its own.
+ * A write moves the row's `updated_at`; its actor stamp (who wrote the
+ * thought, its trust) stays, as on any edit that keeps the text, and the
+ * audit event names `backfill-metadata`. Run it between re-embed passes, as
+ * the recipe's README said of its own. A role needs what `bun db/migrate.ts
+ * --grant <role>` gives (update_thought reads `ob1_agents` and `ob1_config`).
  */
 
 import type { SQL } from "bun";
@@ -70,13 +82,15 @@ const LISTED = 15;
 const STATEMENT_TIMEOUT_S = 60;
 /** Who the writes are by, on each audit event. */
 const ACTOR = { name: "backfill-metadata", via: "db/backfill-metadata.ts" };
+/** The recipe's types for the `type` column (backfill-type.mjs's VALID_TYPES). */
+const COLUMN_TYPES: ReadonlySet<string> = new Set(["idea", "task", "person_note", "reference", "decision", "lesson", "meeting", "journal"]);
 
 /**
  * The recipe's patterns (`recipes/thought-enrichment/sensitivity-patterns.json`,
  * copied whole): [source, flags, label]. None is global, so a test keeps no
  * state between thoughts.
  */
-const PATTERNS: { readonly restricted: readonly (readonly [string, string, string])[]; readonly personal: readonly (readonly [string, string, string])[] } = {
+export const PATTERNS: { readonly restricted: readonly (readonly [string, string, string])[]; readonly personal: readonly (readonly [string, string, string])[] } = {
   restricted: [
     ["\\b\\d{3}-?\\d{2}-?\\d{4}\\b", "", "ssn_pattern"],
     ["\\b[A-Z]{1,2}\\d{6,9}\\b", "", "passport_pattern"],
@@ -105,6 +119,15 @@ export function sensitivityOf(text: string): { tier: "restricted" | "personal" |
   return labels.length ? { tier: "personal", labels: [...new Set(labels)] } : { tier: "standard", labels: [] };
 }
 
+/** A tier's rank: 0 absent, empty or standard (any case), 1 personal, 2 restricted; null for anything else, which is left. */
+export function tierRank(v: unknown): number | null {
+  if (v === null || v === undefined) return 0;
+  if (typeof v !== "string") return null;
+  const t = v.trim().toLowerCase();
+  return t === "" || t === "standard" ? 0 : t === "personal" ? 1 : t === "restricted" ? 2 : null;
+}
+const RANK = { standard: 0, personal: 1, restricted: 2 } as const;
+
 export type Pass = "type" | "sensitivity";
 
 export interface BackfillOptions {
@@ -119,20 +142,22 @@ export interface BackfillOptions {
   writer?: Writer;
 }
 
-export interface BackfillCounts {
+interface Counts {
   scanned: number;
   /** Rows written (or, in a dry run, that would be). */
   written: number;
-  type: { canonical: number; unknown: number; importers: number; listed: string[]; unknownValues: Record<string, number> };
-  sensitivity: { restricted: number; personal: number; standard: number; listed: string[] };
-  /** Rows not written: their metadata SQL NULL, or written since the page read them, or gone. */
-  nullMetadata: number;
+  type: { canonical: number; column: number; unknown: number; importers: number; listed: string[]; unknownValues: Map<string, number> };
+  sensitivity: { restricted: number; personal: number; standard: number; column: number; listed: string[] };
+  /** Keys not written: the row's metadata not a JSON object. */
+  notObject: number;
+  /** Pages read that held rows. */
+  pages: number;
   moved: number;
   gone: number;
   limited: boolean;
 }
 
-type PageRow = { id: string; updated_at: Date; type: unknown; trust: string | null; content: string | null; null_meta: boolean };
+type PageRow = { id: string; stamp: Date; kind: string | null; type: unknown; trust: string | null; meta_tier: unknown; col_type?: string | null; col_tier?: string | null; content: string | null };
 
 /** The SQLSTATE and message of a database error, else the client's code and message, else the message. */
 function reasonOf(e: unknown): string {
@@ -148,10 +173,10 @@ export async function run(opts: BackfillOptions): Promise<number> {
   const sql = opts.sql;
   const doType = opts.passes.includes("type"), doSensitivity = opts.passes.includes("sensitivity");
   const batch = opts.batch ?? BATCH, limit = opts.limit ?? 0;
-  const c: BackfillCounts = {
-    scanned: 0, written: 0, nullMetadata: 0, moved: 0, gone: 0, limited: false,
-    type: { canonical: 0, unknown: 0, importers: 0, listed: [], unknownValues: {} },
-    sensitivity: { restricted: 0, personal: 0, standard: 0, listed: [] },
+  const c: Counts = {
+    scanned: 0, written: 0, notObject: 0, pages: 0, moved: 0, gone: 0, limited: false,
+    type: { canonical: 0, column: 0, unknown: 0, importers: 0, listed: [], unknownValues: new Map() },
+    sensitivity: { restricted: 0, personal: 0, standard: 0, column: 0, listed: [] },
   };
   try {
     const [{ db }] = (await sql.unsafe("SELECT pg_catalog.current_database() AS db")) as { db: string }[];
@@ -162,20 +187,34 @@ export async function run(opts: BackfillOptions): Promise<number> {
         return 2;
       }
     }
-    w.out(`[backfill-metadata] database ${db}, passes ${opts.passes.join(", ")}, ${opts.apply ? "writing" : "a dry run (--apply writes)"}`);
+    // schemas/enhanced-thoughts' columns, where the brain has them: the passes write them too.
+    const cols = new Set(((await sql`SELECT column_name AS c FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name IN ('type', 'sensitivity_tier')`) as { c: string }[]).map((r) => r.c));
+    const typeCol = doType && cols.has("type"), tierCol = doSensitivity && cols.has("sensitivity_tier");
+    w.out(`[backfill-metadata] database ${db}, passes ${opts.passes.join(", ")}, ${opts.apply ? "writing" : "a dry run (--apply writes)"}${typeCol || tierCol ? `; the ${[typeCol ? "type" : "", tierCol ? "sensitivity_tier" : ""].filter(Boolean).join(" and ")} column${typeCol && tierCol ? "s" : ""} too` : ""}`);
+    // The page's columns, fixed strings named by the probe above; a row's text only when the sensitivity pass may write a
+    // place (not when every place it has already says restricted).
+    const restrictedEverywhere = `lower(btrim(t.metadata->>'sensitivity_tier')) = 'restricted'${tierCol ? " AND lower(btrim(t.sensitivity_tier)) = 'restricted'" : ""}`;
+    const select = [
+      "t.id::text AS id", "COALESCE(t.updated_at, t.created_at) AS stamp", "jsonb_typeof(t.metadata) AS kind",
+      "t.metadata->'type' AS type", "t.metadata->>'trust' AS trust", "t.metadata->'sensitivity_tier' AS meta_tier",
+      ...(typeCol ? ["t.type AS col_type"] : []), ...(tierCol ? ["t.sensitivity_tier AS col_tier"] : []),
+      `CASE WHEN ${doSensitivity} AND NOT coalesce(${restrictedEverywhere}, false) THEN t.content END AS content`,
+    ].join(", ");
     let after = "00000000-0000-0000-0000-000000000000";
     pages: for (;;) {
-      // One page by key; a row's text only when the sensitivity pass will read it.
-      const rows = (await sql`
-        SELECT id::text AS id, updated_at, metadata->'type' AS type, metadata->>'trust' AS trust, metadata IS NULL AS null_meta,
-               CASE WHEN ${doSensitivity} AND coalesce(metadata->>'sensitivity_tier', '') IN ('', 'standard') THEN content END AS content
-          FROM thoughts WHERE id > ${after}::uuid ORDER BY id LIMIT ${batch}`) as PageRow[];
+      // By the key itself (t.id), so the primary key's index serves the order and the page stops at its rows.
+      const rows = (await sql.unsafe(`SELECT ${select} FROM thoughts t WHERE t.id > $1::uuid ORDER BY t.id LIMIT $2`, [after, batch])) as PageRow[];
       if (rows.length === 0) break;
+      c.pages++;
       for (const row of rows) {
-        c.scanned++;
         const patch: Record<string, string> = {};
+        const colPatch: { type?: string; sensitivity_tier?: string } = {};
+        const isObject = row.kind === "object";
+        let typeNamed: string | null = null;
         if (doType && row.type !== null && row.type !== undefined) {
           const named = canonicalType(row.type);
+          typeNamed = named?.type ?? null;
           if (named && named.type !== row.type) {
             if (row.trust === "ingested") c.type.importers++;
             else {
@@ -185,31 +224,42 @@ export async function run(opts: BackfillOptions): Promise<number> {
           } else if (!named) {
             c.type.unknown++;
             const key = typeof row.type === "string" ? row.type.slice(0, 40) : JSON.stringify(row.type).slice(0, 40);
-            c.type.unknownValues[key] = (c.type.unknownValues[key] ?? 0) + 1;
+            c.type.unknownValues.set(key, (c.type.unknownValues.get(key) ?? 0) + 1);
           }
+          // The column: the recipe's rule, on the type as the capture names it (or as written, when it names none).
+          const columnType = typeNamed ?? (typeof row.type === "string" ? row.type : null);
+          if (typeCol && row.col_type === "reference" && columnType !== null && columnType !== "reference" && COLUMN_TYPES.has(columnType)) colPatch.type = columnType;
         }
         let tier: ReturnType<typeof sensitivityOf> | null = null;
         if (doSensitivity && row.content !== null) {
           tier = sensitivityOf(row.content);
           if (tier.tier === "standard") c.sensitivity.standard++;
-          else patch.sensitivity_tier = tier.tier;
+          else {
+            const metaRank = tierRank(row.meta_tier);
+            if (metaRank !== null && RANK[tier.tier] > metaRank) patch.sensitivity_tier = tier.tier;
+            const colRank = tierCol ? tierRank(row.col_tier) : null;
+            if (colRank !== null && RANK[tier.tier] > colRank) colPatch.sensitivity_tier = tier.tier;
+          }
         }
-        if (Object.keys(patch).length === 0) continue;
+        // Metadata that is not an object merges no patch (update_thought's `||`): its keys are counted and dropped.
+        if (!isObject && Object.keys(patch).length) {
+          c.notObject++;
+          for (const k of Object.keys(patch)) delete patch[k];
+        }
+        if (Object.keys(patch).length === 0 && Object.keys(colPatch).length === 0) {
+          c.scanned++;
+          continue;
+        }
         if (limit && c.written >= limit) {
           c.limited = true;
           break pages;
         }
-        if (row.null_meta) {
-          c.nullMetadata++;
-          continue;
-        }
+        c.scanned++;
         if (opts.apply) {
-          const [{ r }] = (await sql`
-            SELECT update_thought(${row.id}::uuid, NULL::text, ${patch}::jsonb, NULL::vector, NULL::jsonb, ${row.updated_at}::timestamptz, ${ACTOR}::jsonb) AS r`) as { r: { ok: boolean; error?: string } }[];
-          if (!r.ok) {
-            if (r.error === "STALE_READ") c.moved++;
-            else if (r.error === "NOT_FOUND") c.gone++;
-            else throw new Error(`update_thought ${row.id}: ${r.error}`);
+          const outcome = await writeRow(sql, row, patch, colPatch);
+          if (outcome !== "written") {
+            if (outcome === "moved") c.moved++;
+            else c.gone++;
             continue;
           }
         }
@@ -218,9 +268,11 @@ export async function run(opts: BackfillOptions): Promise<number> {
           c.type.canonical++;
           if (c.type.listed.length < LISTED) c.type.listed.push(`  - ${row.id}: ${JSON.stringify(String(row.type).slice(0, 40))} → ${patch.type}`);
         }
-        if (patch.sensitivity_tier && tier) {
+        if (colPatch.type) c.type.column++;
+        if (tier && (patch.sensitivity_tier || colPatch.sensitivity_tier)) {
           if (tier.tier === "restricted") c.sensitivity.restricted++;
           else c.sensitivity.personal++;
+          if (colPatch.sensitivity_tier) c.sensitivity.column++;
           if (c.sensitivity.listed.length < LISTED) c.sensitivity.listed.push(`  - ${row.id}: ${tier.tier} (${tier.labels.join(", ")})`);
         }
       }
@@ -235,28 +287,61 @@ export async function run(opts: BackfillOptions): Promise<number> {
   return 0;
 }
 
-function report(w: Writer, opts: BackfillOptions, c: BackfillCounts): void {
+/**
+ * One row's writes, in one transaction: the metadata keys through update_thought (its guard on the stamp the page
+ * read), then the columns — under that call's row lock, or, with no keys to write, under the same guard of their own.
+ */
+async function writeRow(sql: SQL, row: PageRow, patch: Record<string, string>, colPatch: { type?: string; sensitivity_tier?: string }): Promise<"written" | "moved" | "gone"> {
+  return await sql.begin(async (txn) => {
+    const tx = txn as unknown as SQL;
+    if (Object.keys(patch).length) {
+      const [{ r }] = (await tx`
+        SELECT update_thought(${row.id}::uuid, NULL::text, ${patch}::jsonb, NULL::vector, NULL::jsonb, ${row.stamp}::timestamptz, ${ACTOR}::jsonb) AS r`) as { r: { ok: boolean; error?: string } }[];
+      if (!r.ok) {
+        if (r.error === "STALE_READ") return "moved";
+        if (r.error === "NOT_FOUND") return "gone";
+        throw new Error(`update_thought ${row.id}: ${r.error}`);
+      }
+    }
+    const names = (["type", "sensitivity_tier"] as const).filter((k) => colPatch[k] !== undefined);
+    if (names.length) {
+      const set = names.map((k, i) => `${k} = $${i + 2}`).join(", ");
+      // With no keys written, the columns take the guard update_thought would have: the stamp the page read.
+      const guarded = Object.keys(patch).length === 0;
+      const guard = guarded ? ` AND date_trunc('milliseconds', COALESCE(updated_at, created_at)) <= date_trunc('milliseconds', $${names.length + 2}::timestamptz)` : "";
+      const params: unknown[] = [row.id, ...names.map((k) => colPatch[k]), ...(guarded ? [row.stamp] : [])];
+      const done = (await tx.unsafe(`UPDATE thoughts SET ${set} WHERE id = $1::uuid${guard} RETURNING id`, params)) as unknown[];
+      if (done.length === 0) {
+        const [{ n }] = (await tx`SELECT count(*)::int AS n FROM thoughts WHERE id = ${row.id}::uuid`) as { n: number }[];
+        return n === 0 ? "gone" : "moved";
+      }
+    }
+    return "written";
+  });
+}
+
+function report(w: Writer, opts: BackfillOptions, c: Counts): void {
   const would = opts.apply ? "written" : "would be written";
   if (opts.passes.includes("type")) {
-    w.out(`[type] ${c.type.canonical} ${would} as the capture's type; ${c.type.unknown} naming no type, left; ${c.type.importers} an importer's, left`);
+    w.out(`[type] ${c.type.canonical} ${would} as the capture's type${c.type.column ? ` (and ${c.type.column} type column${c.type.column === 1 ? "" : "s"} from a type the recipe names)` : ""}; ${c.type.unknown} naming no type, left; ${c.type.importers} an importer's, left`);
     for (const l of c.type.listed) w.out(l);
     if (c.type.canonical > c.type.listed.length) w.out(`  - …and ${c.type.canonical - c.type.listed.length} more`);
-    const unknown = Object.entries(c.type.unknownValues).sort((a, b) => b[1] - a[1]).slice(0, LISTED);
+    const unknown = [...c.type.unknownValues].sort((a, b) => b[1] - a[1]).slice(0, LISTED);
     if (unknown.length) w.out(`  naming no type: ${unknown.map(([v, n]) => `${JSON.stringify(v)} ×${n}`).join(", ")}`);
   }
   if (opts.passes.includes("sensitivity")) {
-    w.out(`[sensitivity] ${c.sensitivity.restricted} restricted and ${c.sensitivity.personal} personal ${would}; ${c.sensitivity.standard} read as standard, left`);
+    w.out(`[sensitivity] ${c.sensitivity.restricted} restricted and ${c.sensitivity.personal} personal ${would}${c.sensitivity.column ? ` (${c.sensitivity.column} into the sensitivity_tier column)` : ""}; ${c.sensitivity.standard} read as standard, left`);
     for (const l of c.sensitivity.listed) w.out(l);
     const more = c.sensitivity.restricted + c.sensitivity.personal - c.sensitivity.listed.length;
     if (more > 0) w.out(`  - …and ${more} more`);
   }
   const notWritten = [
-    c.nullMetadata ? `${c.nullMetadata} with SQL NULL metadata (update_thought merges no patch into it)` : "",
+    c.notObject ? `${c.notObject} whose metadata is not a JSON object (SQL NULL, null, an array or a string), keys dropped` : "",
     c.moved ? `${c.moved} written since the page read them (the next run takes them)` : "",
     c.gone ? `${c.gone} deleted since` : "",
   ].filter(Boolean);
   if (notWritten.length) w.out(`[backfill-metadata] not written: ${notWritten.join("; ")}`);
-  w.out(`[backfill-metadata] ${c.scanned} thoughts read, ${c.written} ${would}${c.limited ? ` — stopped at --limit ${opts.limit}` : ""}`);
+  w.out(`[backfill-metadata] ${c.scanned} thoughts read, ${c.written} ${would}${c.limited ? ` — stopped at --limit ${opts.limit}` : ""}; ${c.pages} page${c.pages === 1 ? "" : "s"} of ${opts.batch ?? BATCH}`);
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────
@@ -266,7 +351,7 @@ if (import.meta.main) {
     "backfill-metadata.ts",
     { url: "one", pass: "one", apply: "none", limit: "one", batch: "one", "statement-timeout": "one" },
     {
-      hints: { url: "<postgres://…>", pass: "<type|sensitivity> (both)", limit: "<rows written> (0: none)", batch: `<rows a page reads> (${BATCH})`, "statement-timeout": `<seconds> (${STATEMENT_TIMEOUT_S}; 0: none)` },
+      hints: { url: "<postgres://…> (DATABASE_URL, from the env or ./.env; --url shows the password to ps)", pass: "<type|sensitivity> (both)", limit: "<rows written> (0: none)", batch: `<rows a page reads> (${BATCH})`, "statement-timeout": `<seconds> (${STATEMENT_TIMEOUT_S}; 0: none)` },
       removed: {
         "dry-run": "--dry-run is removed: a run without --apply is the dry run",
         "batch-size": "--batch-size is removed: --batch names a page's rows",

@@ -20839,7 +20839,7 @@ if (want("19b")) {
     await side`ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS sensitivity_tier text DEFAULT 'standard'`;
     const digestRows = async (includePersonal: boolean) => {
       const r = await readThoughts(side!, { windowDays: 100000, includePersonal, noSensitivityFilter: false });
-      return r.failClosed ? null : r.rows.map((t) => String((t.metadata as Record<string, unknown>)?.source));
+      return r.rows.map((t) => String((t.metadata as Record<string, unknown>)?.source));
     };
     const filtered = await digestRows(false);
     const withPersonal = await digestRows(true);
@@ -24564,18 +24564,14 @@ if (want("36")) {
     assert(noCreds.code === 2 && chatReqs === 0 && tgReqs === 0 && /TELEGRAM_BOT_TOKEN/.test(noCreds.err),
       `--output telegram with the send allowed but no credentials fails before the synthesis, not after it (exit ${noCreds.code}; ${chatReqs} synthesis, ${tgReqs} send(s))`);
 
-    // The sensitivity fail-closed guard: default (filtered), an install without
-    // the sensitivity_tier column refuses before any read leaves; with the
-    // column it proceeds.
+    // The sensitivity filter: the default (filtered) run proceeds with the sensitivity_tier column or without it — without
+    // it the row's metadata.sensitivity_tier is the tier, where until SMD-3318 the run refused ([51] holds the key's
+    // exclusion on a brain without the column).
     const [{ has }] = await wsql`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has`;
     tgReqs = 0; chatReqs = 0;
     const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
-    if (has) {
-      assert(filtered.code === 0 && tgReqs >= 1, `with a sensitivity_tier column the default filtered run proceeds and posts (exit ${filtered.code}; ${tgReqs} send(s))`);
-    } else {
-      assert(filtered.code === 1 && tgReqs === 0 && chatReqs === 0 && /sensitivity_tier column/.test(filtered.err),
-        `without the sensitivity_tier column the default run fails closed before any read leaves (exit ${filtered.code}; ${tgReqs} send(s), ${chatReqs} synthesis)`);
-    }
+    assert(filtered.code === 0 && tgReqs >= 1 && !/sensitivity_tier column/.test(filtered.err),
+      `the default filtered run proceeds and posts, ${has ? "with" : "without"} a sensitivity_tier column (exit ${filtered.code}; ${tgReqs} send(s))`);
   } finally {
     stub.stop(true);
     // The statements cleared before their thoughts go, so no later section reads them open (review pass 1).
@@ -32880,114 +32876,266 @@ if (want("50")) {
 }
 
 if (want("51")) {
-  console.log("\n[51] db/backfill-metadata.ts on a real Postgres: a dry run writes nothing; --apply writes a type the capture's rule names and a sensitivity tier the recipe's patterns set, through update_thought, one audit event a row; an unknown type, an importer's row, a tier already set and SQL NULL metadata left; no thought's text printed; a second run writes nothing; --pass, --limit and the refusals (SMD-3318)");
+  console.log("\n[51] db/backfill-metadata.ts on a real Postgres: a dry run writes nothing; --apply writes a type the capture's rule names and a sensitivity tier the recipe's patterns set, through update_thought, one audit event a row, and the enhanced-thoughts columns where they exist; an unknown type, an importer's type, a higher or unknown tier and metadata that is not an object left; weekly-digest's read leaving the tagged rows out with or without the column; no thought's text printed; paging, a second run, --pass, --limit, a row edited or deleted mid-run, a failure, the statement bound and the refusals (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
     // recipes/thought-enrichment's backfill-type and backfill-sensitivity as one db/ script (SMD-3318 PR 3a), driven as
     // deployed: `bun db/backfill-metadata.ts` with DATABASE_URL alone. Raw inserts plant every case; the importer's row goes
-    // through upsert_thought under a key classified ingested, so its trust is the database's own stamp.
+    // through upsert_thought under a key classified ingested, so its trust is the database's own stamp. The first phase
+    // reads a brain without schemas/enhanced-thoughts' columns, the second adds them (this shard's last section: they
+    // stay, as [29] leaves them in the rest).
     const sql = new SQL({ url: URL_, max: 2 });
     const scratch = mkdtempSync(join(tmpdir(), "ob1-live-3318-backfill-"));
     const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
     const backfill = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(HERE, "backfill-metadata.ts"), ...flags], { cwd: scratch, env: env(extra) });
+    const { run: runBackfill, sensitivityOf, tierRank } = await import("./backfill-metadata.ts");
     const SECRET = "sk-live3318abcdefghijk";
+    // Metadata as JSON text cast in SQL: Bun binds a JS string to a jsonb parameter as a JSON string. undefined is SQL NULL.
+    const plant = async (content: string, metadata: unknown) =>
+      ((await sql.unsafe("INSERT INTO thoughts (content, metadata) VALUES ($1, $2::text::jsonb) RETURNING id::text AS id", [content, metadata === undefined ? null : JSON.stringify(metadata)])) as { id: string }[])[0].id;
+    const metaOf = async (id: string) => ((await sql`SELECT metadata, jsonb_typeof(metadata) AS kind FROM thoughts WHERE id = ${id}::uuid`) as { metadata: Record<string, unknown> | null; kind: string | null }[])[0];
+    const audits = async () => Number(((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE actor_name = 'backfill-metadata'`) as { c: number }[])[0].c);
+    const columns = async () => ((await sql`SELECT column_name AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name IN ('type', 'sensitivity_tier')`) as { c: string }[]).map((r) => r.c);
+    /** The script's client with a hook on each update_thought call (the call's id): the hook acts first, or answers for it. */
+    const hooked = (hook: (id: string) => Promise<unknown[] | void>): SQL => {
+      const wrap = (base: SQL): SQL => Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        if (strings.join("").includes("update_thought(")) {
+          const answer = await hook(String(values[0]));
+          if (answer) return answer;
+        }
+        return base(strings, ...values);
+      }, { unsafe: base.unsafe.bind(base), begin: (fn: (tx: SQL) => Promise<unknown>) => base.begin((tx) => fn(wrap(tx as unknown as SQL))) }) as unknown as SQL;
+      return wrap(sql);
+    };
+    const inProcess = async (client: SQL, passes: ("type" | "sensitivity")[]) => {
+      const lines: string[] = [];
+      const code = await runBackfill({ sql: client, passes, apply: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      return { code, lines };
+    };
     try {
+      // The recipe's patterns, one thought each, read as the recipe read them: every label, the lookahead that keeps a
+      // lab value standard, the case-blind key prefix, and the first restricted match alone.
+      const table: [string, string, string][] = [
+        ["SSN 123-45-6789", "restricted", "ssn_pattern"], ["passport X1234567", "restricted", "passport_pattern"],
+        ["12345678 is the account", "restricted", "bank_account"], ["routing number 1234567890", "restricted", "bank_account"],
+        ["key SK-ABCDEFGHIJKL", "restricted", "api_key"], ["password: hunter2", "restricted", "password_value"],
+        ["card 4111 1111 1111 1111", "restricted", "credit_card"], ["took 20 mg today", "personal", "medication_dosage"],
+        ["on metformin now", "personal", "drug_name"], ["glucose was 110", "personal", "health_measurement"],
+        ["was diagnosed last year", "personal", "medical_condition"], ["my salary is 9", "personal", "financial_detail"],
+        ["cost US$5000", "personal", "financial_amount"], ["glucose 5 mg/dL", "personal", "health_measurement"], ["a plain line", "standard", ""],
+      ];
+      const misread = table.filter(([text, tier, label]) => { const r = sensitivityOf(text); return r.tier !== tier || (label !== "" && r.labels[0] !== label); });
+      const ranks = [tierRank(undefined), tierRank(""), tierRank(" Standard "), tierRank("PERSONAL"), tierRank("restricted"), tierRank("secret"), tierRank(3)];
+      assert(misread.length === 0 && JSON.stringify(sensitivityOf("SSN 123-45-6789 and 20 mg")) === JSON.stringify({ tier: "restricted", labels: ["ssn_pattern"] })
+             && JSON.stringify(sensitivityOf("20 mg of metformin")) === JSON.stringify({ tier: "personal", labels: ["medication_dosage", "drug_name"] })
+             && JSON.stringify(ranks) === "[0,0,0,1,2,null,null]",
+        `the recipe's patterns: each label on its sample (5 mg/dL not a dosage, an upper-case key prefix), the first restricted match alone, every personal one; tiers ranked in any case, anything else unranked (${misread.map(([t]) => t).join("; ") || "none misread"}; ${JSON.stringify(ranks)})`);
+
       await sql`DELETE FROM thoughts`;
       await sql`SELECT set_agent_kind('imp-3318', 'ingested')`;
-      const plant = async (content: string, metadata: Record<string, unknown> | null) =>
-        ((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, ${metadata}::jsonb) RETURNING id::text AS id`) as { id: string }[])[0].id;
-      const ids = {
-        caseOnly: await plant("[51] plain words one", { type: "Task" }),
-        alias: await plant("[51] plain words two", { type: "todo" }),
-        unknown: await plant("[51] plain words three", { type: "decision" }),
-        canonical: await plant("[51] plain words four", { type: "observation" }),
-        apiKey: await plant(`[51] my key is ${SECRET} keep it`, { type: "idea" }),
-        dosage: await plant("[51] took 20 mg of sertraline today", {}),
-        setTier: await plant("[51] took 20 mg again", { sensitivity_tier: "restricted" }),
-        nullMeta: await plant("[51] password: hunter2live", null),
-        both: await plant("[51] my salary is $120000 a year", { type: "Action Item", sensitivity_tier: "standard" }),
-      };
-      const [{ imp }] = (await sql`SELECT (upsert_thought('[51] plain words of an importer', ${{ metadata: { source: "live", type: "Note" }, actor: { name: "imp-3318", via: "test-live" } }}::jsonb, NULL::vector) ->> 'id') AS imp`) as { imp: string }[];
-      const all = [...Object.values(ids), imp];
-      const meta = async () => Object.fromEntries(((await sql`SELECT id::text AS id, metadata FROM thoughts WHERE id = ANY(${sql.array(all, "TEXT")}::uuid[])`) as { id: string; metadata: Record<string, unknown> | null }[]).map((r) => [r.id, r.metadata]));
-      const audits = async () => Number(((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE actor_name = 'backfill-metadata'`) as { c: number }[])[0].c);
-      const before = await meta();
-      const [{ impTrust }] = (await sql`SELECT metadata->>'trust' AS "impTrust" FROM thoughts WHERE id = ${imp}::uuid`) as { impTrust: string }[];
-      assert(all.length === 10 && impTrust === "ingested", `the planted brain: ten thoughts, the importer's trust ingested (${all.length}; ${impTrust})`);
+      const hadColumns = (await columns()).length > 0;
+      if (hadColumns) {
+        skip("…the first phase, a brain without the enhanced-thoughts columns", "an earlier section of this run added them (only an unsharded run reaches [51] after [29])");
+      } else {
+        const ids = {
+          caseOnly: await plant("[51] plain words one", { type: "Task" }),
+          alias: await plant("[51] plain words two", { type: " todo " }),
+          unknown: await plant("[51] plain words three", { type: "decision" }),
+          canonical: await plant("[51] plain words four", { type: "observation" }),
+          ctor: await plant("[51] plain words ctor", { type: "constructor" }),
+          apiKey: await plant(`[51] my key is ${SECRET} keep it`, { type: "idea" }),
+          dosage: await plant("[51] took 20 mg of sertraline today", {}),
+          setTier: await plant("[51] took 20 mg again", { sensitivity_tier: "restricted" }),
+          raise: await plant("[51] SSN 123-45-6789 on the raise row", { sensitivity_tier: "personal" }),
+          caps: await plant("[51] my salary is $120000 a year", { sensitivity_tier: "Standard" }),
+          odd: await plant("[51] SSN 222-33-4444 on the odd row", { sensitivity_tier: "secret" }),
+          nullMeta: await plant("[51] password: hunter2live", undefined),
+          jsonNull: await plant("[51] SSN 333-44-5555 under a JSON null", null),
+          arr: await plant("[51] SSN 444-55-6666 under an array", ["x"]),
+          str: await plant("[51] SSN 555-66-7777 under a string", "{\"type\":\"todo\"}"),
+          both: await plant("[51] my income is $90000 now", { type: "Action Item", sensitivity_tier: "standard" }),
+        };
+        const [{ imp }] = (await sql`SELECT (upsert_thought('[51] plain words of an importer', ${{ metadata: { source: "live", type: "Note" }, actor: { name: "imp-3318", via: "test-live" } }}::jsonb, NULL::vector) ->> 'id') AS imp`) as { imp: string }[];
+        const all = [...Object.values(ids), imp];
+        const snapshot = async () => JSON.stringify((await sql`SELECT id::text AS id, metadata FROM thoughts WHERE id = ANY(${sql.array(all, "TEXT")}::uuid[]) ORDER BY id`) as unknown[]);
+        const before = await snapshot();
+        const [{ impTrust }] = (await sql`SELECT metadata->>'trust' AS "impTrust" FROM thoughts WHERE id = ${imp}::uuid`) as { impTrust: string }[];
+        assert(all.length === 17 && impTrust === "ingested" && (await columns()).length === 0,
+          `the planted brain: seventeen thoughts, the importer's trust ingested, no enhanced-thoughts column (${all.length}; ${impTrust})`);
 
-      // A dry run: what would be written, nothing written. Type: Task and todo and Action Item (3); decision unknown; the
-      // importer's Note left. Sensitivity: the key restricted, the dosage and the salary personal; five read as standard;
-      // the restricted tier not read; the password's row SQL NULL metadata.
-      const dry = await backfill({ DATABASE_URL: URL_ });
-      const dryOut = dry.stdout + dry.stderr;
-      assert(dry.code === 0 && /a dry run \(--apply writes\)/.test(dry.stdout)
-             && dry.stdout.includes("[type] 3 would be written as the capture's type; 1 naming no type, left; 1 an importer's, left")
-             && dry.stdout.includes("[sensitivity] 1 restricted and 2 personal would be written; 5 read as standard, left")
-             && dry.stdout.includes("not written: 1 with SQL NULL metadata") && dry.stdout.includes("10 thoughts read, 5 would be written")
-             && dry.stdout.includes(`  - ${ids.apiKey}: restricted (api_key)`) && dry.stdout.includes(`  - ${ids.dosage}: personal (medication_dosage, drug_name)`)
-             && dry.stdout.includes(`  - ${ids.alias}: "todo" → task`)
-             && JSON.stringify(await meta()) === JSON.stringify(before) && (await audits()) === 0 && !dryOut.includes(SECRET) && !dryOut.includes("hunter2"),
-        `a dry run: exit 0, three types and three tiers that would be written, each listed with its patterns' labels, the NULL metadata counted, nothing written, no text printed (exit ${dry.code}: ${dry.stdout.split("\n").filter((l) => /^\[/.test(l)).join(" | ") || dry.stderr.split("\n")[0]})`);
+        // A dry run, and the same over pages of two. Type: Task, " todo " and Action Item; decision and constructor name none;
+        // the importer's Note left. Sensitivity: the key and the raise restricted (personal raised), the dosage, the salary
+        // ("Standard") and the income personal; six read as standard; the restricted tier not read, the "secret" one left; four
+        // rows whose metadata is no object (SQL NULL, a JSON null, an array, a string) counted, their keys dropped.
+        const dry = await backfill({ DATABASE_URL: URL_ });
+        const paged = await backfill({ DATABASE_URL: URL_ }, "--batch", "2");
+        const dryOut = dry.stdout + dry.stderr;
+        const linesOf = (out: string) => out.split("\n").filter((l) => /^\[(type|sensitivity|backfill-metadata)\] (\d|not)/.test(l)).join("\n").replace(/; \d+ pages? of \d+$/m, "");
+        assert(dry.code === 0 && /a dry run \(--apply writes\)$/m.test(dry.stdout)
+               && dry.stdout.includes("[type] 3 would be written as the capture's type; 2 naming no type, left; 1 an importer's, left")
+               && dry.stdout.includes(`"constructor" ×1`) && dry.stdout.includes(`"decision" ×1`)
+               && dry.stdout.includes("[sensitivity] 2 restricted and 3 personal would be written; 6 read as standard, left")
+               && dry.stdout.includes("not written: 4 whose metadata is not a JSON object") && dry.stdout.includes("17 thoughts read, 7 would be written")
+               && dry.stdout.includes(`  - ${ids.apiKey}: restricted (api_key)`) && dry.stdout.includes(`  - ${ids.dosage}: personal (medication_dosage, drug_name)`)
+               && dry.stdout.includes(`  - ${ids.alias}: " todo " → task`) && dry.stdout.includes(`  - ${ids.raise}: restricted (ssn_pattern)`)
+               && paged.code === 0 && linesOf(paged.stdout) === linesOf(dry.stdout) && /; 1 page of 500$/m.test(dry.stdout) && /; 9 pages of 2$/m.test(paged.stdout)
+               && (await snapshot()) === before && (await audits()) === 0 && !dryOut.includes(SECRET) && !dryOut.includes("hunter2"),
+          `a dry run: exit 0, three types and five tiers that would be written, each listed with its labels, the unknown types named, four non-object metadata counted, nothing written, no text printed; the same over nine pages of two (exit ${dry.code}, ${paged.code}: ${linesOf(dry.stdout).replace(/\n/g, " | ")})`);
 
-      // --apply: each row's keys in one update_thought call, one audit event a row written.
-      const applied = await backfill({ DATABASE_URL: URL_ }, "--apply");
-      const after = await meta();
-      const m = (id: string) => after[id] ?? {};
-      assert(applied.code === 0 && applied.stdout.includes("10 thoughts read, 5 written")
-             && m(ids.caseOnly).type === "task" && !("type_raw" in m(ids.caseOnly))
-             && m(ids.alias).type === "task" && m(ids.alias).type_raw === "todo"
-             && m(ids.both).type === "task" && m(ids.both).type_raw === "Action Item" && m(ids.both).sensitivity_tier === "personal"
-             && m(ids.unknown).type === "decision" && m(ids.canonical).type === "observation" && m(imp).type === "Note"
-             && m(ids.apiKey).sensitivity_tier === "restricted" && m(ids.apiKey).type === "idea" && m(ids.dosage).sensitivity_tier === "personal"
-             && m(ids.setTier).sensitivity_tier === "restricted" && after[ids.nullMeta] === null
-             && !("sensitivity_tier" in m(ids.caseOnly)) && !("sensitivity_tier" in m(imp))
-             && (await audits()) === 5 && !(applied.stdout + applied.stderr).includes(SECRET),
-        `--apply: Task → task, todo → task with its words in type_raw, Action Item → task and personal in one write; decision, observation and the importer's Note left; the key restricted, the dosage personal, a set tier and NULL metadata left; standard never written; five audit events by backfill-metadata (exit ${applied.code}; ${JSON.stringify({ alias: m(ids.alias), both: m(ids.both) })})`);
+        const applied = await backfill({ DATABASE_URL: URL_ }, "--apply");
+        const m = async (id: string) => (await metaOf(id)).metadata ?? {};
+        const kinds = await Promise.all([ids.nullMeta, ids.jsonNull, ids.arr, ids.str].map(async (id) => (await metaOf(id)).kind));
+        const alias = await m(ids.alias), both = await m(ids.both);
+        assert(applied.code === 0 && applied.stdout.includes("17 thoughts read, 7 written")
+               && (await m(ids.caseOnly)).type === "task" && !("type_raw" in (await m(ids.caseOnly)))
+               && alias.type === "task" && alias.type_raw === "todo" && both.type === "task" && both.type_raw === "Action Item" && both.sensitivity_tier === "personal"
+               && (await m(ids.unknown)).type === "decision" && (await m(ids.ctor)).type === "constructor" && (await m(imp)).type === "Note"
+               && (await m(ids.apiKey)).sensitivity_tier === "restricted" && (await m(ids.dosage)).sensitivity_tier === "personal"
+               && (await m(ids.raise)).sensitivity_tier === "restricted" && (await m(ids.caps)).sensitivity_tier === "personal"
+               && (await m(ids.odd)).sensitivity_tier === "secret" && (await m(ids.setTier)).sensitivity_tier === "restricted"
+               && JSON.stringify(kinds) === JSON.stringify([null, "null", "array", "string"])
+               && !("sensitivity_tier" in (await m(ids.caseOnly))) && !("sensitivity_tier" in (await m(imp)))
+               && (await audits()) === 7 && !(applied.stdout + applied.stderr).includes(SECRET),
+          `--apply: Task → task, " todo " → task with "todo" in type_raw, Action Item → task and personal in one write; decision, constructor and the importer's Note left; personal raised to restricted, "Standard" written personal, "secret" and a restricted tier left; the four non-object metadata untouched; standard never written; seven audit events (exit ${applied.code}; ${JSON.stringify({ alias, kinds })})`);
 
-      // A second run finds nothing to write.
-      const again = await backfill({ DATABASE_URL: URL_ }, "--apply");
-      assert(again.code === 0 && again.stdout.includes("10 thoughts read, 0 written") && (await audits()) === 5,
-        `a second --apply writes nothing (exit ${again.code}: ${again.stdout.split("\n").at(-2) ?? ""})`);
+        // weekly-digest's read, on this brain without the column: the rows the backfill tagged are left out by the key (it
+        // refused to run here until SMD-3318), and kept when the filter is waived.
+        const digest = async (includePersonal: boolean, noSensitivityFilter = false) =>
+          (await readThoughts(sql, { windowDays: 100000, includePersonal, noSensitivityFilter })).rows.map((t) => String(t.id));
+        const filtered = await digest(false), withPersonal = await digest(true), unfiltered = await digest(false, true);
+        const tagged = [ids.apiKey, ids.raise, ids.setTier], personal = [ids.dosage, ids.caps, ids.both];
+        assert([...tagged, ...personal].every((id) => !filtered.includes(id)) && filtered.includes(ids.caseOnly) && filtered.includes(ids.odd)
+               && personal.every((id) => withPersonal.includes(id)) && tagged.every((id) => !withPersonal.includes(id)) && tagged.every((id) => unfiltered.includes(id)),
+          `weekly-digest's read without the column: the restricted and personal rows left out by the key, the personal ones kept with --include-personal, every row with the filter waived (${filtered.length} / ${withPersonal.length} / ${unfiltered.length} read)`);
+
+        const again = await backfill({ DATABASE_URL: URL_ }, "--apply");
+        assert(again.code === 0 && again.stdout.includes("17 thoughts read, 0 written") && (await audits()) === 7,
+          `a second --apply writes nothing (exit ${again.code}: ${again.stdout.split("\n").at(-2) ?? ""})`);
+      }
 
       // --pass type alone leaves a matching text's tier; --limit 1 stops after one row written.
+      await sql`DELETE FROM thoughts`;
       const fact = await plant("[51] SSN 123-45-6789 on file", { type: "Fact" });
       const typeOnly = await backfill({ DATABASE_URL: URL_ }, "--pass", "type", "--apply");
-      const [f] = (await sql`SELECT metadata FROM thoughts WHERE id = ${fact}::uuid`) as { metadata: Record<string, unknown> }[];
+      const factMeta = (await metaOf(fact)).metadata ?? {};
+      await sql`DELETE FROM thoughts WHERE id = ${fact}::uuid`;
       const twins = [await plant("[51] plain words five", { type: "TASK" }), await plant("[51] plain words six", { type: "TASK" })];
       const limited = await backfill({ DATABASE_URL: URL_ }, "--pass", "type", "--apply", "--limit", "1");
       const [{ left }] = (await sql`SELECT count(*) FILTER (WHERE metadata->>'type' = 'TASK')::int AS left FROM thoughts WHERE id = ANY(${sql.array(twins, "TEXT")}::uuid[])`) as { left: number }[];
-      assert(typeOnly.code === 0 && f.metadata.type === "reference" && f.metadata.type_raw === "Fact" && !("sensitivity_tier" in f.metadata) && !/\[sensitivity\]/.test(typeOnly.stdout)
-             && limited.code === 0 && /1 written — stopped at --limit 1/.test(limited.stdout) && left === 1,
-        `--pass type: Fact → reference, the SSN's tier not written; --limit 1: one of two rows written, the run saying it stopped (exit ${typeOnly.code}, ${limited.code}; ${left} left)`);
+      assert(typeOnly.code === 0 && factMeta.type === "reference" && factMeta.type_raw === "Fact" && !("sensitivity_tier" in factMeta) && !/\[sensitivity\]/.test(typeOnly.stdout)
+             && limited.code === 0 && /1 written — stopped at --limit 1/.test(limited.stdout) && /\] 1 thoughts read, 1 written/.test(limited.stdout) && left === 1,
+        `--pass type: Fact → reference, the SSN's tier not written; --limit 1: one of two rows written, the row after the limit not read (exit ${typeOnly.code}, ${limited.code}; ${left} left; ${limited.stdout.split("\n").at(-2) ?? ""})`);
 
-      // A row written between its page's read and its write: update_thought's if_unchanged_since refuses it (STALE_READ),
-      // and the run leaves it for the next one and counts it. In process, the client wrapped so the row is edited just
-      // before its update_thought call.
-      const { run: runBackfill } = await import("./backfill-metadata.ts");
-      const raced = await plant("[51] plain words seven", { type: "TODO" });
-      await sql`UPDATE thoughts SET updated_at = now() - interval '1 minute' WHERE id = ${raced}::uuid`;
+      // A row edited between its page's read and its write is left (STALE_READ) and counted; one deleted, counted as gone;
+      // an update_thought refusal the run does not expect ends it, exit 1, saying how many rows it wrote before. In process,
+      // the client hooked at each update_thought call. The first row's updated_at NULL: its stamp is its created_at.
+      await sql`DELETE FROM thoughts`;
+      const [{ raced }] = (await sql`INSERT INTO thoughts (content, metadata, updated_at) VALUES ('[51] plain words seven', '{"type": "TODO"}'::jsonb, NULL) RETURNING id::text AS raced`) as { raced: string }[];
+      const [{ unstamped }] = (await sql`SELECT updated_at IS NULL AS unstamped FROM thoughts WHERE id = ${raced}::uuid`) as { unstamped: boolean }[];
       let edited = false;
-      const racing = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-        if (!edited && strings.join("").includes("update_thought(")) {
+      const race = await inProcess(hooked(async (id) => {
+        if (!edited && id === raced) {
           edited = true;
-          await sql`UPDATE thoughts SET metadata = metadata || '{"edited": true}'::jsonb WHERE id = ${raced}::uuid`;
+          await sql`SELECT update_thought(${raced}::uuid, NULL::text, '{"type": "idea"}'::jsonb)`;
         }
-        return sql(strings, ...values);
-      }, { unsafe: sql.unsafe.bind(sql) }) as unknown as SQL;
-      const lines: string[] = [];
-      const racedCode = await runBackfill({ sql: racing, passes: ["type"], apply: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
-      const [r] = (await sql`SELECT metadata FROM thoughts WHERE id = ${raced}::uuid`) as { metadata: Record<string, unknown> }[];
-      assert(racedCode === 0 && edited && r.metadata.type === "TODO" && r.metadata.edited === true && lines.some((l) => l.includes("not written: 1 written since the page read them")),
-        `a row edited between its page's read and its write is left (STALE_READ) and counted, the run going on (exit ${racedCode}; ${JSON.stringify(r.metadata)}; ${lines.filter((l) => /not written/.test(l)).join(" ") || "no line"})`);
+      }), ["type"]);
+      const racedMeta = (await metaOf(raced)).metadata ?? {};
+      const doomed = await plant("[51] plain words eight", { type: "TODO" });
+      const gone = await inProcess(hooked(async (id) => { if (id === doomed) await sql`DELETE FROM thoughts WHERE id = ${doomed}::uuid`; }), ["type"]);
+      const refused = await plant("[51] plain words nine", { type: "TODO" });
+      const failed = await inProcess(hooked(async (id) => (id === refused ? [{ r: { ok: false, error: "WOULD_CYCLE" } }] : undefined)), ["type"]);
+      assert(unstamped && race.code === 0 && edited && racedMeta.type === "idea" && !("type_raw" in racedMeta) && race.lines.some((l) => l.includes("not written: 1 written since the page read them"))
+             && gone.code === 0 && gone.lines.some((l) => l.includes("not written: 1 deleted since"))
+             && failed.code === 1 && failed.lines.some((l) => new RegExp(`^backfill-metadata FAILED — update_thought ${refused}: WOULD_CYCLE\\. 0 rows were written before it; they stay\\.$`).test(l)),
+        `a row edited mid-run (its updated_at NULL) is left and counted, a row deleted mid-run is counted as gone, an unexpected refusal ends the run with exit 1 (${race.code}/${gone.code}/${failed.code}; ${JSON.stringify(racedMeta)}; ${failed.lines.filter((l) => /FAILED/.test(l)).join(" ") || "no FAILED line"})`);
 
-      // The refusals, exit 2: a bad --pass, the recipe's --dry-run (saying a run without --apply is one), another database.
+      // Past fifteen rows of a pass, the list says how many more.
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`INSERT INTO thoughts (content, metadata) SELECT '[51] SSN ' || (100 + i) || '-22-3333 row', '{"type": "FACT"}'::jsonb FROM generate_series(1, 16) i`);
+      const many = await backfill({ DATABASE_URL: URL_ }, "--apply");
+      assert(many.code === 0 && many.stdout.includes("[type] 16 written") && many.stdout.includes("[sensitivity] 16 restricted and 0 personal written")
+             && (many.stdout.match(/^  - …and 1 more$/gm) ?? []).length === 2,
+        `sixteen rows of each pass: fifteen listed, and a line for the one more, each (exit ${many.code})`);
+
+      // A statement past --statement-timeout: thoughts held by another session, the page read fails 57014 in about a second.
+      const holder = new SQL({ url: URL_, max: 1 });
+      let release = () => {};
+      const held = new Promise<void>((r) => (release = r));
+      let locked = () => {};
+      const taken = new Promise<void>((r) => (locked = r));
+      const safety = setTimeout(() => release(), 15_000);
+      const holding = holder.begin(async (tx) => { await tx`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`; locked(); await held; });
+      await taken;
+      const t0 = performance.now();
+      const bounded = await backfill({ DATABASE_URL: URL_ }, "--statement-timeout", "1").finally(() => { clearTimeout(safety); release(); });
+      const boundMs = Math.round(performance.now() - t0);
+      await holding;
+      await holder.close();
+      assert(bounded.code === 1 && /backfill-metadata FAILED — 57014 canceling statement due to statement timeout\. Nothing was written \(a dry run\)\./.test(bounded.stderr) && boundMs < 5_000,
+        `--statement-timeout 1 with thoughts held by another session: exit 1, 57014 in ${boundMs} ms`);
+
+      // The refusals, exit 2: a bad --pass, the recipe's --dry-run and --batch-size (each saying what replaced it), another database.
       const badPass = await backfill({ DATABASE_URL: URL_ }, "--pass", "importance");
       const dryFlag = await backfill({ DATABASE_URL: URL_ }, "--dry-run");
+      const batchSize = await backfill({ DATABASE_URL: URL_ }, "--batch-size", "200");
       const other = await backfill({ DATABASE_URL: URL_, PGDATABASE: "template1" }, "--apply");
       assert(badPass.code === 2 && /--pass must be type or sensitivity/.test(badPass.stderr)
              && dryFlag.code === 2 && /^--dry-run is removed: a run without --apply is the dry run/m.test(dryFlag.stderr)
+             && batchSize.code === 2 && /^--batch-size is removed: --batch names a page's rows/m.test(batchSize.stderr)
              && other.code === 2 && /backfill-metadata refused — the connection reached database "template1"/.test(other.stderr),
-        `a bad --pass, --dry-run and another database each refused, exit 2 (${[badPass, dryFlag, other].map((x) => x.code).join(" ")})`);
+        `a bad --pass, --dry-run, --batch-size and another database each refused, exit 2 (${[badPass, dryFlag, batchSize, other].map((x) => x.code).join(" ")})`);
+
+      // The enhanced-thoughts columns: where they exist the passes write them too, by the recipe's rules, beside the
+      // metadata key; metadata that is not an object still takes its column. The digest leaves the rows out.
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS type TEXT; ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS sensitivity_tier TEXT DEFAULT 'standard'`);
+      const plantCols = async (content: string, metadata: unknown, type: string | null, tier: string) =>
+        ((await sql.unsafe("INSERT INTO thoughts (content, metadata, type, sensitivity_tier) VALUES ($1, $2::text::jsonb, $3, $4) RETURNING id::text AS id", [content, metadata === undefined ? null : JSON.stringify(metadata), type, tier])) as { id: string }[])[0].id;
+      const b = {
+        decision: await plantCols("[51] plain words b1", { type: "decision" }, "reference", "standard"),
+        task: await plantCols("[51] plain words b2", { type: "Task" }, "reference", "standard"),
+        idea: await plantCols("[51] plain words b3", { type: "lesson" }, "idea", "standard"),
+        synthesis: await plantCols("[51] plain words b8", { type: "synthesis" }, "reference", "standard"),
+        both: await plantCols("[51] SSN 123-45-6789 b4", {}, null, "standard"),
+        colSet: await plantCols("[51] SSN 123-45-6789 b5", {}, null, "restricted"),
+        nullMeta: await plantCols("[51] password: hunter2b6", undefined, null, "standard"),
+      };
+      const [{ bImp }] = (await sql`SELECT (upsert_thought('[51] SSN 987-65-4321 of an importer', ${{ metadata: { source: "live", type: "Note" }, actor: { name: "imp-3318", via: "test-live" } }}::jsonb, NULL::vector) ->> 'id') AS "bImp"`) as { bImp: string }[];
+      const withCols = await backfill({ DATABASE_URL: URL_ }, "--apply");
+      type Cols = { metadata: Record<string, unknown> | null; type: string | null; tier: string | null };
+      const row = async (id: string) => ((await sql`SELECT metadata, type, sensitivity_tier AS tier FROM thoughts WHERE id = ${id}::uuid`) as Cols[])[0];
+      const r = Object.fromEntries(await Promise.all(Object.entries({ ...b, imp: bImp }).map(async ([k, id]) => [k, await row(id)] as const))) as Record<string, Cols>;
+      const colDigest = (await readThoughts(sql, { windowDays: 100000, includePersonal: false, noSensitivityFilter: false })).rows.map((t) => String(t.id));
+      const colsAgain = await backfill({ DATABASE_URL: URL_ }, "--apply");
+      // A write to the columns alone (no key to write) takes the same guard: the row edited between its page's read and that
+      // write is left and counted. In process, the transaction's column UPDATE hooked.
+      const colRaced = await plantCols("[51] plain words b9", { type: "decision" }, "reference", "standard");
+      let colEdited = false;
+      const colHooked = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {
+        unsafe: sql.unsafe.bind(sql),
+        begin: (fn: (tx: SQL) => Promise<unknown>) => sql.begin((tx) => fn(Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => tx(strings, ...values), {
+          unsafe: async (query: string, params?: unknown[]) => {
+            if (!colEdited && query.startsWith("UPDATE thoughts SET")) {
+              colEdited = true;
+              await sql`SELECT update_thought(${colRaced}::uuid, NULL::text, '{"edited": true}'::jsonb)`;
+            }
+            return tx.unsafe(query, params);
+          },
+        }) as unknown as SQL)),
+      }) as unknown as SQL;
+      const colRace = await inProcess(colHooked, ["type"]);
+      const [{ colLeft }] = (await sql`SELECT type AS "colLeft" FROM thoughts WHERE id = ${colRaced}::uuid`) as { colLeft: string }[];
+      assert(withCols.code === 0 && /; the type and sensitivity_tier columns too$/m.test(withCols.stdout)
+             && withCols.stdout.includes("[type] 1 written as the capture's type (and 2 type columns from a type the recipe names)")
+             && withCols.stdout.includes("[sensitivity] 4 restricted and 0 personal written (3 into the sensitivity_tier column)")
+             && withCols.stdout.includes("not written: 1 whose metadata is not a JSON object") && withCols.stdout.includes("8 thoughts read, 6 written")
+             && r.decision.type === "decision" && r.decision.metadata?.type === "decision" && r.task.type === "task" && r.task.metadata?.type === "task" && r.idea.type === "idea" && r.synthesis.type === "reference"
+             && r.both.tier === "restricted" && r.both.metadata?.sensitivity_tier === "restricted" && r.colSet.tier === "restricted" && r.colSet.metadata?.sensitivity_tier === "restricted"
+             && r.nullMeta.tier === "restricted" && r.nullMeta.metadata === null && r.imp.tier === "restricted" && r.imp.metadata?.sensitivity_tier === "restricted" && r.imp.metadata?.type === "Note"
+             && [b.both, b.colSet, b.nullMeta, bImp].every((id) => !colDigest.includes(id)) && colDigest.includes(b.decision)
+             && colsAgain.code === 0 && colsAgain.stdout.includes("8 thoughts read, 0 written")
+             && colRace.code === 0 && colEdited && colLeft === "reference" && colRace.lines.some((l) => l.includes("not written: 1 written since the page read them")),
+        `with the enhanced-thoughts columns: the type column from reference to decision and task, idea and a synthesis (none of the recipe's eight) left; the tier column and key raised where lower, the NULL metadata's column alone, the importer's tier in both; the digest leaving them out; a second run writing nothing; a column-only write to a row edited mid-run left (exit ${withCols.code}, ${colsAgain.code}, ${colRace.code}; ${colLeft}; ${JSON.stringify({ decision: r.decision.type, task: r.task.type, nullMeta: r.nullMeta.tier, colSet: r.colSet.metadata })})`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
       await sql`DELETE FROM thoughts`;

@@ -53,13 +53,15 @@
  * migration 122, or a read that fails, leaves the share by recency alone, and
  * the run says so.
  *
- * ── Sensitivity, fail-closed ────────────────────────────────────────────────
- * `sensitivity_tier` is an optional TEXT column. Rows tagged `restricted`
- * (always) and `personal` (unless --include-personal) are excluded, by the
- * column or by `metadata.sensitivity_tier` (the import recipes' facet, under a
- * column left at its default — SMD-2493); NULL and every other tier are kept. If the column is ABSENT the run REFUSES rather than
- * page every row unfiltered — the privacy boundary the recipe promised —
- * unless --no-sensitivity-filter says, in as many words, to send everything.
+ * ── Sensitivity ─────────────────────────────────────────────────────────────
+ * Rows tagged `restricted` (always) and `personal` (unless --include-personal)
+ * are excluded, by `metadata.sensitivity_tier` — the import recipes' facet
+ * (SMD-2493) and `db/backfill-metadata.ts`'s tier — and, where a brain has
+ * `schemas/enhanced-thoughts`' `sensitivity_tier` column, by the column too,
+ * whichever says so; NULL and every other tier are kept. A brain without the
+ * column filters on the key alone: until SMD-3318 it refused to run rather
+ * than read a core brain, whose only tier is the key. --no-sensitivity-filter
+ * says, in as many words, to send everything.
  */
 
 import { commandLine } from "./cli.ts";
@@ -314,34 +316,24 @@ export function chunkForTelegram(text: string, limit = TELEGRAM_CHUNK_LIMIT): st
   return chunks;
 }
 
-// ── Read (raw SQL; sensitivity fail-closed) ─────────────────────────────────
-
-const FAIL_CLOSED =
-  "\n  public.thoughts has no sensitivity_tier column, so restricted/personal rows cannot be excluded.\n" +
-  "  Refusing to read the corpus unfiltered — every row (including anything you would tag restricted or\n" +
-  "  personal) would be synthesized and could leave the box. Add a sensitivity-tiers migration, or pass\n" +
-  "  --no-sensitivity-filter to accept sending ALL rows in the window.";
+// ── Read (raw SQL; the sensitivity filter) ──────────────────────────────────
 
 /**
  * The window's rows, each numbered by its turn (pickForDigest), in turn order and
  * capped, so a cap reached on a busy window drops later turns, not whole
- * days or writers. `restricted` (always) and
- * `personal` (unless includePersonal) are excluded when the column exists, by
- * the column or the row's `metadata.sensitivity_tier`. Returns the rows, or
- * `{ failClosed: true }` when the sensitivity column is missing and the filter
- * was not waived.
+ * days or writers. `restricted` (always) and `personal` (unless
+ * includePersonal) are excluded by the row's `metadata.sensitivity_tier`, and
+ * by the column where it exists, unless the filter was waived.
  */
 export async function readThoughts(
   sql: SQL,
   opts: { windowDays: number; includePersonal: boolean; noSensitivityFilter: boolean },
-): Promise<{ failClosed: true } | { failClosed: false; rows: DigestThought[]; more: boolean }> {
+): Promise<{ rows: DigestThought[]; more: boolean }> {
   const [cols] = await sql`
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has_sensitivity`;
   const hasSensitivity = Boolean(cols.has_sensitivity);
   const filter = !opts.noSensitivityFilter;
-
-  if (filter && !hasSensitivity) return { failClosed: true };
 
   // Column names are fixed strings gated by the existence probe above — never
   // caller input — so building the select list is safe. Values go as $-params.
@@ -353,12 +345,13 @@ export async function readThoughts(
 
   const params: unknown[] = [opts.windowDays];
   let where = "created_at >= now() - make_interval(days => $1::int)";
-  if (filter && hasSensitivity) {
+  if (filter) {
     const excluded = opts.includePersonal ? ["restricted"] : ["restricted", "personal"];
     // The tier a row's metadata carries counts as the column's does: an import
     // through the ingestion pipeline sets the facet, and the column keeps its
-    // default 'standard' (SMD-2493).
-    where += " AND (sensitivity_tier IS NULL OR sensitivity_tier <> ALL($2)) AND (metadata->>'sensitivity_tier' IS NULL OR metadata->>'sensitivity_tier' <> ALL($2))";
+    // default 'standard' (SMD-2493). Without the column the key is the tier.
+    if (hasSensitivity) where += " AND (sensitivity_tier IS NULL OR sensitivity_tier <> ALL($2))";
+    where += " AND (metadata->>'sensitivity_tier' IS NULL OR metadata->>'sensitivity_tier' <> ALL($2))";
     params.push(sql.array(excluded, "TEXT"));
   }
 
@@ -374,7 +367,7 @@ export async function readThoughts(
     params,
   )) as DigestThought[];
   const more = rows.length > FETCH_HARD_CAP;
-  return { failClosed: false, rows: more ? rows.slice(0, FETCH_HARD_CAP) : rows, more };
+  return { rows: more ? rows.slice(0, FETCH_HARD_CAP) : rows, more };
 }
 
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 500);
@@ -557,10 +550,6 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   }
 
   const read = await readThoughts(sql, args);
-  if (read.failClosed) {
-    console.error(FAIL_CLOSED);
-    return 1;
-  }
   if (args.noSensitivityFilter) {
     console.error(
       "  ⚠  --no-sensitivity-filter: every row in the window (including any restricted/personal) will be synthesized and may leave the box.",

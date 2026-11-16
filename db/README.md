@@ -5859,33 +5859,43 @@ the refusals.
 ### `backfill-metadata.ts`
 
 ```bash
-bun backfill-metadata.ts --url postgres://…             # both passes, a dry run: what would be written
-bun backfill-metadata.ts --url … --apply                # write
-bun backfill-metadata.ts --url … --pass type --apply    # one pass
-#   --pass type|sensitivity (both)   --apply (none: a dry run)   --limit N (rows written; 0: none)   --batch N (rows a page reads; 500)   --statement-timeout SECONDS (60; 0: none)
+bun backfill-metadata.ts                    # both passes, a dry run: what would be written (DATABASE_URL from the env or ./.env)
+bun backfill-metadata.ts --apply            # write
+bun backfill-metadata.ts --pass type --apply  # one pass
+#   --pass type|sensitivity (both)   --apply (none: a dry run)   --limit N (rows written; 0: none)   --batch N (rows a page reads; 500)   --statement-timeout SECONDS (60; 0: none)   --url (shows the password to ps; prefer DATABASE_URL)
 #   exits 0 the run ended · 1 a read or a write failed (rows already written stay) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
 ```
 
 `recipes/thought-enrichment`'s `backfill-type.mjs` and `backfill-sensitivity.mjs`
-(SMD-2139), one script on the core's metadata (SMD-3318). The core has neither
-the `type` nor the `sensitivity_tier` column those wrote, so both passes write
-metadata keys through `update_thought`, each row's keys in one call: one audit
-event, the row locked, a row written since its page was read left for the next
-run (`if_unchanged_since`), and a row whose metadata is SQL NULL counted, not
-written (update_thought merges no patch into it). The **type** pass writes a
-`metadata.type` the capture would have written otherwise (another case or
-spacing, or an alias such as `todo` or `fact`) as the capture's type, by its
-own rule (`server-portable/thoughts.ts`'s `canonicalType`), an alias's words in
-`type_raw`; a type naming none of the capture's is counted and left, and so is
-a row an importer owns (trust `ingested`), whose next sync would write its own
-value back. The **sensitivity** pass reads a thought whose
-`metadata.sensitivity_tier` is absent, empty or `standard` against the recipe's
-patterns and writes `restricted` or `personal`, the key `db/weekly-digest.ts`
-reads to keep a thought out of its model calls; a tier is never lowered, and a
-thought's text is never printed. Pages are read by key, one statement each, so
-a run holds no snapshot or lock for its length. test-live [51] holds a dry run
-writing nothing, each pass's writes and audit events, the cases left, a second
-run writing nothing, `--pass`, `--limit` and the refusals. The recipe's
+(SMD-2139), one script (SMD-3318). Both passes write the metadata key through
+`update_thought`, and `schemas/enhanced-thoughts`' column too where a brain has
+it, as the old scripts wrote it, for that schema's readers (its search and
+stats functions, the bio worker, ops views). A row's writes are one
+transaction: its keys in one `update_thought` call (one audit event,
+`actor_name` `backfill-metadata`; the row's own actor stamp kept), then its
+columns; a row written since its page was read is left for the next run
+(`if_unchanged_since` on `COALESCE(updated_at, created_at)`, as the function
+compares it), and metadata that is not a JSON object has its keys counted, not
+written. The **type** pass writes a `metadata.type` the capture would have
+written otherwise (another case or spacing, or an alias such as `todo` or
+`fact`) as the capture's type, by its own rule
+(`server-portable/thoughts.ts`'s `canonicalType`), an alias's words in
+`type_raw`; a type naming none of the capture's is left, and so is a row an
+importer owns (trust `ingested`), whose next sync would write its own value
+back. The `type` column takes the old rule: `reference` becomes the metadata
+type when that is one of the old eight. The **sensitivity** pass reads a
+thought's text against the recipe's patterns, and each place takes `restricted`
+or `personal` when that is higher than what it says (absent, empty and
+`standard`, in any case, lowest); a tier is never lowered, an unknown one left,
+and no text is printed. `db/weekly-digest.ts` leaves a tagged row out by the
+key or the column. Pages are read by the primary key, one statement each, so a
+run holds no snapshot or lock for its length. A role needs what `bun
+db/migrate.ts --grant <role>` gives (`update_thought` reads `ob1_agents` and
+`ob1_config`). test-live [51] holds the recipe's patterns label by label, a dry
+run writing nothing (and the same over pages of two), each pass's writes and
+audit events, the cases left, the digest's read with and without the column, a
+row edited or deleted mid-run, a failure, a second run writing nothing,
+`--pass`, `--limit`, the statement bound and the refusals. The recipe's
 `enrich-thoughts.mjs` becomes SMD-2298's re-tag worker (SMD-3318 PR 3b).
 
 ## Extensions
@@ -7656,12 +7666,13 @@ as the actor — and one term opts the sink in: `OB1_EGRESS_ALLOW=type:digest` (
 `source:weekly-digest`, or `actor:<key>`). Under the default deny with no such
 term the send is refused, the refusal names the rule, and the digest is printed
 to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
-the box (the synthesis still does). The sensitivity boundary is fail-closed: with
-no `sensitivity_tier` column the run refuses rather than page every row, unless
-`--no-sensitivity-filter` says so. A row is left out by the column or by its
-`metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
-`--include-personal`): the import recipes set the facet and leave the column
-at its default (SMD-2493). The prompt takes a share of each day and writer
+the box (the synthesis still does). A row is left out by its
+`metadata.sensitivity_tier`, or by `schemas/enhanced-thoughts`' column where a
+brain has it, whichever says `restricted` (or `personal` without
+`--include-personal`): the import recipes set the key and leave the column at
+its default (SMD-2493), and `db/backfill-metadata.ts` sets both. A brain
+without the column filters on the key alone (it refused to run until
+SMD-3318); `--no-sensitivity-filter` sends every row. The prompt takes a share of each day and writer
 (`metadata.actor_name`), a turn at a time, so neither a busy day nor one key's
 burst fills it, and each share what matters most first: open work before
 closed (a settled ticket or item keeps its level in the read; the maintainer,

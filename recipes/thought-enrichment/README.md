@@ -1,8 +1,8 @@
 # Thought Enrichment Pipeline
 
-> **In Daemonic Brain (SMD-3318) — the two backfills moved to `db/`.** `backfill-type.mjs` and `backfill-sensitivity.mjs` are [`db/backfill-metadata.ts`](../../db/backfill-metadata.ts) now, writing `metadata.type` and `metadata.sensitivity_tier` through `update_thought` (below, "The two backfills"). `enrich-thoughts.mjs` follows as SMD-2298's re-tag worker (SMD-3318 PR 3b); until then it is as below.
+> **In Daemonic Brain (SMD-3318) — the two backfills moved to `db/`.** `backfill-type.mjs` and `backfill-sensitivity.mjs` are [`db/backfill-metadata.ts`](../../db/backfill-metadata.ts) now, writing `metadata.type` and `metadata.sensitivity_tier` through `update_thought`, and the `type` and `sensitivity_tier` columns too where `schemas/enhanced-thoughts` added them (below, "The two backfills"). `enrich-thoughts.mjs` follows as SMD-2298's re-tag worker (SMD-3318 PR 3b); until then it is as below.
 >
-> **In Daemonic Brain (SMD-2139).** `enrich-thoughts.mjs` reads and writes the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the scripts run from a checkout (their import is relative). Until SMD-2139 they reached the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway Daemonic Brain's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Their writes are `type`, `sensitivity_tier`, `importance`, `source_type`, `enriched` and `metadata`, never content or vector — the columns `update_thought` owns stay its. Every row written has its `updated_at` moved by the core trigger, and in Daemonic Brain that column is evidence: the accepted-vector caveat and the label-from-claims rule compare it with a re-embed pass's claim times, so run these backfills between re-embed passes, not during one — as `schemas/enhanced-thoughts/schema.sql` says of its own backfill. Three things changed with the transport: a refused read or write ends the run with the database's reason, one line and exit 1, where a failed write was counted and the scan went on (and an enrichment run that left rows failed exits 1); a flag no script knows is refused, and so is `--dry-run` beside `--apply`; and every numeric flag must be an integer. The port is a stopgap by design: SMD-1930 re-expresses these backfills as transforms over the worker-claim runner, and the client goes with it.
+> **In Daemonic Brain (SMD-2139).** `enrich-thoughts.mjs` reads and writes the brain through `compat/supabase-sql` under `bun`: `SUPABASE_URL` is a `postgres://` connection string, `SUPABASE_SERVICE_ROLE_KEY` is accepted and ignored, and the script runs from a checkout (its import is relative). Until SMD-2139 they reached the brain as PostgREST clients — `${SUPABASE_URL}/rest/v1/…` with a service-role key — over a gateway Daemonic Brain's stack does not run (SETUP.md); the decision for the class is in `docs/vendored-disposition.md`. Its writes are `type`, `importance`, `source_type`, `enriched` and `metadata`, never content or vector — the columns `update_thought` owns stay its. Every row written has its `updated_at` moved by the core trigger, and in Daemonic Brain that column is evidence: the accepted-vector caveat and the label-from-claims rule compare it with a re-embed pass's claim times, so run it between re-embed passes, not during one — as `schemas/enhanced-thoughts/schema.sql` says of its own backfill. Three things changed with the transport: a refused read or write ends the run with the database's reason, one line and exit 1, where a failed write was counted and the scan went on (and a run that left rows failed exits 1); a flag the script does not know is refused, and so is `--dry-run` beside `--apply`; and every numeric flag must be an integer. The port is a stopgap: SMD-3318 PR 3b replaces it with SMD-2298's re-tag worker (SMD-1930's runner was canceled).
 
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
@@ -79,26 +79,29 @@ The `--max-calls` flag is a hard ceiling on the number of LLM calls per run. The
 
 ### The two backfills: `db/backfill-metadata.ts`
 
-`backfill-type.mjs` and `backfill-sensitivity.mjs` are one `db/` script now (SMD-3318), run from a checkout with the connection as `--url` or `DATABASE_URL`:
+`backfill-type.mjs` and `backfill-sensitivity.mjs` are one `db/` script now (SMD-3318). It reads `DATABASE_URL`, not `SUPABASE_URL`, from the environment or from a `.env` / `.env.local` in the directory you run it from (Bun reads those; the old scripts read `.env.local` beside themselves). Keep the URL there rather than on the command line, where `ps` shows its password to every user. From this directory, with `DATABASE_URL=postgres://…` in its `.env.local`:
 
 ```bash
-bun db/backfill-metadata.ts --url postgres://…            # both passes, a dry run
-bun db/backfill-metadata.ts --url … --apply               # write
-bun db/backfill-metadata.ts --url … --pass sensitivity --apply
+bun ../../db/backfill-metadata.ts                         # both passes, a dry run: what would be written
+bun ../../db/backfill-metadata.ts --apply                 # write
+bun ../../db/backfill-metadata.ts --pass sensitivity --apply
 ```
 
-The core has no `type` or `sensitivity_tier` column, so both passes write metadata keys through `update_thought`, one audit event a row:
+A cron line `cd`s here first (cron starts in `$HOME`, where no `.env` names the brain) and adds `--apply`: with no flag the script is a dry run that writes nothing, where `bun backfill-type.mjs` wrote. A role of its own needs what `bun db/migrate.ts --grant <role>` gives (run from the checkout's root): the write goes through `update_thought`, which reads `ob1_agents` and `ob1_config` as well as `thoughts` and `thought_audit`.
 
-- **type** writes a `metadata.type` the capture would have written otherwise (another case, or an alias such as `todo` or `fact`) as the capture's own type, an alias's words kept in `type_raw`. A type naming none of the capture's (`decision`, `lesson`) is counted and left, and so is a row an importer owns.
-- **sensitivity** reads the patterns this recipe shipped (now in the script) and writes `restricted` or `personal` into `metadata.sensitivity_tier`, which `db/weekly-digest.ts` reads to keep those thoughts out of its model calls. A tier is never lowered, and a thought's text is never printed (the old script printed 80 characters of each restricted one).
+Both passes write the metadata key through `update_thought` (one audit event a row, `actor_name` `backfill-metadata`), and the column too where `schemas/enhanced-thoughts` added it, as the old scripts wrote it, for that schema's readers:
 
-Without `--apply` nothing is written. `--dry-run` is refused (a run without `--apply` is one), and `--batch-size` is `--batch`. `db/README.md` has the rest.
+- **type** writes a `metadata.type` the capture would have written otherwise (another case, or an alias such as `todo` or `fact`) as the capture's own type, an alias's words kept in `type_raw`. A type naming none of the capture's (`decision`, `lesson`) is left in the key, and so is a row an importer owns. The `type` column takes the old script's rule: a row stamped `reference` takes its metadata type when that is one of the old eight.
+- **sensitivity** reads the patterns this recipe shipped (now in the script), and each place — the key, and the column where it exists — takes `restricted` or `personal` when that is higher than what it says. A tier is never lowered, and a thought's text is never printed (the old script printed 80 characters of each restricted one). `db/weekly-digest.ts` leaves a tagged row out of its model calls, by the key or by the column.
+
+Without `--apply` nothing is written. `--dry-run` is refused (a run without `--apply` is one), and `--batch-size` is `--batch`. A row whose metadata is not a JSON object (SQL NULL, or a double-encoded string, below) has its keys counted, not written; repair it and run again. The audit trail names each row written: `SELECT thought_id, diff FROM thought_audit WHERE actor_name = 'backfill-metadata'`. Its failures print `backfill-metadata FAILED — <code> <message>` and exit 1 (2 for a refusal), not the `ERROR:` lines under Troubleshooting, which are `enrich-thoughts.mjs`'s. `db/README.md` has the rest.
 
 ## Recommended execution order
 
-1. Run `bun db/backfill-metadata.ts --apply` first, to settle types and tag sensitive content before enrichment.
+1. Run `bun ../../db/backfill-metadata.ts --apply` first, to settle types and tag sensitive content before enrichment.
 2. Run `enrich-thoughts.mjs --dry-run --limit 20` to preview LLM classifications.
 3. Run `enrich-thoughts.mjs --apply` to enrich all remaining thoughts.
+4. Run `bun ../../db/backfill-metadata.ts --apply` again: the enrichment writes its own `metadata.type` (and gives metadata to rows that had none), which the type pass settles and the sensitivity pass then reads.
 
 ## Security notes
 
@@ -112,7 +115,7 @@ Every failure is one line on stderr, `ERROR: <what> → <code> <message>`, and e
 
 - `ERROR: SUPABASE_URL must be set …` — the variable is neither in the environment nor in `.env.local` beside the scripts.
 - `ERROR: SUPABASE_URL must be a postgres:// connection string; the value's scheme is "https:" …` — an older `.env.local` still names a Supabase project; Daemonic Brain's value is the database's connection string. The value itself is never printed.
-- `ERROR: unknown flag "--dryrun" (flags: …)` — a flag the script does not know is refused rather than ignored (the typo would otherwise have run the write). A numeric flag must be an integer (`--limit 1.5`, `--concurrency 0` and `--concurrency x` are refused by name).
+- `ERROR: unknown flag "--dryrun" (flags: …)` — a flag the script does not know is refused rather than ignored (the typo would otherwise have run the write). `--dry-run` beside `--apply` is refused the same way, and a numeric flag must be an integer (`--limit 1.5`, `--concurrency 0` and `--concurrency x` are refused by name).
 - `… → ERR_POSTGRES_CONNECTION_REFUSED Failed to connect` — nothing listens at the host and port in the URL (a stopped container, or `5432` where the compose stack publishes another port).
 - `… → 3D000 database "…" does not exist` — the URL's path names a database the server does not have.
 - `… → 28P01 password authentication failed for user "…"` — the URL's password is not the role's.
