@@ -439,7 +439,7 @@ export { INGESTED_NOTICE, ingestedNotice };
 // 074's rank and SMD-2707's WRITER rule live in standing.ts, which the
 // decision's guard (proposal-review.ts) reads without this file's imports.
 export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
-import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { standingFlags, type StandingFlag } from "./standing.ts";
 import { dueText, LEVEL_WORDS } from "./priority-scale.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */

@@ -11,7 +11,7 @@
 
 import type { Principal } from "../auth.ts";
 import { ClaimRefused, UUID_RE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
-import { asked, unattributedAs } from "./caller.ts";
+import { asked, notOperator, operatorGate, unattributedAs } from "./caller.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type HeldClaim, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -248,16 +248,13 @@ export type CapSet = { changed: boolean; cap: number | null; previous: number | 
 export type CapSetCode = "REFUSED_NOT_OPERATOR" | "CLAIM_CAP_UNATTRIBUTED";
 
 export async function setWorkClaimCap(ctx: Ctx, principal: Principal, { cap }: Input<"set_work_claim_cap">): Promise<Outcome<CapSet, CapSetCode>> {
-  // Who may is the database's to say (migration 140): the key's registry kind by its agent id, which the server does
-  // not hold. The cap is checked there again, in 140's words; null clears. Without the agent id the database can tell
-  // no operator (a name lends no kind): the registry's absence is said as set_priority_weights says it, and a principal
-  // that has none by design is named so, never told to classify a key that may be the operator's already (132's rule).
-  const away = unattributedAs("CLAIM_CAP_UNATTRIBUTED", principal);
-  if (away) return away;
-  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true });
+  // Who may is the database's to say (migration 140; operatorGate). The cap is checked there again, in 140's words; null
+  // clears.
+  const gate = operatorGate("CLAIM_CAP_UNATTRIBUTED", principal);
+  if (gate) return gate;
   const result = await (await ctx.store()).setWorkClaimCap({ cap, actor: actorOf(ctx, principal) });
   if (!result.ok) {
-    if (result.error === "NOT_OPERATOR") return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: result.kind });
+    if (result.error === "NOT_OPERATOR") return notOperator(principal, result.kind);
     // BAD_CAP is unreachable: the schema admits a cap only in 140's range (1..100000) or null, exactly what 140 accepts;
     // a database refusing one the schema admits means the two have diverged — a fault, not the caller's.
     throw new Error(`set_work_claim_cap: the database refused a cap the schema admits (${result.message})`);

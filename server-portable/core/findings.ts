@@ -14,7 +14,7 @@ import type { FindingInputError, FindingKind, FindingStatus } from "../priority-
 import { findingsCursor, parseFindingsCursor, sameFindingSelection, type FindingSelection } from "./list-cursor.ts";
 import { dueBy } from "../priority-scale.ts";
 import type { Ctx } from "./context.ts";
-import { asked, unattributedAs, writerScope } from "./caller.ts";
+import { asked, notOperator, operatorGate, writerScope } from "./caller.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
@@ -62,12 +62,9 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
   // join them are 142's alone. One exception: a due time Postgres cannot read is refused binding the call, after the
   // agent-id check below and before 142's operator check, so any key with an agent id is told so (REFUSED_PRIORITY_INPUT,
   // naming nothing about the finding).
-  // Who may is the database's to say, as for set_priority_weights: the key's registry kind by its agent id, which the
-  // server does not hold. Without the agent id the database can tell no operator (a name lends no kind): the
-  // registry's absence is said as set_priority says it, and a principal that has none by design is named so.
-  const away = unattributedAs("PRIORITY_UNATTRIBUTED", principal);
-  if (away) return away;
-  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true });
+  // Who may is the database's to say, as for set_priority_weights (operatorGate).
+  const gate = operatorGate("PRIORITY_UNATTRIBUTED", principal);
+  if (gate) return gate;
   const id = input.id.toLowerCase();
   // A date alone is due by the end of that day, as set_priority reads one (SMD-3778). A due time Postgres cannot read,
   // or a 22023 of the writer 142 calls, is set_priority's refusal, the same input answered the same.
@@ -78,7 +75,7 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
   if (r instanceof PriorityRefused) return refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: r.problem, message: r.message });
   if (!r.ok) {
     switch (r.error) {
-      case "NOT_OPERATOR": return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: r.kind });
+      case "NOT_OPERATOR": return notOperator(principal, r.kind);
       case "NOT_WRITE_SCOPE": return refuse({ code: "WRITE_SCOPE_REQUIRED", retryable: false, key: principal.name });
       case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
       case "NOT_PENDING": return refuse({ code: "REFUSED_FINDING_DECISION", retryable: false, id, problem: "NOT_PENDING", message: r.message, ...(r.status === "pending" ? {} : { status: r.status }) });

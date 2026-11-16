@@ -7977,7 +7977,15 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   const NEXT = { grp: 1, sk: "-1763164800.000000", id: F };
   const listCore = { door: "test", store: async () => ({ listPriorityFindings: async (o: Record<string, unknown>) => { listAsked.push(o); return { total: 7, before: 0, findings: [staleRow, disagreeRow, overdueRow].map((r) => normalisePriorityFinding(r)), next: NEXT }; } }) };
   const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
-  const { findingsCursor, parseFindingsCursor } = await import("./core/list-cursor.ts");
+  const { findingsCursor, parseFindingsCursor, listCursor, parseListCursor } = await import("./core/list-cursor.ts");
+  // Every cursor's text is read one way (list-cursor.ts decodeCursor): trimmed; base64url alone, so a character outside
+  // it refuses the cursor even where Buffer would skip it; an array of the cursor's own length.
+  const listed1 = listCursor("newest", null, F);
+  const decoded = [parseListCursor(` ${listed1}\n`) !== null, parseListCursor(`${listed1}.`) === null,
+    parseListCursor(Buffer.from(JSON.stringify(["newest", null, F, "x"])).toString("base64url")) === null,
+    parseFindingsCursor(` ${findingsCursor({ list: "findings", status: "all", kind: null }, { grp: 1, sk: "-5", id: F })} `) !== null,
+    parseFindingsCursor(Buffer.from(JSON.stringify(["findings", "all", null, 1, "-5"])).toString("base64url")) === null];
+  assert(decoded.every(Boolean), `a cursor's text trimmed, held to base64url and to its own length (${decoded.join(",")})`);
   const listed = await listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3 } as never);
   const nextCursor = listed.ok ? listed.value.cursor : null;
   const pendingOnly = await listPriorityFindings(listCore as never, P, { status: "pending", limit: 20, after: findingsCursor({ list: "findings", status: "pending", kind: null }, { grp: 0, sk: "1762732800.5", id: T.toUpperCase() }) } as never);

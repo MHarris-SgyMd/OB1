@@ -4,7 +4,7 @@
 // copies drifted once (SMD-3665 PR 2 review passes 1 and 2).
 
 import type { Principal } from "../auth.ts";
-import { refuse, type Outcome, type Refusal } from "./refusal.ts";
+import { refuse, type Outcome, type Refusal, type RefusalCode } from "./refusal.ts";
 
 /**
  * The scope 116 and 117 read off the envelope: `write` for a write key, `capture` for a capture-only key. A read key
@@ -57,3 +57,21 @@ export function unattributedAs(code: UnattributedCode, principal: Principal, fac
     : { retryable: false, cause: principal.agentUnresolved === "misconfigured" ? "registry_misconfigured" : "registry_refused" };
   return refuse<never, UnattributedCode>({ code, ...said, ...facts } as Extract<Refusal, { code: UnattributedCode }>);
 }
+
+/**
+ * The gate an operator-only write asks before its store call (set_priority_weights, set_work_claim_cap,
+ * review_priority_finding): who may is the database's to say, by the key's registry kind under its agent id, which the
+ * server does not hold. Without the agent id the database can tell no operator (a name lends no kind): the registry's
+ * absence is said as `code` (unattributedAs), and a principal that has none by design is named so, never told to
+ * classify a key that may be the operator's already (132's rule). Null: the store is asked.
+ */
+export function operatorGate(code: "PRIORITY_UNATTRIBUTED", principal: Principal): Outcome<never, "PRIORITY_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
+export function operatorGate(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
+export function operatorGate(code: "PRIORITY_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, RefusalCode> | null {
+  const away = code === "PRIORITY_UNATTRIBUTED" ? unattributedAs(code, principal) : unattributedAs(code, principal);
+  if (away) return away;
+  return principal.agentId === undefined ? refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true }) : null;
+}
+
+/** The database's NOT_OPERATOR, as the operator-only writes answer it: the key, and the kind the registry gives it. */
+export const notOperator = (principal: Principal, kind: string | null) => refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind });

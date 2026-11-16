@@ -1620,7 +1620,7 @@ function findingStatements(evidence: Record<string, unknown>): FindingStatement[
   return listed.filter((s): s is FindingStatement => s !== null);
 }
 
-/** One priority_findings row as the list reads it. A kind, status or item 142 does not write is a fault. */
+/** One priority_findings row as the list reads it: a kind, status or answer this server does not know marked unread; a row with no id or item a fault. */
 export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
   // History outlives the server that reads it: a finding a brain migrated ahead of this server wrote — a fifth kind, a
   // status, a writer's answer in a later shape — is listed with that part marked unread, never the list's fault. Its id
@@ -1645,8 +1645,9 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
 }
 
 /**
- * review_priority_finding's answer (142, SMD-3671). Decided: the finding's id, kind, item and status now, the writer's
- * answer to an accept (assert_priority's or clear_priority's; null for a reject), and until when the decision holds the
+ * review_priority_finding's answer (142, SMD-3671). Decided: the finding's id, kind (`kindUnread` for one this server does
+ * not know), item and status now, the writer's answer to an accept (assert_priority's or clear_priority's; null for a
+ * reject, or with `answerUnread` for one this server does not read), and until when the decision holds the
  * same finding back. Refused, by 142's error: NOT_OPERATOR (`kind` the key's registry kind), NOT_PENDING (`status`
  * the finding's), NOTHING_TO_CLEAR and WRITER_REFUSED (`writerCode` the writer's own code, if it named one), and the
  * rest in `message` alone.
@@ -1659,7 +1660,10 @@ export type ReviewFindingResult =
   | { ok: false; error: "NOT_WRITE_SCOPE" | "NOT_FOUND" | FindingInputError; message: string };
 const FINDING_PLAIN_ERRORS = new Set<string>(["NOT_WRITE_SCOPE", "NOT_FOUND", ...FINDING_INPUT_ERRORS]);
 
-/** review_priority_finding's jsonb (142) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+/**
+ * review_priority_finding's jsonb (142) as the store's union. A decision 142 made is never a fault: its kind and its writer's
+ * answer are read leniently (marked unread). A refusal it does not name, or no envelope, throws: one this server cannot word is a fault.
+ */
 export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
   const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
   const word = (v: unknown): string | null => (typeof v === "string" ? v : null);

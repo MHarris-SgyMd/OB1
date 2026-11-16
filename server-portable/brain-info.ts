@@ -1355,6 +1355,21 @@ export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unkno
   };
 }
 
+/**
+ * A preflight row for a fact its read did not get (`unread`): a warning with the remedy for its reason — the grant the
+ * read needs when refused, the search path when its table is out of the role's sight, a wait when a lock or the cap
+ * stopped it, else the tables it reads. One shape for the rows read off these facts (threadsRow, priorityFindingsRow).
+ */
+export function unreadRow(u: Unread, fixes: { refused: string; timeout: string; reads: string }): { status: "warn"; detail: string; fix: string } {
+  return {
+    status: "warn", detail: `could not verify: ${u.message}`,
+    fix: u.reason === "refused" ? fixes.refused
+      : u.reason === "invisible" ? "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it."
+      : u.reason === "timeout" ? fixes.timeout
+      : `The check reads ${fixes.reads}; the message says why it failed.`,
+  };
+}
+
 /** The priority group's grant, as preflight's priority row and the priority findings row name it: one remedy. */
 export const PRIORITY_GRANT_FIX = "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).";
 
@@ -1366,12 +1381,7 @@ export const PRIORITY_GRANT_FIX = "Grant the priority group (SMD-3663): cd db &&
 export function priorityFindingsRow(f: PriorityFindingsFact | null, u: Unread | undefined): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
   if (f === null) {
     if (!u) return { status: "skip", detail: "not checked — priority_findings does not exist (migration 142 not applied)" };
-    if (u.reason === "refused")
-      return { status: "warn", detail: `could not verify: ${u.message}`,
-               fix: PRIORITY_GRANT_FIX };
-    if (u.reason === "invisible") return { status: "warn", detail: `could not verify: ${u.message}`, fix: "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it." };
-    return { status: "warn", detail: `could not verify: ${u.message}`,
-             fix: u.reason === "timeout" ? "A migration or a long transaction may hold priority_findings; run preflight again once it has finished." : "The check reads priority_findings; the message says why it failed." };
+    return unreadRow(u, { refused: PRIORITY_GRANT_FIX, timeout: "A migration or a long transaction may hold priority_findings; run preflight again once it has finished.", reads: "priority_findings" });
   }
   const decided = f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : "";
   if (f.pending === 0) return { status: "ok", detail: `none pending${decided}` };
@@ -2644,15 +2654,11 @@ export function threadsRow(t: ThreadsFact | null, u: Unread | undefined): { stat
   if (t === null) {
     if (!u) return { status: "skip", detail: "no thread_relink — migration 120 (SMD-3306) is not applied, so no thread's edges stand yet." };
     // The census reads thought_facets and thoughts.
-    if (u.reason === "refused")
-      return { status: "warn", detail: `could not verify: ${u.message}`,
-               fix: "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role)." };
-    if (u.reason === "invisible")
-      return { status: "warn", detail: `could not verify: ${u.message}`, fix: "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it." };
-    return { status: "warn", detail: `could not verify: ${u.message}`,
-             fix: u.reason === "timeout"
-               ? `A migration or a long transaction may hold thought_facets or thoughts: run preflight again once it has finished (--status would wait on it too). With nothing holding it, the census outran the statement cap: read it whole with ${THREADS_LINK} --status.`
-               : "The check reads thought_facets and thoughts; the message says why it failed." };
+    return unreadRow(u, {
+      refused: "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).",
+      timeout: `A migration or a long transaction may hold thought_facets or thoughts: run preflight again once it has finished (--status would wait on it too). With nothing holding it, the census outran the statement cap: read it whole with ${THREADS_LINK} --status.`,
+      reads: "thought_facets and thoughts",
+    });
   }
   const readEvery = `Read every key: ${THREADS_LINK} --status, which counts the keys whose edges differ and names the first ${THREAD_CENSUS_NAMED}; ${THREADS_LINK} links them.`;
   // Nothing read: the first key in key order alone passes the bound — not a pass (review pass 1).
