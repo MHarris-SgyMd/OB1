@@ -2505,8 +2505,8 @@ export const ROLE_GRANTS = Object.freeze({
     // reaches stay the owner's. Soft as the rest of this group — without it
     // the operation is refused with this grant named, and preflight's
     // `forget definer` row says so; every other write goes on. 144 carries
-    // it from 139's function to the wrapper; a role granted before 144 is
-    // granted again.
+    // it from 139's function to the wrapper; a role granted before 144
+    // needs `--grant` again.
     Object.freeze({ function: "forget_thought(uuid, jsonb, boolean)", privileges: Object.freeze(["EXECUTE"]),  since: "144" }),
     // Preflight's `forgotten` row reads every store forget_thought reaches through 144's ob1_forget_leftovers, which
     // runs as its owner too: the query log, the priority and item tables need no read grant of this role's. Soft:
@@ -2621,7 +2621,7 @@ export const ROLE_GRANTS = Object.freeze({
   // drafts and their revisions are these three tables, written only through
   // upsert_page, write_page_section, accept_page_section and
   // release_page_section, reject_page_section, lock_page_section, delete_page_section
-  // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function). No DELETE
+  // (SECURITY INVOKER, PUBLIC's EXECUTE as every core function but 118's release and 144's two). No DELETE
   // on pages (a page goes with its thought's delete, the capture group's) or
   // on the revisions (they go with their section's cascade, which runs as the
   // tables' owner); DELETE on page_sections, since delete_page_section deletes

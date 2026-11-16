@@ -1719,7 +1719,7 @@ stripped (`X-Forwarded-Prefix`).
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
-  /v1/thoughts/{id}/reset-capture-stamp` and `/evidence`, `POST /v1/search` (and
+  /v1/thoughts/{id}/reset-capture-stamp`, `/evidence` and `/forget`, `POST /v1/search` (and
   `/keyword`, `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET

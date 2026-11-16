@@ -1764,7 +1764,7 @@ function mutationRefusalText(r: Refusal): string {
     case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the edit (its new text needs its vector)");
     case "FORGOTTEN": return forgottenTextRefusal(r, "edit");
     case "NOT_FOUND":
-      return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
+      return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content unless the thought was forgotten (forget_thought).`;
     case "REFUSED_STALE_READ":
       return `Refused: ${r.id} changed after the if_unchanged_since you passed${
         r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""
@@ -1950,7 +1950,7 @@ export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
       `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
       `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
     ];
-    if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync from now on.`);
+    if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync, until an operator reinstates it.`);
     if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
     if (v.pages.length) lines.push(`Pages to review — an earlier render may hold its text: ${v.pages.join(", ")}.`);
     if (v.twins.length) lines.push(`Standing thoughts that keep the same text (not forgotten), so a capture of it lands on them rather than being refused: ${v.twins.join(", ")}.`);
@@ -2122,7 +2122,7 @@ export const resetHint = (msg: string): string =>
  */
 export const forgetHint = (msg: string): string =>
   /permission denied for function forget_thought/i.test(msg)
-    ? " — the server's database role needs EXECUTE on forget_thought (migration 144): cd db && bun migrate.ts --grant <role> --url $DATABASE_URL"
+    ? " — the server's database role needs EXECUTE on forget_thought (migration 144), the server group's: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server"
     : /forget_thought/.test(msg) && /does not exist|could not find/i.test(msg)
       ? " — migration 139 (db/migrations/139_forget_thought.sql) is not applied"
       : /permission denied for (table|relation|sequence)/i.test(msg)

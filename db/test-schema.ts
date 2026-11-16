@@ -22197,11 +22197,14 @@ console.log("\n[131] Migration 144: forget_thought runs as its owner — a SECUR
   await db.query(`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', $1::uuid)`, [C]);
   assert(await left(C) === "", `a thought standing again under its id is skipped (${await left(C)})`);
 
-  // A re-apply is a no-op: still a definer, the grant kept, PUBLIC still without EXECUTE.
+  // A re-apply is a no-op: still a definer, the grant kept, PUBLIC still without EXECUTE — and a grant revoked from the
+  // wrapper by hand stays revoked, the body holding none to carry back (review pass 2).
+  await db.exec(`REVOKE EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM ob1_fg130_granted`);
   await reapply(file.slice(0, 4));
+  const handRevoke = await may("ob1_fg130_granted");
   const re = await one<{ def: boolean; acl: string | null }>(`SELECT prosecdef AS def, proacl::text AS acl FROM pg_proc WHERE oid = $1::regprocedure`, [SIG]);
-  assert(re.def === true && !/(^|[{,])=X/.test(re.acl ?? "") && await may("ob1_fg130_exec") && await code(`SELECT 1`) === "taken",
-    `a re-apply keeps the definer and the grants (${re.acl})`);
+  assert(re.def === true && !/(^|[{,])=X/.test(re.acl ?? "") && await may("ob1_fg130_exec") && !handRevoke && await code(`SELECT 1`) === "taken",
+    `a re-apply keeps the definer and the grants, and restores none revoked by hand (${re.acl})`);
   await db.exec(`REVOKE ALL ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM ob1_fg130_exec, ob1_fg130_granted;
                  REVOKE ALL ON FUNCTION ob1_forget_thought_body(uuid, jsonb, boolean) FROM ob1_fg130_granted;
                  REVOKE ALL ON FUNCTION ob1_forget_leftovers() FROM ob1_fg130_exec, ob1_fg130_granted;
