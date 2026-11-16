@@ -10,7 +10,7 @@
 // below is that file, the MCP server this one replaced, retired in SMD-2287
 // PR 6b (`git show 52f77d4f:server-portable/index.ts`), never this directory's.
 
-import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
+import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport, type AuthInfo } from "@modelcontextprotocol/server";
 import { Hono, type Context } from "hono";
 import { presentedKeys, queryOf } from "../server-portable/auth.ts";
 import { BRAIN_VERSION } from "../server-portable/version.ts";
@@ -368,6 +368,9 @@ const WORDS: Record<ToolName, Words> = {
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };
 
+/** The revision family a request speaks, as the SDK names the two: `legacy` the 2025-era revisions, `modern` 2026-07-28 and later. */
+type Era = "legacy" | "modern";
+
 /**
  * The MCP server for one request: the tools the caller's operations name,
  * each validated by the SDK against the tool's own schema (core/schemas.ts,
@@ -375,10 +378,15 @@ const WORDS: Record<ToolName, Words> = {
  * its answer said by render.ts. `endpoint`: the path the request came to, no
  * trailing slash — a scan's job links go under it, as server-portable's do.
  * `ops`: the enabled plugins' operations. `raw`: each call's arguments as its
- * client sent them (argumentsById), which a plugin tool sends on.
+ * client sent them (argumentsById), which a plugin tool sends on. `era`: the
+ * revision family the request speaks (SMD-4345). A 2026-07-28 server says it
+ * sends no list-changed notification: this server holds no connection open to
+ * send one on, and a client told so opens no `subscriptions/listen` stream
+ * (Claude Code 2.1.325, measured; serving that stream is SMD-4347). The
+ * 2025-era server declares what the SDK declares for it, as it always has.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION });
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void, era: Era): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION }, era === "modern" ? { capabilities: { tools: { listChanged: false } } } : undefined);
   const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
   // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250), and
   // under its own span, the request's child (index.ts's registerOp, PR 4c): what it sends the REST core carries that
@@ -484,6 +492,21 @@ export function createMcpApp(deps: McpDeps): Hono {
       warn(`mcp-server: the REST core runs ${name}, which is no tool here: run this server from the REST core's build, with its OB1_PLUGINS`);
     }
   };
+
+  // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
+  // by the function the request's route hands it (forRequest), so that server is the caller's, as a 2025-era
+  // request's is. 2025-era traffic never reaches it (`legacy: "reject"`): the route sends that to the transport it
+  // always had. Always an event stream, as that transport answers: a JSON body would arrive only when the tool
+  // ends, with nothing for withSseKeepalive to keep open (SMD-1864). Its own keepalive is off, the route's being
+  // the one. No `onerror`: what it reports is a request it refused (a header that disagrees with the body, a
+  // revision it does not serve, a body that is no JSON), which the request's line already says by its status.
+  const modern = createMcpHandler((ctx) => {
+    const build = (ctx.authInfo?.extra as { build?: () => McpServer } | undefined)?.build;
+    if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
+    return build();
+  }, { legacy: "reject", responseMode: "sse", keepAliveMs: 0 });
+  /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
+  const forRequest = (build: () => McpServer): AuthInfo => ({ token: "", clientId: "", scopes: [], extra: { build } });
 
   // Every request's record (SMD-1849, telemetry.ts's RequestTrace), made first
   // and ended here, as index.ts's first middleware makes and ends it — the MCP
@@ -919,10 +942,22 @@ export function createMcpApp(deps: McpDeps): Hono {
       label = requestLabel(rawBody);
       read(rawBody);
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
-      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err));
-      const transport = new WebStandardStreamableHTTPServerTransport();
-      await server.connect(transport);
-      const response = await transport.handleRequest(new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined }));
+      const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era);
+      const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
+      // Which revision family the request speaks, by the SDK's own rule (SMD-4345): a 2026-07-28 request carries
+      // its envelope and goes to the SDK's handler; any other stays on the 2025-era transport, as every request
+      // did. Each reads the request's body itself, under the SDK's one bound: a body past 4 MiB is answered 413
+      // by whichever meets it, in the same words (the rule calls such a body 2026-07-28 whatever it holds, and the
+      // handler refuses it as the transport would have). Handing either the body already parsed would lift that
+      // bound for one revision and not the other.
+      let response: Response | undefined;
+      if (await isLegacyRequest(request)) {
+        const transport = new WebStandardStreamableHTTPServerTransport();
+        await build("legacy").connect(transport);
+        response = await transport.handleRequest(request);
+      } else {
+        response = await modern.fetch(request, { authInfo: forRequest(() => build("modern")) });
+      }
       if (!response) {
         settled = true;
         trace.status = 500;
