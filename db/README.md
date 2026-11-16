@@ -3976,11 +3976,12 @@ none: a session on a branch may have done other work. A header listing several
 is left to the model, which names each whose work the session did. A header
 listing a ticket of another team than the session's, its branch's first ticket,
 else its project's, read as the hook reads a place (`hotfix-2026` names none),
-is left to the model too: the hook learns a team from each ticket-shaped word of
-a branch, so on `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it.
-The hook also learns teams from the session's other places and a directory's
-whole path, which the header does not show; that is SMD-4291's to fix in the
-hook. A summary the hook's model wrote (`metadata.summary_model`) keys no
+is left to the model too: the hook before 1.8.1 learned a team from each
+ticket-shaped word of a branch, so on `smd-610-bump-node-22` a prompt's
+`node-22` was a ticket to it, and from the session's other places and a
+directory's whole path, which the header does not show. From 1.8.1 a place
+teaches its own ticket's team alone (SMD-4291); summaries captured before keep
+their headers, so the guard stays. A summary the hook's model wrote (`metadata.summary_model`) keys no
 header: its prose is never the hook's layout. The header rule's version 3
 (SMD-3306 PR 7a-3b-2) keyed a header listing several as a set; its Verify on the
 canary failed on such sessions, whose raters mostly named one subject, often the

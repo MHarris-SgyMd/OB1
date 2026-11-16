@@ -222,9 +222,10 @@ export const TICKETS_FROM = "tickets_from";
  * The hook's header lists the tickets the session's prompts named, and the branch's or directory's only when they named
  * none; on Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose
  * prompts named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a
- * release, a review. The hook learns a team from every ticket-shaped word of a branch or a directory, so on
- * `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it (SMD-4291): a header listing a ticket of another team
- * than the session's is the model's. The session's team is the first ticket of the header's own branch, else of its
+ * release, a review. The hook before 1.8.1 learned a team from every ticket-shaped word of a branch or a directory, so
+ * on `smd-610-bump-node-22` a prompt's `node-22` was a ticket to it; from 1.8.1 a place teaches its own ticket's team
+ * alone (SMD-4291), but summaries captured before keep their headers: a header listing a ticket of another team than
+ * the session's is the model's. The session's team is the first ticket of the header's own branch, else of its
  * project, as the hook's anchorOf reads a place, read with the hook's own shape (two to five letters, two to six
  * digits) and no prefix either list denies (PR 7a-3b-2's review passes 3, 5 and 6). A denied prefix the hook listed is
  * no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The hook's layout is read as

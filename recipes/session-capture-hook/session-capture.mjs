@@ -793,8 +793,31 @@ export function ticketsIn(text, teams) {
 }
 /** Whether one directory is the other or lies inside it. */
 const nested = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-/** The tickets a place — a branch and a directory — names. */
-const anchorOf = (cwd, branch) => [...new Set([...ticketsIn(branch), ...ticketsIn(cwd)])];
+/**
+ * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
+ * its team are tickets beside it (`smd-610-and-smd-611`); a word of another team is the place's description, no ticket
+ * and no team (`node-22` of `smd-610-bump-node-22`). Before, every ticket-shaped word of a branch or a directory was a
+ * ticket of the place and taught its team, so on `smd-610-bump-node-22` an ask's `node-22` headed the summary.
+ */
+const ownTickets = (text) => {
+  const [first] = ticketsIn(text);
+  return first ? ticketsIn(text, new Set([first.split("-")[0]])) : [];
+};
+/** A branch's own tickets: read whole, its first ticket-shaped word the place's (`feature/smd-55-x`). */
+const branchTickets = (branch) => ownTickets(branch);
+/**
+ * A directory's own tickets: those of its deepest part that names one, a worktree's or a project's own name, not a
+ * parent's (`~/aoc-2024/smd-55-day1/src` is SMD-55's, not AOC-2024's).
+ */
+const dirTickets = (cwd) => {
+  const parts = String(cwd ?? "").split("/");
+  for (let k = parts.length - 1; k >= 0; k--) { const own = ownTickets(parts[k]); if (own.length) return own; }
+  return [];
+};
+/** The tickets of a place's change, a `cwd` or a `branch` event, as the event's kind reads them. */
+const placeTickets = (t, v) => (t === "branch" ? branchTickets(v) : dirTickets(v));
+/** The tickets a place — a branch and a directory — names: each one's own, the branch's first. */
+const anchorOf = (cwd, branch) => [...new Set([...branchTickets(branch), ...dirTickets(cwd)])];
 /** The tickets an episode is known by: those its asks named, and those its branch and its directory name. */
 const knownTickets = (ep) => new Set([...ep.named, ...anchorOf(ep.cwd, ep.branch)]);
 /** Anchored: the episode's branch or directory names a ticket — its work has a home, and a ticket an ask merely mentions does not end it. */
@@ -802,7 +825,7 @@ const anchored = (ep) => anchorOf(ep.cwd, ep.branch).length > 0;
 /** Whether, before the next ask, the session moves to a branch or directory naming one of these tickets: then the ask that named them began that work, whatever branch it was typed on. */
 const movesTo = (events, i, ids) => {
   for (let k = i + 1; k < events.length && events[k].t !== "prompt"; k++) {
-    if ((events[k].t === "cwd" || events[k].t === "branch") && ticketsIn(events[k].v).some((id) => ids.includes(id))) return true;
+    if ((events[k].t === "cwd" || events[k].t === "branch") && placeTickets(events[k].t, events[k].v).some((id) => ids.includes(id))) return true;
   }
   return false;
 };
@@ -872,7 +895,7 @@ export function segment(events, s = emptySummary()) {
   // walk goes, never ahead of it — a branch made later would make an earlier
   // mention a key and move a boundary already captured (second review pass).
   const teams = new Set();
-  const learnTeams = (v) => { for (const id of ticketsIn(v)) teams.add(id.split("-")[0]); }; // the team prefixes a branch or directory names
+  const learnTeams = (t, v) => { for (const id of placeTickets(t, v)) teams.add(id.split("-")[0]); }; // the team of a branch's or a directory's own ticket, not of every word (SMD-4291)
   const episodes = [];
   let cur, lineAt = "", compacted = false; // the open episode; the current line's time; a compaction since the episode's last ask
   const loc = { cwd: "", branch: "" }; // where the session IS, against where the episode runs
@@ -921,21 +944,21 @@ export function segment(events, s = emptySummary()) {
     if (ev.t === "compaction") { if (cur.prompts.length) compacted = true; else cur.opened = { kind: "compaction" }; continue; }
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
-      learnTeams(ev.v);
+      learnTeams(ev.t, ev.v);
       loc[ev.t] = ev.v;
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it
       // ends before its branch arrives (second review pass).
-      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); learnTeams(nb.v); loc.branch = nb.v; }
+      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); learnTeams("branch", nb.v); loc.branch = nb.v; }
       if (!cur.prompts.length) { settle(); continue; } // before the first ask, the episode is wherever the session is
       if (!branchMoved()) {
         if (inside()) settle(); // a cd within the checkout
-        else if (!cur.branch && own(ticketsIn(loc.cwd))) settle(); // no branch to go by: a directory naming the episode's ticket is its own
+        else if (!cur.branch && own(dirTickets(loc.cwd))) settle(); // no branch to go by: a directory naming the episode's ticket is its own
         // else: the shell out of the checkout on the same branch — the session's place stands; or, with no branch, a move the next ask decides
         continue;
       }
-      if (own([...ticketsIn(loc.branch), ...(inside() ? [] : ticketsIn(loc.cwd))])) settle(); // a move to the episode's own place — judged by what changed: the branch, and the directory once it too has left the roots, in whichever order the line records them; else pending, decided at the next ask
+      if (own([...branchTickets(loc.branch), ...(inside() ? [] : dirTickets(loc.cwd))])) settle(); // a move to the episode's own place — judged by what changed: the branch, and the directory once it too has left the roots, in whichever order the line records them; else pending, decided at the next ask
       continue;
     }
     if (ev.t === "prompt") {

@@ -383,6 +383,32 @@ let episodesLines;
   assert(stamped.length === 2 && stamped[1].opened.kind === "branch" && stamped[1].opened.ticket === undefined && !stamped[1].about.has("SMD-2000") && /begun on the move to branch main\.\n/.test(renderSummary(stamped[1])) && segment([BR("me/smd-2035-x"), P("do smd-2035"), { t: "compaction" }, P("create a branch for smd-2013"), BR("me/smd-2013-y"), P("review")]).episodes[1].opened.ticket === "SMD-2013",
     "an episode opened by a move is not 'with' a key its first ask merely names, nor about it; one opened at a compaction whose ask names the key the session then moves to is (second review pass)");
   assert(ticketsIn("smd-2013 and NODE-22 and pg-16", new Set(["SMD"])).join() === "SMD-2013" && ticketsIn("smd-2013 and pg-16", new Set()).length === 0 && ticketsIn("smd-2013 and pg-16").join() === "SMD-2013,PG-16", "…ticketsIn with a non-empty team set keeps only those teams' keys, in any case; an empty set keeps upper-case keys alone; no set — a branch name — every key (second review pass)");
+  // SMD-4291: a place teaches the team of its own ticket alone, its first ticket-shaped word, not of every word of it;
+  // and a place's own tickets are that ticket's team's keys. On `smd-610-bump-node-22` the hook learned NODE too, so an
+  // ask's `node-22` was a named ticket that headed the summary, and with none named the branch's place listed NODE-22.
+  const head610 = (ev) => renderSummary(segment(ev).episodes[0]).split("\n")[0];
+  const on610 = (...asked) => segment([CWD("/wt/ob1"), BR("michaelharris/smd-610-bump-node-22"), ...asked.map(P)]).episodes;
+  const bumped = on610("bump node-22 to node-24 in the Dockerfile", "run the tests"), pinned = on610("the image still pins node-22, see smd-610");
+  assert(bumped.length === 1 && bumped[0].named.size === 0 && /^Session summary — SMD-610 — /.test(head610([CWD("/wt/ob1"), BR("michaelharris/smd-610-bump-node-22"), P("bump node-22 to node-24 in the Dockerfile")]))
+      && headerTickets(bumped[0]).from === "place" && headerTickets(bumped[0]).tickets.join() === "SMD-610"
+      && [...pinned[0].named].join() === "SMD-610" && headerTickets(pinned[0]).from === "asks" && headerTickets(pinned[0]).tickets.join() === "SMD-610",
+    `on smd-610-bump-node-22 an ask's node-22 and node-24 are no tickets: the header names the branch's SMD-610 alone, from the place, or from the ask that names smd-610 (${JSON.stringify([headerTickets(bumped[0]), headerTickets(pinned[0])])})`);
+  assert(on610("start work", "and now node-22 again").length === 1 && on610("start work", "see smd-611 next").length === 1,
+    "…and a mention of node-22 on that branch begins no episode, as a mention of another of the team's tickets begins none on a branch naming the episode's ticket");
+  const twoOwn = segment([CWD("/wt/ob1"), BR("michaelharris/smd-610-and-smd-611"), P("start")]).episodes[0];
+  const deepDir = segment([CWD("/Users/me/aoc-2024/smd-55-day1/src"), BR("main"), P("fix the day1 parser for aoc-2024")]).episodes[0];
+  const nestedNode = segment([CWD("/Users/me/node-22-tools/smd-55-x"), BR("main"), P("bump node-22 and smd-55")]).episodes[0];
+  assert(headerTickets(twoOwn).tickets.join() === "SMD-610,SMD-611" && headerTickets(deepDir).tickets.join() === "SMD-55" && deepDir.named.size === 0
+      && [...nestedNode.named].join() === "SMD-55" && headerTickets(nestedNode).tickets.join() === "SMD-55",
+    `a branch naming two of its team's tickets names both; a directory's own ticket is its deepest part's, so a parent's aoc-2024 or node-22-tools is neither a ticket of the place nor a team (${JSON.stringify([headerTickets(twoOwn), headerTickets(deepDir), headerTickets(nestedNode)])})`);
+  assert(asks(CWD("/wt/ob1"), BR("michaelharris/smd-610-bump-node-22"), P("start"), BR("michaelharris/node-22-pin"), P("pin it")) === "start|pin it"
+      && asks(CWD("/wt/ob1"), BR("main"), P("help"), P("now NODE-22 please")) === "help|now NODE-22 please",
+    "…a branch whose own first ticket-shaped word is node-22 names NODE-22 as its place, a move like any; with no team known, an upper-case key still counts");
+  const slashed = segment([CWD("/wt/ob1"), BR("smd-12/fix-node-22"), P("start")]).episodes[0];
+  assert(headerTickets(slashed).tickets.join() === "SMD-12"
+      && asks(CWD("/wt/ob1"), BR("me/smd-610-a"), P("start"), P("now smd-700"), BR("node-22-smd-700-x"), P("go")) === "start+now smd-700|go",
+    `a branch is read whole, its first ticket-shaped word its own, not by its last part (smd-12/fix-node-22 is SMD-12's); and a move is to the place's own ticket alone, so a later key of another team in a branch begins no episode with it (mutants: ${JSON.stringify(headerTickets(slashed))})`);
+
   // The teams are those named SO FAR: a keyed branch made later must not make an earlier mention a key and move a boundary already captured (second review pass — the set was built from the whole transcript up front, and a prefix segmented otherwise than the whole).
   const early = [CWD("/repo"), BR("main"), P("help with x"), P("now smd-2013 please"), P("more")];
   assert(asks(...early) === "help with x+now smd-2013 please+more" && asks(...early, BR("me/smd-2099-later"), P("review")) === "help with x+now smd-2013 please+more+review" && asks(...early, BR("me/smd-2099-later"), P("now smd-2013 for real"), BR("me/smd-2013-z"), P("go")) === "help with x+now smd-2013 please+more|now smd-2013 for real+go",
