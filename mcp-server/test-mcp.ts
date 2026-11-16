@@ -1059,25 +1059,47 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   const nearModern = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw", { modern: true });
   assert(nearLegacy.status === 200 && nearLegacy.body?.result !== undefined && same(replyOf(nearModern), replyOf(nearLegacy)) && nearModern.status === 200, `a 3 MiB call, either revision: answered by its tool (${nearLegacy.status}, ${nearModern.status})`);
 
-  // A slow call: this server's keepalive on the stream and no other, and a client gone mid-call is `abandoned`, for both.
+  // A request the SDK's rule cannot place goes to the handler, which refuses it in its own words: a 2025-era
+  // `initialize` under a 2026-07-28 header was served before this, and is a 400 now.
+  const mixed = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } }, "read-raw", { headers: { "mcp-protocol-version": MODERN } });
+  assert(mixed.status === 400 && errorOf(mixed).code === -32020 && last().status === 400, `a 2025-era initialize under a 2026-07-28 header: the handler's 400, -32020, not served (${mixed.status} ${errorOf(mixed).code})`);
+
+  // Two callers at once through the one handler: each its own server, by the function its own request handed over.
+  const together = await Promise.all(["write-raw", "read-raw", "cap-raw", "write-raw", "read-raw", "cap-raw"].map(async (key) => [key, ((resultOf(await rpc("tools/list", {}, key, { modern: true })).tools as unknown[] | undefined) ?? []).length] as const));
+  assert(same(together.map(([, n]) => n), [47, 24, 8, 47, 24, 8]), `six 2026-07-28 requests at once under three keys: each its own key's list (${together.map(([k, n]) => `${k} ${n}`).join(", ")})`);
+
+  // A fault building the server (here a plugin's tool named as a core tool is): this server's 500, said once in
+  // the log as a route's throw, for both. The SDK's handler catches it and would say it nowhere.
+  const clash = definePlugin({ name: "clash-kit", title: "C", description: "A plugin whose one operation is given a core tool's name below.", operations: { look: operation({ title: "L", description: "d", scope: "read", method: "GET", path: "/look", input: {}, output: {}, async handler() { return pluginOk({}); } }) } });
+  // Loaded as a manifest must be, then its operation renamed past the manifest's own check, which refuses the name.
+  const clashed = loadPlugins("clash-kit", [clash]).map((pl) => ({ ...pl, operations: pl.operations.map((o) => ({ ...o, tool: "thought_stats" })) }));
+  for (const modern of [false, true]) {
+    const era = modern ? "2026-07-28" : "2025-era";
+    const said: string[] = [];
+    const clashing = createMcpApp({ rest, plugins: () => clashed, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l) });
+    const failed = await clashing.fetch(requestFor("tools/list", {}, "write-raw", { modern }));
+    const text = await failed.text();
+    assert(failed.status === 500 && text === "Internal Server Error" && said.length === 1 && /POST a route failed/.test(said[0]) && /thought_stats is already registered/.test(said[0]) && last().status === 500 && last().outcome === "error",
+      `a ${era} request whose server cannot be built: 500 in this server's words, one line naming the fault, its line \`error\` (${failed.status} ${text.slice(0, 60)}; ${said.join(" | ").slice(0, 110)})`);
+  }
+
+  // A slow call: comment frames keep its stream open, and a client that lets go of the answer mid-call is `abandoned`, for both.
   const slowWarned: string[] = [];
   const slow = createMcpApp({
-    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { if (!new URL(req.url).pathname.endsWith("/whoami")) await Bun.sleep(180); return restApp.fetch(req); } }),
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { if (!new URL(req.url).pathname.endsWith("/whoami")) await Bun.sleep(400); return restApp.fetch(req); } }),
     edge: () => ({ configured: false, origin: null }), warn: (l) => slowWarned.push(l), keepalive: { intervalMs: 25, maxMs: 60_000 },
   });
   for (const modern of [false, true]) {
     const era = modern ? "2026-07-28" : "2025-era";
     const text = await (await slow.fetch(requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }))).text();
     const comments = text.split("\n").filter((l) => l.startsWith(":"));
-    assert(comments.length >= 1 && comments.every((l) => l === ": keepalive") && firstMessage(text)?.result !== undefined, `a slow ${era} call: kept open by this server's comment frames and no other, then answered (${comments.length} frames)`);
-    const leaving = new AbortController();
+    assert(comments.length >= 1 && firstMessage(text)?.result !== undefined, `a slow ${era} call: kept open by comment frames, then answered (${comments.length} frames)`);
+    // The answer let go of at once, as a runtime does when its client leaves: the stream's cancel, not the request's signal.
     const linesBefore = lines.length;
-    const answer = await slow.fetch(requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern, signal: leaving.signal }));
-    await Bun.sleep(40);
-    leaving.abort();
-    await answer.text().catch(() => null);
+    const answer = await slow.fetch(requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }));
+    await answer.body?.cancel();
     for (let waited = 0; lines.length === linesBefore && waited < 5_000; waited += 20) await Bun.sleep(20);
-    assert(lines.length === linesBefore + 1 && last().rpc === "tools/call" && last().tool === "thought_stats" && last().outcome === "abandoned", `a ${era} call whose client leaves: its line \`abandoned\` (${JSON.stringify(last())})`);
+    assert(lines.length === linesBefore + 1 && last().rpc === "tools/call" && last().tool === "thought_stats" && last().outcome === "abandoned", `a ${era} call whose client lets go of the answer: its line \`abandoned\` (${JSON.stringify(last())})`);
   }
   useRequestLog(before);
 }

@@ -209,9 +209,9 @@ The stages above moved the servers onto the v2 packages while still serving the
 2025-era revisions. Since SMD-4345, `mcp-server/app.ts` serves 2026-07-28 beside them:
 
 - The route asks the SDK's `isLegacyRequest` which family a request speaks. A
-  2026-07-28 request goes to one `createMcpHandler` (`legacy: "reject"`,
-  `responseMode: "sse"`, its own keepalive off); any other goes to the per-request
-  `WebStandardStreamableHTTPServerTransport` it always had. The built-in legacy
+  2026-07-28 request, and one the rule cannot place, goes to one `createMcpHandler`
+  (`legacy: "reject"`, `responseMode: "sse"`); a well-formed 2025-era request goes to
+  the per-request `WebStandardStreamableHTTPServerTransport` it always had. The built-in legacy
   handling this document called a backstop is not used: the 2025-era path is the
   wiring already proven.
 - The handler builds each request's server through `authInfo`, which reaches its

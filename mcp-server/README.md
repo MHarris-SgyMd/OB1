@@ -45,8 +45,11 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
 - **The revision** (SMD-4345). Once the caller is known, the request is told apart by
   the SDK's own rule (`isLegacyRequest`). One carrying the 2026-07-28 envelope in
   `params._meta` is answered by the SDK's `createMcpHandler`: `server/discover`,
-  `tools/list` and `tools/call` with no `initialize` before them. Any other is answered
-  by the 2025-era transport, as every request was. Both get the caller's own server,
+  `tools/list` and `tools/call` with no `initialize` before them. A well-formed
+  2025-era request is answered by the 2025-era transport, as every request was. A
+  request the rule cannot place (one that mixes the two revisions' header and body, or
+  a JSON body that is no JSON-RPC message) goes to the handler too, which refuses it in
+  its own words. Both get the caller's own server,
   the same tools and replies, an event stream with this server's keepalive, and one
   line. What differs for a 2026-07-28 client:
   - its server declares `tools.listChanged: false`, since this server holds no

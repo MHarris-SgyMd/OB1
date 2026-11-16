@@ -11,6 +11,7 @@
 // PR 6b (`git show 52f77d4f:server-portable/index.ts`), never this directory's.
 
 import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport, type AuthInfo } from "@modelcontextprotocol/server";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Hono, type Context } from "hono";
 import { presentedKeys, queryOf } from "../server-portable/auth.ts";
 import { BRAIN_VERSION } from "../server-portable/version.ts";
@@ -496,15 +497,21 @@ export function createMcpApp(deps: McpDeps): Hono {
   // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
   // by the function the request's route hands it (forRequest), so that server is the caller's, as a 2025-era
   // request's is. 2025-era traffic never reaches it (`legacy: "reject"`): the route sends that to the transport it
-  // always had. Always an event stream, as that transport answers: a JSON body would arrive only when the tool
-  // ends, with nothing for withSseKeepalive to keep open (SMD-1864). Its own keepalive is off, the route's being
-  // the one. No `onerror`: what it reports is a request it refused (a header that disagrees with the body, a
-  // revision it does not serve, a body not sent as JSON), which the request's line already says by its status.
+  // always had. What it serves it answers as an event stream, as that transport does: a JSON body would arrive
+  // only when the tool ends, with nothing for withSseKeepalive to keep open (SMD-1864). What it refuses before
+  // serving (a header that disagrees with the body, a revision it does not serve, a body not sent as JSON, one
+  // past its bound) is a JSON answer. Its own 15 s keepalive stays on, as the transport's does, so sse.ts's account
+  // of a stream past its bound holds for both.
+  //
+  // `onerror` is told of each request it refused and of each fault it caught, a throw building the server among
+  // them, which it answers 500 and says nowhere else. The route cannot tell the two apart there, so the error is
+  // kept for the request that is running (handlerSaid) and the route reads it once it has the answer's status.
+  const handlerSaid = new AsyncLocalStorage<{ err?: Error }>();
   const modern = createMcpHandler((ctx) => {
     const build = (ctx.authInfo?.extra as { build?: () => McpServer } | undefined)?.build;
     if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
     return build();
-  }, { legacy: "reject", responseMode: "sse", keepAliveMs: 0 });
+  }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; } });
   /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
   const forRequest = (build: () => McpServer): AuthInfo => ({ token: "", clientId: "", scopes: [], extra: { build } });
 
@@ -944,19 +951,29 @@ export function createMcpApp(deps: McpDeps): Hono {
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
       const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era);
       const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
-      // Which revision family the request speaks, by the SDK's own rule (SMD-4345): a 2026-07-28 request carries
-      // its envelope and goes to the SDK's handler; any other stays on the 2025-era transport, as every request
-      // did. Each reads the request's body itself, under the SDK's one bound: a body past 4 MiB is answered 413
-      // by whichever meets it, in the same words (the rule calls such a body 2026-07-28 whatever it holds, and the
-      // handler refuses it as the transport would have). Handing either the body already parsed would lift that
-      // bound for one revision and not the other.
+      // Which revision family the request speaks, by the SDK's own rule (SMD-4345). A well-formed 2025-era
+      // request (no envelope, no 2026-07-28 header) stays on the 2025-era transport, as every request did. One
+      // carrying the 2026-07-28 envelope goes to the SDK's handler. So does whatever the rule cannot place: a
+      // request that mixes the two (a 2026-07-28 header on a 2025-era body, or the reverse), a body that is JSON
+      // and no JSON-RPC message, and a body past the SDK's 4 MiB bound. The handler refuses each in its own
+      // words, where the transport's differed or it served the request; the SDK asks that its rule's `false` go
+      // to the handler and never to a 2025-era one. Each path reads the body itself, so the bound is one: handing
+      // either the body already parsed would lift it for one revision and not the other.
       let response: Response | undefined;
       if (await isLegacyRequest(request)) {
         const transport = new WebStandardStreamableHTTPServerTransport();
         await build("legacy").connect(transport);
         response = await transport.handleRequest(request);
       } else {
-        response = await modern.fetch(request, { authInfo: forRequest(() => build("modern")) });
+        const said: { err?: Error } = {};
+        response = await handlerSaid.run(said, () => modern.fetch(request, { authInfo: forRequest(() => build("modern")) }));
+        // A fault the handler caught and answered 500: thrown here, so it is said and recorded as a 2025-era
+        // request's is (the catch above: this server's 500, its line `error`, one line in the log). A request the
+        // handler refused is a 4xx, and its error is let go: the request's line says it by its status.
+        if (response.status >= 500 && said.err) {
+          void response.body?.cancel().catch(() => {});
+          throw said.err;
+        }
       }
       if (!response) {
         settled = true;
