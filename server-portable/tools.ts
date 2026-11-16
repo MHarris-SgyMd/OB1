@@ -72,7 +72,7 @@ export const TOOLS = [
   { name: "decide_item_close", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
-  // SMD-1723 PR 2 (migrations 139 and 143): forgetting, which the audit trail cannot undo; the id is echoed in `confirm`.
+  // SMD-1723 PR 2 (migrations 139 and 144): forgetting, which the audit trail cannot undo; the id is echoed in `confirm`.
   { name: "forget_thought", scope: "write" },
   { name: "reset_capture_stamp", scope: "write" },
   { name: "append_thought_evidence", scope: "write" },

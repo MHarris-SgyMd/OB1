@@ -1014,7 +1014,7 @@ export class SqlStore implements ThoughtStore {
       const rows = await this.sql`SELECT ob1_text_forgotten_at(${content}::text) AS at`;
       return isoTimestampOrNull(rows[0]?.at ?? null);
     } catch (e) {
-      // A brain before 143 has no such function: the refusal trigger (139)
+      // A brain before 144 has no such function: the refusal trigger (139)
       // still answers at the write, after the embedding.
       if ((e as { errno?: string }).errno === "42883") return null;
       throw e;

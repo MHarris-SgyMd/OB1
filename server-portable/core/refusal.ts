@@ -56,7 +56,7 @@ export type Refusal =
   | { code: "REFUSED_DUPLICATE_CONTENT"; retryable: false }           // the text is another thought's
   | { code: "REFUSED_WOULD_CYCLE"; retryable: false; id: string }     // the supersedes pointer would close a loop
   | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[]; op?: "forget" } // statements in other thoughts rest on it (042); op: forget_thought's refusal, whose way through deletes the citations
-  // forget_thought (139, 143; SMD-1723 PR 2), and a capture or an edit of a forgotten text.
+  // forget_thought (139, 144; SMD-1723 PR 2), and a capture or an edit of a forgotten text.
   | { code: "REFUSED_CONFIRM"; retryable: false; id: string }        // forget_thought: `confirm` is not the `id` echoed exactly
   | { code: "FORGOTTEN"; retryable: false; id?: string; forgottenAt?: string } // forget_thought: forgotten already, nothing left to take (id); capture_thought, update_thought: the text was forgotten, and writing it again is the operator's (forgottenAt: when, to a key that can read)
   | { code: "REPLAYING"; retryable: true; id: string }               // forget_thought: a replay is rebuilding the brain's derived rows, and the forget, which rebuilds them for this thought, did nothing

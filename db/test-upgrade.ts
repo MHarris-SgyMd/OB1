@@ -783,10 +783,10 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 056's apply_entity_type_gate carried), refusing by name without 016,
   // 056, 061, 116, 133 or 136 ([20ce]); 142 adds priority_findings, the
   // priority review's scan and an operator's decision, refusing by name
-  // without 046, 068, 116, 117, 122 or 133 ([20cf]); 143 makes forget_thought
+  // without 046, 068, 116, 117, 122 or 133 ([20cf]); 144 makes forget_thought
   // SECURITY DEFINER, its search_path and settings pinned and EXECUTE not
   // PUBLIC's, and adds ob1_text_forgotten_at and ob1_forget_leftovers,
-  // refusing by name without 139 or 142 ([20ch]) — all recorded by the
+  // refusing by name without 139 or 142 ([20ci]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
@@ -6982,14 +6982,14 @@ console.log("\n[20cg] Migration 139: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20ch] Migration 143: onto a populated brain at the file before it — refused by name without 139's forget_thought, nothing changed; then applied: forget_thought its owner's, EXECUTE no longer PUBLIC's but carried to the role 139's function was granted to; a role holding a plain --grant, refused at 142 for want of the stores' privileges, forgets a thought at 143; a replay's setting the role set first is not carried in, and is its own again after; a re-apply a no-op (SMD-1723)");
+console.log("\n[20ci] Migration 144: onto a populated brain at the file before it — refused by name without 139's forget_thought, nothing changed; then applied: forget_thought its owner's, EXECUTE no longer PUBLIC's but carried to the role 139's function was granted to; a role holding a plain --grant, refused at 142 for want of the stores' privileges, forgets a thought at 144; a replay's setting the role set first is not carried in, and is its own again after; a re-apply a no-op (SMD-1723)");
 {
-  const the143 = MIGRATIONS.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const the144 = MIGRATIONS.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the143 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the144 });
   const sql = new SQL({ url: URL_, max: 1 });
-  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-143-op', 'operator')`;
-  const ACT = JSON.stringify({ name: "upgrade-143-op", scope: "write" });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-144-op', 'operator')`;
+  const ACT = JSON.stringify({ name: "upgrade-144-op", scope: "write" });
   const thought = async (content: string) => {
     let id = "";
     await sql.begin(async (tx) => {
@@ -7000,10 +7000,10 @@ console.log("\n[20ch] Migration 143: onto a populated brain at the file before i
   };
   // Roles made at 142: one granted every group a plain migrate.ts --grant issues (the objects there), one that may
   // delete a thought, one that may only read.
-  const ROLE = "ob1_upgrade_143_granted";
+  const ROLE = "ob1_upgrade_144_granted";
   await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE};
-                    CREATE ROLE ob1_upgrade_143_deleter NOLOGIN; GRANT SELECT, DELETE ON thoughts TO ob1_upgrade_143_deleter;
-                    CREATE ROLE ob1_upgrade_143_reader NOLOGIN; GRANT SELECT ON thoughts TO ob1_upgrade_143_reader`);
+                    CREATE ROLE ob1_upgrade_144_deleter NOLOGIN; GRANT SELECT, DELETE ON thoughts TO ob1_upgrade_144_deleter;
+                    CREATE ROLE ob1_upgrade_144_reader NOLOGIN; GRANT SELECT ON thoughts TO ob1_upgrade_144_reader`);
   const present142 = new Set(((await sql.unsafe(grantPresenceSql(grantedObjects([...ROLE_GRANT_GROUPS])))) as { name: string; present: boolean }[])
     .filter((r) => r.present).map((r) => r.name));
   for (const st of grantStatements(ROLE, { groups: [...ROLE_GRANT_GROUPS], present: present142 })) await sql.unsafe(st);
@@ -7022,49 +7022,49 @@ console.log("\n[20ch] Migration 143: onto a populated brain at the file before i
     } catch (e) { out = String((e as { errno?: string }).errno ?? (e as Error).message); }
     return { out, after };
   };
-  const A = await thought("upgrade 143: the door code is 8642");
+  const A = await thought("upgrade 144: the door code is 8642");
   const at142 = await forgetAs(A);
   // to_regprocedure, read as the statement runs: a ::regprocedure literal is resolved when the statement is planned,
-  // and the cached plan kept the OID 143 renames to ob1_forget_thought_body.
+  // and the cached plan kept the OID 144 renames to ob1_forget_thought_body.
   const definer = async () => Boolean((await sql`SELECT prosecdef AS d FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].d);
 
   // Without 139's forget_thought: refused by name, nothing changed.
   await sql`ALTER FUNCTION forget_thought(uuid, jsonb, boolean) RENAME TO forget_thought_away`;
-  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 }).then(() => "applied", (e: Error) => e.message);
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION forget_thought_away(uuid, jsonb, boolean) RENAME TO forget_thought`;
-  assert(at142.out === "42501" && /^migration 143 needs 139 and 142 /.test(without) && !(await definer()),
+  assert(at142.out === "42501" && /^migration 144 needs 139 and 142 /.test(without) && !(await definer()),
     `at 142 a role holding a plain --grant may not forget (${at142.out}); without forget_thought the file is refused by name, the function its caller's still (${without.slice(0, 60)})`);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 });
   const may = async (role: string) => Boolean((await sql`SELECT has_function_privilege(${role}, 'forget_thought(uuid, jsonb, boolean)', 'EXECUTE') AS y`)[0].y);
   const publicMay = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)') AND a.grantee = 0) AS y`)[0].y);
-  const shape143 = async () => JSON.stringify({ definer: await definer(), deleter: await may("ob1_upgrade_143_deleter"), reader: await may("ob1_upgrade_143_reader"), granted: await may(ROLE),
+  const shape144 = async () => JSON.stringify({ definer: await definer(), deleter: await may("ob1_upgrade_144_deleter"), reader: await may("ob1_upgrade_144_reader"), granted: await may(ROLE),
     acl: (await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].a });
-  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_143_deleter")) && !(await may("ob1_upgrade_143_reader")) && !publicMay,
-    `applied: forget_thought its owner's; EXECUTE PUBLIC's no more, carried from 139's function to the --grant role, not given to a role that may only delete or read (${await shape143()})`);
+  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_144_deleter")) && !(await may("ob1_upgrade_144_reader")) && !publicMay,
+    `applied: forget_thought its owner's; EXECUTE PUBLIC's no more, carried from 139's function to the --grant role, not given to a role that may only delete or read (${await shape144()})`);
 
   // The same role forgets now: the row gone, its events redacted, the ledger written, as the owner.
-  const at143 = await forgetAs(A);
+  const at144 = await forgetAs(A);
   const left = (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE id = ${A}::uuid) AS row,
       (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${A}::uuid AND (redacted_at IS NULL OR diff::text LIKE '%8642%')) AS open,
-      (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = ${A}::uuid AND actor_name = 'upgrade-143-op') AS led`)[0] as { row: number; open: number; led: number };
-  assert(at143.out === "ok" && left.row === 0 && left.open === 0 && left.led === 1,
-    `at 143 the same role forgets the thought: the row gone, its events redacted, the ledger naming the actor (${at143.out}; ${JSON.stringify(left)})`);
+      (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = ${A}::uuid AND actor_name = 'upgrade-144-op') AS led`)[0] as { row: number; open: number; led: number };
+  assert(at144.out === "ok" && left.row === 0 && left.open === 0 && left.led === 1,
+    `at 144 the same role forgets the thought: the row gone, its events redacted, the ledger naming the actor (${at144.out}; ${JSON.stringify(left)})`);
 
   // A replay's setting, set by the role first: not carried in — the forget runs as a live write, no REPLAYING — and
   // the role's own again after the call.
-  const B = await thought("upgrade 143: forgotten by a caller claiming a replay");
+  const B = await thought("upgrade 144: forgotten by a caller claiming a replay");
   const replayed = await forgetAs(B, [`SELECT set_config('ob1.projecting_replay', 'on', true)`]);
   const bLed = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten WHERE thought_id = ${B}::uuid`)[0].c);
   assert(replayed.out === "ok" && replayed.after === "on" && bLed === 1,
     `a caller's ob1.projecting_replay is not carried in: forgotten as a live write, and the setting is the caller's again after (${replayed.out}, ${replayed.after})`);
 
   // A re-apply is a no-op: still the owner's, the grants kept.
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 });
-  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_143_deleter")) && !(await may("ob1_upgrade_143_reader")),
-    `a re-apply is a no-op: the definer and the grants kept (${await shape143()})`);
-  await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ob1_upgrade_143_deleter; DROP ROLE ob1_upgrade_143_deleter;
-                    DROP OWNED BY ob1_upgrade_143_reader; DROP ROLE ob1_upgrade_143_reader`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 });
+  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_144_deleter")) && !(await may("ob1_upgrade_144_reader")),
+    `a re-apply is a no-op: the definer and the grants kept (${await shape144()})`);
+  await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ob1_upgrade_144_deleter; DROP ROLE ob1_upgrade_144_deleter;
+                    DROP OWNED BY ob1_upgrade_144_reader; DROP ROLE ob1_upgrade_144_reader`);
   await sql.close();
 }
 

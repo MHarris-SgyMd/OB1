@@ -950,7 +950,7 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
   });
 }
 
-/** What a forget did (139, 143; SMD-1723 PR 2): the evidence, and the client_key it was named by. */
+/** What a forget did (139, 144; SMD-1723 PR 2): the evidence, and the client_key it was named by. */
 export type Forgotten = ForgetEvidence & { byClientKey?: string };
 export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
 

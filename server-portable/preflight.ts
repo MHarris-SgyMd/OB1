@@ -3323,32 +3323,32 @@ if (configFailed) {
         }
 
         /**
-         * Forgetting (SMD-1723 PR 2). `forget definer`: 143 made forget_thought a SECURITY DEFINER wrapper over 139's
+         * Forgetting (SMD-1723 PR 2). `forget definer`: 144 made forget_thought a SECURITY DEFINER wrapper over 139's
          * body, its search_path pinned, and revoked it from PUBLIC; a re-applied 139 (CREATE OR REPLACE) puts the body
          * back under that name, running as its caller — the server's role meeting every store's privilege, or none. And whether
          * the server's role may run it at all: EXECUTE is the `server` group's, soft — without it the forget tool alone
          * fails. `forgotten`, the ticket's Work 3: every forgotten thought a store still holds the id or the text of
-         * (143's ob1_forget_leftovers) — a write that raced the forget (SMD-4299) — named, since the brain promised those
+         * (144's ob1_forget_leftovers) — a write that raced the forget (SMD-4299) — named, since the brain promised those
          * gone. A warning, not the ticket's failure: preflight gates the server's start, and the sweep — a second
-         * forget — runs through the server; the brain serves correctly meanwhile. Nothing to read before 143: a skip.
+         * forget — runs through the server; the brain serves correctly meanwhile. Nothing to read before 144: a skip.
          */
         {
           const fRows = await sql.unsafe(`
-            SELECT to_regprocedure('public.ob1_forget_leftovers()') IS NOT NULL AS has_143,
+            SELECT to_regprocedure('public.ob1_forget_leftovers()') IS NOT NULL AS has_144,
                    (SELECT p.prosecdef FROM pg_proc p WHERE p.oid = to_regprocedure('public.forget_thought(uuid, jsonb, boolean)')) AS definer,
                    (SELECT EXISTS (SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}')) c WHERE c LIKE 'search_path=%pg_temp')
                       FROM pg_proc p WHERE p.oid = to_regprocedure('public.forget_thought(uuid, jsonb, boolean)')) AS pinned,
                    CASE WHEN to_regprocedure('public.forget_thought(uuid, jsonb, boolean)') IS NULL THEN NULL
                         ELSE has_function_privilege('public.forget_thought(uuid, jsonb, boolean)', 'EXECUTE') END AS may`)
-            .then((r) => r as { has_143: boolean; definer: boolean | null; pinned: boolean | null; may: boolean | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+            .then((r) => r as { has_144: boolean; definer: boolean | null; pinned: boolean | null; may: boolean | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const fd = Array.isArray(fRows) ? fRows[0] : null;
           if (!fd) {
             add("forget definer", "warn", `could not verify: ${(fRows as Error).message}`, "The check reads forget_thought in pg_proc; the message says why it failed.");
-          } else if (!fd.has_143) {
-            add("forget definer", "skip", "not checked — ob1_forget_leftovers does not exist (migration 143 not applied)");
+          } else if (!fd.has_144) {
+            add("forget definer", "skip", "not checked — ob1_forget_leftovers does not exist (migration 144 not applied)");
           } else if (fd.definer !== true || fd.pinned !== true) {
-            add("forget definer", "warn", "forget_thought runs as its caller, not its owner: a re-applied 139 put its body back in place of 143's SECURITY DEFINER wrapper, so the forget tool fails for any role but the owner's, naming the first store it may not touch",
-                ledgerRemedy("143", "Re-apply db/migrations/143_forget_thought_definer.sql."));
+            add("forget definer", "warn", "forget_thought runs as its caller, not its owner: a re-applied 139 put its body back in place of 144's SECURITY DEFINER wrapper, so the forget tool fails for any role but the owner's, naming the first store it may not touch",
+                ledgerRemedy("144", "Re-apply db/migrations/144_forget_thought_definer.sql."));
           } else if (fd.may !== true) {
             add("forget definer", "warn", "the server's role holds no EXECUTE on forget_thought: the forget tool fails naming the function, and nothing else does",
                 "Grant the server group (SMD-1723): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server (db/README.md, Grants for a capturing role).");
@@ -3356,8 +3356,8 @@ if (configFailed) {
             add("forget definer", "ok", "forget_thought runs as its owner, its search_path pinned; the server's role may run it");
           }
 
-          if (!fd?.has_143) {
-            add("forgotten", "skip", fd ? "not checked — ob1_forget_leftovers does not exist (migration 143 not applied)" : "not checked — forget_thought could not be read (the row above)");
+          if (!fd?.has_144) {
+            add("forgotten", "skip", fd ? "not checked — ob1_forget_leftovers does not exist (migration 144 not applied)" : "not checked — forget_thought could not be read (the row above)");
           } else {
             // Bounded: preflight gates the start, and the read is every store's (review pass 1 measured 12 s at
             // 300,000 logged searches before it read each store once).
@@ -3370,7 +3370,7 @@ if (configFailed) {
                   "Run it by hand, unbounded: SELECT thought_id, store, n FROM ob1_forget_leftovers(); a row is a forgotten thought a store still holds, which forget_thought again sweeps.");
             } else if (!Array.isArray(left)) {
               add("forgotten", "warn", `could not verify: ${left.message}`,
-                "ob1_forget_leftovers reads every store forget_thought reaches, as its owner (migration 143); a role without EXECUTE on it is granted the server group: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server.");
+                "ob1_forget_leftovers reads every store forget_thought reaches, as its owner (migration 144); a role without EXECUTE on it is granted the server group: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server.");
             } else if (left.length) {
               const byId = new Map<string, string[]>();
               for (const r of left) byId.set(r.id, [...(byId.get(r.id) ?? []), `${r.store} ${r.n}`]);

@@ -589,13 +589,13 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
   const untimed = (r: { text: string; sc: Record<string, unknown> }) => r.sc.code === "FORGOTTEN" && !("forgottenAt" in r.sc) && /this text was forgotten \(forget_thought\)/.test(r.text) && !/forgotten on /.test(r.text);
   assert(hooked.isError && untimed(hooked), `a capture-only key's capture of it: FORGOTTEN, no time in the values or the text (${hooked.text.slice(0, 70)})`);
 
-  // A brain without 143's ledger check: the trigger's OB005 is the same refusal, not a fault — after the embedding.
+  // A brain without 144's ledger check: the trigger's OB005 is the same refusal, not a fault — after the embedding.
   await sql`DROP FUNCTION ob1_text_forgotten_at(text)`;
   const raised = await full("capture_thought", { content: SECRET });
   const raisedEdit = await full("update_thought", { id: other, content: SECRET });
   const raisedHook = await full("capture_thought", { content: SECRET }, hook);
-  const migration143 = await Bun.file(new URL("../db/migrations/143_forget_thought_definer.sql", import.meta.url)).text();
-  await sql.unsafe(migration143);
+  const migration144 = await Bun.file(new URL("../db/migrations/144_forget_thought_definer.sql", import.meta.url)).text();
+  await sql.unsafe(migration144);
   assert(raised.isError && raised.sc.code === "FORGOTTEN" && typeof raised.sc.forgottenAt === "string" && raisedEdit.isError && raisedEdit.sc.code === "FORGOTTEN"
       && raisedHook.isError && untimed(raisedHook) && embeddedTexts.slice(asked).includes(SECRET),
     `without the ledger check the trigger's OB005 is refused FORGOTTEN, with its time, on capture and on edit — and without it to a capture-only key (${raised.text.slice(0, 60)} | ${raisedHook.text.slice(0, 50)})`);

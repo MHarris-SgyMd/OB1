@@ -1079,7 +1079,7 @@ bodiless `ok`).
 **`forget_thought(id, confirm, detach_citations?)`** is a **write-scoped** tool
 (`POST /v1/thoughts/{id}/forget`) that removes a thought and every copy of its text
 or id the brain holds, where `delete_thought` keeps the removed text in the audit
-trail. It calls migration 139's `forget_thought`, which since 143 runs as its owner:
+trail. It calls migration 139's `forget_thought`, which since 144 runs as its owner:
 the server's role needs `EXECUTE` on it (the **server** grant group) and nothing on
 the stores it reaches. Forgetting cannot be undone, so `confirm` must be the `id`
 again, exactly as sent (an id or a `client_key`), or the call is refused
@@ -1093,7 +1093,7 @@ it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-lo
 row: the query log is one of the stores it clears.
 
 A capture or an edit of a forgotten text is refused `FORGOTTEN` before the
-embedding call (143's `ob1_text_forgotten_at`), so the model provider never sees
+embedding call (144's `ob1_text_forgotten_at`), so the model provider never sees
 it again; the refusal trigger's `OB005`, raised if a forget lands between that
 check and the write, is the same refusal. A capture-only key is told the text was
 forgotten, not when. Writing it again is the operator's, in SQL, under

@@ -1918,7 +1918,7 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
     mutationRefusalText, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
 
-/** forget_thought's refusals (139, 143; SMD-1723 PR 2). CITED is delete_thought's, its way through the forget's. */
+/** forget_thought's refusals (139, 144; SMD-1723 PR 2). CITED is delete_thought's, its way through the forget's. */
 function forgetRefusal(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_CONFIRM":
@@ -1940,7 +1940,7 @@ const removedText = (removed: Record<string, number>): string => {
 };
 
 /**
- * forget_thought's reply (139, 143; SMD-1723 PR 2): what each store gave up, then what the forget could not do
+ * forget_thought's reply (139, 144; SMD-1723 PR 2): what each store gave up, then what the forget could not do
  * mechanically and a person reviews — the thoughts derived from it, the pages, the twins that keep the text, and the
  * copies outside the brain. The values are the database's: ids, counts, and the ingested record's hashed identity.
  */
@@ -2117,16 +2117,16 @@ export const resetHint = (msg: string): string =>
     : "";
 
 /**
- * forget_thought's fault (SMD-1723 PR 2): a role without EXECUTE on the function (143 revoked it from PUBLIC), or a
+ * forget_thought's fault (SMD-1723 PR 2): a role without EXECUTE on the function (144 revoked it from PUBLIC), or a
  * brain before 139, named with the step that mends it.
  */
 export const forgetHint = (msg: string): string =>
   /permission denied for function forget_thought/i.test(msg)
-    ? " — the server's database role needs EXECUTE on forget_thought (migration 143): cd db && bun migrate.ts --grant <role> --url $DATABASE_URL"
+    ? " — the server's database role needs EXECUTE on forget_thought (migration 144): cd db && bun migrate.ts --grant <role> --url $DATABASE_URL"
     : /forget_thought/.test(msg) && /does not exist|could not find/i.test(msg)
       ? " — migration 139 (db/migrations/139_forget_thought.sql) is not applied"
       : /permission denied for (table|relation|sequence)/i.test(msg)
-        ? " — forget_thought ran as the server's database role, which holds no privilege on that store: apply migration 143 (db/migrations/143_forget_thought_definer.sql), which makes it run as its owner"
+        ? " — forget_thought ran as the server's database role, which holds no privilege on that store: apply migration 144 (db/migrations/144_forget_thought_definer.sql), which makes it run as its owner"
         : "";
 
 // ── append_thought_evidence (SMD-2690 PR 3b) ─────────────────────────────────

@@ -548,7 +548,7 @@ export const SPECS = {
       ),
     },
   },
-  // Migrations 139 and 143 (SMD-1723 PR 2): the one write the audit trail
+  // Migrations 139 and 144 (SMD-1723 PR 2): the one write the audit trail
   // cannot undo, so the id is echoed back in `confirm`, as the CLI's --retire
   // asks. The guard is the core's (SMD-2282): every client meets it.
   forget_thought: {

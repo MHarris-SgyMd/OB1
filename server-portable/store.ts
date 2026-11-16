@@ -1175,7 +1175,7 @@ export type DeleteResult =
   | { ok: true; id: string; detached?: number; inactive?: number }
   | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
 /**
- * What forget_thought answers (migrations 139 and 143, SMD-1723): the
+ * What forget_thought answers (migrations 139 and 144, SMD-1723): the
  * evidence of what each store gave up. `removed` counts by store (139's keys:
  * relations, inactive_citations, detached_citations, derived_refs,
  * page_sections, query_log_rows, priority_statements, priority_findings,
@@ -1303,7 +1303,7 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
 }
 
 /**
- * forget_thought's jsonb (139, 143) as the store's union. A refusal keeps its
+ * forget_thought's jsonb (139, 144) as the store's union. A refusal keeps its
  * own word; CITED's count and rows are read as delete_thought's are. A body
  * that is no envelope throws: an answer this server cannot read is a fault,
  * and a forget the caller cannot see the evidence of must not read as done.
@@ -2550,11 +2550,11 @@ export interface ThoughtStore {
   }): Promise<DeleteResult>;
 
   /**
-   * Forget a thought (migrations 139 and 143, SMD-1723): forget_thought, which
+   * Forget a thought (migrations 139 and 144, SMD-1723): forget_thought, which
    * removes the row and every store holding its text or id, redacts its
    * events, writes the ledger, and answers the evidence. Refused CITED while
    * an active citation leans on it, unless `detach`, which deletes the citing
-   * rows with the rest. Runs as the function's owner since 143: the
+   * rows with the rest. Runs as the function's owner since 144: the
    * connecting role needs EXECUTE on it alone, and a role without it throws
    * (42501).
    */
@@ -2565,9 +2565,9 @@ export interface ThoughtStore {
   }): Promise<ForgetResult>;
 
   /**
-   * When the brain forgot this text, or null (migration 143's
+   * When the brain forgot this text, or null (migration 144's
    * ob1_text_forgotten_at: 139's refusal rule, asked before an embedding is
-   * paid for). Null on a brain before 143, whose refusal trigger still
+   * paid for). Null on a brain before 144, whose refusal trigger still
    * answers at the write.
    */
   textForgottenAt(content: string): Promise<string | null>;

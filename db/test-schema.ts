@@ -4904,13 +4904,13 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedOids = new Set(await fnOids(listedFns));
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
-  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600); since 143
+  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600); since 144
   // forget_thought and ob1_forget_leftovers, granted by the server group (SMD-1723).
   const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
   const lockedOids = new Set(await fnOids(lockedFns));
   const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
   assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 3,
-    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, 118's release in closedclaims and 143's forget_thought and ob1_forget_leftovers in server — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, 118's release in closedclaims and 144's forget_thought and ob1_forget_leftovers in server — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -7719,7 +7719,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 11 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && restored[10].startsWith("143") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm), 143's forget_thought and ob1_forgetting over 139's, and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 11 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && restored[10].startsWith("144") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm), 144's forget_thought and ob1_forgetting over 139's, and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -10528,7 +10528,7 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure) AS "lifeBody",
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS "stateBody",
            (SELECT prorows::int FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure) AS rows`);
-  // 143's ob1_forget_leftovers is the one ob1_* definer by design (SMD-1723 PR 2: preflight reads every store a forget
+  // 144's ob1_forget_leftovers is the one ob1_* definer by design (SMD-1723 PR 2: preflight reads every store a forget
   // reaches as its owner); 068's projection is none.
   const secdef = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'ob1\\_%' AND proname <> 'ob1_forget_leftovers' AND prosecdef`))[0].n;
   assert(await cols("ob1_ticket_head") === "issue_key uuid, issue text, head_id uuid, status text, status_type text, synced_at text"
@@ -21930,7 +21930,7 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
     `a re-apply keeps the ledger and the refusal (${ledAfter})`);
 }
 
-console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECURITY DEFINER wrapper over 139's body, its search_path pinned with pg_temp last, every ob1.* setting the migrations read but ob1.actor emptied for the call, EXECUTE not PUBLIC's but every thought deleter's; a role holding EXECUTE alone forgets, one without is refused; a caller's temporary table shadows nothing, and its settings come back after the call; ob1_text_forgotten_at answers as the refusal trigger does; ob1_forget_leftovers names what a raced write left, until a second forget; a re-apply a no-op (SMD-1723)");
+console.log("\n[131] Migration 144: forget_thought runs as its owner — a SECURITY DEFINER wrapper over 139's body, its search_path pinned with pg_temp last, every ob1.* setting the migrations read but ob1.actor emptied for the call, EXECUTE not PUBLIC's but every thought deleter's; a role holding EXECUTE alone forgets, one without is refused; a caller's temporary table shadows nothing, and its settings come back after the call; ob1_text_forgotten_at answers as the refusal trigger does; ob1_forget_leftovers names what a raced write left, until a second forget; a re-apply a no-op (SMD-1723)");
 {
   const file = files.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f)) ?? "no NNN_forget_thought_definer.sql";
   type J = Record<string, unknown>;
@@ -21944,7 +21944,7 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
                  CREATE ROLE ob1_fg130_deleter NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_deleter; GRANT SELECT, DELETE ON thoughts TO ob1_fg130_deleter;
                  CREATE ROLE ob1_fg130_reader NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_reader; GRANT SELECT ON thoughts TO ob1_fg130_reader;
                  CREATE ROLE ob1_fg130_exec NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_exec`);
-  // [129] re-applied 139, which put back a function running as its caller, the wrapper's grants on it: 143 now, as
+  // [129] re-applied 139, which put back a function running as its caller, the wrapper's grants on it: 144 now, as
   // the shipped tree has it, taking that function as the body and carrying its grantees to the wrapper.
   await db.exec(`GRANT EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) TO ob1_fg130_granted`);
   await reapply(file.slice(0, 4));
@@ -21968,8 +21968,8 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECUR
   const unpinned = wanted.filter((s) => !emptied.includes(s));
   const path = cfg.find((c) => c.startsWith("search_path=")) ?? "";
   assert(fn.def === true && unpinned.length === 0 && wanted.length >= 13 && !emptied.includes("ob1.actor") && /ob1_forget_thought_body\(p_id, p_actor, p_detach\)/.test(fn.src)
-      && fn.body !== null && fn.bodyDef === false && /^search_path=.*\bpublic\b.*, pg_temp$/.test(path) && /migration 143/i.test(fn.c ?? ""),
-    `forget_thought a SECURITY DEFINER wrapper over 139's body, its search_path ending in pg_temp, each of the ${wanted.length} runtime ob1.* settings emptied for the call but ob1.actor, its comment naming 143 (${path}; not emptied: ${unpinned.join(", ") || "none"})`);
+      && fn.body !== null && fn.bodyDef === false && /^search_path=.*\bpublic\b.*, pg_temp$/.test(path) && /migration 144/i.test(fn.c ?? ""),
+    `forget_thought a SECURITY DEFINER wrapper over 139's body, its search_path ending in pg_temp, each of the ${wanted.length} runtime ob1.* settings emptied for the call but ob1.actor, its comment naming 144 (${path}; not emptied: ${unpinned.join(", ") || "none"})`);
   const may = async (role: string) => (await one<{ y: boolean }>(`SELECT has_function_privilege($1, $2, 'EXECUTE') AS y`, [role, SIG])).y;
   const leftoversFn = await one<{ def: boolean; granted: boolean; pub: boolean }>(`SELECT p.prosecdef AS def,
       has_function_privilege('ob1_fg130_granted', p.oid, 'EXECUTE') AS granted,
