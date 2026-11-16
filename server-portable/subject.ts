@@ -224,9 +224,11 @@ export const TICKETS_FROM = "tickets_from";
  * prompts named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a
  * release, a review. The hook before 1.8.1 learned a team from every ticket-shaped word of a branch or a directory, so
  * on `smd-610-bump-node-22` a prompt's `node-22` was a ticket to it; from 1.8.1 a place teaches its own ticket's team
- * alone (SMD-4291), but summaries captured before keep their headers: a header listing a ticket of another team than
- * the session's is the model's. The session's team is the first ticket of the header's own branch, else of its
- * project, as the hook's anchorOf reads a place, read with the hook's own shape (two to five letters, two to six
+ * alone (SMD-4291), but a place with no ticket teaches its first ticket-shaped word's (`node-22-pin`) and the session's
+ * teams are every place it has been, so the guard stays for those summaries too: a header listing a ticket of another
+ * team than the session's is the model's. The session's team is the first ticket of the header's own branch, else of
+ * its project (the directory's last part, which the header shows; the hook reads the deepest part that names one), as
+ * the hook's anchorOf reads a branch, read with the hook's own shape (two to five letters, two to six
  * digits) and no prefix either list denies (PR 7a-3b-2's review passes 3, 5 and 6). A denied prefix the hook listed is
  * no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The hook's layout is read as
  * it is written: the header; a blank line between its parts; `Title: …`, passed over; `Asked (N prompts):` and its

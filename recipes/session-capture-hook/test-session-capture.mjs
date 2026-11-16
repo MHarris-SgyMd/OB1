@@ -408,6 +408,23 @@ let episodesLines;
   assert(headerTickets(slashed).tickets.join() === "SMD-12"
       && asks(CWD("/wt/ob1"), BR("me/smd-610-a"), P("start"), P("now smd-700"), BR("node-22-smd-700-x"), P("go")) === "start+now smd-700|go",
     `a branch is read whole, its first ticket-shaped word its own, not by its last part (smd-12/fix-node-22 is SMD-12's); and a move is to the place's own ticket alone, so a later key of another team in a branch begins no episode with it (mutants: ${JSON.stringify(headerTickets(slashed))})`);
+  // Review pass 1 (run-it): a cd within the checkout into a ticket-shaped subdirectory teaches no team, and a Windows
+  // directory is read by its parts.
+  const sub = segment([CWD("/wt/smd-610-x"), BR("me/smd-610-x"), P("start"), CWD("/wt/smd-610-x/packages/node-22-compat"), BR("me/smd-610-x"), P("the node-22 shim broke")]).episodes;
+  const win = segment([CWD("C:\\work\\aoc-2024\\smd-55-day1"), BR("main"), P("fix the parser")]).episodes[0];
+  assert(sub.length === 1 && headerTickets(sub[0]).tickets.join() === "SMD-610" && headerTickets(win).tickets.join() === "SMD-55",
+    `a cd into a ticket-shaped subdirectory of the checkout teaches no team; a Windows directory is read by its parts (${JSON.stringify([headerTickets(sub[0]), headerTickets(win)])})`);
+  // Review pass 1 (cold read, mutants): each reader of a place, by the path it is reached on.
+  const namedOn = (...ev) => [...segment([...ev, P("bump node-22 now")]).episodes.at(-1).named].join();
+  assert(namedOn(CWD("/wt/ob1"), BR("smd-12/fix-node-22")) === "" && namedOn(BR("smd-12/fix-node-22")) === "" && namedOn(CWD("/wt/ob1"), P("start"), BR("smd-12/fix-node-22")) === "",
+    "a branch teaches its team read whole, whether its event follows a cwd on one line or stands alone: smd-12/fix-node-22 teaches SMD, not NODE");
+  assert(asks(CWD("/wt/ob1"), BR("me/smd-610-a"), P("start"), P("now smd-700"), CWD("/Users/me/aoc-2024/smd-700-x"), P("go")) === "start|now smd-700+go",
+    "…a move to a directory is to its deepest part's ticket: an ask naming smd-700, then the shell in ~/aoc-2024/smd-700-x, begins SMD-700's episode");
+  assert(asks(CWD("/tmp/s"), P("do SMD-55"), CWD("/b/smd-55-tools/smd-60-x"), P("more")) === "do SMD-55|more"
+      && asks(CWD("/wt/ob1"), BR("me/smd-55-a"), P("start"), CWD("/b/smd-55-tools/smd-60-x"), BR("me/feature-x"), P("more")) === "start|more",
+    "…and a move into SMD-60's directory under a parent naming SMD-55 is not the SMD-55 episode's own, with no branch or with one");
+  assert(headerTickets(segment([CWD("/wt/smd-3379-pr3b2"), BR("me/smd-610-x"), P("start")]).episodes[0]).tickets.join() === "SMD-610,SMD-3379",
+    "…and a place lists its branch's own tickets before its directory's");
 
   // The teams are those named SO FAR: a keyed branch made later must not make an earlier mention a key and move a boundary already captured (second review pass — the set was built from the whole transcript up front, and a prefix segmented otherwise than the whole).
   const early = [CWD("/repo"), BR("main"), P("help with x"), P("now smd-2013 please"), P("more")];

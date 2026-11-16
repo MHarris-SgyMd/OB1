@@ -806,11 +806,12 @@ const ownTickets = (text) => {
 /** A branch's own tickets: read whole, its first ticket-shaped word the place's (`feature/smd-55-x`). */
 const branchTickets = (branch) => ownTickets(branch);
 /**
- * A directory's own tickets: those of its deepest part that names one, a worktree's or a project's own name, not a
- * parent's (`~/aoc-2024/smd-55-day1/src` is SMD-55's, not AOC-2024's).
+ * A directory's own tickets: those of its deepest part that names one, a worktree's or a project's own name before a
+ * parent's (`~/aoc-2024/smd-55-day1/src` is SMD-55's, not AOC-2024's; `~/aoc-2024/day1` is AOC-2024's). Split at either
+ * slash, so a Windows path is read by its parts too (review pass 1, run-it: read whole, its parent's word won).
  */
 const dirTickets = (cwd) => {
-  const parts = String(cwd ?? "").split("/");
+  const parts = String(cwd ?? "").split(/[\\/]/);
   for (let k = parts.length - 1; k >= 0; k--) { const own = ownTickets(parts[k]); if (own.length) return own; }
   return [];
 };
@@ -944,8 +945,10 @@ export function segment(events, s = emptySummary()) {
     if (ev.t === "compaction") { if (cur.prompts.length) compacted = true; else cur.opened = { kind: "compaction" }; continue; }
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
-      learnTeams(ev.t, ev.v);
       loc[ev.t] = ev.v;
+      // A cd within the episode's checkout teaches no team: a subdirectory's name is the checkout's, not a ticket's
+      // (review pass 1, run-it: `packages/node-22-compat` taught NODE).
+      if (ev.t === "branch" || !cur.cwd || !inside()) learnTeams(ev.t, ev.v);
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it
