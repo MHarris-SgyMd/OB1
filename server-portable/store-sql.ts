@@ -27,7 +27,7 @@ import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -41,6 +41,7 @@ import type {
   ListPosition,
   ThoughtListPage,
   DeleteResult,
+  ForgetResult,
   ResetStampResult,
   SetWeightsResult,
   SetCapResult,
@@ -997,6 +998,27 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT delete_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
+  }
+
+  async forgetThought(opts: { id: string; actor?: Actor; detach?: boolean }): Promise<ForgetResult> {
+    // 139's three arguments, always sent, as delete_thought's are. One
+    // statement: the function is one transaction, and READ COMMITTED alone
+    // (ob1_priority_isolation refuses any other).
+    const rows = await this.sql`
+      SELECT forget_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;
+    return normaliseForget(rows[0]?.r);
+  }
+
+  async textForgottenAt(content: string): Promise<string | null> {
+    try {
+      const rows = await this.sql`SELECT ob1_text_forgotten_at(${content}::text) AS at`;
+      return isoTimestampOrNull(rows[0]?.at ?? null);
+    } catch (e) {
+      // A brain before 144 has no such function: the refusal trigger (139)
+      // still answers at the write, after the embedding.
+      if ((e as { errno?: string }).errno === "42883") return null;
+      throw e;
+    }
   }
 
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
