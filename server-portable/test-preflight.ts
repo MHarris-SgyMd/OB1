@@ -861,11 +861,12 @@ else {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       assert(/✓  ticket claims\s+claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; the logging settings read print no bind value/.test(whole.out),
              `on a brain at 115 the four claim functions, the claims grant and no token-printing log: ok (${line(whole.out).trim()})`);
-      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer) RENAME TO list_work_claims_away");
+      // 143 redefined list_work_claims with the eight-argument keyset-cursor signature; its own, not 115's four, is what the check reads now.
+      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims_away");
       const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims");
-      assert(missing.code === 1 && /ticket claims\s+migration 115's list_work_claims\(text\[\],text,boolean,integer\) missing under 115's signature/.test(missing.out) && /115_work_claims\.sql/.test(missing.out),
-             `a claim function missing: does not start, naming it and 115 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 140)})`);
+      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims");
+      assert(missing.code === 1 && /ticket claims\s+list_work_claims\(text\[\],text,boolean,integer,text,text,timestamptz,uuid\) missing under 143's signature/.test(missing.out) && /143_work_claims_cursor\.sql/.test(missing.out),
+             `list_work_claims missing under 143's signature alone: does not start, naming it and 143 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 160)})`);
       // Statement logging, set for the database so the next connection reads it (a superuser's settings).
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_statement = 0`);
       const logging = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -925,8 +926,8 @@ else {
              `a failed statement's parameters logged: a warning naming log_parameter_max_length_on_error; log_statement=mod, which logs no claim call, ok (${line(onError.out).trim().slice(0, 120)} | ${line(mod.out).trim().slice(0, 40)})`);
     } finally {
       for (const s of SET_HERE) await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET ${s}`).catch(() => {});
-      await ticket.unsafe(`DO $r$ BEGIN IF to_regprocedure('list_work_claims_away(text[],text,boolean,integer)') IS NOT NULL THEN
-        ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims; END IF; END $r$`).catch(() => {});
+      await ticket.unsafe(`DO $r$ BEGIN IF to_regprocedure('list_work_claims_away(text[],text,boolean,integer,text,text,timestamptz,uuid)') IS NOT NULL THEN
+        ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims; END IF; END $r$`).catch(() => {});
       await ticket.close();
     }
   }

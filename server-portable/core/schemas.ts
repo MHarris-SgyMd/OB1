@@ -704,13 +704,15 @@ export const SPECS = {
   list_claims: {
     title: "List Work Claims",
     description:
-      "List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means the limit cut the list: narrow by ticket or holder. Never shows a claim's token.",
+      "List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means more claims follow this page: page to the end by calling again with `after` set to the reply's `cursor` and the same `ticket`, `holder` and `include_ended`; `remaining` counts how many follow. A cursor that is not this tool's, or made with other filters, is refused (REFUSED_CURSOR). Never shows a claim's token.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       ticket: z.string().min(1).max(200).optional().describe("Only this ticket's claims, its whole and its pieces (e.g. SMD-3379; case and surrounding white space don't matter)"),
       holder: z.string().min(1).max(200).optional().describe("Only the claims of the key with this name"),
       include_ended: z.boolean().optional().describe("Also list lapsed and released claims (each with its `state`). Default false: live claims only"),
       limit: z.number().int().min(1).max(1000).optional().default(100).describe("At most this many, by ticket, piece and claim time. Default 100"),
+      // 2048, not the other cursors' 512: this one carries its selection (ticket, holder) and position (issue, piece_key), each up to 200 chars, so a max-length cursor reaches ~1200 (SMD-3606 PR 2).
+      after: z.string().max(2048).optional().describe("Keyset cursor — the previous page's `cursor`, given with the same `ticket`, `holder` and `include_ended`; omit for the first page"),
     },
   },
   claim_work: {

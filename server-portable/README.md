@@ -1270,8 +1270,13 @@ and MCP alike:
   and its token. `release_claim` takes `force` with a `reason` for an operator key,
   classified `operator` by its agent id.
 - **`list_claims`** (`GET /v1/claims`, read scope): the live claims, of one ticket or
-  one holder's key, or every claim with `include_ended`, and `truncated` when the
-  limit cut the list. Never a token.
+  one holder's key, or every claim with `include_ended`, by ticket then piece then
+  claim time. `truncated` is true when more follow this page; page to the end with
+  `after` set to the reply's `cursor` and the same `ticket`, `holder` and
+  `include_ended` (migration 143's keyset cursor), `remaining` counting how many
+  follow. A cursor carries the filters it was made under, so one passed with others
+  — or any string that is not this listing's cursor — is refused `REFUSED_CURSOR`
+  (400). Never a token.
 
 **The token** is a bearer secret to its key: anyone holding it under that key acts as
 the holder. It travels in a JSON body, never a URL, and as a bind parameter, never
