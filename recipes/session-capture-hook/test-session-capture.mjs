@@ -425,6 +425,39 @@ let episodesLines;
     "…and a move into SMD-60's directory under a parent naming SMD-55 is not the SMD-55 episode's own, with no branch or with one");
   assert(headerTickets(segment([CWD("/wt/smd-3379-pr3b2"), BR("me/smd-610-x"), P("start")]).episodes[0]).tickets.join() === "SMD-610,SMD-3379",
     "…and a place lists its branch's own tickets before its directory's");
+  // Review pass 2 (run-it, cold read): a cd within a checkout naming no ticket still teaches, so this repo's worktrees,
+  // nested under its checkout on `main`, and a ticket's directory under HOME or a projects folder do; an episode opened
+  // where the session stayed keeps the ticketed checkout as its place; a Windows subdirectory is within its checkout;
+  // a prefix the brain denies is no place's ticket.
+  const nest = segment([CWD("/r/OB1"), BR("main"), P("pick up SMD-1246"), CWD("/r/OB1/.claude/worktrees/smd-1246-x"), BR("main"), P("now smd-1247 as well")]).episodes;
+  const projects = segment([CWD("/Users/me/Projects"), CWD("/Users/me/Projects/smd-55-day1"), P("fix smd-55")]).episodes[0];
+  assert(nest.length === 2 && headerTickets(nest[1]).tickets.join() === "SMD-1247" && [...projects.named].join() === "SMD-55",
+    `a worktree nested in a ticketless checkout teaches its team, and so does a ticket's directory under a projects folder (${JSON.stringify([nest.length, headerTickets(nest.at(-1)), [...projects.named]])})`);
+  const compacted = segment([CWD("/wt/ob1"), BR("smd-610-bump-node-22"), P("start"), CWD("/wt/ob1/packages/node-22-compat"), BR("smd-610-bump-node-22"), CP, P("continue")]).episodes;
+  const winSub = segment([CWD("C:\\wt\\smd-610-x"), BR("me/smd-610-x"), P("start"), CWD("C:\\wt\\smd-610-x\\packages\\node-22-compat"), BR("me/smd-610-x"), P("the node-22 shim broke")]).episodes;
+  assert(compacted.length === 2 && headerTickets(compacted[1]).tickets.join() === "SMD-610" && compacted[1].cwd === "/wt/ob1"
+      && winSub.length === 1 && headerTickets(winSub[0]).tickets.join() === "SMD-610",
+    `an episode opened at a compaction in a subdirectory of the ticketed checkout keeps the checkout as its place; a Windows cd within the checkout is no move and teaches no team (${JSON.stringify([headerTickets(compacted.at(-1)), compacted.at(-1).cwd, winSub.length, headerTickets(winSub[0])])})`);
+  const es = segment([CWD("/wt/ob1"), BR("me/es-2015-target-smd-610"), P("smd-610 now")]).episodes[0];
+  assert(headerTickets(es).tickets.join() === "SMD-610" && ticketsIn("ES-2015 and CC-12 and FY-2026").length === 0,
+    `a prefix the brain denies is no place's ticket nor any ask's: es-2015-target-smd-610 is SMD-610's (${JSON.stringify(headerTickets(es))})`);
+  // Review pass 2 (cold read, mutants): the move to a branch by its own ticket; the gate judged where the session moved to;
+  // a cd within any of the episode's roots.
+  assert(asks(CWD("/wt/ob1"), BR("main"), P("do SMD-700"), BR("me/node-22-smd-700-x"), P("go")) === "do SMD-700|go",
+    "…a move to a branch whose own ticket is another team's is not the episode's own, though a later word of it names the episode's key (mutant: ticketsIn at the move)");
+  assert([...segment([CWD("/tmp/s"), P("hi"), CWD("/wt/smd-55-x"), P("fix smd-55")]).episodes.at(-1).named].join() === "SMD-55",
+    "…a cd that leaves the episode's checkout teaches its directory's team, judged where the session moved to (mutant: the gate read before loc is set)");
+  assert([...segment([CWD("/tmp/s"), P("do SMD-55"), CWD("/wt/smd-55-x"), P("more"), CWD("/tmp/s/node-22-compat"), P("the node-22 shim")]).episodes.at(-1).named].join() === "SMD-55",
+    "…a cd within any of the episode's roots, not only its latest directory, teaches no team (mutant: the gate by cur.cwd alone)");
+  // …and the place an episode opens in is kept only for a ticket-shaped subdirectory of no known team, where it did not
+  // move: a known team's nested worktree, a plain subdirectory and a move's place are where the shell is, as before
+  // (review pass 2, mutants).
+  const nestedWt = segment([CWD("/r/OB1"), BR("me/smd-1-x"), P("start"), CWD("/r/OB1/.claude/worktrees/smd-2-y"), BR("me/smd-1-x"), CP, P("continue")]).episodes;
+  const plainSub = segment([CWD("/wt/smd-610-x"), BR("me/smd-610-x"), P("start"), CWD("/wt/smd-610-x/api"), BR("me/smd-610-x"), CP, P("continue")]).episodes;
+  const movedSub = segment([CWD("/wt/ob1"), BR("me/smd-610-a"), P("start"), CWD("/wt/ob1/packages/node-22-compat"), BR("me/smd-610-a"), P("x"), BR("me/smd-700-b"), P("go")]).episodes;
+  assert(nestedWt.length === 2 && nestedWt[1].cwd === "/r/OB1/.claude/worktrees/smd-2-y" && plainSub.length === 2 && plainSub[1].cwd === "/wt/smd-610-x/api"
+      && movedSub.length === 2 && movedSub[1].cwd === "/wt/ob1/packages/node-22-compat",
+    `a known team's nested worktree, a plain subdirectory and a branch move's place open where the shell is (${JSON.stringify([nestedWt.at(-1).cwd, plainSub.at(-1).cwd, movedSub.at(-1).cwd])})`);
 
   // The teams are those named SO FAR: a keyed branch made later must not make an earlier mention a key and move a boundary already captured (second review pass — the set was built from the whole transcript up front, and a prefix segmented otherwise than the whole).
   const early = [CWD("/repo"), BR("main"), P("help with x"), P("now smd-2013 please"), P("more")];

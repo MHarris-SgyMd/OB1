@@ -779,7 +779,11 @@ export function summariseTranscript(path, harness) {
  * keyed branch names its work.
  */
 const TICKET_RE = /\b([A-Za-z]{2,5})-(\d{2,6})\b/g;
-const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
+// The brain's own denied prefixes (server-portable/subject.ts's NOT_TICKET_PREFIXES) are here too, those this shape can
+// match: a branch's first word the brain denies would else be its ticket here and none there (SMD-4291's review pass 2:
+// `es-2015-target-smd-610` named ES-2015, and the asked smd-610 lost its team).
+const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML",
+  "IEEE", "CWE", "WCAG", "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "COVID", "FY"]);
 /** The ticket keys a text names, upper-cased, in first-mention order; with `teams`, under the rule for an ask. */
 export function ticketsIn(text, teams) {
   const out = [];
@@ -901,7 +905,7 @@ export function segment(events, s = emptySummary()) {
   let cur, lineAt = "", compacted = false; // the open episode; the current line's time; a compaction since the episode's last ask
   const loc = { cwd: "", branch: "" }; // where the session IS, against where the episode runs
   const branchMoved = () => Boolean(loc.branch && cur.branch && loc.branch !== cur.branch);
-  const below = (dir, root) => dir === root || dir.startsWith(`${root}/`);
+  const below = (dir, root) => dir === root || dir.startsWith(`${root}/`) || dir.startsWith(`${root}\\`); // either slash: a Windows path too (SMD-4291's review pass 2)
   const inside = () => !loc.cwd || !cur.cwd || [...cur.roots].some((r) => below(loc.cwd, r)); // at or under a root: an ancestor of the checkout — HOME, ~/Projects — is not inside it (second review pass: it became the episode's directory, and every checkout under it was then inside)
   /** Away: the session is not where the episode runs — another branch, or with no branch to go by, a directory inside none of its roots. */
   const away = () => branchMoved() || (!(loc.branch && cur.branch) && !inside());
@@ -931,7 +935,16 @@ export function segment(events, s = emptySummary()) {
     const next = emptySummary(episodes.length + 1);
     if (cur) cur.closed = boundary;
     next.opened = boundary;
-    next.cwd = loc.cwd; next.branch = loc.branch; if (loc.cwd) next.roots.add(loc.cwd);
+    // An episode opened where the session did not move (a compaction with no move, a new ticket asked in place), the
+    // shell in a subdirectory of the last one's checkout whose name is ticket-shaped but of no team the session knows,
+    // runs in that checkout: a compaction in `packages/node-22-compat` named NODE-22 as the new episode's place
+    // (SMD-4291's review pass 2, cold read). Any other takes where the shell is, as before: a subdirectory naming nothing
+    // (`api`), a worktree of a known team nested in the checkout (`OB1/.claude/worktrees/smd-…`), a move's place.
+    const stayed = boundary && ((boundary.kind === "compaction" && !boundary.moved) || boundary.kind === "ticket");
+    const shellTickets = loc.cwd ? dirTickets(loc.cwd) : [];
+    const keep = stayed && cur && cur.cwd && inside() && shellTickets.length > 0 && !shellTickets.some((id) => teams.has(id.split("-")[0]));
+    next.cwd = keep ? cur.cwd : loc.cwd; next.branch = loc.branch;
+    if (keep || loc.cwd) next.roots.add(keep ? cur.cwd : loc.cwd);
     if (boundary?.ticket) next.about.add(boundary.ticket); // the key it BEGAN with; its home is read live in `own` (second review pass)
     if (lineAt) next.first = next.last = lineAt;
     episodes.push(next); cur = next; compacted = false;
@@ -946,9 +959,12 @@ export function segment(events, s = emptySummary()) {
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
       loc[ev.t] = ev.v;
-      // A cd within the episode's checkout teaches no team: a subdirectory's name is the checkout's, not a ticket's
-      // (review pass 1, run-it: `packages/node-22-compat` taught NODE).
-      if (ev.t === "branch" || !cur.cwd || !inside()) learnTeams(ev.t, ev.v);
+      // A cd within an episode's checkout that names a ticket teaches no team: a subdirectory's name is the checkout's,
+      // not a ticket's (review pass 1, run-it: `packages/node-22-compat` taught NODE). Within one that names none it
+      // does: this repo's worktrees sit under its checkout (`OB1/.claude/worktrees/smd-…`), the branch still `main`, and
+      // HOME or a projects folder holds every checkout (review pass 2, run-it and cold read: a nested worktree taught
+      // nothing, and a lower-case ask there named no ticket).
+      if (ev.t === "branch" || !cur.cwd || !inside() || !anchored(cur)) learnTeams(ev.t, ev.v);
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it

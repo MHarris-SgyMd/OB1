@@ -3982,9 +3982,11 @@ ticket-shaped word of a branch, so on `smd-610-bump-node-22` a prompt's
 directory's whole path, which the header does not show. From 1.8.1 a place
 teaches its own ticket's team alone (SMD-4291), but the guard stays for it too:
 a place with no ticket teaches its first ticket-shaped word's team
-(`node-22-pin`), and the session's teams are every place it has been, so an ask
-can still name another team's key the branch on the header does not show. A summary the hook's model wrote (`metadata.summary_model`) keys no
-header: its prose is never the hook's layout. The header rule's version 3
+(`node-22-pin`), and the session's teams are every place it has been but a
+subdirectory of a checkout naming a ticket, so an ask can still name another
+team's key the branch on the header does not show. A summary the hook's model
+wrote (`metadata.summary_model`) keys no header: its prose is never the hook's
+layout. The header rule's version 3
 (SMD-3306 PR 7a-3b-2) keyed a header listing several as a set; its Verify on the
 canary failed on such sessions, whose raters mostly named one subject, often the
 review or triage the session did (Linear cd0dfb52), and version 4 (PR 7a-3b-3)
