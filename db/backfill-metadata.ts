@@ -38,8 +38,8 @@
  * the type as written, so `Task`, `todo` and `contact` now set the column
  * where they were skipped.
  *
- * sensitivity: a thought's text is read against the recipe's patterns
- * (`db/sensitivity.ts`, shared with weekly-digest): the first restricted
+ * sensitivity: a thought's text is read against the sensitivity patterns
+ * (`db/sensitivity.ts`, the recipe's, widened, and shared with weekly-digest): the first restricted
  * pattern that matches makes it `restricted`, else any personal one
  * `personal`. Each place — the metadata key, and the column where it exists —
  * takes the highest of that tier and the other place's when it is higher than
@@ -50,8 +50,9 @@
  * of exactly `standard`, empty or NULL, and never raised `personal`.) A thought
  * whose places both say `restricted` is not read. The run prints a thought's id
  * and where its tier came from (the patterns' labels, or the other place),
- * never its text (an API key, a card number), where the recipe printed 80
- * characters of each.
+ * never its text (an API key, a card number), where the recipe printed the
+ * first 80 characters of every restricted thought and of the first 30 it
+ * scanned.
  *
  * ── What a run guarantees ───────────────────────────────────────────────────
  * Without --apply nothing is written: the run says what would be. With it, a
@@ -85,7 +86,7 @@ import type { SQL } from "bun";
 import { canonicalType } from "../server-portable/thoughts.ts";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, openSql, reachedDatabaseRefusal } from "./connect.ts";
-import { RANK, sensitivityOf, TIER_OF_RANK, tierRank } from "./sensitivity.ts";
+import { RANK, sensitivityOf, sqlTier, TIER_OF_RANK, tierRank } from "./sensitivity.ts";
 
 /** The rows a page reads, by default. */
 const BATCH = 500;
@@ -161,26 +162,31 @@ export async function run(opts: BackfillOptions): Promise<number> {
         return 2;
       }
     }
-    // schemas/enhanced-thoughts' columns, where the brain has them: the passes write them too.
-    const cols = new Set(((await sql`SELECT column_name AS c FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name IN ('type', 'sensitivity_tier')`) as { c: string }[]).map((r) => r.c));
+    // schemas/enhanced-thoughts' columns, where the brain has them: the passes write them too. From the catalog, not
+    // information_schema, which hides a column the role may not read: such a column fails the run (42501), where it was
+    // skipped unsaid.
+    const cols = new Set(((await sql`SELECT attname AS c FROM pg_catalog.pg_attribute
+      WHERE attrelid = 'public.thoughts'::regclass AND attname IN ('type', 'sensitivity_tier') AND NOT attisdropped`) as { c: string }[]).map((r) => r.c));
     const typeCol = doType && cols.has("type"), tierCol = doSensitivity && cols.has("sensitivity_tier");
     c.typeCol = typeCol;
     c.tierCol = tierCol;
     w.out(`[backfill-metadata] database ${db}, passes ${opts.passes.join(", ")}, ${opts.apply ? "writing" : "a dry run (--apply writes)"}${typeCol || tierCol ? `; the ${[typeCol ? "type" : "", tierCol ? "sensitivity_tier" : ""].filter(Boolean).join(" and ")} column${typeCol && tierCol ? "s" : ""} too` : ""}`);
     // The page's columns, fixed strings named by the probe above; a row's text only when the sensitivity pass may write a
     // place (not when every place it has already says restricted).
-    const restrictedEverywhere = `lower(btrim(t.metadata->>'sensitivity_tier')) = 'restricted'${tierCol ? " AND lower(btrim(t.sensitivity_tier)) = 'restricted'" : ""}`;
+    const restrictedEverywhere = `${sqlTier("t.metadata->>'sensitivity_tier'")} = 'restricted'${tierCol ? ` AND ${sqlTier("t.sensitivity_tier")} = 'restricted'` : ""}`;
     const select = [
       "t.id::text AS id", "COALESCE(t.updated_at, t.created_at) AS stamp", "jsonb_typeof(t.metadata) AS kind",
       "t.metadata->'type' AS type", "t.metadata->>'trust' AS trust", "t.metadata->'sensitivity_tier' AS meta_tier",
       ...(typeCol ? ["t.type AS col_type"] : []), ...(tierCol ? ["t.sensitivity_tier AS col_tier"] : []),
       `CASE WHEN ${doSensitivity} AND NOT coalesce(${restrictedEverywhere}, false) THEN t.content END AS content`,
     ].join(", ");
-    let after = "00000000-0000-0000-0000-000000000000";
+    let after: string | null = null;
     pages: for (;;) {
-      // By the key itself (t.id), so the primary key's index serves the order and the page stops at its rows.
-      const rows = (await sql.unsafe(`SELECT ${select} FROM thoughts t WHERE t.id > $1::uuid ORDER BY t.id LIMIT $2`, [after, batch])) as PageRow[];
+      // By the key itself (t.id), so the primary key's index serves the order and the page stops at its rows. The first
+      // page has no cursor: a thought at the nil uuid is read too.
+      const rows = (after === null
+        ? await sql.unsafe(`SELECT ${select} FROM thoughts t ORDER BY t.id LIMIT $1`, [batch])
+        : await sql.unsafe(`SELECT ${select} FROM thoughts t WHERE t.id > $1::uuid ORDER BY t.id LIMIT $2`, [after, batch])) as PageRow[];
       if (rows.length === 0) break;
       c.pages++;
       for (const row of rows) {

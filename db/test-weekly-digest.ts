@@ -288,10 +288,12 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const window = (n: number) => {
     const asked: string[] = [];
     const fn = Object.assign(
-      (strings: TemplateStringsArray) => (/information_schema/.test(strings.join("$")) ? Promise.resolve([{ has_sensitivity: true }]) : Promise.reject(new Error("unexpected"))),
+      (strings: TemplateStringsArray) => (/pg_attribute|has_column_privilege/.test(strings.join("$")) ? Promise.resolve([{ has_sensitivity: true, readable: true }]) : Promise.reject(new Error("unexpected"))),
       {
-        unsafe: (q: string) => {
+        unsafe: (q: string, params?: unknown[]) => {
           asked.push(q);
+          // The pattern check's second read: each id asked for, its text clean.
+          if (/id = ANY/.test(q)) return Promise.resolve((params?.[0] as string[]).map((id) => ({ id, content: "x" })));
           const limit = Number(/LIMIT (\d+)/.exec(q)?.[1]);
           return Promise.resolve(Array.from({ length: Math.min(n, limit) }, (_, i) => ({ id: `t${i}`, content: "x", created_at: "2026-11-01T00:00:00Z", metadata: null, turn: 1, group: "g" })));
         },

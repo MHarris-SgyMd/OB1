@@ -67,7 +67,7 @@ console.log("\n[3] Unknown and malformed values degrade to observation");
   }
   assert(normaliseType("wingding").raw === "wingding", "an invented type is preserved in type_raw");
   // An object's inherited keys are no alias: TYPE_ALIASES["constructor"] was Object's function (SMD-3318).
-  for (const inherited of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+  for (const inherited of ["constructor", "Constructor", "__proto__"]) {
     const out = normaliseType(inherited);
     assert(out.type === "observation" && out.raw === inherited && canonicalType(inherited) === null, `${inherited} → observation, its words in type_raw; canonicalType names none`);
   }

@@ -5885,6 +5885,8 @@ the bound on a lock wait (a held table, and a held REINDEX under an unbounded
 count), a role that may not read a table, a report that cannot be written, and
 the refusals.
 
+## Backfilling a thought's type and sensitivity tier (SMD-3318)
+
 ### `backfill-metadata.ts`
 
 ```bash
@@ -7701,14 +7703,16 @@ term the send is refused, the refusal names the rule, and the digest is printed
 to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
 the box (the synthesis still does). A row is left out by its
 `metadata.sensitivity_tier`, by `schemas/enhanced-thoughts`' column where a
-brain has it (each in any case), or by the sensitivity patterns
-(`db/sensitivity.ts`) over its whole text, whichever says `restricted` (or
-`personal` without `--include-personal`): the import recipes set the key and
-leave the column at its default (SMD-2493), `db/backfill-metadata.ts` sets
-both, and the patterns hold back what neither tags yet, a capture since the
-backfill's last run included, the run saying how many. A brain without the
-column refused to run until SMD-3318; `--no-sensitivity-filter` sends every
-row. The prompt takes a share of each day and writer
+brain has it (each in any case and white space; a column the role may not read
+refuses the run), or by the sensitivity patterns (`db/sensitivity.ts`) over
+its whole text and the type, topics and tags the prompt sends, whichever says
+`restricted` (or `personal` without `--include-personal`): the import recipes
+set the key and leave the column at its default (SMD-2493),
+`db/backfill-metadata.ts` sets both, and the patterns hold back what neither
+tags yet, a capture since the backfill's last run included, the run saying
+how many. The patterns are a denylist: they narrow what leaves, they do not
+prove nothing does. A brain without the column refused to run until SMD-3318;
+`--no-sensitivity-filter` sends every row. The prompt takes a share of each day and writer
 (`metadata.actor_name`), a turn at a time, so neither a busy day nor one key's
 burst fills it, and each share what matters most first: open work before
 closed (a settled ticket or item keeps its level in the read; the maintainer,

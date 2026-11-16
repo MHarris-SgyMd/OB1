@@ -51,7 +51,7 @@ export function canonicalType(raw: unknown): { type: (typeof THOUGHT_TYPES)[numb
   const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
   const exact = THOUGHT_TYPES.find((t) => t === key);
   if (exact) return { type: exact, aliased: false };
-  // Own keys alone: `constructor` or `tostring` is not an alias.
+  // Own keys alone: `constructor` or `__proto__` is not an alias.
   return Object.hasOwn(TYPE_ALIASES, key) ? { type: TYPE_ALIASES[key], aliased: true } : null;
 }
 
