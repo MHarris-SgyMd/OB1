@@ -1924,7 +1924,7 @@ function forgetRefusal(r: Refusal): string {
     case "REFUSED_CONFIRM":
       return `Refused: \`confirm\` must be the \`id\` again, exactly as passed (${r.id}). Forgetting cannot be undone: read the thought first (fetch takes the id), then repeat the call with confirm set to the same id.`;
     case "NOT_FOUND":
-      return `No thought with id ${r.id} was ever in the brain's log, so there is nothing to forget. A client_key names only a thought still standing: a thought deleted earlier is forgotten by its id.`;
+      return `No thought with id ${r.id} was ever in the brain's log, nor deleted keeping it as its client_key, so there is nothing to forget.`;
     case "FORGOTTEN":
       return `Refused: ${r.id ?? "this thought"} was forgotten already${r.forgottenAt ? ` on ${r.forgottenAt}` : ""}, and nothing of it is left to remove.`;
     case "REPLAYING":

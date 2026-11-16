@@ -2577,6 +2577,16 @@ export interface ThoughtStore {
   textForgottenAt(content: string): Promise<string | null>;
 
   /**
+   * A deleted thought named by the client_key it kept (SMD-1723 PR 3): the id
+   * whose latest tombstone's previous metadata held it, no thought standing
+   * under that id; else null. A forget copied from another brain names its
+   * thought by that brain's id, the copy's key here; the copy deleted before
+   * (a delete copied earlier) is still to be forgotten, and only the log keeps
+   * its key. A tombstone a forget redacted keeps none.
+   */
+  deletedThoughtKeyed(key: string): Promise<string | null>;
+
+  /**
    * The operator's reset of a capture-only key's label that a re-capture
    * settled or moved (migration 086, SMD-2744): ob1_reset_capture_stamp,
    * which decides who may — a key the registry classifies operator — and
@@ -3064,7 +3074,7 @@ export function maskUrl(url: string): string {
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
-  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true,
+  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true, deletedThoughtKeyed: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,

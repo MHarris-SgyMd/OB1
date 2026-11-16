@@ -1021,6 +1021,18 @@ export class SqlStore implements ThoughtStore {
     }
   }
 
+  async deletedThoughtKeyed(key: string): Promise<string | null> {
+    if (!UUID_RE.test(key)) return null;
+    // The newest delete event whose previous metadata kept the key, of a thought not standing again.
+    const rows = await this.sql`
+      SELECT a.thought_id::text AS id FROM thought_audit a
+       WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${key.toLowerCase()}::text
+         AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
+       ORDER BY a.created_at DESC LIMIT 1`;
+    const r = rows[0] as { id: string } | undefined;
+    return r ? String(r.id).toLowerCase() : null;
+  }
+
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
     // 086: one statement, as the note and the restamp are made; the function
     // decides who may, and names the actor in the event it appends.

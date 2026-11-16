@@ -607,6 +607,20 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
   assert(again.isError && again.sc.code === "FORGOTTEN" && /was forgotten already/.test(again.text) && never.isError && never.sc.code === "NOT_FOUND" && /was ever in the brain's log/.test(never.text),
     `forgotten again is FORGOTTEN; an unknown id NOT_FOUND (${again.text.slice(0, 50)} | ${never.text.slice(0, 50)})`);
 
+  // A thought another brain copied here under its client_key, deleted here by a copied delete, is forgotten by that key:
+  // the tombstone kept it (SMD-1723 PR 3, the fan-out's case). Its text redacted, the ledger written.
+  const KEY = "11111111-2222-4333-8444-555555555555";
+  const keyed = idOf(await writer.call("capture_thought", { content: "[12] a copy another brain made, deleted then forgotten here", client_key: KEY }));
+  await writer.call("delete_thought", { id: KEY });
+  const byKey = await full("forget_thought", { id: KEY, confirm: KEY });
+  const keyedLeft = (await sql`SELECT
+      (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${keyed}::uuid AND (redacted_at IS NULL OR diff::text LIKE '%deleted then forgotten%')) AS open,
+      (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = ${keyed}::uuid) AS led`)[0] as { open: number; led: number };
+  const keyedAgain = await full("forget_thought", { id: KEY, confirm: KEY });
+  assert(!byKey.isError && byKey.sc.id === keyed && byKey.sc.byClientKey === KEY && new RegExp(`^Forgot ${keyed}, named by its client_key ${KEY} at `).test(byKey.text)
+      && /deleted earlier/.test(byKey.text) && keyedLeft.open === 0 && keyedLeft.led === 1 && keyedAgain.isError && keyedAgain.sc.code === "NOT_FOUND",
+    `a deleted thought is forgotten by the client_key its tombstone kept, its events redacted; the key no longer names it once forgotten (${byKey.text.split("\n")[0].slice(0, 90)}; ${JSON.stringify(keyedLeft)}; ${keyedAgain.sc.code})`);
+
   // An edit resending a row's own text is the database's to take, as its trigger does, though the text was forgotten:
   // a row holding it with no fingerprint (an operator's reinstating write) (review pass 3).
   const keyless = String((await sql.begin(async (tx) => {

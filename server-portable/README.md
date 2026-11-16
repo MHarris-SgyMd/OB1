@@ -1082,7 +1082,9 @@ or id the brain holds, where `delete_thought` keeps the removed text in the audi
 trail. It calls migration 139's `forget_thought`, which since 144 runs as its owner:
 the server's role needs `EXECUTE` on it (the **server** grant group) and nothing on
 the stores it reaches. Forgetting cannot be undone, so `confirm` must be the `id`
-again, exactly as sent (an id or a `client_key`), or the call is refused
+again, exactly as sent (an id or a `client_key`, a deleted thought's too, read from the
+key its tombstone kept: the session hook's copy of a forget names a copy so, which a
+copied delete may have taken first), or the call is refused
 `REFUSED_CONFIRM` before anything is read. A thought another cites is refused
 `REFUSED_CITED` unless `detach_citations` is true, which deletes the citations with
 it. The answer is the evidence: what each store gave up (`removed`), the thoughts

@@ -563,7 +563,7 @@ export const SPECS = {
       idempotentHint: true,
     },
     inputSchema: {
-      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with, when no thought has that id"),
+      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with, when no thought has that id — a thought deleted earlier too, by the key its delete kept"),
       confirm: z.string().describe("The `id` again, exactly as you passed it: forgetting cannot be undone, so the call is refused unless the two match"),
       detach_citations: z.boolean().optional().describe(
         "When statements in other thoughts cite this one as their source, the forget is refused and the reply names them. Pass true to forget anyway: the citations are deleted with it, since each one may restate its text; the thoughts that made them stay. Default false.",

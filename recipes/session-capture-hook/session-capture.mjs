@@ -2472,17 +2472,19 @@ async function checkBrain(cfg, tag, onSecret) {
 
 // ── The write fan-out (SMD-3314) ─────────────────────────────────────────────
 //
-// A PostToolUse hook on the brain's write tools: each capture, edit and delete
-// that lands on the brain a connector names is repeated on every other brain
-// with a write key, through that brain's own key and its own queue. A copied
+// A PostToolUse hook on the brain's write tools: each capture, edit, delete
+// and forget that lands on the brain a connector names is repeated on every
+// other brain with a write key, through that brain's own key and its own queue. A copied
 // capture carries `client_key`: the id the first brain gave the thought, which
 // the server keeps on the copy (migration 112), so an edit or a pointer that
 // names the thought by that id finds the copy on every brain. The queue keeps
 // the first brain's order, one write at a time: a capture lands before the
 // edit or the delete of it, and a brain away holds its queue until it answers.
 
-/** The write tools a fan-out repeats. */
-export const FANOUT_TOOLS = ["capture_thought", "update_thought", "delete_thought"];
+/** The write tools a fan-out repeats: forget_thought since 1.9.0 (SMD-1723 PR 3), a server from 144 on serving it. */
+export const FANOUT_TOOLS = ["capture_thought", "update_thought", "delete_thought", "forget_thought"];
+/** The fan-out's tools a brain's server may lack and still take the rest: a copy of one is held for it, not refused. */
+const FANOUT_LATER = new Set(["forget_thought"]);
 const WRITES_DIR = () => join(STATE_DIR, "writes");
 const WRITES_PENDING = () => join(WRITES_DIR(), "pending");
 const WRITES_DEAD = () => join(WRITES_DIR(), "dead");
@@ -2553,9 +2555,9 @@ export function fanOutPlan(hook, brains) {
   // A write that failed reaches PostToolUseFailure, not this hook; a result
   // that reads as an error is never copied all the same — a refusal's or a
   // fault's code, or a reply that is not the tool's success: `Captured as`,
-  // `Updated`, `Deleted` (review pass 2: a fault's `update_thought failed: …`
+  // `Updated`, `Deleted`, `Forgot` (review pass 2: a fault's `update_thought failed: …`
   // read as a success).
-  const success = { capture_thought: /^Captured as /, update_thought: /^Updated /, delete_thought: /^Deleted / }[tool];
+  const success = { capture_thought: /^Captured as /, update_thought: /^Updated /, delete_thought: /^Deleted /, forget_thought: /^Forgot / }[tool];
   if (resultIsError(resp, text) || typeof sc?.code === "string" || !(success.test(first) || (scId && !/^Already captured\b/.test(first) && sc?.keyed !== "matched")))
     return { skip: /^Already captured\b/.test(first) || sc?.keyed === "matched"
       // The key named a thought already there: nothing was written on the first brain, so nothing is copied (review pass 2).
@@ -2577,13 +2579,16 @@ export function fanOutPlan(hook, brains) {
     // The thought by the id the first brain answered: a name the caller gave
     // as a client_key resolved there to the thought's own id, which is the
     // copy's key (review pass 2); else the name as sent.
-    const answered = scId ?? new RegExp(`^(?:Updated|Deleted) (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
+    const answered = scId ?? new RegExp(`^(?:Updated|Deleted|Forgot) (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
     args = tool === "update_thought"
       // `if_unchanged_since` is the first brain's clock: the copy is always newer, so it is not sent.
       ? pick(input, ["id", "content", "metadata_patch", "supersedes"])
       : pick(input, ["id", "detach_citations"]);
     if (answered) args.id = answered;
     if (typeof args.id !== "string") return { skip: `${tool}'s input carried no id, so it is not copied` };
+    // A forget's echo (SMD-1723 PR 3): the name the copy sends, which each brain resolves on its own — the first
+    // brain's id, there the copy's client_key — so the echo is checked against what reaches that brain.
+    if (tool === "forget_thought") args.confirm = args.id;
     if (tool === "update_thought" && Object.keys(args).length === 1) return { skip: `update_thought of ${args.id} changed nothing a copy carries, so it is not copied` };
   }
   return { source, targets, op: { tool, args, from: source.name, session: typeof hook.session_id === "string" ? hook.session_id : null, at: new Date().toISOString() } };
@@ -2681,13 +2686,20 @@ export async function postWrite(cfg, op) {
       return { done: true, line: `copied ${opLabel(op)}${id ? ` → ${id.toLowerCase()}` : ""}${keyed}${onto}${note}` };
     }
     const v = verdictOf(result, text);
+    // Forgotten there already (its own forget, or a copy that landed before a lost answer): done (SMD-1723 PR 3).
+    if (op.tool === "forget_thought" && v.code === "FORGOTTEN") return { done: true, line: `copied ${opLabel(op)}: forgotten there already${note}` };
+    // A server from before forget_thought (migration 144): the copy waits for it, in order, as a brain away does —
+    // given up only after the week — so the forget is not lost (SMD-1723 PR 3).
+    if (FANOUT_LATER.has(op.tool) && SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text))
+      return { keep: true, line: `kept: ${opLabel(op)} — this brain's server has no ${op.tool} (from before SMD-1723 PR 2, migration 144), or the write key is no write key: upgrade it, and the copy lands in order` };
     // A key that cannot call the tool (a capture key in write_key): the
     // operator's to fix, and every later copy would meet it — kept, in order.
     // Only "Tool … not found" (or disabled): the SDK answers an input it
     // cannot validate with the same -32602, and that copy is refused for good
     // — kept, it would hold the queue for ever behind the wrong advice (review pass 1).
     if ((SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) || v.code === "REFUSED_CLIENT_KEY_SCOPE") return { keep: true, line: `kept: ${opLabel(op)} — the write key cannot ${v.code === "REFUSED_CLIENT_KEY_SCOPE" ? "send a client_key (a capture key)" : `call ${op.tool}`}; mint a write key on this brain (bun server-portable/keygen.ts --name claude-code --scope write) and set write_key — --check says` };
-    if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${note}` };
+    // A forget's: or forgotten there already, by a copy whose answer was lost — a forgotten copy keeps no key to resolve (SMD-1723 PR 3).
+    if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${op.tool === "forget_thought" ? ", or forgotten there already" : ""}${note}` };
     // A fault (FAILED: the REST core away behind the MCP server, the store
     // restarting, a busy registry) carries no `retryable`, which verdictOf reads
     // as final: kept, so a brain mid-restart does not lose its edits (review pass 2).
@@ -2853,8 +2865,10 @@ async function checkWrites(brain, brains, tag) {
   let tools;
   try { tools = (await rpc({ ...cfg, key: cfg.writeKey }, "tools/list", {}, 15_000)).tools ?? []; } catch (e) { console.error(`session-capture: ${tag}the write key: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
   const names = tools.map((t) => t.name);
-  const missing = FANOUT_TOOLS.filter((t) => !names.includes(t));
+  const missing = FANOUT_TOOLS.filter((t) => !names.includes(t) && !FANOUT_LATER.has(t));
   if (missing.length) { console.error(`session-capture: ${tag}the write key cannot call ${missing.join(", ")} — mint a write key on this brain: bun server-portable/keygen.ts --name claude-code --scope write`); return 1; }
+  const later = FANOUT_TOOLS.filter((t) => !names.includes(t) && FANOUT_LATER.has(t));
+  if (later.length) console.error(`${tag}warning: this brain's server has no ${later.join(", ")} (from before SMD-1723 PR 2, migration 144): a forget through the connector is held for it, the copies behind it waiting, until it is upgraded`);
   const capture = tools.find((t) => t.name === "capture_thought");
   if (!capture?.inputSchema?.properties?.client_key) { console.error(`session-capture: ${tag}this brain's capture_thought takes no client_key — its server is from before migration 112 (SMD-3314): upgrade it before copying writes to it`); return 1; }
   useStateRoot(brain.root);
@@ -2863,7 +2877,7 @@ async function checkWrites(brain, brains, tag) {
   // The oldest copy's age: a queue held on it for long is the one thing an operator needs to see (review pass 1).
   let oldest = "";
   if (queued.length) { try { const at = Date.parse(JSON.parse(readFileSync(join(WRITES_PENDING(), queued[0]), "utf8")).at); if (Number.isFinite(at)) oldest = `, the oldest ${Math.max(0, Math.round((Date.now() - at) / 60_000))} min old`; } catch { /* unreadable: the drain says so */ } }
-  console.log(`${tag}write key: ok — it can capture, edit and delete, and the brain keeps a client_key. Copies queued: ${queued.length}${oldest}${dead ? `; given up: ${dead} (in ${WRITES_DEAD()})` : ""}`);
+  console.log(`${tag}write key: ok — it can capture, edit${later.length ? " and delete" : ", delete and forget"}, and the brain keeps a client_key. Copies queued: ${queued.length}${oldest}${dead ? `; given up: ${dead} (in ${WRITES_DEAD()})` : ""}`);
   return 0;
 }
 

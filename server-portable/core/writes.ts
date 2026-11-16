@@ -962,10 +962,21 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   if (confirm !== name) return refuse({ code: "REFUSED_CONFIRM", retryable: false, id: name.slice(0, 80) });
   // A name that is no uuid names no thought, as at delete.
   if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
-  // The thought by id, else by client_key (SMD-3314). A thought deleted
-  // before keeps no key to resolve: its id alone names it then.
-  const { id, byClientKey } = await targetNamed(ctx, principal, name);
-  const result = await (await ctx.store()).forgetThought({ id, actor: actorOf(ctx, principal), detach: detach_citations === true });
+  // The thought by id, else by client_key (SMD-3314). An id the log never
+  // held may still be a deleted thought's client_key, which its tombstone
+  // kept: a forget copied from another brain names the copy so, and a delete
+  // copied before took the row (SMD-1723 PR 3). Asked only then, so an id
+  // this brain's log holds is always that thought.
+  let { id, byClientKey } = await targetNamed(ctx, principal, name);
+  const store = await ctx.store();
+  let result = await store.forgetThought({ id, actor: actorOf(ctx, principal), detach: detach_citations === true });
+  if (!result.ok && result.error === "NOT_FOUND" && !byClientKey && canRead(principal)) {
+    const deleted = await store.deletedThoughtKeyed(name);
+    if (deleted && deleted !== id) {
+      ({ id, byClientKey } = { id: deleted, byClientKey: name.toLowerCase() });
+      result = await store.forgetThought({ id, actor: actorOf(ctx, principal), detach: detach_citations === true });
+    }
+  }
   if (!result.ok) {
     switch (result.error) {
       case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
