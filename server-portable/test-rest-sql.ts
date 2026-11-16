@@ -3461,6 +3461,31 @@ console.log("\n[24] The work-claims listing cursor through both doors (SMD-3606 
   }
 }
 
+console.log("\n[25] release_holder_claims through both doors (SMD-3606 PR 3, migration 144): an operator ends every live claim one holder holds — POST /v1/claims/release-holder and MCP release_holder_claims — the count and the claims (id, ticket, piece) in the reply and no token; an agent key refused 403 NOT_OPERATOR; a holder with no live claims releases 0");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('rival', 'agent')`;
+  try {
+    // "fresh" holds the claims (the operator is the writer, rest/mcp's default key; rival is the agent key for the refusal). Reset it first — other sections hold claims under their own keys — so the count is exactly what this section makes.
+    await rest("POST", "/v1/claims/release-holder", { holder: "fresh", reason: "reset for [25]" });
+    for (const t of ["SMD-7301", "SMD-7302", "SMD-7303"]) await mcp("claim_work", { ticket: t, lease_seconds: 14400 }, KEYS.fresh);
+    // The operator ends fresh's three live claims over REST.
+    const relRest = await rest("POST", "/v1/claims/release-holder", { holder: "fresh", reason: "retired a hog over REST" });
+    // fresh claims two more; MCP ends them.
+    for (const t of ["SMD-7304", "SMD-7305"]) await mcp("claim_work", { ticket: t, lease_seconds: 14400 }, KEYS.fresh);
+    const relMcp = await mcp("release_holder_claims", { holder: "fresh", reason: "retired a hog over MCP" });
+    // An agent key (the rival) is refused by the gate; a holder with nothing live releases 0.
+    const byAgent = await rest("POST", "/v1/claims/release-holder", { holder: "fresh", reason: "nope" }, KEYS.rival);
+    const none = await mcp("release_holder_claims", { holder: "fresh", reason: "nothing left" });
+    assert(relRest.status === 200 && relRest.body.released === 3 && Array.isArray(relRest.body.claims) && (relRest.body.claims as unknown[]).length === 3 && !("token" in relRest.body)
+        && !relMcp.isError && relMcp.sc.released === 2 && /Released 2 live claims held by fresh/.test(relMcp.text)
+        && byAgent.status === 403 && byAgent.body.code === "REFUSED_NOT_OPERATOR"
+        && !none.isError && none.sc.released === 0,
+      `the operator ends fresh's claims over both doors (REST 3, MCP 2), an agent key refused 403 NOT_OPERATOR, a holder with none releases 0 (${relRest.status}/${String(relRest.body.released)} ${String(relMcp.sc.released)} ${String(byAgent.body.code)} ${String(none.sc.released)})`);
+  } finally {
+    await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[25]' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

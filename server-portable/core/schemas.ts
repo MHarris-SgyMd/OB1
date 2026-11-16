@@ -806,6 +806,25 @@ export const SPECS = {
       cap: z.number().int().min(1).max(100000).nullable().describe("The per-holder cap on live work claims (1 to 100000); null clears the setting so the built-in 50 stands"),
     },
   },
+  // SMD-3606 PR 3 (migration 144): the operator's one-call undo of a claim hog. The gate past the scope is the
+  // database's: the key's registry kind by its agent id, which the server does not hold. The blank-check refines keep
+  // NO_HOLDER and NO_REASON (144's backstop) unreachable from here, as the cap's range keeps BAD_CAP unreachable.
+  release_holder_claims: {
+    title: "Release Holder Claims",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). End every live work claim one holder holds, in one call — the undo of a claim hog, where release_claim ends one claim at a time (SMD-3606). `holder` is the key's name as list_claims shows it (its `holder`); `reason` says why and is kept on each released claim as history. Only the holder's live claims (unreleased and unexpired) end; its lapsed and released claims, and every other holder's, stand. The reply gives how many ended and which (id, ticket, piece). A holder with no live claims ends none (`released` 0). Any key not classified operator, or reaching the brain with no agent id, is refused.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // A released claim stays as a history row, as release_claim's does.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      holder: z.string().min(1).max(200).refine((v) => v.trim() !== "", "may not be blank").describe("The holder whose live claims to release: a key's name, as list_claims shows it (its `holder`). Surrounding white space is ignored"),
+      reason: z.string().min(1).max(500).refine((v) => v.trim() !== "", "may not be blank").describe("Why the claims are released; kept on each released claim as history"),
+    },
+  },
   // Open items (SMD-3665 PR 2, migration 117): a to-do, a commitment or a plugin's task — its id, status and history.
   open_item: {
     title: "Open Item",

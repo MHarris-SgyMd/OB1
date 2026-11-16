@@ -56,6 +56,7 @@ export const CALLS = {
   clear_priority: (c, p, i) => c.clearPriority(p, i),
   set_priority_weights: (c, p, i) => c.setPriorityWeights(p, i),
   set_work_claim_cap: (c, p, i) => c.setWorkClaimCap(p, i),
+  release_holder_claims: (c, p, i) => c.releaseHolderClaims(p, i),
   priority_history: (c, p, i) => c.priorityHistory(p, i),
   // The plugin a ctx.call came through rides to 117's envelope (SMD-3665 PR 2): a plugin row's item is the plugin's.
   open_item: (c, p, i, o) => c.openItem(p, i, { plugin: o.plugin }),

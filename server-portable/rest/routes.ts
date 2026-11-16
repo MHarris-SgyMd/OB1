@@ -61,6 +61,7 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_CLAIM_KEY: 403,
   CLAIM_UNATTRIBUTED: 503,
   CLAIM_CAP_UNATTRIBUTED: 503,
+  RELEASE_HOLDER_UNATTRIBUTED: 503,
   ITEM_NOT_FOUND: 404,
   ITEM_NOT_YOURS: 403,
   REFUSED_PRIORITY_INPUT: 400,
@@ -160,6 +161,7 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   // The operator's weights every read takes as its defaults (SMD-4193 PR 2, migration 132): the weights in the body, {} to clear.
   set_priority_weights: { method: "POST", path: "/v1/priority-weights", ok: 200, call: CALLS.set_priority_weights },
   set_work_claim_cap: { method: "POST", path: "/v1/work-claim-cap", ok: 200, call: CALLS.set_work_claim_cap },
+  release_holder_claims: { method: "POST", path: "/v1/claims/release-holder", ok: 200, call: CALLS.release_holder_claims },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },

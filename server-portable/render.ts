@@ -36,7 +36,7 @@ import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemH
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
 import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
-import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
+import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type HolderRelease, type HolderReleaseCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
@@ -2025,6 +2025,28 @@ export const setCapHint = (msg: string): string =>
     ? " — migration 140 (db/migrations/140_work_claim_cap.sql) is not applied"
     : /permission denied for table work_claim_cap_settings/i.test(msg)
     ? " — the server's role needs the claims group's grants on work_claim_cap_settings (migration 140; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
+
+// ── release_holder_claims (SMD-3606 PR 3, migration 144) ─────────────────────
+export function renderReleaseHolderClaims(o: Outcome<HolderRelease, HolderReleaseCode>): Reply {
+  return render(o, (v) => {
+    const who = snipText(v.holder, 80);
+    if (v.released === 0) return `No live claims held by ${who}; nothing was released.`;
+    const tickets = new Set(v.claims.map((c) => c.issue)).size;
+    return `Released ${v.released} live claim${v.released === 1 ? "" : "s"} held by ${who}${tickets > 1 ? ` across ${tickets} tickets` : ""}, ${v.released === 1 ? "with the reason" : "each with the reason"}. The rows stay as history; list_claims and the per-holder cap no longer count them.`;
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may release a holder's claims, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may release a holder's claims.")
+    : r.code === "RELEASE_HOLDER_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : unknownRefusal(r),
+  (v) => ({ holder: v.holder, released: v.released, claims: v.claims }));
+}
+
+/** release_holder_claims' fault: a database before 144 has no such function. */
+export const releaseHolderHint = (msg: string): string =>
+  /release_holder_claims/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migration 144 (db/migrations/144_release_holder_claims.sql) is not applied"
     : "";
 
 /** set_priority_weights' fault: a database before 132 has no such function. */
