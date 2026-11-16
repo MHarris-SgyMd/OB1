@@ -65,9 +65,9 @@ export function measured(f: Facts): { ok: boolean; why: string; shape?: Shape } 
   return { ok: false, why: `${what}: no shape of the federated coordinator was measured there — a brain's container must reach the broker's port at its host alias (deploy/federated/federated.ts names the two measured)${docker}` };
 }
 
-/** The default bridge's IPv4 gateway from `docker network inspect bridge`'s IPAM gateways, or why none will do: a private
- *  or shared (100.64.0.0/10) address alone, the port's one host address — a public one would publish the broker to
- *  every network that routes to it. */
+/** The default bridge's IPv4 gateway from `docker network inspect bridge`'s IPAM gateways, or why none will do: a
+ *  private or shared (100.64.0.0/10) address alone, the port's one host address — a public one would publish the broker
+ *  to every network that routes to it. */
 export function gatewayFrom(out: string): { host: string } | { why: string } {
   const v4 = out.split(/\s+/).filter((x) => /^\d{1,3}(\.\d{1,3}){3}$/.test(x));
   if (!v4.length) return { why: "the default bridge names no IPv4 gateway (docker network inspect bridge)" };
@@ -199,7 +199,7 @@ async function main(cmd: string, args: string[]) {
   // down and logs read compose.yaml, whose settings are all required: they are given placeholders, which neither
   // command uses (review pass 4: a bare `compose logs` the operator was told to paste refused on each).
   if (cmd === "down" || cmd === "logs") {
-    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd, "127.0.0.1"), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
     process.exit(r.exitCode === 0 ? 0 : 1);
   }
   if (!existsSync(o.registry)) { console.error(`no registry at ${o.registry} — copy deploy/federated/federation.example.yaml there and name your servers and brains, or give --registry PATH`); process.exit(2); }
@@ -238,9 +238,10 @@ async function main(cmd: string, args: string[]) {
   const summary = `the slot broker: ${registry.brains.map((b) => b.name).join(", ")} on ${registry.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved)`).join(", ")}; brains reach it at ws://${alias}:${registry.port}/v1/slots (published on ${host})`;
   if (cmd === "check") { console.log(summary); return; }
   const env = composeEnv(process.env, registry, o.registry, sha256(readFileSync(BROKER, "utf8")), sha256(text), host);
-  const logs = `bun --no-env-file deploy/federated/federated.ts logs${o.runtime === "podman" ? "" : ` --runtime ${o.runtime}`}`;
+  const rt = o.runtime === "podman" ? "" : ` --runtime ${o.runtime}`;
+  const logs = `bun --no-env-file deploy/federated/federated.ts logs${rt}`;
   const up = Bun.spawnSync(composeArgs(o.runtime, ["up", "-d", "--remove-orphans", "--wait", "--wait-timeout", "60"]), { env, stdout: "inherit", stderr: "inherit" });
-  if (up.exitCode !== 0 || !(await healthy(host, registry.port))) { console.error(`the broker did not come up (or does not answer on ${host}:${registry.port}); its log: ${logs} — its container may still be up: bun --no-env-file deploy/federated/federated.ts down${o.runtime === "podman" ? "" : ` --runtime ${o.runtime}`}`); process.exit(1); }
+  if (up.exitCode !== 0 || !(await healthy(host, registry.port))) { console.error(`the broker did not come up (or does not answer on ${host}:${registry.port}); its log: ${logs} — its container may still be up: bun --no-env-file deploy/federated/federated.ts down${rt}`); process.exit(1); }
   // The gateway shape, proved as a brain dials it: a container at host.docker.internal.
   if (shape?.name === "gateway") {
     const p = spawn(probeArgs(o.runtime, brokerImage(), registry.port));
@@ -262,10 +263,10 @@ function selfCheck() {
   const cases: [string, boolean][] = [
     ["podman machine, rootful, on macOS is the loopback shape, at host.containers.internal", (() => { const m = measured(facts({})); return m.ok && m.shape === LOOPBACK && m.shape.alias === "host.containers.internal"; })()],
     ["Docker Engine on Linux, rootful, is the gateway shape, at host.docker.internal (SMD-3379 PR 3b-3a)", (() => { const m = measured(facts({ runtime: "docker", engine: "docker", platform: "linux" })); return m.ok && m.shape === GATEWAY && m.shape.alias === "host.docker.internal"; })()],
-    ["rootless podman, rootless Docker Engine, Docker Desktop and podman on Linux are refused, naming why", !measured(facts({ rootless: true })).ok && !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", rootless: true })).ok
+    ["rootless podman, rootless Docker Engine, Docker Desktop and podman on Linux are refused, the last naming why", !measured(facts({ rootless: true })).ok && !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", rootless: true })).ok
       && !measured(facts({ engine: "docker", desktop: true })).ok && (() => { const m = measured(facts({ platform: "linux" })); return !m.ok && /podman on linux: no shape/.test(m.why); })()],
     ["the gateway is the bridge's private or shared IPv4 one; none, or any other, refused", (() => { const a = gatewayFrom("172.17.0.1 \n"), b = gatewayFrom("fd00::1 10.200.0.1 "), c = gatewayFrom(" "), d = gatewayFrom("203.0.113.1 "), e = gatewayFrom("100.64.0.1 "), f = gatewayFrom("100.128.0.1 "), g = gatewayFrom("127.0.0.1 "); return "host" in a && a.host === "172.17.0.1" && "host" in b && b.host === "10.200.0.1" && "why" in c && "why" in d && /no private or shared/.test(d.why) && "host" in e && e.host === "100.64.0.1" && "why" in f && "why" in g; })()],
-    ["a daemon of another host is refused by its name even where this host holds the same gateway; a gateway not this host's by its address; this host's daemon passes", /names its host prod-box, not this host/.test(remoteDaemon("prod-box\n", "dev-box", "172.17.0.1", true)) && /no address of this host's/.test(remoteDaemon("dev-box\n", "dev-box", "172.17.0.1", false)) && remoteDaemon("Dev-Box\n", "dev-box", "172.17.0.1", true) === "" && /cannot be told/.test(remoteDaemon("", "dev-box", "172.17.0.1", true)) && /could not be told — binding it failed \(EACCES/.test(remoteDaemon("dev-box", "dev-box", "172.17.0.1", "EACCES: denied"))],
+    ["a daemon of another host is refused by its name even where this host holds the same gateway; a gateway not this host's by its address; no name, or a failed bind, cannot tell; this host's daemon passes", /names its host prod-box, not this host/.test(remoteDaemon("prod-box\n", "dev-box", "172.17.0.1", true)) && /no address of this host's/.test(remoteDaemon("dev-box\n", "dev-box", "172.17.0.1", false)) && remoteDaemon("Dev-Box\n", "dev-box", "172.17.0.1", true) === "" && /cannot be told/.test(remoteDaemon("", "dev-box", "172.17.0.1", true)) && /could not be told — binding it failed \(EACCES/.test(remoteDaemon("dev-box", "dev-box", "172.17.0.1", "EACCES: denied"))],
     ["an address is this host's where a socket binds there: the loopback is, a documentation address is not (EADDRNOTAVAIL)", ownsAddress("127.0.0.1") === true && ownsAddress("203.0.113.1") === false],
     ["Docker Desktop on Linux is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", osType: "linux", desktop: true })).ok],
     ["Docker Engine on macOS (colima, OrbStack: not Desktop, a Linux VM) is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "darwin", osType: "linux", desktop: false })).ok],
@@ -278,17 +279,16 @@ function selfCheck() {
       const good = run({}), unread = run({ inspect: { ok: false, out: "", err: "no such network" } }), other = run({ info: () => ok("prod\n") }), unbound = run({ owns: () => false }), denied = run({ owns: () => "EACCES: denied" });
       return "host" in good && good.host === "172.17.0.1" && "why" in unread && /inspect bridge failed/.test(unread.why) && "why" in other && /names its host prod/.test(other.why) && "why" in unbound && /no address of this host's/.test(unbound.why) && "why" in denied && /binding it failed/.test(denied.why);
     })()],
-    ["a registry readable by its group alone is refused", /chmod 644/.test(modeProblem(0o100640, "f")) && /chmod 644/.test(modeProblem(0o100600, "f"))],
     ["podman on Linux is refused pointing at --runtime docker, unless docker is that podman (podman-docker)", (() => { const m = measured(facts({ platform: "linux" })), s = measured(facts({ runtime: "docker", platform: "linux" })); return !m.ok && /--runtime docker/.test(m.why) && !s.ok && !/--runtime docker/.test(s.why); })()],
     ["Docker Engine whose OS type is not linux is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", osType: "windows" })).ok],
     ["a re-up under the gateway shape knows its own port: ps's binding on the gateway address is this broker's", (() => { const line = `abc|ob1-federated-slots-1|172.17.0.1:8095->8095/tcp|${PROJECT}|slots|running|||`; const c = containersIn(line)[0]; return !!c && c.project === PROJECT && holds(c.ports, { hostIp: "172.17.0.1", port: 8095, protocol: "tcp" }) && !holds(c.ports, { hostIp: "127.0.0.1", port: 8095, protocol: "tcp" }); })()],
-    ["down's and logs' placeholder settings name every value compose.yaml requires", (() => { const need = [...readFileSync(COMPOSE, "utf8").matchAll(/\$\{([A-Z_]+):\?/g)].map((m) => m[1]); const e = composeEnv({}, { port: 1 }, BROKER, "down", "down", "127.0.0.1"); return need.length > 0 && need.every((k) => typeof e[k] === "string" && e[k] !== ""); })()],
+    ["down's and logs' placeholder settings name every value compose.yaml requires", (() => { const need = [...readFileSync(COMPOSE, "utf8").matchAll(/\$\{([A-Z_]+):\?/g)].map((m) => m[1]); const e = composeEnv({}, { port: 1 }, BROKER, "down", "down"); return need.length > 0 && need.every((k) => typeof e[k] === "string" && e[k] !== ""); })()],
     ["the gateway shape's proof dials host.docker.internal at host-gateway, with the broker's own image, removed after, bounded", (() => { const a = probeArgs("docker", "img@sha256:x", 8095), j = a.join(" "); return j.includes("--add-host host.docker.internal:host-gateway") && a.includes("img@sha256:x") && a.at(-1) === "http://host.docker.internal:8095/health" && a.includes("--rm") && j.includes("-T 5") && j.includes("--entrypoint wget") && j.includes("-O -"); })()],
     ["compose's environment drops the shell's COMPOSE_* and FEDERATED_* and sets the project's own, the port's host the loopback unless given", (() => { const e = composeEnv({ PATH: "/bin", COMPOSE_FILE: "x", FEDERATED_PORT: "1", FEDERATED_HOST: "0.0.0.0", DOCKER_HOST: "unix:///x" }, { port: 8095 }, "/r.yaml", "b", "r"); const g = composeEnv({}, { port: 8095 }, "/r.yaml", "b", "r", "172.17.0.1"); return e.PATH === "/bin" && e.DOCKER_HOST === "unix:///x" && !("COMPOSE_FILE" in e) && e.FEDERATED_HOST === "127.0.0.1" && g.FEDERATED_HOST === "172.17.0.1" && e.FEDERATED_PORT === "8095" && e.FEDERATED_REGISTRY === "/r.yaml" && e.FEDERATED_BROKER_SHA256 === "b" && e.FEDERATED_REGISTRY_SHA256 === "r"; })()],
     ["a minted key is marked, its lines read as a registry's brain, and the key finds it", minted.key.startsWith(KEY_PREFIX) && minted.key.length === KEY_PREFIX.length + 64 && !!reg && brainOf(reg.brains, minted.key)?.name === "canary" && !minted.lines.includes(minted.key)],
     ["two mints are two keys", mintKey("a").key !== mintKey("a").key],
     ["key takes the names the registry takes, and refuses the ones it refuses", isName("stable") && isName("canary-2") && ["on", "yes", "null", "Stable", "-x"].every((n) => !isName(n))],
-    ["a registry not readable by others is refused, naming chmod 644", /chmod 644/.test(modeProblem(0o100600, "f")) && modeProblem(0o100644, "f") === ""],
+    ["a registry not readable by others, readable by its group alone included, is refused, naming chmod 644", /chmod 644/.test(modeProblem(0o100600, "f")) && /chmod 644/.test(modeProblem(0o100640, "f")) && modeProblem(0o100644, "f") === ""],
     ["the project is ob1-federated, one service", compose.name === PROJECT && Object.keys(compose.services).join() === "slots"],
     ["the broker runs unprivileged, read-only, with no capability", slots.user === "65534:65534" && (slots.cap_drop as string[]).join() === "ALL" && slots.read_only === true && (slots.security_opt as string[]).includes("no-new-privileges:true")],
     ["its one port is on the shape's host address alone (FEDERATED_HOST), never every address", (slots.ports as string[]).length === 1 && (slots.ports as string[])[0].startsWith("${FEDERATED_HOST:?")],

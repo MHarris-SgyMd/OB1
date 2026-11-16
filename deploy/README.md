@@ -447,7 +447,7 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
 container reaches it at the host alias, as it reaches the host's Ollama, and
-its port is published where that alias lands alone (below).
+its port is published only where that alias lands (below).
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
@@ -481,24 +481,23 @@ bun --no-env-file deploy/federated/federated.ts down
     `host.docker.internal:<port>`, the default bridge's gateway, which a
     loopback port doesn't answer (Docker documents a port published on
     `127.0.0.1` as reached from the host alone). So the port is published on
-    that gateway
-    address, read from Docker at each `check` and `up`. The host and its
-    containers reach it, and so can a machine beside the host that routes
-    the bridge's subnet through it (Docker's own caveat), so the brain keys
-    are the guard there: an unknown key is refused before any upgrade. `up`
-    then has a container on the default bridge dial the broker at the alias,
-    and fails naming why where none answers: a firewall dropping the bridge's
-    traffic to the host, a daemon whose `host-gateway-ip` isn't the bridge's
-    gateway, or an alias that resolves to IPv6 first. A brain dials from its
-    own network, which a firewall may treat apart (a rule for `docker0`
-    alone), so allow the brains' bridges too. CI measures this shape: the
-    stack's own coordinator container is granted a slot there. A daemon of
-    another host (a `DOCKER_HOST` or a Docker context pointing elsewhere) is
-    refused: it names another host, or its gateway is no address of this
-    host's. So is `federated.ts` run in a container. A daemon restarted with
-    another bridge address leaves the broker's old address unbound: run `up`
-    again. Where podman is installed beside Docker, pass `--runtime docker`
-    to each command: `federated.ts` takes podman first.
+    that gateway address, read from Docker at each `check` and `up`. The host
+    and its containers reach it, and so can a machine beside the host that
+    routes the bridge's subnet through it (Docker's own caveat), so the brain
+    keys are the guard there: an unknown key is refused before any upgrade.
+    `up` then has a container on the default bridge dial the broker at the
+    alias, and fails naming why where none answers: a firewall dropping the
+    bridge's traffic to the host, a daemon whose `host-gateway-ip` isn't the
+    bridge's gateway, or an alias that resolves to IPv6 first. A brain dials
+    from its own network, which a firewall may treat apart (a rule for
+    `docker0` alone), so allow the brains' bridges too. CI measures this
+    shape: the stack's own coordinator container is granted a slot there. A
+    daemon of another host (a `DOCKER_HOST` or a Docker context pointing
+    elsewhere) is refused: it names another host, or its gateway is no address
+    of this host's. So is `federated.ts` run in a container. A daemon
+    restarted with another bridge address leaves the broker's old address
+    unbound: run `up` again. Where podman is installed beside Docker, pass
+    `--runtime docker` to each command: `federated.ts` takes podman first.
 
   `federated.ts` refuses any other runtime: Docker Desktop, rootless podman
   or Docker, podman on Linux.

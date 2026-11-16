@@ -4,7 +4,7 @@
 # slots (deploy/federated/broker.ts says how). It is a compose project of its
 # own, as the edge proxy is (deploy/edge/), and joins no brain's network: a
 # brain's container reaches it at the host alias, as it reaches the host's
-# Ollama, and the port is published where that alias lands alone: the host's
+# Ollama, and the port is published only where that alias lands: the host's
 # loopback under podman machine, the default bridge's gateway under Docker
 # Engine on Linux (federated.ts says why, and what reaches each).
 #
