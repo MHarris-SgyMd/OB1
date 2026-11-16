@@ -17,8 +17,8 @@
   },
   "comment": "hono and zod match the versions integrations/package.json installs for the vendored servers, which is those two alone since SMD-3747; the MCP packages are the v2 scoped @modelcontextprotocol/core + @modelcontextprotocol/server (SMD-2278). integrations/test-auth.ts holds each install to its stack and fails on drift; bump the shared packages across integrations, server-portable and mcp-server in the same commit. jose matches deploy/auth's pin: the REST core checks that server's tokens with it (oauth-token.ts, SMD-2286).",
   "dependencies": {
-    "@modelcontextprotocol/core": "2.1.0",
-    "@modelcontextprotocol/server": "2.1.0",
+    "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/api-logs": "0.223.0",
     "@opentelemetry/context-async-hooks": "2.12.0",

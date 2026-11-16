@@ -1033,8 +1033,8 @@ export class SqlStore implements ThoughtStore {
   }
 
   async listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number; after?: ClaimPosition }): Promise<ClaimPage> {
-    // Migration 115, under 142's eight-argument form. Eight arguments, always: 115 re-applied by hand lands its
-    // four-argument form beside 142's, and a call both forms take is then ambiguous (42725, not unique) and fails;
+    // Migration 115, under 143's eight-argument form. Eight arguments, always: 115 re-applied by hand lands its
+    // four-argument form beside 143's, and a call both forms take is then ambiguous (42725, not unique) and fails;
     // eight resolve (preflight's ticket-claims check names the leftover by its signature). Its columns by name, never
     // `*`: a migration that adds one to the function leaves this statement's result type as it was, so the connection's
     // prepared plan is re-planned rather than failing 0A000 (SMD-3302).
@@ -1055,7 +1055,7 @@ export class SqlStore implements ThoughtStore {
       if (unread) throw new ListCursorRefused();
       throw e;
     }
-    // 142: each row's page_key is its place for the next call; remaining counts the selection from this page's first on,
+    // 143: each row's page_key is its place for the next call; remaining counts the selection from this page's first on,
     // so what follows the page is that less the rows listed, read off the listing as it came back.
     const remaining = rows.length ? Math.max(0, Number(rows[0].remaining) - rows.length) : 0;
     const lastKey = remaining > 0 ? JSON.parse(String(rows[rows.length - 1].page_key)) as string[] : null;

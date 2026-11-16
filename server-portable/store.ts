@@ -1327,7 +1327,7 @@ export type WorkClaim = {
 };
 /** A list_work_claims page's place on its order (SMD-3606 PR 2): a claim's issue, piece_key (folded, '' for a whole-ticket claim), claimed_at (Postgres's text) and id. The store's `after` and the page's `next`. */
 export type ClaimPosition = { issue: string; pieceKey: string; claimedAt: string; id: string };
-/** A page of work claims (SMD-3606 PR 2, migration 142's keyset cursor): the claims, the next page's position while more follow (else null) and how many follow this page. */
+/** A page of work claims (SMD-3606 PR 2, migration 143's keyset cursor): the claims, the next page's position while more follow (else null) and how many follow this page. */
 export type ClaimPage = { claims: WorkClaim[]; next: ClaimPosition | null; remaining: number };
 /** The refusal codes 115's writers answer with (SMD-3597). */
 export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_LIMIT" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
@@ -2507,7 +2507,7 @@ export interface ThoughtStore {
   claimTokenIs(id: string, token: string): Promise<boolean>;
   /**
    * list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name
-   * or all, by ticket then piece then claim time then id. `after` (142's keyset cursor) picks the page after a position,
+   * or all, by ticket then piece then claim time then id. `after` (143's keyset cursor) picks the page after a position,
    * so a full read pages past the 1,000 cap; the page's `next` is the next cursor while more follow, `remaining` how
    * many. Throws ListCursorRefused for a cursor time Postgres cannot read (SMD-3606 PR 2).
    */

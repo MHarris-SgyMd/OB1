@@ -234,7 +234,7 @@ export async function releaseClaim(ctx: Ctx, principal: Principal, input: Input<
 
 export async function listClaims(ctx: Ctx, _principal: Principal, input: Input<"list_claims">): Promise<Outcome<ListClaimsResult, "REFUSED_CURSOR">> {
   // SMD-3606 PR 2: `after` is a cursor a page ended with — one of this listing's, read before the store sees it;
-  // list_thoughts' and list_supersession_proposals' shape and refusal (142). It carries the selection it was made
+  // list_thoughts' and list_supersession_proposals' shape and refusal (143). It carries the selection it was made
   // under, and one passed with other filters is refused rather than starting the listing at a place in another.
   // The ticket is the one filter the SQL normalizes (upper + ob1_work_claim_text), so the cursor's identity must normalize
   // it too (case and surrounding space, the common variations) — else paging the same listing with the ticket written

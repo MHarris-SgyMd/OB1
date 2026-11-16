@@ -3413,7 +3413,7 @@ console.log("\n[23] set_work_claim_cap through both doors (SMD-3606 PR 1b, migra
   }
 }
 
-console.log("\n[24] The work-claims listing cursor through both doors (SMD-3606 PR 2, migration 142): four pieces of one ticket held by a key, list_work_claims paged two at a time — GET /v1/claims?after=… and MCP list_claims after — each piece once in piece order, the cursor, remaining, truncated and pastCursor in the reply, the last page's cursor null; a bad cursor and a cursor passed with other filters refused 400 REFUSED_CURSOR; the claims released after");
+console.log("\n[24] The work-claims listing cursor through both doors (SMD-3606 PR 2, migration 143): four pieces of one ticket held by a key, list_work_claims paged two at a time — GET /v1/claims?after=… and MCP list_claims after — each piece once in piece order, the cursor, remaining, truncated and pastCursor in the reply, the last page's cursor null; a bad cursor and a cursor passed with other filters refused 400 REFUSED_CURSOR; the claims released after");
 {
   await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24] reset' WHERE holder_name = 'fresh' AND released_at IS NULL`;
   // Four pieces of one ticket are four different works, so one key may hold all four and the ticket filter isolates them.

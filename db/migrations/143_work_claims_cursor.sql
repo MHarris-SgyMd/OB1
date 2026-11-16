@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 142: the work-claims listing pages — list_work_claims redefined on
+-- Migration 143: the work-claims listing pages — list_work_claims redefined on
 --                115's body with a keyset cursor on its own order and the four
 --                columns a reader pages by (SMD-3606 PR 2)
 -- =============================================================================
@@ -63,14 +63,14 @@
 --   keeps running. An older server left running calls the four-argument form this
 --   file drops and fails every listing (42883, function does not exist) until it
 --   restarts; the release's `up` recreates the servers. Preflight on a brain at
---   142, run from an older tree, probes the four-argument signature this file
+--   143, run from an older tree, probes the four-argument signature this file
 --   dropped and reports the listing missing; the fix is this tree's server, which
 --   probes the eight. Nothing runs at apply time but the DDL; no row moves; no
 --   table is touched. The keyset term and the window count read the rows the
 --   listing already sorts; no index (work_claims holds few rows on the dogfood
 --   brains, and 140 now caps a holder at 50). MINOR under FORK.md's version
 --   rules, on 110's precedent: the parameters and the columns are trailing and
---   defaulted. test-schema [128], test-upgrade [20cf], server-portable/test-
+--   defaulted. test-schema [130], test-upgrade [20ch], server-portable/test-
 --   preflight.ts, test-rest-sql, the store and server suites.
 --
 -- Prerequisites
@@ -85,14 +85,14 @@ DO $qc$
 BEGIN
   IF to_regclass('work_claims') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 142 needs 115 (work_claims); this schema lacks it',
+      MESSAGE = 'migration 143 needs 115 (work_claims); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_work_claim_text(text, integer, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 142 needs 115 (ob1_work_claim_text); this schema lacks it',
+      MESSAGE = 'migration 143 needs 115 (ob1_work_claim_text); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -136,7 +136,7 @@ STABLE
 AS $$
 #variable_conflict use_column
 BEGIN
-  -- 142 (SMD-3606 PR 2): all four of the cursor's values or none — a partial
+  -- 143 (SMD-3606 PR 2): all four of the cursor's values or none — a partial
   -- cursor read as none would list from the top without a word (110's rule).
   IF num_nulls(p_after_issue, p_after_piece_key, p_after_claimed_at, p_after_id) NOT IN (0, 4) THEN
     RAISE EXCEPTION USING
@@ -144,7 +144,7 @@ BEGIN
       ERRCODE = 'invalid_parameter_value';
   END IF;
   RETURN QUERY
-  -- 142 (ob1:work-claims-pages): the after-cursor starts past the row it names
+  -- 143 (ob1:work-claims-pages): the after-cursor starts past the row it names
   -- on the listing's own order, before the order and the cap; page_key is each
   -- row's four values for the next call, remaining the selection's rows from this
   -- page's first on, counted before the LIMIT. All four order columns are NOT
@@ -167,4 +167,4 @@ END
 $$;
 
 COMMENT ON FUNCTION list_work_claims(text[], text, boolean, int, text, text, timestamptz, uuid) IS
-  'Who holds a ticket, or one piece of it, under a lease — live, lapsed or (p_include_ended) released, by ticket then piece then claim time then id. p_issues NULL lists every ticket, p_holder NULL every holder. The after-cursor (142) — p_after_issue, p_after_piece_key, p_after_claimed_at, p_after_id, all set or none — starts past that row on the listing''s order; each row''s page_key holds a JSON array of its four values as text for the next call, and remaining counts the selection''s rows from this page''s first on, so remaining > the rows returned means more follow. At most 1,000. Migrations 115, 142 / SMD-3606.';
+  'Who holds a ticket, or one piece of it, under a lease — live, lapsed or (p_include_ended) released, by ticket then piece then claim time then id. p_issues NULL lists every ticket, p_holder NULL every holder. The after-cursor (143) — p_after_issue, p_after_piece_key, p_after_claimed_at, p_after_id, all set or none — starts past that row on the listing''s order; each row''s page_key holds a JSON array of its four values as text for the next call, and remaining counts the selection''s rows from this page''s first on, so remaining > the rows returned means more follow. At most 1,000. Migrations 115, 143 / SMD-3606.';

@@ -6946,7 +6946,7 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
   const released = say.renderReleaseClaim({ ok: true, value: { outcome: "released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releaseReason: "merged" }) } } as never);
   const already = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z" }) } } as never);
   const overtaken = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "codex", releaseReason: "lapsed; taken over" }) } } as never);
-  // list_claims' JSON carries 142's cursor, remaining and pastCursor (AS_JSON, so the cursor token rides untouched); a bad cursor and one with other filters are refused REFUSED_CURSOR (SMD-3606 PR 2).
+  // list_claims' JSON carries 143's cursor, remaining and pastCursor (AS_JSON, so the cursor token rides untouched); a bad cursor and one with other filters are refused REFUSED_CURSOR (SMD-3606 PR 2).
   const listed = say.renderListClaims({ ok: true, value: { claims: [claim()], truncated: true, cursor: "Y3Vyc29y", remaining: 3, pastCursor: false } } as never);
   const curShape = say.renderListClaims({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "nope", reason: "shape" } } as never);
   const curFilters = say.renderListClaims({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "nope", reason: "filters" } } as never);
@@ -6954,7 +6954,7 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && /had already ended at 2026-10-30T12:00:00\.000Z: it lapsed and was taken over by codex\.$/.test(text(overtaken))
       && JSON.parse(text(listed)).claims.length === 1 && JSON.parse(text(listed)).cursor === "Y3Vyc29y" && JSON.parse(text(listed)).remaining === 3 && !text(listed).includes("token")
       && curShape.isError === true && /not a list_claims cursor/.test(text(curShape)) && curFilters.isError === true && /made with other filters/.test(text(curFilters)),
-    `release_claim's two answers in words, and list_claims' JSON with 142's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
+    `release_claim's two answers in words, and list_claims' JSON with 143's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
 
   // The list_work_claims cursor codec (SMD-3606 PR 2): this listing's own round-trips with its selection; another tag, a
   // wrong length, a non-boolean include_ended, an over-long or non-string ticket/holder, an empty issue, an over-long

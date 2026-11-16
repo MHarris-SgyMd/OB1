@@ -184,7 +184,7 @@ export type ClaimSelection = { ticket: string | null; holder: string | null; inc
  * on the listing's order — its issue (the upper-case ticket key 115 stores), piece_key (the piece folded, '' for a
  * whole-ticket claim), claimed_at as Postgres's text (to the microsecond) and its id — as base64url of `["claims",
  * ticket, holder, includeEnded, issue, pieceKey, claimedAt, id]`. The values, not a row alone: a claim's four order
- * values never change after it is made (142), so the cursor keeps the place the page ended at. The selection, so a
+ * values never change after it is made (143), so the cursor keeps the place the page ended at. The selection, so a
  * cursor passed with other filters is refused rather than starting the listing at a place in another. The tag keeps it
  * apart from the other listings' cursors, so one listing's is refused by another.
  */

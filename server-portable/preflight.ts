@@ -239,12 +239,14 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
  * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
  * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
- * its own too.
+ * its own too. 142's priority_findings is written by the priority review's scan and by an operator's decision on a
+ * finding (SMD-3671), and read by nothing else: a clause of its own, no board lost for it.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
   const sources = ungranted.filter((g) => g.startsWith("thought_sources "));
-  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings ") && !g.startsWith("thought_sources "));
+  const findings = ungranted.filter((g) => g.startsWith("priority_findings "));
+  const rest = ungranted.filter((g) => !g.startsWith("priority_weight_settings ") && !g.startsWith("thought_sources ") && !g.startsWith("priority_findings "));
   const clauses: string[] = [];
   if (rest.length) {
     const itemOnly = rest.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
@@ -262,6 +264,9 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
     clauses.push(weights.includes("priority_weight_settings SELECT")
       ? "every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings (migration 132)"
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
+  }
+  if (findings.length) {
+    clauses.push("the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)");
   }
   const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
@@ -3174,10 +3179,10 @@ if (configFailed) {
           } else if (!tc.has_table) {
             add("ticket claims", "skip", "not checked — work_claims does not exist (migration 115 not applied)");
           } else if (tc.missing.length) {
-            // 115 added all four claim functions; 142 redefined list_work_claims with its keyset cursor (a new, eight-argument signature). A brain missing that signature alone is behind 142, not 115.
-            const only142 = tc.missing.every((f) => f.startsWith("list_work_claims"));
-            add("ticket claims", "fail", `${tc.missing.join(", ")} missing under ${only142 ? "142's" : "115's"} signature; claim_work, renew_claim, release_claim and list_claims call them`,
-                only142 ? ledgerRemedy("142", "Apply db/migrations/142_work_claims_cursor.sql.") : ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
+            // 115 added all four claim functions; 143 redefined list_work_claims with its keyset cursor (a new, eight-argument signature). A brain missing that signature alone is behind 143, not 115.
+            const only143 = tc.missing.every((f) => f.startsWith("list_work_claims"));
+            add("ticket claims", "fail", `${tc.missing.join(", ")} missing under ${only143 ? "143's" : "115's"} signature; claim_work, renew_claim, release_claim and list_claims call them`,
+                only143 ? ledgerRemedy("143", "Apply db/migrations/143_work_claims_cursor.sql.") : ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
           } else if (tc.ungranted?.length) {
             // INSERT is claim_work's alone; UPDATE claim_work's (a renewal or a takeover), renew's and release's; SELECT every call's.
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
