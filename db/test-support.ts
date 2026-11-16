@@ -402,7 +402,9 @@ const FUNCTIONS = [
   "claim_work(text, text, text, integer, text, jsonb)",
   "renew_work_claim(uuid, text, integer, jsonb)",
   "release_work_claim(uuid, text, text, boolean, jsonb)",
+  // 142 dropped the four-argument form for the eight-argument one (the keyset cursor); both named, so a reset after a partial apply leaves neither behind.
   "list_work_claims(text[], text, boolean, integer)",
+  "list_work_claims(text[], text, boolean, integer, text, text, timestamptz, uuid)",
   "ob1_work_claim_text(text, integer, text)",
   "ob1_work_claim_issue(text)",
   "ob1_work_claim_lease(integer)",

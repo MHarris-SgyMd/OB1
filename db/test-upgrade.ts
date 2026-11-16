@@ -776,12 +776,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // prune_orphan_entities carried) and moves a merge's statements and due
   // references through ob1_priority_merge_entity (136's merge_entities and
   // 056's apply_entity_type_gate carried), refusing by name without 016,
-  // 056, 061, 116, 133 or 136 ([20ce]) — all recorded by the
+  // 056, 061, 116, 133 or 136 ([20ce]); 142 redefines 115's list_work_claims
+  // with a keyset after-cursor on (issue, piece_key, claimed_at, id) and the
+  // page_key and remaining columns, refusing by name without 115 ([20cf]) — all
+  // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 111, `030 is among the last one hundred and eleven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 112, `030 is among the last one hundred and twelve migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6773,6 +6776,59 @@ console.log("\n[20ce] Migration 141: onto a populated brain at the file before i
   await sql`SELECT prune_orphan_entities()`;
   assert(await exists(bowline) && await reasonOf(onBowline) === null,
     `a re-apply is a no-op: prune_orphan_entities still spares the entity with an open statement`);
+  await sql.close();
+}
+
+console.log("\n[20cf] Migration 142: onto a populated brain at the file before it — refused by name without 115's ob1_work_claim_text, the eight-argument form not made; then applied: list_work_claims pages with the after-cursor, each claim once to the end, remaining counting down; a partial cursor refused; a re-apply a no-op (SMD-3606)");
+{
+  const the142 = MIGRATIONS.find((f) => /^\d{3}_work_claims_cursor\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the142 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('cur-holder', 'agent')`;
+  const hid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'cur-holder'`)[0].id);
+  const H = JSON.stringify({ name: "cur-holder", agent_id: hid });
+
+  // Without 115's ob1_work_claim_text (the body calls it): refused by name, the new form not made.
+  await sql`ALTER FUNCTION ob1_work_claim_text(text, integer, text) RENAME TO ob1_work_claim_text_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the142 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_text_away(text, integer, text) RENAME TO ob1_work_claim_text`;
+  const eight = async () => (await sql`SELECT to_regprocedure('list_work_claims(text[],text,boolean,integer,text,text,timestamptz,uuid)') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 142 needs 115 \(ob1_work_claim_text\); this schema lacks it/.test(without) && !(await eight()),
+    `without 115's ob1_work_claim_text the file is refused by name; the eight-argument form not made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the142 });
+
+  // Five claims by one holder (the built-in cap 50 allows), on tickets that sort in order.
+  for (const n of [1, 2, 3, 4, 5]) await sql`SELECT claim_work(${`SMD-710${n}`}, NULL, NULL, 14400, NULL, (${H}::text)::jsonb)`;
+  type Row = { id: string; issue: string; page_key: string; remaining: number | string };
+  const page = async (after: string[] | null): Promise<Row[]> =>
+    await sql`SELECT id, issue, page_key, remaining
+                FROM list_work_claims(NULL, ${"cur-holder"}::text, false, 2, ${after?.[0] ?? null}::text, ${after?.[1] ?? null}::text, ${after?.[2] ?? null}::timestamptz, ${after?.[3] ?? null}::uuid)` as Row[];
+  const seen: string[] = [];
+  let after: string[] | null = null;
+  let more = true;
+  for (let i = 0; i < 10 && more; i++) {
+    const rows: Row[] = await page(after);
+    if (rows.length === 0) break;
+    for (const r of rows) seen.push(r.issue);
+    const left = Number(rows[rows.length - 1].remaining) - rows.length;  // the rows after this page
+    more = left > 0;
+    after = more ? JSON.parse(rows[rows.length - 1].page_key) as string[] : null;
+  }
+  assert(seen.length === 5 && new Set(seen).size === 5 && JSON.stringify(seen) === JSON.stringify(["SMD-7101", "SMD-7102", "SMD-7103", "SMD-7104", "SMD-7105"]),
+    `list_work_claims pages with the after-cursor, each of the five claims once to the end, in ticket order (${seen.join(",")})`);
+
+  // A partial cursor — some of the four values set, not all — is refused by name, no rows.
+  const partial = await sql`SELECT * FROM list_work_claims(NULL, NULL, false, 2, 'SMD-7101', NULL, NULL, NULL)`.then(() => "listed", (e: Error) => e.message);
+  assert(/the after-cursor is four values/.test(partial), `a partial after-cursor is refused by name (${partial.slice(0, 80)})`);
+
+  // A re-apply is a no-op: the listing still pages, remaining counts the five.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the142 });
+  const reapplied = await page(null);
+  assert(reapplied.length === 2 && Number(reapplied[0].remaining) === 5,
+    `a re-apply is a no-op: the listing still pages, remaining counts the five (${reapplied.length}, ${reapplied[0]?.remaining})`);
+
   await sql.close();
 }
 

@@ -16513,14 +16513,20 @@ console.log("\n[103] Migration 115: work claims — a ticket or one piece of it 
     `a role granted capture, server and claims claims, lists and releases, and may not DELETE (no history is removed); without the group it is refused naming the table (${roleGranted.message.slice(0, 80)}, ${delRow.code}, ${roleWithout.message.slice(0, 80)})`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
 
-  // Re-applied: the claims stand, one of each call.
+  // Re-applied: the claims stand. 115 re-creates claim_work, renew and release on their own signatures (one each), and
+  // list_work_claims on its four-argument signature BESIDE 142's eight-argument form — two now, which the restore below
+  // drops back to one (SMD-3778).
   const before = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
   await reapply(file);
   const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
-  const ones = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
-  assert(after === before && ones.every((n) => n === 1), `115 applied again changes nothing: ${after} claims stand, one of each call (${ones.join(",")})`);
-  // 140 redefines claim_work: this section re-applied 115's above, so restore 140's — the last definer — for [126] and any later section, as every section re-applying an older definer must (SMD-3778).
+  const [cw, rn, rl, lwc] = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
+  assert(after === before && cw === 1 && rn === 1 && rl === 1 && lwc === 2, `115 applied again changes nothing: ${after} claims stand, one each of claim_work/renew/release and 142's eight-argument list_work_claims beside 115's four (${cw},${rn},${rl},${lwc})`);
+  // 140 redefines claim_work, 142 list_work_claims (a new arity): this section re-applied 115's, so restore theirs — the
+  // last definers — for [126], [128] and any later section (SMD-3778). list_work_claims' restore re-runs 142, dropping
+  // 115's four-argument form, so one stands: the eight.
   await restoreShipped("claim_work");
+  await restoreShipped("list_work_claims");
+  assert((await functionsNamed("list_work_claims")) === 1, "restoring 142 drops 115's four-argument list_work_claims, leaving its eight-argument form alone");
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);
@@ -21020,6 +21026,67 @@ console.log("\n[127] Migration 141: an entity's priority statements follow it �
   const before = await closedCount();
   await reapply(file.slice(0, 4));
   assert(await closedCount() === before && await drift() === 0, `a re-apply closes nothing`);
+}
+
+console.log("\n[128] Migration 142: the work-claims listing pages — list_work_claims redefined with a keyset after-cursor on (issue, piece_key, claimed_at, id), 142 its last definer and the only one of the name (115's four-argument form dropped), STABLE and not SECURITY DEFINER, its page_key and remaining columns; the walk pages each claim once to the end in that order, piece_key breaking a tie within a ticket and '' (a whole-ticket claim) sorting first, remaining counting down; a cursor at the last row an empty page; a partial cursor refused by name; a re-apply a no-op (SMD-3606)");
+{
+  const file = readdirSync(MIGRATIONS).find((m) => /^\d{3}_work_claims_cursor\.sql$/.test(m))!;
+  assert(lastDefinerOf("list_work_claims") === file && (await functionsNamed("list_work_claims")) === 1,
+    `142 is list_work_claims' last definer and the only one of the name (${lastDefinerOf("list_work_claims")}, ${await functionsNamed("list_work_claims")})`);
+  const meta = (await db.query<{ provolatile: string; prosecdef: boolean; args: string; out: string }>(
+    `SELECT provolatile, prosecdef, pg_get_function_identity_arguments(oid) AS args, pg_get_function_result(oid) AS out FROM pg_proc WHERE proname = 'list_work_claims'`)).rows[0];
+  assert(meta.provolatile === "s" && meta.prosecdef === false && /p_after_issue text/.test(meta.args) && /p_after_claimed_at timestamp with time zone/.test(meta.args) && /p_after_id uuid/.test(meta.args) && /page_key text/.test(meta.out) && /remaining bigint/.test(meta.out),
+    `list_work_claims is STABLE, not SECURITY DEFINER, takes the four cursor arguments and returns page_key and remaining (${meta.provolatile}, ${meta.prosecdef})`);
+
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('cur-h', 'agent')`);
+  const hid = String((await db.query<{ id: string }>(`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'cur-h'`)).rows[0].id);
+  const H = JSON.stringify({ name: "cur-h", agent_id: hid });
+  const claim = (issue: string, piece: string | null) => db.query(`SELECT claim_work($1, $2, NULL, 14400, NULL, $3::jsonb)`, [issue, piece, H]);
+  // Two pieces of one ticket are different work; a whole-ticket claim and a piece are the same, so a ticket here is whole or pieced, never both.
+  await claim("SMD-8201", "PR 1");
+  await claim("SMD-8201", "PR 2");
+  await claim("SMD-8202", null);
+  await claim("SMD-8203", "PR 1");
+  await claim("SMD-8203", "PR 2");
+
+  type Row = { issue: string; piece: string | null; page_key: string; remaining: number | string };
+  const page = async (after: string[] | null): Promise<Row[]> =>
+    (await db.query<Row>(`SELECT issue, piece, page_key, remaining FROM list_work_claims(NULL, 'cur-h', false, 2, $1, $2, $3::timestamptz, $4::uuid)`,
+      [after?.[0] ?? null, after?.[1] ?? null, after?.[2] ?? null, after?.[3] ?? null])).rows;
+  const label = (r: Row) => `${r.issue}/${r.piece ?? ""}`;
+  const seen: string[] = [];
+  const remainders: number[] = [];
+  let after: string[] | null = null;
+  let more = true;
+  let lastKey: string[] = [];
+  for (let i = 0; i < 12 && more; i++) {
+    const rows = await page(after);
+    if (rows.length === 0) break;
+    for (const r of rows) seen.push(label(r));
+    remainders.push(Number(rows[rows.length - 1].remaining));
+    lastKey = JSON.parse(String(rows[rows.length - 1].page_key)) as string[];
+    const left = Number(rows[rows.length - 1].remaining) - rows.length;
+    more = left > 0;
+    after = more ? lastKey : null;
+  }
+  assert(JSON.stringify(seen) === JSON.stringify(["SMD-8201/PR 1", "SMD-8201/PR 2", "SMD-8202/", "SMD-8203/PR 1", "SMD-8203/PR 2"]) && JSON.stringify(remainders) === JSON.stringify([5, 3, 1]),
+    `the walk pages each claim once to the end, piece_key breaking a tie within a ticket and '' first, remaining 5,3,1 (${seen.join(",")} | ${remainders.join(",")})`);
+
+  // A cursor at the last row is an empty next page — the walk's end, not an error.
+  const beyond = await page(lastKey);
+  assert(beyond.length === 0, `a cursor at the last row pages to nothing (${beyond.length})`);
+
+  // A partial cursor — some of the four values set, not all — is refused by name (22023).
+  const partial = await db.query(`SELECT * FROM list_work_claims(NULL, NULL, false, 2, 'SMD-8201', NULL, NULL, NULL)`).then(() => "listed", (e: Error) => `${String((e as { code?: string }).code ?? "?")} ${e.message.split("\n")[0]}`);
+  assert(/^22023 /.test(partial) && /the after-cursor is four values/.test(partial), `a partial after-cursor is refused by name 22023 (${partial.slice(0, 90)})`);
+
+  // A re-apply is a no-op: one function of the name, the walk still pages.
+  await reapply(file.slice(0, 4));
+  assert((await functionsNamed("list_work_claims")) === 1 && (await page(null)).length === 2,
+    `142 applied again is a no-op: one list_work_claims, the walk still pages (${await functionsNamed("list_work_claims")})`);
+
+  await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label = 'cur-h'`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

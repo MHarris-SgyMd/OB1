@@ -3413,6 +3413,54 @@ console.log("\n[23] set_work_claim_cap through both doors (SMD-3606 PR 1b, migra
   }
 }
 
+console.log("\n[24] The work-claims listing cursor through both doors (SMD-3606 PR 2, migration 142): four pieces of one ticket held by a key, list_work_claims paged two at a time — GET /v1/claims?after=… and MCP list_claims after — each piece once in piece order, the cursor, remaining, truncated and pastCursor in the reply, the last page's cursor null; a bad cursor and a cursor passed with other filters refused 400 REFUSED_CURSOR; the claims released after");
+{
+  await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24] reset' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  // Four pieces of one ticket are four different works, so one key may hold all four and the ticket filter isolates them.
+  for (const p of ["PR 1", "PR 2", "PR 3", "PR 4"]) await rest("POST", "/v1/claims", { ticket: "SMD-9360", piece: p }, KEYS.fresh);
+  try {
+    // REST: page two at a time, following the body's cursor to the end.
+    const restSeen: string[] = [];
+    let body: Record<string, unknown> = {};
+    let after: string | undefined;
+    let restPages = 0;
+    for (let i = 0; i < 6; i++) {
+      const r = await rest("GET", `/v1/claims?ticket=SMD-9360&limit=2${after ? `&after=${encodeURIComponent(after)}` : ""}`, undefined, KEYS.fresh);
+      body = r.body as Record<string, unknown>;
+      restPages++;
+      for (const c of (body.claims as { piece: string }[])) restSeen.push(c.piece);
+      if (!body.cursor) break;
+      after = String(body.cursor);
+    }
+    // MCP: the same walk, from the structuredContent.
+    const mcpSeen: string[] = [];
+    let mAfter: string | undefined;
+    for (let i = 0; i < 6; i++) {
+      const r = await mcp("list_claims", { ticket: "SMD-9360", limit: 2, ...(mAfter ? { after: mAfter } : {}) }, KEYS.fresh);
+      for (const c of (r.sc.claims as { piece: string }[])) mcpSeen.push(c.piece);
+      if (!r.sc.cursor) break;
+      mAfter = String(r.sc.cursor);
+    }
+    // A bad cursor, and a good one passed with other filters (a different ticket), refused through both doors.
+    const firstPage = await rest("GET", "/v1/claims?ticket=SMD-9360&limit=2", undefined, KEYS.fresh);
+    const goodCursor = String((firstPage.body as Record<string, unknown>).cursor);
+    const badRest = await rest("GET", "/v1/claims?ticket=SMD-9360&after=not-a-cursor", undefined, KEYS.fresh);
+    const badMcp = await mcp("list_claims", { ticket: "SMD-9360", after: "not-a-cursor" }, KEYS.fresh);
+    const otherFilter = await rest("GET", `/v1/claims?ticket=SMD-9361&after=${encodeURIComponent(goodCursor)}`, undefined, KEYS.fresh);
+    // The ticket is the one filter the SQL normalizes (upper + clean), so the same cursor pages on with the ticket written in another case — not refused as other filters.
+    const lowerTicket = await rest("GET", `/v1/claims?ticket=smd-9360&limit=2&after=${encodeURIComponent(goodCursor)}`, undefined, KEYS.fresh);
+    assert(JSON.stringify(restSeen) === JSON.stringify(["PR 1", "PR 2", "PR 3", "PR 4"]) && JSON.stringify(mcpSeen) === JSON.stringify(["PR 1", "PR 2", "PR 3", "PR 4"])
+        && body.cursor === null && Number(body.remaining) === 0 && body.truncated === false && body.pastCursor === true
+        && badRest.status === 400 && badRest.body.code === "REFUSED_CURSOR" && badMcp.isError && badMcp.sc.code === "REFUSED_CURSOR"
+        && otherFilter.status === 400 && otherFilter.body.code === "REFUSED_CURSOR" && otherFilter.body.reason === "filters"
+        && lowerTicket.status === 200 && (lowerTicket.body.claims as unknown[]).length === 2
+        && restPages === 2,
+      `the cursor pages each of the four pieces once through both doors in exactly two pages (the last full page ends the walk, no extra empty fetch — remaining counts the rows after this page, not this page's), the last page cursor null / remaining 0 / truncated false / pastCursor true; a bad cursor and one with other filters refused 400 REFUSED_CURSOR, but the same ticket in another case pages on (REST ${restSeen.join(",")} in ${restPages} pages | MCP ${mcpSeen.join(",")} | bad ${badRest.status}/${String(badRest.body.code)} | other ${otherFilter.status}/${String(otherFilter.body.reason)} | lower ${lowerTicket.status})`);
+  } finally {
+    await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24]' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();
