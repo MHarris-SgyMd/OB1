@@ -1325,6 +1325,10 @@ export type WorkClaim = {
   releaseReason: string | null;
   state: "live" | "lapsed" | "released";
 };
+/** A list_work_claims page's place on its order (SMD-3606 PR 2): a claim's issue, piece_key (folded, '' for a whole-ticket claim), claimed_at (Postgres's text) and id. The store's `after` and the page's `next`. */
+export type ClaimPosition = { issue: string; pieceKey: string; claimedAt: string; id: string };
+/** A page of work claims (SMD-3606 PR 2, migration 143's keyset cursor): the claims, the next page's position while more follow (else null) and how many follow this page. */
+export type ClaimPage = { claims: WorkClaim[]; next: ClaimPosition | null; remaining: number };
 /** The refusal codes 115's writers answer with (SMD-3597). */
 export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_LIMIT" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
 /** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). `byAgentId` (claim_work's form): the claim was made under an agent id, so 115's holder test needs that id to read it as the caller's (SMD-3705). */
@@ -2501,8 +2505,13 @@ export interface ThoughtStore {
   releaseClaim(opts: { id: string; token?: string; reason?: string; force?: boolean; actor?: Actor }): Promise<ClaimAnswer>;
   /** Whether a token is this claim's, by 115's hash (a token in its shape: the writer that refused it read it so); never the hash itself. */
   claimTokenIs(id: string, token: string): Promise<boolean>;
-  /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
-  listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
+  /**
+   * list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name
+   * or all, by ticket then piece then claim time then id. `after` (143's keyset cursor) picks the page after a position,
+   * so a full read pages past the 1,000 cap; the page's `next` is the next cursor while more follow, `remaining` how
+   * many. Throws ListCursorRefused for a cursor time Postgres cannot read (SMD-3606 PR 2).
+   */
+  listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number; after?: ClaimPosition }): Promise<ClaimPage>;
   /**
    * The unreleased claims — live, and lapsed but never released — on the tickets `issues` names, keyed as 115 keys
    * them (SMD-3599: a read's whole page at once, so a result says who holds a ticket it names, or held it and may
