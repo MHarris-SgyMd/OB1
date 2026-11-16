@@ -1477,7 +1477,7 @@ request), `http.response.body.size`, `mcp.method.name` (with
 tool that ran — not one refused at its key, nor one that never ran), and
 `ob1.door`, `ob1.tool`, `ob1.agent`, `ob1.outcome` and `ob1.code` as the line
 has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
-method outside the schema's). No `url.*`: the path is a key's or an id's, and
+method the `rpc` field writes `other`). No `url.*`: the path is a key's or an id's, and
 behind the proxy the scheme is not the server's to know. A tool call's span is
 `execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
 operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none). A
