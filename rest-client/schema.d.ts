@@ -482,7 +482,7 @@ export interface paths {
         };
         /**
          * List Work Claims
-         * @description List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means the limit cut the list: narrow by ticket or holder. Never shows a claim's token.
+         * @description List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means more claims follow this page: page to the end by calling again with `after` set to the reply's `cursor` and the same `ticket`, `holder` and `include_ended`; `remaining` counts how many follow. A cursor that is not this tool's, or made with other filters, is refused (REFUSED_CURSOR). Never shows a claim's token.
          */
         get: operations["list_claims"];
         put?: never;
@@ -3898,6 +3898,7 @@ export interface operations {
                 holder?: string;
                 include_ended?: boolean;
                 limit?: number;
+                after?: string;
             };
             header?: never;
             path?: never;

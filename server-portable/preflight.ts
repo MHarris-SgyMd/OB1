@@ -3134,7 +3134,7 @@ if (configFailed) {
          */
         {
           // Constants of this file, spelled into the statement: Bun's unsafe binds a JS array as no text[].
-          const CLAIM_FNS = ["claim_work(text,text,text,integer,text,jsonb)", "renew_work_claim(uuid,text,integer,jsonb)", "release_work_claim(uuid,text,text,boolean,jsonb)", "list_work_claims(text[],text,boolean,integer)"];
+          const CLAIM_FNS = ["claim_work(text,text,text,integer,text,jsonb)", "renew_work_claim(uuid,text,integer,jsonb)", "release_work_claim(uuid,text,text,boolean,jsonb)", "list_work_claims(text[],text,boolean,integer,text,text,timestamptz,uuid)"];
           // Its own read, caught here: a role with no USAGE on public is refused even to_regclass, and that must
           // warn this row alone, never end the block before the rows after it (the qualified reads' rule).
           const tcRows = await sql.unsafe(`
@@ -3179,8 +3179,10 @@ if (configFailed) {
           } else if (!tc.has_table) {
             add("ticket claims", "skip", "not checked — work_claims does not exist (migration 115 not applied)");
           } else if (tc.missing.length) {
-            add("ticket claims", "fail", `migration 115's ${tc.missing.join(", ")} missing under 115's signature; claim_work, renew_claim, release_claim and list_claims call them`,
-                ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
+            // 115 added all four claim functions; 143 redefined list_work_claims with its keyset cursor (a new, eight-argument signature). A brain missing that signature alone is behind 143, not 115.
+            const only143 = tc.missing.every((f) => f.startsWith("list_work_claims"));
+            add("ticket claims", "fail", `${tc.missing.join(", ")} missing under ${only143 ? "143's" : "115's"} signature; claim_work, renew_claim, release_claim and list_claims call them`,
+                only143 ? ledgerRemedy("143", "Apply db/migrations/143_work_claims_cursor.sql.") : ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
           } else if (tc.ungranted?.length) {
             // INSERT is claim_work's alone; UPDATE claim_work's (a renewal or a takeover), renew's and release's; SELECT every call's.
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
