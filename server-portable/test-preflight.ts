@@ -828,11 +828,12 @@ else {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       assert(/✓  ticket claims\s+claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; the logging settings read print no bind value/.test(whole.out),
              `on a brain at 115 the four claim functions, the claims grant and no token-printing log: ok (${line(whole.out).trim()})`);
-      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer) RENAME TO list_work_claims_away");
+      // 143 redefined list_work_claims with the eight-argument keyset-cursor signature; its own, not 115's four, is what the check reads now.
+      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims_away");
       const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims");
-      assert(missing.code === 1 && /ticket claims\s+migration 115's list_work_claims\(text\[\],text,boolean,integer\) missing under 115's signature/.test(missing.out) && /115_work_claims\.sql/.test(missing.out),
-             `a claim function missing: does not start, naming it and 115 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 140)})`);
+      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims");
+      assert(missing.code === 1 && /ticket claims\s+list_work_claims\(text\[\],text,boolean,integer,text,text,timestamptz,uuid\) missing under 143's signature/.test(missing.out) && /143_work_claims_cursor\.sql/.test(missing.out),
+             `list_work_claims missing under 143's signature alone: does not start, naming it and 143 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 160)})`);
       // Statement logging, set for the database so the next connection reads it (a superuser's settings).
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_statement = 0`);
       const logging = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -892,8 +893,8 @@ else {
              `a failed statement's parameters logged: a warning naming log_parameter_max_length_on_error; log_statement=mod, which logs no claim call, ok (${line(onError.out).trim().slice(0, 120)} | ${line(mod.out).trim().slice(0, 40)})`);
     } finally {
       for (const s of SET_HERE) await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET ${s}`).catch(() => {});
-      await ticket.unsafe(`DO $r$ BEGIN IF to_regprocedure('list_work_claims_away(text[],text,boolean,integer)') IS NOT NULL THEN
-        ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims; END IF; END $r$`).catch(() => {});
+      await ticket.unsafe(`DO $r$ BEGIN IF to_regprocedure('list_work_claims_away(text[],text,boolean,integer,text,text,timestamptz,uuid)') IS NOT NULL THEN
+        ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims; END IF; END $r$`).catch(() => {});
       await ticket.close();
     }
   }
@@ -3333,8 +3334,9 @@ else {
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
       // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing; 132's
-      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'.
-      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE: set_priority and clear_priority fail naming the table; set_priority_weights fails naming priority_weight_settings \(migration 132\), and nothing else does/.test(missingBoth.out)
+      // operator's weights among them (SMD-4193 PR 2), their write set_priority_weights'; 142's findings (SMD-3671), the
+      // review's.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE, priority_weight_settings INSERT, priority_weight_settings UPDATE, priority_findings INSERT, priority_findings UPDATE, priority_findings DELETE: set_priority and clear_priority fail naming the table; set_priority_weights fails naming priority_weight_settings \(migration 132\); the priority review's scan \(ob1_priority_review\) and review_priority_finding fail naming priority_findings \(migration 142\), and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
              `…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it (${missingBoth.out.split("\n").find((l) => /!  priority\s/.test(l))?.trim()})`);
       // 117's items group (SMD-3665 PR 2): soft too — the writes it lacks named, the open-item writers alone failing.
@@ -3378,11 +3380,12 @@ else {
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
       const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`!  ${name}\\s`).test(l)) ?? "";
-      // 132's setting's writes, missing for this role too, are a clause of their own between (SMD-4193 PR 2).
-      assert(/, and so does agenda \(SMD-3669\); set_priority_weights fails naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\);.* plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
+      // 132's setting's writes, missing for this role too, are a clause of their own between (SMD-4193 PR 2), and 142's
+      // findings' another after (SMD-3671).
+      assert(/, and so does agenda \(SMD-3669\); set_priority_weights fails naming priority_weight_settings \(migration 132\); the priority review's scan \(ob1_priority_review\) and review_priority_finding fail naming priority_findings \(migration 142\); plan_context answers with no board \(SMD-2684\)/.test(rowOf(noAssertions.out, "priority")) && /, and so does agenda \(SMD-3669\);.* plan_context answers with no board/.test(rowOf(noItems.out, "priority"))
              && /every open-item tool, set_priority on an open item, and agenda \(SMD-3669\) fail naming the table; plan_context answers with no board \(SMD-2684\)/.test(rowOf(noItems.out, "open items")),
         `…and without the agenda's reads, the priority and items rows name it (${rowOf(noAssertions.out, "priority").trim().slice(-80)} | ${rowOf(noItems.out, "open items").trim().slice(0, 140)})`);
-      assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
+      assert(/priority_weight_settings SELECT[^:]*: set_priority and clear_priority fail naming the table; every ranked priority read — agenda, and search_thoughts' priority_weight and min_priority — and set_priority_weights fail naming priority_weight_settings \(migration 132\); the priority review's scan \(ob1_priority_review\) and review_priority_finding fail naming priority_findings \(migration 142\); plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noWeights.out, "priority").trim()),
         `…and without SELECT on the operator's weights, the priority row says every ranked priority read fails (${rowOf(noWeights.out, "priority").trim().slice(-260)})`);
       assert(/thought_sources SELECT[^:]*: [^;]*; set_priority, clear_priority and priority_history on a thought or a ticket \(or set_priority taking one's due time\), agenda, and search_thoughts' priority_weight and min_priority fail naming thought_sources \(migration 133\);.* plan_context answers with no board \(SMD-2684\)$/.test(rowOf(noSources.out, "priority").trim()),
         `…and without SELECT on thought_sources, the priority row says every priority call on a thought or a ticket fails, in a clause of its own (${rowOf(noSources.out, "priority").trim().slice(-260)})`);

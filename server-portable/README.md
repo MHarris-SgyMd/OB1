@@ -51,7 +51,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
-| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (its own at `OB1_CONSOLIDATE_DECIDER_URL`, else the shared tier at `OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). Since decide version 4 it first answers the mediated-pair test's link step for those pairs and for an evolves the pass would store, and a pair linked only through a third subject or a passing mention is related at most, with no proposal (SMD-3203). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight warns without a tier for it, or on the shared tier with `OB1_JEV_MODEL` naming another model, and `db/consolidate.ts` refuses to start then (SMD-3115) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (its own at `OB1_CONSOLIDATE_DECIDER_URL`, else the shared tier at `OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). Since decide version 4 it first answers the mediated-pair test's link step for those pairs, and a pair linked only through a third subject or a passing mention is related at most, with no proposal (SMD-3203); since version 5 the tier's evolves is folded into related before a verdict is chosen, a work thread's edges giving evolves (SMD-3306). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight warns without a tier for it, or on the shared tier with `OB1_JEV_MODEL` naming another model, and `db/consolidate.ts` refuses to start then (SMD-3115) |
 | `OB1_CONSOLIDATE_DECIDER_URL` / `OB1_CONSOLIDATE_DECIDER_LOCAL` | unset (decide mode asks the shared tier at `OB1_JEV_BASE_URL`) | Decide mode's own tier (a tier per caller, SMD-3326): H2O-Lightning-4B served on the host by `jev/h2o/serve.py` (port 8022), reached as `http://host.containers.internal:8022` under podman machine, and `1` declaring it on this machine, as `OB1_JEV_LOCAL` declares the shared tier. Held to the decider, so an answer from another model is refused. Preflight's decide tier row dials it on every start and warns when it does not answer: the server starts, and the consolidation pass decides nothing until it does (`jev/h2o/README.md`, "When the tier is down") |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
@@ -1241,8 +1241,13 @@ and MCP alike:
   and its token. `release_claim` takes `force` with a `reason` for an operator key,
   classified `operator` by its agent id.
 - **`list_claims`** (`GET /v1/claims`, read scope): the live claims, of one ticket or
-  one holder's key, or every claim with `include_ended`, and `truncated` when the
-  limit cut the list. Never a token.
+  one holder's key, or every claim with `include_ended`, by ticket then piece then
+  claim time. `truncated` is true when more follow this page; page to the end with
+  `after` set to the reply's `cursor` and the same `ticket`, `holder` and
+  `include_ended` (migration 143's keyset cursor), `remaining` counting how many
+  follow. A cursor carries the filters it was made under, so one passed with others
+  — or any string that is not this listing's cursor — is refused `REFUSED_CURSOR`
+  (400). Never a token.
 
 **The token** is a bearer secret to its key: anyone holding it under that key acts as
 the holder. It travels in a JSON body, never a URL, and as a bind parameter, never

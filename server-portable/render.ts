@@ -2381,7 +2381,12 @@ export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCo
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
-export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
+export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply =>
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_CURSOR"
+    ? (r.reason === "filters"
+        ? "Error: `after` was made with other filters — page with the same `ticket`, `holder` and `include_ended` it was made for."
+        : "Error: `after` is not a list_claims cursor — pass the previous page's `cursor`, as it was given.")
+    : unknownRefusal(r)), AS_JSON);
 
 // ── Priority assertions (SMD-3664, migration 116) ────────────────────────────
 // Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would

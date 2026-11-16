@@ -6946,11 +6946,50 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
   const released = say.renderReleaseClaim({ ok: true, value: { outcome: "released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releaseReason: "merged" }) } } as never);
   const already = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z" }) } } as never);
   const overtaken = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "codex", releaseReason: "lapsed; taken over" }) } } as never);
-  const listed = say.renderListClaims({ ok: true, value: { claims: [claim()], truncated: false } } as never);
+  // list_claims' JSON carries 143's cursor, remaining and pastCursor (AS_JSON, so the cursor token rides untouched); a bad cursor and one with other filters are refused REFUSED_CURSOR (SMD-3606 PR 2).
+  const listed = say.renderListClaims({ ok: true, value: { claims: [claim()], truncated: true, cursor: "Y3Vyc29y", remaining: 3, pastCursor: false } } as never);
+  const curShape = say.renderListClaims({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "nope", reason: "shape" } } as never);
+  const curFilters = say.renderListClaims({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "nope", reason: "filters" } } as never);
   assert(/^Released claim 1111[0-9a-f-]+ on SMD-3379 PR 1b-2 \(merged\)\.$/.test(text(released)) && /had already ended at 2026-10-30T12:00:00\.000Z\.$/.test(text(already))
       && /had already ended at 2026-10-30T12:00:00\.000Z: it lapsed and was taken over by codex\.$/.test(text(overtaken))
-      && JSON.parse(text(listed)).claims.length === 1 && !text(listed).includes("token"),
-    `release_claim's two answers in words, and list_claims' JSON, no token field (${text(released)} | ${text(already).slice(-40)})`);
+      && JSON.parse(text(listed)).claims.length === 1 && JSON.parse(text(listed)).cursor === "Y3Vyc29y" && JSON.parse(text(listed)).remaining === 3 && !text(listed).includes("token")
+      && curShape.isError === true && /not a list_claims cursor/.test(text(curShape)) && curFilters.isError === true && /made with other filters/.test(text(curFilters)),
+    `release_claim's two answers in words, and list_claims' JSON with 143's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
+
+  // The list_work_claims cursor codec (SMD-3606 PR 2): this listing's own round-trips with its selection; another tag, a
+  // wrong length, a non-boolean include_ended, an over-long or non-string ticket/holder, an empty issue, an over-long
+  // piece_key, a non-uuid id, a day that does not exist, a clock past 23:59 and a null time are none of its cursors;
+  // sameClaimSelection tells one selection from another.
+  const { parseClaimCursor, claimCursor, sameClaimSelection } = await import("./core/list-cursor.ts");
+  const b64c = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+  const UC = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const SELC = { ticket: "SMD-3379", holder: "codex", includeEnded: true } as const;
+  const CLA = (...v: unknown[]) => b64c(["claims", null, null, false, ...v]);
+  const okClaim = parseClaimCursor(claimCursor(SELC, "SMD-3379", "pr 2", "2024-02-29 23:59:59+00", UC.toUpperCase()));
+  const badClaimCur = [
+    b64c(["proposals", null, null, false, "SMD-1", "", "2026-09-25 00:00:00+00", UC]),        // another tag
+    b64c(["claims", null, null, false, "SMD-1", "", "2026-09-25 00:00:00+00"]),               // seven, not eight
+    b64c(["claims", null, null, "true", "SMD-1", "", "2026-09-25 00:00:00+00", UC]),          // include_ended a string
+    b64c(["claims", 7, null, false, "SMD-1", "", "2026-09-25 00:00:00+00", UC]),              // ticket a number
+    b64c(["claims", "x".repeat(201), null, false, "SMD-1", "", "2026-09-25 00:00:00+00", UC]), // ticket over 200
+    CLA("", "", "2026-09-25 00:00:00+00", UC),                                                // issue empty
+    CLA("SMD-1", "x".repeat(201), "2026-09-25 00:00:00+00", UC),                              // piece_key over 200 (100's CHECK, 2x for lower() expansion)
+    CLA("SMD-1", "", "2026-09-25 00:00:00+00", "not-a-uuid"),                                 // id no uuid
+    CLA("SMD-1", "", "2026-02-30 00:00:00+00", UC),                                           // Feb 30
+    CLA("SMD-1", "", "2026-09-25 24:00:00+00", UC),                                           // 24:00
+    CLA("SMD-1", "", null, UC),                                                               // a null time
+    "a sentence, not a cursor", "",
+  ];
+  assert(okClaim?.issue === "SMD-3379" && okClaim.pieceKey === "pr 2" && okClaim.claimedAt === "2024-02-29 23:59:59+00" && okClaim.id === UC && JSON.stringify(okClaim.selection) === JSON.stringify(SELC)
+      && badClaimCur.every((b) => parseClaimCursor(b) === null)
+      && sameClaimSelection(SELC, { ticket: "SMD-3379", holder: "codex", includeEnded: true }) && !sameClaimSelection(SELC, { ticket: "SMD-3379", holder: "codex", includeEnded: false }),
+    `the claims cursor round-trips with its selection (an upper-case id read lower, a leap day), none of ${badClaimCur.length} others reads as one, and sameClaimSelection tells selections apart (${JSON.stringify(okClaim)})`);
+  // A cursor for a claim with max-length identifiers (ticket/holder/issue/piece_key each up to 200) reaches ~1200 chars — over the other cursors' 512 — and must still round-trip, so the raised bound admits it rather than leaving the claim un-pageable (SMD-3606 PR 2 review).
+  const longSel = { ticket: "T".repeat(200), holder: "H".repeat(200), includeEnded: true };
+  const longCur = claimCursor(longSel, "I".repeat(200), "p".repeat(200), "2026-11-15 01:49:48.466123+00", UC);
+  const longParsed = parseClaimCursor(longCur);
+  assert(longCur.length > 512 && longCur.length <= 2048 && longParsed?.issue === "I".repeat(200) && longParsed.pieceKey === "p".repeat(200) && JSON.stringify(longParsed.selection) === JSON.stringify(longSel),
+    `a max-length claims cursor exceeds 512 and still round-trips under the raised 2048 bound (${longCur.length} chars)`);
 }
 
 console.log("\n[33c] The claimed label in the core and the words (SMD-3599): one claims read per page, the keys a row is filed under first, then the first 50 others its text names; live and lapsed-unreleased claims, a released one never; the caller's own said so; ten named and the rest counted; nothing read when no row names a ticket; a failed read is null and said; a cut read over-counts rather than misses");

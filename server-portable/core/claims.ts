@@ -10,9 +10,10 @@
 // refusal, error message or log line carries it.
 
 import type { Principal } from "../auth.ts";
-import { ClaimRefused, UUID_RE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
+import { ClaimRefused, ListCursorRefused, UUID_RE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
 import { asked, unattributedAs } from "./caller.ts";
 import type { Ctx } from "./context.ts";
+import { claimCursor, parseClaimCursor, sameClaimSelection, type ClaimSelection } from "./list-cursor.ts";
 import { ok, refuse, type HeldClaim, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
@@ -38,8 +39,8 @@ export type RenewClaimResult = { claim: WorkClaim; lapsed?: ClaimLapse; ticketCl
 export type RenewClaimCode = "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED" | "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "CLAIM_UNATTRIBUTED";
 export type ReleaseClaimResult = { outcome: "released" | "already_released"; claim: WorkClaim };
 export type ReleaseClaimCode = "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "REFUSED_CLAIM_INPUT" | "CLAIM_UNATTRIBUTED";
-/** list_claims' value: the claims, and whether the limit cut the list (narrow by ticket or holder to see the rest). */
-export type ListClaimsResult = { claims: WorkClaim[]; truncated: boolean };
+/** A page of work claims (SMD-3606 PR 2): `cursor` the next page's `after` while more follow, else null; `remaining` how many follow this page; `truncated` whether any do (remaining > 0); `pastCursor` whether this page followed a cursor, so an empty one reads as the walk's end, not an empty board. */
+export type ListClaimsResult = { claims: WorkClaim[]; truncated: boolean; cursor: string | null; remaining: number; pastCursor: boolean };
 
 /** 115's own release reason for a claim taken over after it lapsed (its claim_work writes it). */
 export const TAKEN_OVER = "lapsed; taken over";
@@ -54,8 +55,6 @@ export const closedBySync = (issue: string | null | undefined, reason: string | 
   const head = `${issue} closed: `;
   return reason.startsWith(head) && /^.+ \((?:completed|canceled|duplicate)\); .+$/.test(reason.slice(head.length));
 };
-/** 115's clamp on list_work_claims' limit. */
-const LIST_MAX = 1000;
 
 /** The claim's holder is the caller's own key — another session of it, or this one without its token — so the words say so rather than name the caller's key as someone else's. */
 const ownKey = (principal: Principal, c: WorkClaim | null) => !!c && c.holder === principal.name;
@@ -233,10 +232,27 @@ export async function releaseClaim(ctx: Ctx, principal: Principal, input: Input<
   return unread("release_work_claim");
 }
 
-export async function listClaims(ctx: Ctx, _principal: Principal, input: Input<"list_claims">): Promise<Outcome<ListClaimsResult>> {
-  // One more than asked says whether the limit cut the list; at 115's clamp a full page is said cut, as it may be.
-  const rows = await (await ctx.store()).listClaims({ issue: input.ticket, holder: input.holder, includeEnded: input.include_ended, limit: Math.min(input.limit + 1, LIST_MAX) });
-  return ok({ claims: rows.slice(0, input.limit), truncated: rows.length > input.limit || (input.limit === LIST_MAX && rows.length === LIST_MAX) });
+export async function listClaims(ctx: Ctx, _principal: Principal, input: Input<"list_claims">): Promise<Outcome<ListClaimsResult, "REFUSED_CURSOR">> {
+  // SMD-3606 PR 2: `after` is a cursor a page ended with — one of this listing's, read before the store sees it;
+  // list_thoughts' and list_supersession_proposals' shape and refusal (143). It carries the selection it was made
+  // under, and one passed with other filters is refused rather than starting the listing at a place in another.
+  // The ticket is the one filter the SQL normalizes (upper + ob1_work_claim_text), so the cursor's identity must normalize
+  // it too (case and surrounding space, the common variations) — else paging the same listing with the ticket written
+  // differently is wrongly refused. The holder the SQL compares exactly, so it stays as given.
+  const selection: ClaimSelection = { ticket: input.ticket ? input.ticket.trim().toUpperCase() : null, holder: input.holder ?? null, includeEnded: input.include_ended === true };
+  const position = input.after === undefined ? undefined : parseClaimCursor(input.after);
+  if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: input.after!, reason: "shape" });
+  if (position && !sameClaimSelection(position.selection, selection)) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: input.after!, reason: "filters" });
+  let page;
+  try {
+    page = await (await ctx.store()).listClaims({ issue: input.ticket, holder: input.holder, includeEnded: input.include_ended, limit: input.limit, ...(position ? { after: { issue: position.issue, pieceKey: position.pieceKey, claimedAt: position.claimedAt, id: position.id } } : {}) });
+  } catch (e) {
+    // A cursor time Postgres cannot read is the caller's (the store refuses it ListCursorRefused); anything else is the store's fault.
+    if (e instanceof ListCursorRefused && input.after !== undefined) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: input.after, reason: "shape" });
+    throw e;
+  }
+  const cursor = page.next ? claimCursor(selection, page.next.issue, page.next.pieceKey, page.next.claimedAt, page.next.id) : null;
+  return ok({ claims: page.claims, truncated: page.remaining > 0, cursor, remaining: page.remaining, pastCursor: position !== undefined });
 }
 
 /**

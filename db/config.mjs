@@ -2452,6 +2452,10 @@ export const ROLE_GRANTS = Object.freeze({
     // moves no status and a re-record that changes only the canonical need
     // none of it (SMD-2267).
     Object.freeze({ table: "ob1_source_gate",   privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "071" }),
+    // 139's refusal on thoughts reads the ledger of forgotten texts on every
+    // capture and every edit of a text (SMD-1723): after 139 a role without
+    // it cannot write a thought at all, the ledger empty or not.
+    Object.freeze({ table: "thought_forgotten", privileges: Object.freeze(["SELECT"]), since: "139" }),
   ]),
   // The server's soft extras, beyond the hard capture set: preflight reads its
   // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
@@ -2662,13 +2666,17 @@ export const ROLE_GRANTS = Object.freeze({
   // thought_sources since 133 (SMD-4127): a ticket and its own rows are one
   // item to the writers and the reads, so every call on a thought or a ticket
   // asks which ticket's row a thought is; 133 grants it to the roles holding
-  // the group already. Soft: a role without the group is refused the
+  // the group already. Since 142 (SMD-3671), priority_findings: the review's
+  // scan writes, moots and prunes findings and an operator's decision updates one;
+  // 142 grants it to the roles holding the group already. Soft: a role without the group is refused the
   // priority calls, naming the table, and nothing else.
   priority: Object.freeze([
     Object.freeze({ table: "priority_assertions", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "116" }),
     Object.freeze({ table: "priority_current",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "116" }),
     Object.freeze({ table: "priority_sources",    privileges: Object.freeze(["SELECT"]), since: "116" }),
     Object.freeze({ table: "priority_weight_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "132" }),
+    // The priority review's findings (142, SMD-3671): the scan writes and moots them, an operator's decision updates one.
+    Object.freeze({ table: "priority_findings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "142" }),
     Object.freeze({ table: "ob1_entities",        privileges: Object.freeze(["SELECT"]), since: "016" }),
     Object.freeze({ table: "open_items",          privileges: Object.freeze(["SELECT"]), since: "117" }),
     Object.freeze({ table: "open_item_events",    privileges: Object.freeze(["SELECT"]), since: "117" }),

@@ -1364,7 +1364,10 @@ export interface FindingRow {
    * last rejection were made; null for a relation.
    */
   proposals: { accepted: number; rejected: number; settled: number; reopened: number; stale: number; pending: number; acceptedS: number | null; rejectedS: number | null } | null;
-  /** A relation finding: whether a relation of its word still stands where a facet it named stood; null for outdates. */
+  /**
+   * A relation finding: whether a relation of its word, or of one it covers, still stands where a facet it named
+   * stood; null for outdates.
+   */
   stands: boolean | null;
   /**
    * Seconds from posting to when the judge took the finding back: for
@@ -1478,10 +1481,15 @@ export const FINDING_OUTCOMES_SQL = (sql: SqlTag) => sql`
              max(n.valid_until) FILTER (WHERE EXISTS (SELECT 1 FROM thoughts g WHERE g.id = (n.payload->>'target')::uuid)) AS gone_at
         FROM unnest(b.finding_ids) AS x(id)
         JOIN thought_facets o ON o.id = x.id AND o.kind = 'relation'
-        -- The judge's word on the pair, not a work thread's evolves there (origin thread, 120, SMD-3306).
+        -- The judge's word on the pair, not a work thread's evolves there (origin thread, 120, SMD-3306). A posted
+        -- word stands while one it covers does (board-findings.ts's COVERS: related and evolves each other, a
+        -- duplicate a related): the board's ask stands, though decide version 5 folds an evolves into related and
+        -- a duplicate may follow, or a judge moved between two words that ask one link (SMD-3306 PR 7b's review
+        -- passes 2 and 3, run-it).
         JOIN thought_facets n ON n.thought_id = o.thought_id AND n.kind = 'relation' AND n.payload->>'target' = o.payload->>'target'
                              AND n.payload->>'origin' = 'judged'
-       WHERE b.word <> 'outdates' AND n.payload->>'relation' = b.word) r ON b.word <> 'outdates'
+       WHERE b.word <> 'outdates' AND (n.payload->>'relation' = b.word
+              OR (b.word, n.payload->>'relation') IN (('related', 'evolves'), ('evolves', 'related'), ('duplicate', 'related')))) r ON b.word <> 'outdates'
    ORDER BY b.posted_at DESC, b.ticket_a, b.ticket_b, b.word`;
 
 const FINDING_WORD_NAMES = ["outdates", "related", "evolves", "duplicate"] as const;
@@ -1545,7 +1553,9 @@ export function findingRows(rows: readonly Record<string, unknown>[]): FindingRo
  *              withdrawn  the rest: every proposal it named is gone (or 091's
  *                         record was bypassed and a settle left no time)
  *   relation   accepted   the board links the pair
- *              open       a relation of its word still stands
+ *              open       a relation of its word, or of one it covers
+ *                         (related and evolves each other, a duplicate a
+ *                         related), still stands
  *              withdrawn  the judge stopped saying it within the window
  *              unanswered …or after it: the board had the window and left it
  *
