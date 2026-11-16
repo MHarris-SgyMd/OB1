@@ -4,7 +4,9 @@
 # slots (deploy/federated/broker.ts says how). It is a compose project of its
 # own, as the edge proxy is (deploy/edge/), and joins no brain's network: a
 # brain's container reaches it at the host alias, as it reaches the host's
-# Ollama, and the port is published on the host's loopback alone.
+# Ollama, and the port is published only where that alias lands: the host's
+# loopback under podman machine, the default bridge's gateway under Docker
+# Engine on Linux (federated.ts says why, and what reaches each).
 #
 # Run it with deploy/federated/federated.ts, which checks the registry with the
 # broker's own reading, refuses a runtime no shape was measured on, and runs
@@ -47,7 +49,7 @@ services:
       ob1.broker-sha256: ${FEDERATED_BROKER_SHA256:?run deploy/federated/federated.ts}
       ob1.registry-sha256: ${FEDERATED_REGISTRY_SHA256:?run deploy/federated/federated.ts}
     ports:
-      - "127.0.0.1:${FEDERATED_PORT:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}"
+      - "${FEDERATED_HOST:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}:${FEDERATED_PORT:?run deploy/federated/federated.ts}"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${FEDERATED_PORT:?run deploy/federated/federated.ts}/health"]
       interval: 10s
