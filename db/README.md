@@ -6070,13 +6070,16 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
   It also says whether the brain's extraction backlog ran dry, how often the model
   server's loaded models changed, and each `--live` file's latencies by label.
 
-A heartbeat's tallies count since its worker started. The sleep stamps them about
-once a minute, and a call counts when it ends. So a window's figures are the
-difference between its first and last stamps, over the time between those, and a
-call running across a stamp counts in the next one. A worker that restarted in a
-window is said, and that window is not read. A build before SMD-3379 PR 2b-2a
-stamps no tallies: for it, the summary gives the share of samples in which its
-sleep was working.
+A heartbeat's tallies count since the sleep's process began. It stamps them about
+once a minute, and a call counts when it ends. So a window's figures are the sum
+of the increases from stamp to stamp, over the time between its first and last
+stamps, and a call running across a stamp counts in the next one. A tally that
+falls marks the process begun again: its new value is the increase since, and the
+summary counts the restarts. Two restarts between one pair of stamps lose the
+calls before the second. Each sample keeps the coordinator's children, whose
+`for_s` says when one began. A build
+before SMD-3379 PR 2b-2a stamps no tallies: for it, the summary gives the share of
+samples in which its sleep was working.
 
 ### bench-querylog.ts
 

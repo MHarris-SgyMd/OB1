@@ -43,13 +43,14 @@
  *         extraction backlog ran dry, the model server's loaded models, and
  *         each --live file's latencies (bench-live.ts's samples), by label.
  *
- * What the numbers are. A heartbeat's model tallies are since its worker
- * started, stamped about once a minute (db/pass-stamp.ts `models`), and a call
- * is counted when it ends: a window's figures are the difference between its
- * first and last stamps, over the time between them, and a call running across
- * a stamp counts in the stamp after. A worker that restarted in a window (a
- * tally going down) is said, and that window is not read. Stable's build may
- * stamp no tallies (before SMD-3379 PR 2b-2a): its sleep's state is shown.
+ * What the numbers are. A heartbeat's model tallies are the sleep process's
+ * since it began (db/pass-stamp.ts `models`), stamped about once a minute, and a
+ * call is counted when it ends: a window's figures are the sum of the increases
+ * from stamp to stamp, over the time between its first and last stamps, and a
+ * call running across a stamp counts in the stamp after. A tally that falls is a
+ * process begun again, its value the increase since (windowOf); a sample keeps
+ * the coordinator's children, whose for_s says when. Stable's build may stamp no
+ * tallies (before SMD-3379 PR 2b-2a): its sleep's state is shown.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -249,6 +250,7 @@ export function keptOf(info: Record<string, any>): Record<string, unknown> {
       worker: h.worker, at: h.at, running: h.running, slept: h.slept ?? null, models: h.models ?? null, answers: h.malformed?.answers ?? null,
     })),
     relay: w.coordinator?.relay ?? null,
+    children: w.coordinator?.children ?? null,
   };
 }
 
@@ -312,25 +314,28 @@ export function talliesOf(models: unknown): Record<string, Tally> | null {
   return out;
 }
 
-/** A window's difference between its first and last stamps: null with fewer than two, "restarted" when a tally fell. */
-export function windowOf(stamps: Stamp[]): { s: number; total: Tally; byPass: Record<string, Tally> } | null | "restarted" {
+/**
+ * A window's increase over its stamps, pass by pass and stamp by stamp: null with fewer than two. The sleep's tallies
+ * count since its process began, so a tally that falls is the process begun again: its new value is the increase
+ * since. Two restarts between one pair of stamps lose the calls before the second.
+ */
+export function windowOf(stamps: Stamp[]): { s: number; total: Tally; byPass: Record<string, Tally>; restarts: number } | null {
   if (stamps.length < 2) return null;
-  const [a, z] = [stamps[0], stamps[stamps.length - 1]];
-  const total: Tally = { calls: 0, callMs: 0, waited: 0, waitMs: 0 };
+  const zero = (): Tally => ({ calls: 0, callMs: 0, waited: 0, waitMs: 0 });
+  const total = zero();
   const byPass: Record<string, Tally> = {};
+  let restarts = 0;
   for (let k = 1; k < stamps.length; k++) {
     for (const [pass, t] of Object.entries(stamps[k].byPass)) {
-      const p = stamps[k - 1].byPass[pass] ?? { calls: 0, callMs: 0, waited: 0, waitMs: 0 };
-      if (t.calls < p.calls || t.callMs < p.callMs) return "restarted";
+      const p = stamps[k - 1].byPass[pass] ?? zero();
+      const fell = t.calls < p.calls || t.callMs < p.callMs || t.waited < p.waited || t.waitMs < p.waitMs;
+      if (fell) restarts++;
+      const d = fell ? t : { calls: t.calls - p.calls, callMs: t.callMs - p.callMs, waited: t.waited - p.waited, waitMs: t.waitMs - p.waitMs };
+      const b = (byPass[pass] ??= zero());
+      for (const f of ["calls", "callMs", "waited", "waitMs"] as const) { b[f] += d[f]; total[f] += d[f]; }
     }
   }
-  for (const [pass, t] of Object.entries(z.byPass)) {
-    const p = a.byPass[pass] ?? { calls: 0, callMs: 0, waited: 0, waitMs: 0 };
-    const d = { calls: t.calls - p.calls, callMs: t.callMs - p.callMs, waited: t.waited - p.waited, waitMs: t.waitMs - p.waitMs };
-    byPass[pass] = d;
-    total.calls += d.calls; total.callMs += d.callMs; total.waited += d.waited; total.waitMs += d.waitMs;
-  }
-  return { s: (z.at - a.at) / 1000, total, byPass };
+  return { s: (stamps[stamps.length - 1].at - stamps[0].at) / 1000, total, byPass, restarts };
 }
 
 function summary(out: string, splitMin: number, live: readonly string[]): number {
@@ -354,15 +359,15 @@ function summary(out: string, splitMin: number, live: readonly string[]): number
       const all = [...stamps.values()].sort((x, y) => x.at - y.at);
       for (const [name, lo, hi] of [["before", t0, split], ["after", split, t1 + 1]] as const) {
         const w = windowOf(all.filter((s) => s.at >= lo && s.at < hi));
-        if (w === null || w === "restarted") {
+        if (w === null) {
           const sleeping = rows.filter((r) => Date.parse(r.t) >= lo && Date.parse(r.t) < hi);
           const working = sleeping.filter((r) => (r.heartbeats ?? []).some((h: Record<string, any>) => h.worker === "sleep" && h.running && h.slept && h.slept.to === null)).length;
-          console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${w === "restarted" ? "a worker restarted in the window: not read" : `no model tallies stamped; sleep working in ${working} of ${sleeping.length} samples`}`);
+          console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} no model tallies stamped; sleep working in ${working} of ${sleeping.length} samples`);
           continue;
         }
         const f = (v: number, d = 0) => v.toFixed(d);
         const passes = Object.entries(w.byPass).filter(([, t]) => t.calls > 0).map(([p, t]) => `${p} ${t.calls}/${f(t.callMs / 1000)}s`).join(", ");
-        console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${f(w.s).padStart(5)} ${String(w.total.calls).padStart(7)} ${f(w.total.callMs / 1000).padStart(7)} ${f(w.total.callMs / 1000 / Math.max(1, w.s), 2).padStart(10)} ${String(w.total.waited).padStart(7)} ${f(w.total.waitMs / 1000, 1).padStart(7)}   ${passes || "-"}`);
+        console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${f(w.s).padStart(5)} ${String(w.total.calls).padStart(7)} ${f(w.total.callMs / 1000).padStart(7)} ${f(w.total.callMs / 1000 / Math.max(1, w.s), 2).padStart(10)} ${String(w.total.waited).padStart(7)} ${f(w.total.waitMs / 1000, 1).padStart(7)}   ${passes || "-"}${w.restarts ? ` (${w.restarts} pass restart(s))` : ""}`);
       }
       const dry = rows.filter((r) => !Object.keys(r.backlog ?? {}).some((k) => k.startsWith("extract:")));
       const sizes = rows.map((r) => Object.entries(r.backlog ?? {}).filter(([k]) => k.startsWith("extract:")).reduce((s, [, n]) => s + Number(n), 0));
@@ -426,11 +431,12 @@ export function selfCheck(): number {
   ok(JSON.stringify(tl) === '{"extract":{"calls":7,"callMs":1000,"waited":2,"waitMs":30},"consolidate":{"calls":0,"callMs":0,"waited":0,"waitMs":0}}' && talliesOf(null) === null, "a heartbeat's tallies by pass, background calls only; none without models");
   const st = (at: number, calls: number, callMs: number, pass = "extract") => ({ at, byPass: { [pass]: { calls, callMs, waited: 0, waitMs: 0 } } });
   const w = windowOf([st(0, 10, 10_000), st(60_000, 14, 70_000), st(120_000, 20, 250_000)]);
-  ok(w !== null && w !== "restarted" && w.s === 120 && w.total.calls === 10 && w.total.callMs === 240_000 && w.total.callMs / 1000 / w.s === 2, "a window is its last stamp less its first: 10 calls, 240 s of calls over 120 s is 2 in flight");
+  ok(w !== null && w.restarts === 0 && w.s === 120 && w.total.calls === 10 && w.total.callMs === 240_000 && w.total.callMs / 1000 / w.s === 2, "a window is its last stamp less its first: 10 calls, 240 s of calls over 120 s is 2 in flight");
   ok(windowOf([st(0, 10, 10_000)]) === null, "one stamp is no window");
-  ok(windowOf([st(0, 10, 10_000), st(60_000, 2, 5_000), st(120_000, 6, 20_000)]) === "restarted", "a tally that falls inside the window says the worker restarted");
+  const r = windowOf([st(0, 10, 10_000), st(60_000, 12, 30_000), st(120_000, 2, 5_000), st(180_000, 6, 20_000)]);
+  ok(r !== null && r.restarts === 1 && r.total.calls === 2 + 2 + 4 && r.total.callMs === 20_000 + 5_000 + 15_000, "a tally that falls is the process begun again: its value is the increase since, then it counts on (8 calls, 40 s)");
   const np = windowOf([st(0, 0, 0), { at: 60_000, byPass: { extract: { calls: 0, callMs: 0, waited: 0, waitMs: 0 }, consolidate: { calls: 3, callMs: 9_000, waited: 1, waitMs: 500 } } }]);
-  ok(np !== null && np !== "restarted" && np.byPass.consolidate.calls === 3 && np.total.waited === 1, "a pass first stamped inside the window counts from zero");
+  ok(np !== null && np.restarts === 0 && np.byPass.consolidate.calls === 3 && np.total.waited === 1, "a pass first stamped inside the window counts from zero");
 
   for (const [what, pass] of rows) console.log((pass ? "ok   " : "FAIL ") + what);
   return rows.every(([, p]) => p) ? 0 : 1;
