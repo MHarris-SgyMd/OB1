@@ -794,12 +794,6 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   const { id, byClientKey } = await targetNamed(ctx, principal, name);
   if (typeof supersedes === "string") supersedes = (await targetNamed(ctx, principal, supersedes)).id;
 
-  // A forgotten text, before its embedding is paid for (SMD-1723 PR 2), as at capture.
-  if (content !== undefined) {
-    const forgottenAt = await (await ctx.store()).textForgottenAt(content);
-    if (forgottenAt !== null) return refuse(forgottenText(forgottenAt, canRead(principal)));
-  }
-
   // Only re-embed when the text actually changed. A metadata-only edit
   // must not spend two model calls, nor risk replacing a good vector.
   // The gate as at capture (SMD-1903), asked only when the text moves:
@@ -817,6 +811,13 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   // subject so it cannot gate (SMD-1941).
   const cfg = ctx.embedConfig();
   const existing = content !== undefined ? await (await ctx.store()).getThought(id) : null;
+  // A forgotten text, before its embedding is paid for (SMD-1723 PR 2), as at capture — unless the edit resends the
+  // row's own text, which the refusal trigger lets by (review pass 3: a row with no fingerprint holding a forgotten
+  // text was refused here and taken by the database).
+  if (content !== undefined && existing?.content !== content) {
+    const forgottenAt = await (await ctx.store()).textForgottenAt(content);
+    if (forgottenAt !== null) return refuse(forgottenText(forgottenAt, canRead(principal)));
+  }
   const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
   const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
   // An edit whose provider does not answer is still refused whole; the provider's state hears it either way (SMD-2890, review pass 1).

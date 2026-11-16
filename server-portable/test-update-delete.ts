@@ -606,6 +606,16 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
   const never = await full("forget_thought", { id: ghost, confirm: ghost });
   assert(again.isError && again.sc.code === "FORGOTTEN" && /was forgotten already/.test(again.text) && never.isError && never.sc.code === "NOT_FOUND" && /was ever in the brain's log/.test(never.text),
     `forgotten again is FORGOTTEN; an unknown id NOT_FOUND (${again.text.slice(0, 50)} | ${never.text.slice(0, 50)})`);
+
+  // An edit resending a row's own text is the database's to take, as its trigger does, though the text was forgotten:
+  // a row holding it with no fingerprint (an operator's reinstating write) (review pass 3).
+  const keyless = String((await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`;
+    return tx`INSERT INTO thoughts (content, content_fingerprint) VALUES (${SECRET}, NULL) RETURNING id`;
+  }))[0].id);
+  const resent = await full("update_thought", { id: keyless, content: SECRET, metadata_patch: { resent: true } });
+  assert(!resent.isError && /^Updated /.test(resent.text), `an edit resending a row's own forgotten text is not refused before the database, which takes it (${resent.text.slice(0, 60)})`);
+  await sql`DELETE FROM thoughts WHERE id = ${keyless}::uuid`;
 }
 
 await sql.close();
