@@ -5940,7 +5940,9 @@ and key are the canary connector's, `open-brain-canary` in `~/.claude.json`,
 which `deploy/canary.sh up --connect` registers at the canary's own port with
 its own key (SMD-2874); the key is the entry's `x-brain-key`, or the `?key=` on
 its url. `--key-from` names another entry; `--mcp` names another endpoint and
-needs `--key-from` beside it, as another brain refuses the canary's key. A
+needs `--key-from` beside it, as another brain refuses the canary's key, or
+`--key-file`, a file holding that brain's key alone (a scratch brain no
+connector names; SMD-3379 PR 3b-3b). A
 stack's own endpoint is `/mcp` on its `SERVER_PORT` (8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
 404 from v2.0.0 (SMD-3101).
 
@@ -6020,6 +6022,61 @@ What the columns are not:
   call ends, its call in hand running on (aborted while paused once 60 s in hand,
   SMD-3379 PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
   not measured here.
+
+### bench-brains.ts
+
+Two brains on one model server: what each one's background work gets of the
+server's slots (SMD-3379 PR 3b-3b). The ticket's Verify asks that, with both
+brains backlogged, neither brain's live captures wait for a slot and their
+background work splits the background slots; and that, with one backlogged, it
+uses its share alone under fixed shares, or every free slot under the host's slot
+broker (`deploy/federated/`). This makes the backlog, reads what each brain's
+background calls held, and cleans up after. `bench-live.ts` times the live calls
+beside it.
+
+```bash
+bun bench-brains.ts load    --brains brains.json --brain canary --arm B --ids ids-canary.txt   # the arm's 150 notes
+bun bench-brains.ts sample  --brains brains.json --arm B --minutes 20 --out samples.jsonl --ollama http://127.0.0.1:11434
+bun bench-brains.ts clean   --brains brains.json --brain canary --ids ids-canary.txt
+bun bench-brains.ts summary --out samples.jsonl --split 12 --live live-B-canary.jsonl --live live-B-scratch.jsonl
+bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic; what CI runs
+```
+
+`--brains` is a JSON file naming each brain: `{"canary": {"connector":
+"open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
+`bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
+"keyFile": "…"}}` takes a url and a file holding the key alone. No key is printed.
+
+- **load** captures the arm's notes, generated from the arm's name and the index,
+  so every brain gets the same text and no arm's note is another's. Each starts
+  `SMD-3379 measure note (arm <arm> #<i>). ` and is captured with source
+  `smd3379-measure`, two at a time; each id is appended to `--ids` as it lands. As
+  with `bench-live.ts`, only a brain whose `brain_info` says tier `canary` or
+  `working` takes them.
+- **sample** reads every brain's `brain_info` and `worker_status` each `--every`
+  seconds (15), and the model server's loaded models from Ollama's `/api/ps`. It
+  only reads, so stable can be one of the brains.
+- **clean** deletes the listed ids, then searches for measure notes whose ids never
+  came back and deletes those whose text starts as one does. It exits 1 if one is
+  left.
+- **summary** prints, for each arm and brain, its sleep's background calls in two
+  windows: before `--split` minutes, with no live load from the harness, and after
+  it, with `bench-live.ts` running. For each window it gives:
+  - the calls, and their time;
+  - the mean number in flight: their time over the window's, which is the slots
+    the brain's background held on average;
+  - the slot waits.
+
+  It also says whether the brain's extraction backlog ran dry, how often the model
+  server's loaded models changed, and each `--live` file's latencies by label.
+
+A heartbeat's tallies count since its worker started. The sleep stamps them about
+once a minute, and a call counts when it ends. So a window's figures are the
+difference between its first and last stamps, over the time between those, and a
+call running across a stamp counts in the next one. A worker that restarted in a
+window is said, and that window is not read. A build before SMD-3379 PR 2b-2a
+stamps no tallies: for it, the summary gives the share of samples in which its
+sleep was working.
 
 ### bench-querylog.ts
 

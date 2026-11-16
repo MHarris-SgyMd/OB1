@@ -37,6 +37,7 @@
  *
  *   bun db/bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
  *   --key-from NAME (open-brain-canary: ~/.claude.json's mcpServers entry, its url and key)   --mcp URL (that entry's url; another needs --key-from)
+ *   --key-file PATH (with --mcp, in place of --key-from: a file holding the key alone, a brain no connector names)
  *   --searches N (60)   --captures N (30)   --embeds N (40)   --metadata N (20)   --keep-probes
  *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard — no brain, no provider
  *   bun db/bench-live.ts --help           # the flags (cli.ts reads every argument: an unknown one, a repeat or a blank value is refused, exit 2)
@@ -271,6 +272,21 @@ export function connectorOf(entry: unknown, name: string, mcp: string | undefine
   return { mcp: url, key };
 }
 
+/** Why the flags name no one key for the endpoint, or null: --mcp needs --key-from or --key-file, and the two never come together. */
+export function keySourceProblem(mcp: string | undefined, keyFrom: string | undefined, keyFile: string | undefined): string | null {
+  if (keyFrom !== undefined && keyFile !== undefined) return "give --key-from or --key-file, not both.";
+  if (keyFile !== undefined && mcp === undefined) return "--key-file names a key, not where it goes: give --mcp too.";
+  if (mcp !== undefined && keyFrom === undefined && keyFile === undefined) return "--mcp names another brain, whose key the canary's is not: give --key-from with the connector whose key it takes, or --key-file.";
+  return null;
+}
+
+/** A key file's key: its one line, its newline trimmed. Throws, never naming the content, on anything else. */
+export function keyFromFile(text: string): string {
+  const key = text.trim();
+  if (!/^[\x21-\x7e]+$/.test(key)) throw new Error("the key file holds no key on one line");
+  return key;
+}
+
 function connectorFrom(name: string, mcp: string | undefined): { mcp: string; key: string } {
   return connectorOf(JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"))?.mcpServers?.[name], name, mcp);
 }
@@ -279,12 +295,12 @@ async function main(): Promise<void> {
   // Every argument through the one scanner (cli.ts) before anything runs: a flag the harness
   // does not have, one given twice, a missing or blank value, a count that is not digits — exit 2.
   const cli = commandLine("bench-live.ts", {
-    label: "one", out: "one", ids: "one", mcp: "one", "key-from": "one",
+    label: "one", out: "one", ids: "one", mcp: "one", "key-from": "one", "key-file": "one",
     searches: "one", captures: "one", embeds: "one", metadata: "one",
     "keep-probes": "none", "self-check": "none",
   }, {
     hints: {
-      label: "<state name>", out: "<samples.jsonl>", ids: "<probe-ids.txt>", mcp: "<MCP URL>", "key-from": "<~/.claude.json mcpServers name>",
+      label: "<state name>", out: "<samples.jsonl>", ids: "<probe-ids.txt>", mcp: "<MCP URL>", "key-from": "<~/.claude.json mcpServers name>", "key-file": "<file holding the key>",
       searches: "<n>", captures: "<n>", embeds: "<n>", metadata: "<n>",
     },
     note: "a run needs --label, --out and --ids; --self-check needs none",
@@ -300,12 +316,15 @@ async function main(): Promise<void> {
   const count = (name: "searches" | "captures" | "embeds" | "metadata", absent: number) => cli.int(name, { absent, min: 0, max: 10_000 });
   const want = { search: count("searches", 60), capture: count("captures", 30), embed: count("embeds", 40), metadata: count("metadata", 20) };
   const keep = cli.has("keep-probes");
-  // Another endpoint is another brain, which refuses the canary's key (SMD-2874): it names its connector.
-  if (cli.value("mcp") !== undefined && cli.value("key-from") === undefined) {
-    console.error("bench-live.ts: --mcp names another brain, whose key the canary's is not: give --key-from with the connector whose key it takes.");
+  // Another endpoint is another brain, which refuses the canary's key (SMD-2874): it names its connector, or a file
+  // holding its key (a scratch brain no connector names: SMD-3379 PR 3b-3b).
+  const keyProblem = keySourceProblem(cli.value("mcp"), cli.value("key-from"), cli.value("key-file"));
+  if (keyProblem) {
+    console.error(`bench-live.ts: ${keyProblem}`);
     process.exit(2);
   }
-  const { mcp, key } = connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
+  const keyFile = cli.value("key-file");
+  const { mcp, key } = keyFile ? { mcp: cli.value("mcp")!, key: keyFromFile(readFileSync(keyFile, "utf8")) } : connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
   // Fail before the first call, not after a capture has landed, if either file cannot be written.
   appendFileSync(out, "");
   appendFileSync(ids, "");
@@ -663,6 +682,10 @@ export function selfCheck(): number {
   ok(same(conn({ url: "http://h:8011/mcp", headers: { "x-brain-key": "H" } }, "http://o:8000/mcp"), { mcp: "http://o:8000/mcp", key: "H" }), "--mcp names the endpoint, the entry the key");
   ok(conn({ url: "http://h:8011/mcp" }) === `~/.claude.json has no key for mcpServers["c"], in an x-brain-key header or on its url`, "no key anywhere is refused");
   ok(conn({ headers: { "x-brain-key": "H" } }) === `~/.claude.json has no url for mcpServers["c"]; give --mcp`, "no url and no --mcp is refused");
+  // A key from a file, for a brain no connector names (SMD-3379 PR 3b-3b).
+  ok(keySourceProblem(undefined, undefined, undefined) === null && keySourceProblem("u", "c", undefined) === null && keySourceProblem("u", undefined, "f") === null, "the canary's connector, --mcp with --key-from, and --mcp with --key-file are each one key");
+  ok(/give --key-from with the connector/.test(keySourceProblem("u", undefined, undefined) ?? "") && /give --mcp too/.test(keySourceProblem(undefined, undefined, "f") ?? "") && /not both/.test(keySourceProblem("u", "c", "f") ?? ""), "--mcp with no key, --key-file with no --mcp, and both key flags are refused");
+  ok(keyFromFile("abc123\n") === "abc123" && (() => { try { keyFromFile("two words\n"); return false; } catch (e) { return !/two words/.test((e as Error).message); } })(), "a key file's one line is its key; anything else is refused without naming it");
   ok(typeof conn(undefined) === "string", "no such entry is refused");
   ok(shownUrl("http://user:SECRET@host:8000/mcp") === "http://host:8000/mcp", "the banner never prints a URL's userinfo");
   ok(shownUrl("not a url") === "(an endpoint that does not parse)", "an endpoint that does not parse is not echoed");
