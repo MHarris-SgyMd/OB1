@@ -59,6 +59,7 @@ import { metadataTicket, subjectCurrent, subjectPoolKey, subjectPrompt, subjectR
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { run as runThreads, type ThreadsOptions } from "./threads.ts";
+import { writeReport as writeLintReport } from "./lint-sweep.ts";
 import { drainer, sweepOrphans } from "./rebuild.ts";
 import type { Admit, InHandAbort, PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
@@ -19989,8 +19990,8 @@ if (want("18")) {
       const seqGrants: string[] = notSkipped.match(/ON SEQUENCE [^\s]+/g) ?? [];
       assert(!/openbrain_agents/.test(notSkipped) && !grantedSequences(["community"]).some((s) => seqGrants.includes(`ON SEQUENCE ${s}`))
              && JSON.stringify(seqGrants) === JSON.stringify(["ON SEQUENCE deliverable_events_seq_seq"])
-             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
+             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION forget_thought", "ON FUNCTION ob1_forget_leftovers", "ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence, 144's forget_thought and ob1_forget_leftovers, and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
 
       const failed: string[] = [];
       // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges)
@@ -22242,142 +22243,262 @@ if (want("25")) {
 }
 
 if (want("26")) {
-  console.log("\n[26] recipes/lint-sweep on the SQL shim: the sweep's counts are the table's, it needs no key, and a Supabase URL is refused before any query (SMD-2144)");
+  console.log("\n[26] db/lint-sweep.ts on a real Postgres: Tier 1's counts over the newest 2,000 dated thoughts and the whole table, Tier 2's over the newest 500 and the entity graph, each the planted table's; undated thoughts in no sample; the report written through a file of its own, 0600, its previews made safe; a statement past --statement-timeout and a table the role may not read write no report; the refusals (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
-    // The read-only recipe script SMD-2126 sent to compat/supabase-sql (its
-    // sibling, brain-backup's export, is db/backup.ts now: [50], SMD-3318),
-    // driven as deployed — `bun <file>` in a directory of its own, SUPABASE_URL
-    // the one variable — against this database carrying the schemas its reads
-    // name: enhanced-thoughts for Tier 1's importance and source_type columns
-    // ([18] left the columns; the file is idempotent); entity-extraction for Tier
-    // 2's entities and edges, applied only after Tier 2 has seen their absence —
-    // the one path the rule tolerates; the lint views for the record. What the files add is read from the catalog and
-    // dropped in the finally, as [18] does; the columns stay, as there. The
-    // planted table is the truth every printed count is held to. lint-sweep.js
-    // reads `.env` and `.env.local` from ITS OWN directory (the recipe's, not the
-    // cwd — `--no-env-file` stops Bun's loader, not the script's), so on a machine
-    // where a developer keeps one there the four sweep runs it could reach are
-    // skipped: that file's SUPABASE_URL would defeat the refusal case and its
-    // OPENROUTER_API_KEY would pay for Tier 3 (review pass 1, cold read); the two
-    // `--tier=2` runs — absence, the denied role — take their URL from the
-    // environment, which the script prefers, and read no key, so they run
-    // everywhere. CI has no such file. Residue, as [18]'s: entity-extraction's two
-    // indexes on 016's `thought_entities` outlive the catalog diff.
+    // recipes/lint-sweep's tiers 1 and 2 as the db/ script (SMD-3318 PR 2; Tier 3 is PR 2b), driven as deployed:
+    // `bun db/lint-sweep.ts` with DATABASE_URL alone, in a directory of its own. The planted rows set every count.
     const sql = new SQL({ url: URL_, max: 2 });
-    const catalog26 = async () => ({
-      tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
-      views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
-      fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
-    });
-    const before26 = await catalog26();
-    const RECIPES = join(CONTRIB_DIR, "recipes");
-    const scratch = join(tmpdir(), `ob1-live-2144-${process.pid}`);
-    const lintDir = join(scratch, "lint");
-    mkdirSync(lintDir, { recursive: true });
+    const scratch = mkdtempSync(join(tmpdir(), "ob1-live-3318-lint-"));
     const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
-    const lint = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPES, "lint-sweep/lint-sweep.js"), ...flags], { cwd: lintDir, env: env(extra) });
-    const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
-    // The tier lines and the script's own FAILED line, so a failed assertion's message says why (review pass 6, run-it:
-    // under the mutants it read `[tier 2] graph lint…` alone).
-    const tierLines = (out: string) => out.split("\n").filter((l) => /^\[tier|^\[lint-sweep\] FAILED/.test(l)).join(" | ");
-    const recipeEnvFile = [".env", ".env.local"].map((f) => join(RECIPES, "lint-sweep", f)).find((f) => existsSync(f));
+    const lintIn = (cwd: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(HERE, "lint-sweep.ts"), ...flags], { cwd, env: env(extra) });
+    const lint = (extra: Record<string, string>, ...flags: string[]) => lintIn(scratch, extra, ...flags);
+    const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf8") : "");
+    const modeOf = (f: string) => (statSync(f).mode & 0o777).toString(8);
+    const PROBE_ROLE = "ob1_live_lint_probe";
+    const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
     try {
       await sql`DELETE FROM thoughts`;
-      await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
-      // 1,050 rows — a third tagged, one over-tagged, importance 0–4 by turn, a second apart so "most
-      // recent" is an order and not a tie; a raw insert leaves the fingerprint
-      // NULL (the functions compute it; 023's backfill is the only other writer),
-      // which the sweep counts. A three-entity graph
-      // with one edge, and one high-importance row linked through 016's
-      // thought_entities.
-      const N = 1050;
-      await sql.unsafe(`INSERT INTO thoughts (content, metadata, importance, created_at)
-        SELECT 'lint row ' || i,
-               CASE WHEN i % 3 = 0 THEN '{"tags":["a"],"topics":["b"]}'::jsonb
-                    WHEN i = 7 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 11) j))
-                    ELSE '{}'::jsonb END,
-               (i % 5)::smallint,
+      await sql`DELETE FROM ob1_entities`;
+      // 2,100 dated thoughts a second apart, i = 1 the newest; 3 with no created_at, one at infinity and one at
+      // -infinity (undated too: infinity would sort first). Metadata: i = 101-116 and 2,050 (past the newest 2,000)
+      // over-tagged with 11 tags, i = 24 exactly 10; i = 14 a person alone; i = 15 tags as a string, 16 as an object,
+      // 17 no metadata at all (each no array, so an orphan); i = 27 topics a reader does not see (blank, null) and 30
+      // eleven null tags (each an orphan, 30 not over-tagged); the other multiples of 3 tagged by topic. i = 28's
+      // content is characters a preview drops alone (zero-width joiners, a word joiner, NEL, SOH): empty. Content: i = 11,
+      // 18 and 26 whitespace only (ASCII's with a carriage return and a form feed; a no-break space and a vertical
+      // tab; an em space, an ideographic space and a zero-width space), 12 text a markdown bullet must not keep (a
+      // bell, an escape, an Arabic letter mark, a right-to-left override, a zero-width space, an isolate, a byte-order
+      // mark and an 8-bit escape introducer among it), 13, 19 and 20 over 20,000 characters, 21 exactly 20,000 once
+      // trimmed of its trailing spaces, 22 cut at 120 with brackets the preview drops, 23 exactly 120 characters,
+      // uncut. The newest hundred's plain rows (89) get their fingerprint; a raw insert leaves the rest NULL.
+      await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at)
+        SELECT CASE WHEN i = 11 THEN E'  \\t \\n ' || chr(13) || chr(12) WHEN i = 18 THEN chr(160) || chr(11)
+                    WHEN i = 26 THEN chr(8195) || chr(12288) || chr(8203)
+                    WHEN i = 28 THEN chr(8204) || chr(8205) || chr(8288) || chr(133) || chr(1)
+                    WHEN i = 12 THEN E'[26] row 12 with \`code\`, [a link](x) and <!-- a comment -->\\n\\tthen  a' || chr(7) || chr(27) || chr(1564) || chr(8238) || chr(8203) || chr(8294) || chr(65279) || chr(155) || E' second line  '
+                    WHEN i = 13 THEN repeat('x', 25000) WHEN i IN (19, 20) THEN repeat('y', 21000)
+                    WHEN i = 21 THEN repeat('w', 20000) || repeat(' ', 20) WHEN i = 22 THEN repeat('[', 10) || repeat('q', 200)
+                    WHEN i = 23 THEN repeat('v', 120) ELSE '[26] row ' || i END,
+               CASE WHEN i BETWEEN 101 AND 116 OR i = 2050 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 11) j))
+                    WHEN i = 24 THEN jsonb_build_object('tags', (SELECT jsonb_agg('t' || j) FROM generate_series(1, 10) j))
+                    WHEN i = 27 THEN '{"topics": ["", null, "  "]}'::jsonb
+                    WHEN i = 30 THEN jsonb_build_object('tags', (SELECT jsonb_agg(NULL::text) FROM generate_series(1, 11) j))
+                    WHEN i = 14 THEN '{"people": ["Ada"]}'::jsonb WHEN i = 15 THEN '{"tags": "a,b,c"}'::jsonb
+                    WHEN i = 16 THEN '{"tags": {"x": 1}}'::jsonb WHEN i = 17 THEN NULL
+                    WHEN i % 3 = 0 THEN '{"topics": ["b"]}'::jsonb ELSE '{}'::jsonb END,
                now() - (i || ' seconds')::interval
-        FROM generate_series(1, ${N}) i`);
-      // The tolerated absence, before the graph schema lands: a brain without `schemas/entity-extraction` — the README's
-      // optional case — is Tier 2's "absent", exit 0 and a report naming the two tables; 016's `thought_entities` is here,
-      // so it is not among them, and the 210 rows at importance ≥ 4 are all unlinked. A rule that refused everything
-      // aborted here with 42P01 and passed every other assertion (review pass 5, mutant). Outside the env-file guard,
-      // as the probe is: the URL rides in the environment and Tier 2 reads no key (review pass 6, cold read).
-      const absentRun = await lint({ SUPABASE_URL: URL_ }, "--tier=2", `--report=${join(lintDir, "absent.md")}`);
-      let absentReport = "";
-      try { absentReport = readFileSync(join(lintDir, "absent.md"), "utf8"); } catch { /* not written: the assertion says so */ }
-      assert(absentRun.code === 0 && /\[tier 2\] done — 210 high-imp isolated, 0 isolated entities, missing: entities,edges$/m.test(absentRun.out) && /\*Graph tables absent: entities, edges\./.test(absentReport),
-        `…Tier 2 on a brain without entity-extraction: exit 0, the two tables named absent and 016's thought_entities not among them, 210 unlinked high-importance rows (${absentRun.code}: ${tierLines(absentRun.out) || firstLine(absentRun.out)})`);
-      await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "entity-extraction/schema.sql"), "utf8"));
-      await sql.unsafe(readFileSync(join(RECIPES, "lint-sweep/views.sql"), "utf8"));
-      await sql`INSERT INTO entities (entity_type, canonical_name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
-      await sql`INSERT INTO edges (from_entity_id, to_entity_id, relation) SELECT a.id, b.id, 'related_to' FROM entities a, entities b WHERE a.normalized_name = 'ada' AND b.normalized_name = 'bob'`;
-      await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Ada', 'ada')`;
-      await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) SELECT t.id, e.id, 0.9, 'test-live' FROM thoughts t, ob1_entities e WHERE t.content = 'lint row 4' AND e.normalized_name = 'ada'`;
-      const [truth] = (await sql`SELECT count(*)::int AS total,
-        count(*) FILTER (WHERE COALESCE(jsonb_array_length(metadata->'tags'), 0) = 0 AND COALESCE(jsonb_array_length(metadata->'topics'), 0) = 0 AND COALESCE(jsonb_array_length(metadata->'people'), 0) = 0)::int AS orphans,
-        count(*) FILTER (WHERE importance <= 2 AND length(content) < 40)::int AS low,
-        count(*) FILTER (WHERE importance >= 4)::int AS hi,
-        count(*) FILTER (WHERE content_fingerprint IS NULL)::int AS nofp FROM thoughts`) as { total: number; orphans: number; low: number; hi: number; nofp: number }[];
-      assert(truth.total === N && truth.orphans === 699 && truth.low === 630 && truth.hi === 210 && truth.nofp === N,
-        `the planted table: ${N} rows, 699 orphans by tag, 630 low-signal, 210 at importance ≥ 4, no fingerprint on a raw insert (${JSON.stringify(truth)})`);
+          FROM generate_series(1, 2100) i`);
+      await sql.unsafe(`INSERT INTO thoughts (content, created_at) SELECT '[26] undated ' || k, NULL FROM generate_series(1, 3) k`);
+      await sql.unsafe(`INSERT INTO thoughts (content, created_at) VALUES ('[26] infinitely new', 'infinity'), ('[26] infinitely old', '-infinity')`);
+      await sql.unsafe(`UPDATE thoughts SET content_fingerprint = content_fingerprint_of(content) WHERE content IN (SELECT '[26] row ' || i FROM generate_series(1, 100) i)`);
+      // Three entities, an edge between two, the newest ten thoughts mentioning one: the third entity has no edge.
+      await sql`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('person', 'Ada', 'ada'), ('person', 'Bob', 'bob'), ('topic', 'Graphs', 'graphs')`;
+      await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key)
+        SELECT t.id, e.id, 0.9, 'test-live' FROM thoughts t, ob1_entities e WHERE e.normalized_name = 'ada' AND t.content IN (SELECT '[26] row ' || i FROM generate_series(1, 10) i)`;
+      await sql`INSERT INTO ob1_entity_edges (thought_id, from_entity_id, to_entity_id, relation, confidence, extraction_key)
+        SELECT t.id, a.id, b.id, 'related_to', 0.5, 'test-live' FROM thoughts t, ob1_entities a, ob1_entities b
+         WHERE t.content = '[26] row 1' AND a.normalized_name = 'ada' AND b.normalized_name = 'bob'`;
+      const [planted] = (await sql`SELECT (SELECT count(*) FROM thoughts)::int AS t, (SELECT count(*) FROM thoughts WHERE content_fingerprint IS NULL)::int AS nofp,
+        (SELECT count(*) FROM thought_entities)::int AS m, (SELECT count(*) FROM ob1_entity_edges)::int AS e`) as { t: number; nofp: number; m: number; e: number }[];
+      const mentionedIds = ((await sql`SELECT t.id::text AS id FROM thoughts t JOIN thought_entities te ON te.thought_id = t.id`) as { id: string }[]).map((r) => r.id);
+      const newestOverTagged = ((await sql`SELECT id::text AS id FROM thoughts WHERE content IN (SELECT '[26] row ' || i FROM generate_series(101, 115) i)`) as { id: string }[]).map((r) => r.id).sort();
+      const [{ row12Date }] = (await sql`SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS "row12Date" FROM thoughts WHERE content LIKE '[26] row 12 %'`) as { row12Date: string }[];
+      assert(planted.t === 2105 && planted.nofp === 2016 && planted.m === 10 && planted.e === 1, `the planted brain: 2,105 thoughts, 2,016 with no fingerprint, 10 mentions, 1 edge (${JSON.stringify(planted)})`);
 
-      // Every tier, no key in the environment: each count the run prints and the report carries is the table's.
-      if (recipeEnvFile) {
-        for (const label of ["lint-sweep.js --tier=all on the shim", "…its report", "…OPEN_BRAIN_URL alone", "…no URL and a Supabase URL refused"]) skip(label, `${recipeEnvFile.slice(CONTRIB_DIR.length + 1)} exists on this machine and the script reads it`);
+      // Both tiers, as deployed. Of the newest 2,000 dated: 657 tagged by topic, 17 by tags (16 over-tagged) and one
+      // by a person, so 1,325 orphans; 4 empty; 3 very long. Of the newest 500, 490 with no mention; of 3 entities, 1
+      // with no edge.
+      const report = join(scratch, "sweep.md");
+      const both = await lint({ DATABASE_URL: URL_ }, "--report", report);
+      const text = read(report);
+      assert(both.code === 0
+             && both.stdout.includes("[tier 1] 2105 thoughts, 2016 without a fingerprint, 5 undated; of the newest 2000: 1325 orphans by tag, 16 over-tagged, 4 empty, 3 very long")
+             && both.stdout.includes("[tier 2] of the newest 500: 490 with no entity mention; 1 of 3 entities with no edge")
+             && both.stdout.includes("[lint-sweep] database ") && both.stdout.includes(`[lint-sweep] report written: ${report}`)
+             && existsSync(report) && modeOf(report) === "600",
+        `bun db/lint-sweep.ts, DATABASE_URL alone: exit 0, Tier 1's seven counts and Tier 2's three the planted table's, the report 0600 (exit ${both.code}: ${both.stdout.split("\n").filter((l) => /^\[tier/.test(l)).join(" | ") || both.stderr.split("\n")[0]})`);
+      const overLines = text.split("\n").filter((l) => /^  - [0-9a-f-]{36} → 11 tags$/.test(l));
+      assert(/^---\ntitle: Lint Sweep — \d{4}-\d\d-\d\d\ndatabase: \S+\ntier: all\nstarted_at: \d{4}-\d\d-\d\dT[\d:.]+Z\nfinished_at: \d{4}-\d\d-\d\dT[\d:.]+Z\n---\n/.test(text)
+             && /^- \*\*Tier 1\*\* — .*\*\*2000 newest dated thoughts\*\*/m.test(text) && /^- \*\*Tier 2\*\* — .*\*\*500 newest dated thoughts\*\*/m.test(text) && /\*\*Safety:\*\* every finding/.test(text)
+             && /Total thoughts \(exact\): \*\*2105\*\*/.test(text) && /No content_fingerprint \(exact\): \*\*2016\*\*/.test(text) && /No created_at, or an infinite one \(exact\): \*\*5\*\*/.test(text)
+             && /Orphans by tag \(no topics, tags or people; newest 2000\): \*\*1325\*\* — pages/.test(text) && /Over-tagged \(more than 10 tags; newest 2000\): \*\*16\*\*/.test(text)
+             && overLines.length === 15 && /^  - …and 1 more$/m.test(text.split("## Tier 2")[0] ?? "")
+             && overLines.map((l) => l.slice(4, 40)).sort().join(",") === newestOverTagged.join(",")
+             && /Empty content \(newest 2000\): \*\*4\*\*/.test(text) && /Very long content \(over 20,000 characters once trimmed; newest 2000\): \*\*3\*\*/.test(text)
+             && /Thoughts no entity mention names \(newest 500\): \*\*490\*\* — .*failed on them/.test(text) && /^  - …and 475 more$/m.test(text)
+             && /Entities with no edge either way \(exact, of 3\): \*\*1\*\*/.test(text) && /not ported yet \(SMD-3318 PR 2b/.test(text),
+        `…the report carries its frontmatter, scope and safety lines, the counts, the 15 newest of the 16 over-tagged and the last counted, 15 of the 490 unmentioned and the rest counted (${overLines.length} over-tagged lines; ${text.length} chars)`);
+      const listed = text.split("## Tier 2")[1] ?? "";
+      const row12 = /^  - [0-9a-f-]{36} \(\d{4}-\d\d-\d\d\) — 26 row 12 .*$/m.exec(listed)?.[0] ?? "";
+      assert(mentionedIds.length === 10 && mentionedIds.every((id) => !listed.includes(id))
+             && / — 26 row 12 with code, a link\(x\) and !-- a comment -- then a second line$/.test(row12) && row12.includes(` (${row12Date}) — `)
+             && new RegExp(`^  - [0-9a-f-]{36} \\(\\d{4}-\\d\\d-\\d\\d\\) — ${"x".repeat(120)}…$`, "m").test(listed) && !/undated|\(null\)/.test(listed)
+             && new RegExp(`^  - [0-9a-f-]{36} \\(\\d{4}-\\d\\d-\\d\\d\\) — ${"q".repeat(110)}…$`, "m").test(listed)
+             && new RegExp(`^  - [0-9a-f-]{36} \\(\\d{4}-\\d\\d-\\d\\d\\) — ${"v".repeat(120)}$`, "m").test(listed),
+        `…the unmentioned list leaves out the ten mentioned and the undated; row 12's date its created_at's in UTC, its preview one line with no backtick, bracket, angle bracket, control or doubled space; row 13's 120 characters and the mark of a cut, row 22's mark though its preview is shorter, row 23's none (${row12.slice(0, 120) || "no row 12"})`);
+
+      // One tier: its section alone. Before --tier 2, the 26th to 500th newest dated (i = 26-500) mentioned too: of the
+      // newest 500, i = 11-25 unmentioned, all 15 listed, and no line for more.
+      const oneReport = join(scratch, "one.md");
+      const one = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--report", oneReport);
+      await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key)
+        SELECT t.id, e.id, 0.9, 'test-live' FROM ob1_entities e, (SELECT id FROM thoughts WHERE created_at > '-infinity' AND created_at < 'infinity' ORDER BY created_at DESC OFFSET 25 LIMIT 475) t WHERE e.normalized_name = 'ada'`;
+      const twoReport = join(scratch, "two.md");
+      const two = await lint({ DATABASE_URL: URL_ }, "--tier", "2", "--report", twoReport);
+      const twoText = read(twoReport);
+      assert(one.code === 0 && /## Tier 1 — thoughts/.test(read(oneReport)) && !/## Tier 2/.test(read(oneReport)) && !/\[tier 2\]/.test(one.stdout)
+             && two.code === 0 && /## Tier 2 — the entity graph/.test(twoText) && !/## Tier 1/.test(twoText) && !/\[tier 1\]/.test(two.stdout)
+             && /Thoughts no entity mention names \(newest 500\): \*\*15\*\*/.test(twoText) && twoText.split("\n").filter((l) => /^  - [0-9a-f-]{36} \(/.test(l)).length === 15 && !/…and/.test(twoText),
+        `…--tier 1 and --tier 2: each tier's section alone; 15 unmentioned, all listed, no line for more (exit ${one.code}, ${two.code})`);
+
+      // The report's path: an existing report, 0644, replaced 0600; a symlink there replaced, its target untouched; a
+      // directory made 0700; `~` from HOME; no --report, ./lint-report-<UTC date>.md in the working directory.
+      const old = join(scratch, "old.md");
+      writeFileSync(old, "an older report\n", { mode: 0o644 });
+      const target = join(scratch, "target.txt");
+      writeFileSync(target, "not a report\n", { mode: 0o644 });
+      const linked = join(scratch, "linked.md");
+      symlinkSync(target, linked);
+      const nested = join(scratch, "new", "a", "r.md");
+      const homeDir = join(scratch, "home");
+      mkdirSync(homeDir);
+      const defaultsDir = join(scratch, "defaults");
+      mkdirSync(defaultsDir);
+      // One over-tagged thought fewer: 15, all listed, and no line for more.
+      await sql`UPDATE thoughts SET metadata = '{}'::jsonb WHERE content = '[26] row 116'`;
+      const replaced = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--report", old);
+      const throughLink = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--report", linked);
+      const deep = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--report", nested);
+      const home = await lint({ DATABASE_URL: URL_, HOME: homeDir }, "--tier", "1", "--report", "~/home.md");
+      const plain = await lintIn(defaultsDir, { DATABASE_URL: URL_ }, "--tier", "1");
+      const defaults = readdirSync(defaultsDir);
+      // A rename that fails (onto a directory, which reportPath refuses before any read) throws and leaves no temporary file.
+      const blocked = join(scratch, "blocked");
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, "inside"), "");
+      let renameThrew = false;
+      try { writeLintReport(blocked, "a report\n"); } catch { renameThrew = true; }
+      const tmpLeft = readdirSync(scratch).filter((f) => f.endsWith(".tmp"));
+      assert(replaced.code === 0 && modeOf(old) === "600" && /Over-tagged \(more than 10 tags; newest 2000\): \*\*15\*\*/.test(read(old)) && !/…and/.test(read(old))
+             && throughLink.code === 0 && !statSync(linked).isSymbolicLink() && read(target) === "not a report\n" && modeOf(target) === "644"
+             && deep.code === 0 && modeOf(join(scratch, "new")) === "700" && existsSync(nested)
+             && home.code === 0 && existsSync(join(homeDir, "home.md"))
+             && plain.code === 0 && defaults.length === 1 && /^lint-report-\d{4}-\d\d-\d\d\.md$/.test(defaults[0] ?? "")
+             && renameThrew && tmpLeft.length === 0 && readdirSync(blocked).join(" ") === "inside",
+        `…the report's path: an older 0644 report replaced 0600 (15 over-tagged, all listed, no line for more), a symlink replaced and its target untouched, a new directory 0700, ~ from HOME, the default name in the working directory; a failed rename throws and leaves no temporary file (${[replaced, throughLink, deep, home, plain].map((r) => r.code).join(" ")}; ${modeOf(old)} ${modeOf(target)}; ${defaults.join(" ")}; threw ${renameThrew}, ${tmpLeft.join(" ") || "no .tmp"})`);
+
+      // A report that cannot be written — a directory the run may not write — fails after the reads: exit 1. Skipped as
+      // root, whom the mode does not stop.
+      if (process.getuid?.() === 0) {
+        skip("…a report the run cannot write: exit 1", "running as root, whom a directory's mode does not stop");
       } else {
-      const sweep = await lint({ SUPABASE_URL: URL_ }, "--tier=all", `--report=${join(lintDir, "sweep.md")}`);
-      let report = "";
-      try { report = readFileSync(join(lintDir, "sweep.md"), "utf8"); } catch { /* not written: the assertion says so */ }
-      assert(sweep.code === 0 && sweep.out.includes(`[tier 1] done — ${N} total thoughts, 699 orphans-by-tag, 0 dup groups, ${N} missing-fingerprint`) && sweep.out.includes("[tier 2] done — 209 high-imp isolated, 1 isolated entities") && sweep.out.includes("[tier 3] skipped — OPENROUTER_API_KEY not set"),
-        `lint-sweep.js --tier=all on the shim, SUPABASE_URL alone: Tier 1's four counts are the table's, Tier 2 finds the 209 unlinked high-importance rows and the one entity without an edge, Tier 3 skips without a key (exit ${sweep.code}: ${tierLines(sweep.out).slice(0, 320) || firstLine(sweep.out)})`);
-      // The `created_at desc` clause holds the report's wording: the query's direction is not observable here — 1,050 rows
-      // fit inside one 2,000-row sample, so no count moves when it flips (review pass 3, mutant).
-      assert(/Total thoughts in table \(exact count, uncapped\): 1050\n/.test(report) && /Low-signal noise candidates \(in recent 2000 sampled\): 630\n/.test(report) && /Over-tagged \(>10 tags\): \*\*1\*\*/.test(report) && /ordered by `created_at desc`/.test(report) && /Entities with zero edges .*: \*\*1\*\*/.test(report),
-        `…and the report carries the exact count, the 630 low-signal rows, the one over-tagged row, recency by created_at and the one isolated entity (${report.length} chars)`);
-      const legacy = await lint({ OPEN_BRAIN_URL: URL_ }, "--tier=1", `--report=${join(lintDir, "legacy.md")}`);
-      assert(legacy.code === 0 && legacy.out.includes(`[tier 1] done — ${N} total thoughts`) && /OPEN_BRAIN_URL is deprecated; prefer SUPABASE_URL/.test(legacy.out),
-        `…OPEN_BRAIN_URL alone runs the same sweep, with the deprecation line (exit ${legacy.code})`);
-      // Refused before any query, the message intact on stderr.
-      const noUrl = await lint({}, "--tier=1");
-      const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
-      assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL, got a "https:" URL/.test(httpsUrl.out) && !httpsUrl.out.includes("example.supabase.co") && !/\[tier 1\] done/.test(httpsUrl.out),
-        `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal naming its scheme alone, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+        const shut = join(scratch, "shut");
+        mkdirSync(shut, { mode: 0o500 });
+        const unwritable = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--report", join(shut, "r.md"));
+        chmodSync(shut, 0o700);
+        assert(unwritable.code === 1 && /lint-sweep FAILED writing .*shut\/r\.md: .*EACCES/.test(unwritable.stderr) && readdirSync(shut).length === 0,
+          `…a report the run cannot write: exit 1 after the reads, nothing left in the directory (exit ${unwritable.code}: ${unwritable.stderr.split("\n")[0]})`);
       }
 
-      // A graph table the role may not read is a refusal, not an absence: with SELECT on `thoughts` alone, Tier 2 exits 1
-      // naming 42501 on `entities`, where it had called the three tables absent and exited 0 with a report (review pass 4,
-      // run-it — both readers, from a denied role and from the README's promise). A LOGIN role, so [18]'s two guards:
-      // skipped where the connection cannot create one or carries no credentials to swap. Outside the env-file guard:
-      // the URL rides in the environment, which the script prefers over its files, and Tier 2 reads no key (review
-      // pass 5, cold read — inside the guard it was dropped silently on a machine with such a file).
-      const PROBE_ROLE = "ob1_live_lint_probe";
+      // A statement past --statement-timeout: with thoughts held by another session, the run fails 57014 in about a
+      // second and writes no report (the hold let go after 15 s whatever happens, so an unbounded run exits 0 and fails
+      // the row).
+      const holder = new SQL({ url: URL_, max: 1 });
+      let release = () => {};
+      const held = new Promise<void>((r) => (release = r));
+      let locked = () => {};
+      const taken = new Promise<void>((r) => (locked = r));
+      const safety = setTimeout(() => release(), 15_000);
+      const holding = holder.begin(async (tx) => { await tx`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`; locked(); await held; });
+      await taken;
+      const t0 = performance.now();
+      const boundReport = join(scratch, "bound.md");
+      const bound = await lint({ DATABASE_URL: URL_ }, "--statement-timeout", "1", "--report", boundReport).finally(() => { clearTimeout(safety); release(); });
+      const boundMs = Math.round(performance.now() - t0);
+      await holding;
+      await holder.close();
+      assert(bound.code === 1 && /lint-sweep FAILED — locking thoughts, thought_entities, ob1_entities, ob1_entity_edges: 57014 canceling statement due to statement timeout\. No report was written\./.test(bound.stderr) && boundMs >= 900 && boundMs < 5_000 && !existsSync(boundReport),
+        `…--statement-timeout 1 with thoughts held by another session: exit 1, 57014 in ${boundMs} ms, no report (exit ${bound.code}: ${bound.stderr.split("\n")[0]})`);
+
+      // A lock the table lock does not cover: a REINDEX held open takes SHARE on thoughts (granted beside the run's
+      // ACCESS SHARE) and ACCESS EXCLUSIVE on the index, which the whole-table count's planner waits for, its statement
+      // unbounded; lock_timeout, the same bound, fails it with 55P03 in about a second (the hold let go after 15 s).
+      {
+        const reindexer = new SQL({ url: URL_, max: 1 });
+        let letGo = () => {};
+        const hold = new Promise<void>((r) => (letGo = r));
+        let indexed = () => {};
+        const reindexed = new Promise<void>((r) => (indexed = r));
+        const safety2 = setTimeout(() => letGo(), 15_000);
+        const reindexing = reindexer.begin(async (tx) => { await tx`REINDEX INDEX thoughts_pkey`; indexed(); await hold; });
+        await reindexed;
+        const t1 = performance.now();
+        const indexReport = join(scratch, "index.md");
+        const index = await lint({ DATABASE_URL: URL_ }, "--tier", "1", "--statement-timeout", "1", "--report", indexReport).finally(() => { clearTimeout(safety2); letGo(); });
+        const indexMs = Math.round(performance.now() - t1);
+        await reindexing;
+        await reindexer.close();
+        assert(index.code === 1 && /lint-sweep FAILED — tier 1: 55P03 canceling statement due to lock timeout\. No report was written\./.test(index.stderr) && indexMs < 5_000 && !existsSync(indexReport),
+          `…a REINDEX of thoughts' primary key held by another session: the whole-table count fails 55P03 in ${indexMs} ms, its lock wait bounded though its statement is not (exit ${index.code}: ${index.stderr.split("\n")[0]})`);
+      }
+
+      // A table the role may not read: Tier 2 exits 1 naming 42501 on thought_entities at the lock and writes no
+      // report; Tier 1 alone runs on SELECT on thoughts. A role needs CREATE ROLE and credentials to swap, as in [50].
       const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
-      const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
-      if (probeUrl === URL_ || !mayCreateProbe) {
-        skip("…a role with SELECT on thoughts alone: Tier 2 refuses, not \"absent\"", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+      const [{ mayCreate }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+      if (probeUrl === URL_ || !mayCreate) {
+        const why = probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE";
+        skip("…a role with SELECT on thoughts alone: Tier 2 exits 1 and writes no report; Tier 1 runs", why);
       } else {
-        const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
         await dropProbe();
-        try {
-          await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
-          const denied = await lint({ SUPABASE_URL: probeUrl }, "--tier=2", `--report=${join(lintDir, "denied.md")}`);
-          assert(denied.code === 1 && /\[lint-sweep\] FAILED: entities → 42501 permission denied for table entities/.test(denied.out) && !/Graph tables absent|\[tier 2\] done/.test(denied.out) && !existsSync(join(lintDir, "denied.md")),
-            `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on entities and writes no report, rather than calling the three tables absent (${denied.code}: ${firstLine(denied.out.split("\n").filter((l) => /FAILED/.test(l)).join(" ") || denied.out)})`);
-        } finally {
-          await dropProbe();
-        }
+        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
+        const deniedReport = join(scratch, "denied.md");
+        const denied = await lint({ DATABASE_URL: probeUrl }, "--tier", "2", "--report", deniedReport);
+        const t1Only = await lint({ DATABASE_URL: probeUrl }, "--tier", "1", "--report", join(scratch, "t1-only.md"));
+        assert(denied.code === 1 && /lint-sweep FAILED — locking thoughts, thought_entities, ob1_entities, ob1_entity_edges: 42501 permission denied for table thought_entities\. No report was written\./.test(denied.stderr) && !existsSync(deniedReport)
+               && t1Only.code === 0 && existsSync(join(scratch, "t1-only.md")),
+          `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on thought_entities, no report; Tier 1 runs (${denied.code}: ${denied.stderr.split("\n")[0]}; tier 1 ${t1Only.code})`);
       }
+
+      // The refusals, exit 2 and no report: --tier 3 (PR 2b's) and 4, a removed flag (saying why), a --report climbing
+      // out of the working directory, naming a directory (before any read; `~` too) or too long for its temporary file,
+      // a --statement-timeout out of range, another database than the URL's (PGDATABASE). A name only starting with two
+      // dots is inside; an absolute path outside the working directory is taken as given (here with --url and no bound).
+      // A refused connection exits 1, naming the client's code.
+      const refusedDir = join(scratch, "refused");
+      mkdirSync(refusedDir);
+      const r = (extra: Record<string, string>, ...flags: string[]) => lintIn(refusedDir, extra, ...flags);
+      const three = await r({ DATABASE_URL: URL_ }, "--tier", "3");
+      const four = await r({ DATABASE_URL: URL_ }, "--tier", "4");
+      const removed = await r({ DATABASE_URL: URL_ }, "--max-llm-calls", "5");
+      const climb = await r({ DATABASE_URL: URL_ }, "--report", "../../climbed.md");
+      const dir = await r({ DATABASE_URL: URL_ }, "--report", refusedDir);
+      const other = await r({ DATABASE_URL: URL_, PGDATABASE: "template1" }, "--report", "other.md");
+      const dots = await r({ DATABASE_URL: URL_ }, "--tier", "1", "--report", "..dots.md");
+      const long = await r({ DATABASE_URL: URL_ }, "--report", `${"n".repeat(218)}.md`);
+      const tilde = await r({ DATABASE_URL: URL_, HOME: homeDir }, "--report", "~");
+      const negative = await r({ DATABASE_URL: URL_ }, "--statement-timeout", "-1");
+      const huge = await r({ DATABASE_URL: URL_ }, "--statement-timeout", "2147484");
+      const refused = await r({ DATABASE_URL: "postgres://ob1@127.0.0.1:1/ob1" }, "--tier", "1");
+      const absReport = join(scratch, "abs.md");
+      const abs = await r({}, "--url", URL_, "--tier", "1", "--statement-timeout", "0", "--report", absReport);
+      const left = readdirSync(refusedDir);
+      assert(three.code === 2 && /--tier 3 is not ported yet/.test(three.stderr) && four.code === 2 && /--tier must be 1, 2 or all/.test(four.stderr)
+             && removed.code === 2 && /^--max-llm-calls was Tier 3's model calls, and is removed/m.test(removed.stderr) && climb.code === 2 && /climbs out of the working directory/.test(climb.stderr)
+             && dir.code === 2 && /is a directory/.test(dir.stderr) && !/\[lint-sweep\] database/.test(dir.stdout)
+             && other.code === 2 && /lint-sweep refused — the connection reached database "template1"/.test(other.stderr)
+             && dots.code === 0 && left.join(" ") === "..dots.md" && long.code === 2 && /longer than 220 bytes/.test(long.stderr)
+             && tilde.code === 2 && /--report ~ is a directory/.test(tilde.stderr)
+             && negative.code === 2 && /statement-timeout/.test(negative.stderr) && huge.code === 2 && /statement-timeout/.test(huge.stderr)
+             && abs.code === 0 && existsSync(absReport)
+             && refused.code === 1 && /lint-sweep FAILED — ERR_POSTGRES_CONNECTION_REFUSED /.test(refused.stderr),
+        `…--tier 3 and 4, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0; a refused connection exit 1 naming the client's code (${[three, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs, refused].map((x) => x.code).join(" ")}; ${left.join(" ")}; ${refused.stderr.split("\n")[0]})`);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
       await sql`DELETE FROM thoughts`;
       await sql`DELETE FROM ob1_entities`;
-      const after26 = await catalog26();
-      for (const v of after26.views) if (!before26.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
-      for (const t of after26.tables) if (!before26.tables.has(t)) await sql.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
-      for (const f of after26.fns) if (!before26.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+      await dropProbe();
       await sql.close();
     }
   })();
@@ -22648,7 +22769,7 @@ if (want("29")) {
   // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
   // class's first writers — driven as deployed: `bun <file>` in a directory
   // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
-  // this database carrying enhanced-thoughts ([18] and [26] left the columns;
+  // this database carrying enhanced-thoughts ([18] left the columns;
   // the file is idempotent). The planted table is the truth every printed
   // count is held to, and a snapshot of every row's content, fingerprint and
   // model label is what the writes are held away from. The enrichment's model
@@ -32647,7 +32768,7 @@ if (want("50")) {
       }
 
       // A table the role may not read: exit 1 naming it, nothing written, the date's earlier file untouched; with SELECT
-      // on the four, the same role's run succeeds. [26]'s guards: a role needs CREATE ROLE and credentials to swap.
+      // on the four, the same role's run succeeds. A role needs CREATE ROLE and credentials to swap, as in [26].
       const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
       const [{ mayCreate }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
       if (probeUrl === URL_ || !mayCreate) {

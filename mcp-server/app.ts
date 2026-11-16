@@ -331,6 +331,8 @@ const WORDS: Record<ToolName, Words> = {
   capture_thought: { render: (o) => say.renderCapture(o), fault: (err) => say.storeUnavailable(err) },
   update_thought: { render: (o) => say.renderUpdate(o), fault: writeFault("update_thought failed: ") },
   delete_thought: { render: (o) => say.renderDelete(o), fault: writeFault("delete_thought failed: ") },
+  // Forgetting (SMD-1723 PR 2, migrations 139 and 144).
+  forget_thought: { render: (o) => say.renderForget(o), fault: writeFault("forget_thought failed: ", say.forgetHint) },
   reset_capture_stamp: { render: (o) => say.renderResetCaptureStamp(o), fault: writeFault("reset_capture_stamp failed: ", say.resetHint) },
   append_thought_evidence: { render: (o) => say.renderAppendThoughtEvidence(o), fault: writeFault("append_thought_evidence failed: ") },
   review_supersession_proposal: { render: (o) => say.renderReviewProposal(o), fault: writeFault("review_supersession_proposal failed: ", say.reviewHint) },

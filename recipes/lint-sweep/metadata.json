@@ -1,26 +1,24 @@
 {
   "name": "Lint Sweep — bounded brain quality audit",
-  "description": "Weekly quality audit across three cost tiers: SQL-only lint (orphans, duplicates, low-signal noise), graph-based lint (isolated high-importance thoughts, orphan entities), and LLM-assisted contradiction sampling (budget-capped). Read-only — produces a markdown report, never mutates thoughts.",
+  "description": "Moved to db/ in Daemonic Brain (SMD-3318): tiers 1 and 2 of the read-only quality audit are db/lint-sweep.ts, over the core's thoughts and entity graph; Tier 3, a model's reading of sampled thoughts, follows in SMD-3318 PR 2b. The lint-sweep.js script is gone; views.sql stays the recipe's.",
   "category": "recipes",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": {
     "name": "Alan Shurafa",
     "github": "alanshurafa"
   },
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter (Tier 3 only)"],
+    "services": [],
     "tools": ["Bun 1.4+"],
     "env": {
-      "required": ["SUPABASE_URL"],
-      "optional": ["OPENROUTER_API_KEY"],
-      "legacy_aliases": { "OPEN_BRAIN_URL": "SUPABASE_URL" },
-      "ignored": ["SUPABASE_SERVICE_ROLE_KEY", "OPEN_BRAIN_SERVICE_KEY"]
+      "required": [],
+      "optional": ["DATABASE_URL"]
     }
   },
-  "tags": ["quality", "audit", "maintenance", "contradictions", "orphans", "staleness"],
+  "tags": ["quality", "audit", "maintenance", "orphans", "retired"],
   "difficulty": "intermediate",
-  "estimated_time": "30 minutes",
+  "estimated_time": "10 minutes",
   "created": "2026-04-17",
-  "updated": "2026-04-17"
+  "updated": "2026-11-14"
 }
