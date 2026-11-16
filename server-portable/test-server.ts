@@ -5266,6 +5266,30 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
     `a retried hundredth entry found, not full; a null entry passed over; each answer's stamp; deleted under the read NOT_FOUND; a longer list at its count; busy 503 and the list's refusals 409 over REST (${JSON.stringify([retried, pastNull.ok, appendedStamp, goneUnder.ok ? "ok" : goneUnder.refusal.code])})`);
 }
 
+console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids among the values, the twins' wording, the hint for a brain without 144, and a malformed answer a fault (SMD-1723 PR 2)");
+{
+  const { renderForget, forgetHint } = await import("./render.ts");
+  const { normaliseForget } = await import("./store.ts");
+  const T = "00000000-0000-4000-8000-000000001723", I = "00000000-0000-4000-8000-0000000017a1", P = "00000000-0000-4000-8000-0000000017b1", TW = "00000000-0000-4000-8000-0000000017c1";
+  const evidence = { id: T, forgottenAt: "2026-11-16T00:00:00.000Z", gone: false, orphanEntities: 0, removed: { audit_events: 2 }, irreproducible: [], pages: [], twins: [] as string[], source: null, itemIds: [I], proposalIds: [P], outside: [] };
+  const plain = renderForget({ ok: true, value: evidence } as never);
+  const twinned = renderForget({ ok: true, value: { ...evidence, twins: [TW] } } as never);
+  const sc = plain.structuredContent as Record<string, unknown>;
+  assert(JSON.stringify(sc.itemIds) === JSON.stringify([I]) && JSON.stringify(sc.proposalIds) === JSON.stringify([P])
+      && /the same text is refused if captured again/.test(plain.content[0].text) && !/refused if captured again/.test(twinned.content[0].text)
+      && new RegExp(`lands on them rather than being refused: ${TW}`).test(twinned.content[0].text),
+    `the values carry the item and proposal ids; the text promises a refusal only when no twin keeps the text (${JSON.stringify({ itemIds: sc.itemIds, proposalIds: sc.proposalIds })})`);
+  const tableHint = forgetHint("permission denied for table thought_audit");
+  const fnHint = forgetHint("permission denied for function forget_thought");
+  assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
+    `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
+  const noWord = thrown({ ok: false });
+  const noTime = thrown({ ok: true, id: T, removed: {} });
+  assert(noWord !== "answered" && noTime !== "answered" && thrown({ ok: false, error: "NOT_FOUND", id: T }) === "answered",
+    `a refusal with no error word and an answer with no forgotten_at are faults, not NOT_FOUND or "at ." (${noWord} | ${noTime})`);
+}
+
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
 {
   const { keptStampKeys } = await import("./core/writes.ts");
@@ -5282,7 +5306,7 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
       && JSON.stringify(planted) === '[{"key":"actor_name","value":null,"present":true},{"key":"trust","value":null,"present":false}]',
     `the patch against the write's stamp: nothing for a patch naming no stamp key or a database that answered no stamp; the kept keys, an echo not among them; a non-string present, a null absent (${JSON.stringify({ none, kept, pre088, planted })})`);
   // Through the operation, on a store answering as 088 does — and as a database before it does.
-  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
+  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ textForgottenAt: async () => null, updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
   const principal = { name: "laptop", scope: "write", keyHash: "x" } as never;
   const lowered = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
   const echoed = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "x", metadata_patch: { trust: "agent" } } as never);

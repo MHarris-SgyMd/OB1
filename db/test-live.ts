@@ -19990,8 +19990,8 @@ if (want("18")) {
       const seqGrants: string[] = notSkipped.match(/ON SEQUENCE [^\s]+/g) ?? [];
       assert(!/openbrain_agents/.test(notSkipped) && !grantedSequences(["community"]).some((s) => seqGrants.includes(`ON SEQUENCE ${s}`))
              && JSON.stringify(seqGrants) === JSON.stringify(["ON SEQUENCE deliverable_events_seq_seq"])
-             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
+             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION forget_thought", "ON FUNCTION ob1_forget_leftovers", "ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence, 144's forget_thought and ob1_forget_leftovers, and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
 
       const failed: string[] = [];
       // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges)
