@@ -1021,16 +1021,28 @@ export class SqlStore implements ThoughtStore {
     }
   }
 
-  async deletedThoughtKeyed(key: string): Promise<string | null> {
-    if (!UUID_RE.test(key)) return null;
-    // The newest delete event whose previous metadata kept the key, of a thought not standing again.
+  async deletedThoughtsKeyed(key: string): Promise<string[]> {
+    if (!UUID_RE.test(key)) return [];
+    // Every thought a delete event's previous metadata kept the key for, not standing again, newest first. A scan of
+    // the delete events (no index on the path): only a forget asks, and only by a name (review pass 1 measured 0.5 s
+    // at a million deletes).
     const rows = await this.sql`
-      SELECT a.thought_id::text AS id FROM thought_audit a
+      SELECT a.thought_id::text AS id, max(a.created_at) AS at FROM thought_audit a
        WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${key.toLowerCase()}::text
          AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
-       ORDER BY a.created_at DESC LIMIT 1`;
-    const r = rows[0] as { id: string } | undefined;
-    return r ? String(r.id).toLowerCase() : null;
+       GROUP BY a.thought_id ORDER BY at DESC`;
+    return (rows as { id: string }[]).map((r) => String(r.id).toLowerCase());
+  }
+
+  async clientKeyOf(id: string): Promise<string | null> {
+    if (!UUID_RE.test(id)) return null;
+    const rows = await this.sql`
+      SELECT COALESCE(
+        (SELECT t.metadata->>'client_key' FROM thoughts t WHERE t.id = ${id}::uuid),
+        (SELECT a.diff->'previous_metadata'->>'client_key' FROM thought_audit a
+          WHERE a.thought_id = ${id}::uuid AND a.action = 'delete' ORDER BY a.created_at DESC LIMIT 1)) AS k`;
+    const k = (rows[0] as { k: string | null } | undefined)?.k;
+    return typeof k === "string" && UUID_RE.test(k) ? k.toLowerCase() : null;
   }
 
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {

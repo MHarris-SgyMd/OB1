@@ -2976,7 +2976,9 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     `a forget is copied by stable's id, its confirm that id, detach_citations kept, and forgets the canary's copy (${JSON.stringify(fCall?.args)})`);
   await post("delete_thought", { id: S(31) }, [{ type: "text", text: `Deleted ${S(31)}. Its previous content is preserved in the audit trail.` }]);
   const f2 = await post("forget_thought", { id: S(31), confirm: S(31) }, forgot(S(31)));
-  assert(f2.code === 0 && copy31 && forgottenIds.has(copy31) && !gone.has(copy31), `a forget of a copy deleted there before reaches it by the key its tombstone kept (${f2.err.trim().slice(0, 120)})`);
+  const f2Call = calls.filter((c) => c.name === "forget_thought").at(-1);
+  assert(f2.code === 0 && copy31 && forgottenIds.has(copy31) && !gone.has(copy31) && f2Call?.args.detach_citations === true,
+    `a forget of a copy deleted there before reaches it by the key its tombstone kept, its citations detached though the caller sent none (${f2.err.trim().slice(0, 120)})`);
   // Again: the copy forgotten keeps no key to resolve, so the canary answers NOT_FOUND, said as possibly forgotten there.
   const f3 = await post("forget_thought", { id: S(30), confirm: S(30) }, forgot(S(30)));
   // A thought the canary holds under stable's own id (a refresh copied it), forgotten there already: FORGOTTEN, done.
@@ -2990,6 +2992,28 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   await post("forget_thought", { id: S(33), confirm: S(33) }, [{ type: "text", text: `Refused: ${S(33)} was forgotten already, and nothing of it is left to remove.` }]);
   await post("forget_thought", { id: S(34), confirm: S(34) }, { content: [{ type: "text", text: "Refused: `confirm` must be the `id` again" }], structuredContent: { code: "REFUSED_CONFIRM" } });
   assert(calls.length === before, "a forget stable refused, its own FORGOTTEN or a wrong echo, is not copied");
+
+  // A forget drops the copies of its thought still queued — a capture held while the canary was away — so its text
+  // never lands there after the forget (review pass 1); the forget itself, queued, finds nothing there to forget.
+  away = true;
+  const c40 = await post("capture_thought", { content: "a secret captured while the canary is away, then forgotten" }, captured(S(40)));
+  const queuedCapture = queueIn().length;
+  const f6 = await post("forget_thought", { id: S(40), confirm: S(40) }, forgot(S(40)));
+  const afterForget = queueIn().map((f) => JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", f), "utf8")).tool);
+  away = false;
+  const drained40 = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(c40.code === 1 && queuedCapture === 1 && f6.code === 1 && JSON.stringify(afterForget) === '["forget_thought"]' && drained40.code === 0 && !queueIn().length
+      && !calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(40)) && new RegExp(`dropped 1 queued or given-up copy of ${S(40)}`).test(logOf(CANARY_ROOT)),
+    `a forget drops its thought's queued capture, the text never reaching the canary; the forget alone drains (${JSON.stringify(afterForget)})`);
+
+  // A thought that began on the canary, copied to stable under the canary's id as its key: stable's reply names that key,
+  // and the copy, which the canary does not know by stable's id, is sent again by it (review pass 1).
+  const K = uuid(7100);
+  thoughts.set(K, { key: null, content: "a thought the canary captured itself" });
+  const f7 = await post("forget_thought", { id: S(41), confirm: S(41) }, [{ type: "text", text: `Forgot ${S(41)}, its client_key ${K} at 2026-11-16T00:00:00.000Z.` }]);
+  const f7Calls = calls.filter((c) => c.name === "forget_thought").slice(-2).map((c) => `${c.args.id}/${c.args.confirm}`);
+  assert(f7.code === 0 && forgottenIds.has(K) && JSON.stringify(f7Calls) === JSON.stringify([`${S(41)}/${S(41)}`, `${K}/${K}`]),
+    `a forget the canary knows by the thought's own client_key alone is sent again by it, and lands (${JSON.stringify(f7Calls)})`);
 
   // A canary whose server has no forget_thought (before 144): the copy kept, the queue held behind it, the upgrade named;
   // it lands in order once the server has it.

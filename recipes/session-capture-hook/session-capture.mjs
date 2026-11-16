@@ -2586,9 +2586,18 @@ export function fanOutPlan(hook, brains) {
       : pick(input, ["id", "detach_citations"]);
     if (answered) args.id = answered;
     if (typeof args.id !== "string") return { skip: `${tool}'s input carried no id, so it is not copied` };
-    // A forget's echo (SMD-1723 PR 3): the name the copy sends, which each brain resolves on its own — the first
-    // brain's id, there the copy's client_key — so the echo is checked against what reaches that brain.
-    if (tool === "forget_thought") args.confirm = args.id;
+    if (tool === "forget_thought") {
+      // A forget's echo (SMD-1723 PR 3): the name the copy sends, which each brain resolves on its own — the first
+      // brain's id, there the copy's client_key — so the echo is checked against what reaches that brain.
+      args.confirm = args.id;
+      // Its citations there go with it: the person chose to forget on the first brain, and a citation on another is a
+      // copy of the text (the maintainer, review pass 1: a copy refused CITED was given up, the text left there).
+      args.detach_citations = true;
+      // The thought's own client_key, as the reply names it: where the receiving brain knows the thought by that key
+      // alone — the thought began there, its id its own — the copy is sent again by it (review pass 1).
+      const ownName = new RegExp(`\\bclient_key (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
+      if (ownName && ownName !== args.id) return { source, targets, op: { tool, args, alt: ownName, from: source.name, session: typeof hook.session_id === "string" ? hook.session_id : null, at: new Date().toISOString() } };
+    }
     if (tool === "update_thought" && Object.keys(args).length === 1) return { skip: `update_thought of ${args.id} changed nothing a copy carries, so it is not copied` };
   }
   return { source, targets, op: { tool, args, from: source.name, session: typeof hook.session_id === "string" ? hook.session_id : null, at: new Date().toISOString() } };
@@ -2602,6 +2611,28 @@ export function enqueueWrite(op) {
   writeFileSync(tmp, JSON.stringify(op), { mode: 0o600 });
   renameSync(tmp, join(WRITES_PENDING(), name));
   return name;
+}
+
+/**
+ * Removes the current brain's queued and given-up copies that carry a thought by one of `names` — a capture keyed so,
+ * an edit or a delete of it — and returns how many (SMD-1723 PR 3). A drain holding one reads it gone and moves on; a
+ * forget's own copies stay.
+ */
+export function dropCopiesOf(names) {
+  const want = new Set(names.map((n) => String(n).toLowerCase()));
+  let n = 0;
+  for (const dir of [WRITES_PENDING(), WRITES_DEAD()]) {
+    let files = [];
+    try { files = readdirSync(dir).filter((f) => f.endsWith(".json") && !f.startsWith(".")); } catch { continue; }
+    for (const f of files) {
+      let op;
+      try { op = JSON.parse(readFileSync(join(dir, f), "utf8")); } catch { continue; }
+      if (op?.tool === "forget_thought") continue;
+      const named = [op?.args?.client_key, op?.args?.id].filter((x) => typeof x === "string").map((x) => x.toLowerCase());
+      if (named.some((x) => want.has(x))) { try { unlinkSync(join(dir, f)); n++; } catch { /* gone: a drain took it */ } }
+    }
+  }
+  return n;
 }
 
 /** The current brain's queued copies, oldest first. */
@@ -2699,6 +2730,12 @@ export async function postWrite(cfg, op) {
     // — kept, it would hold the queue for ever behind the wrong advice (review pass 1).
     if ((SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) || v.code === "REFUSED_CLIENT_KEY_SCOPE") return { keep: true, line: `kept: ${opLabel(op)} — the write key cannot ${v.code === "REFUSED_CLIENT_KEY_SCOPE" ? "send a client_key (a capture key)" : `call ${op.tool}`}; mint a write key on this brain (bun server-portable/keygen.ts --name claude-code --scope write) and set write_key — --check says` };
     // A forget's: or forgotten there already, by a copy whose answer was lost — a forgotten copy keeps no key to resolve (SMD-1723 PR 3).
+    // A forget the brain knows by the thought's own client_key alone (the thought began there): sent again by it.
+    if (op.tool === "forget_thought" && v.code === "NOT_FOUND" && op.alt && args.id !== op.alt) {
+      args.id = op.alt; args.confirm = op.alt;
+      dropped.push(`its id, sent again by its client_key ${op.alt}`);
+      continue;
+    }
     if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${op.tool === "forget_thought" ? ", or forgotten there already" : ""}${note}` };
     // A fault (FAILED: the REST core away behind the MCP server, the store
     // restarting, a busy registry) carries no `retryable`, which verdictOf reads
@@ -2836,7 +2873,18 @@ async function fanOutHook(hook, brains) {
       if (plan.skip) { useStateRoot(brains[0].root); log(`fan-out: ${plan.skip}`); }
       return 0;
     }
-    for (const t of plan.targets) { useStateRoot(t.root); enqueueWrite(plan.op); log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`); }
+    for (const t of plan.targets) {
+      useStateRoot(t.root);
+      // A forget drops the copies still queued, or given up, that carry the thought: they hold its text, and one landing
+      // after the forget was made would put it back there (review pass 1). The forget itself is queued all the same, a
+      // copy having maybe landed already.
+      if (plan.op.tool === "forget_thought") {
+        const dropped = dropCopiesOf([plan.op.args.id, plan.op.alt].filter(Boolean));
+        if (dropped) log(`fan-out: dropped ${dropped} queued or given-up cop${dropped === 1 ? "y" : "ies"} of ${plan.op.args.id}, which a forget follows`);
+      }
+      enqueueWrite(plan.op);
+      log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`);
+    }
     let code = 0;
     for (const t of plan.targets) code = Math.max(code, await startDrain(t, `[${t.name}] `));
     return sync ? code : 0;

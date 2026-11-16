@@ -78,7 +78,7 @@ const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest|notBefore)$/;
-const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Ids?$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey|clientKey)$|Ids?$/;
 /** A sha256 in hex, as forget_thought's evidence names the record a thought was ingested as (139): no sentence fits. */
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -1947,9 +1947,10 @@ const removedText = (removed: Record<string, number>): string => {
 export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
   return render(o, (v) => {
     const lines = [
-      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
+      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : v.clientKey ? `, its client_key ${v.clientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
       `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
     ];
+    if (v.alsoForgotten?.length) lines.push(`Also forgotten here, the same thought under that name (a copy deleted before, or one keeping it as its client_key): ${v.alsoForgotten.join(", ")}.`);
     if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync, until an operator reinstates it.`);
     if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
     if (v.pages.length) lines.push(`Pages to review — an earlier render may hold its text: ${v.pages.join(", ")}.`);
@@ -1957,7 +1958,8 @@ export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
     if (v.outside.length) lines.push(`Outside the brain's reach: ${v.outside.join("; ")}.`);
     return lines.join("\n");
   }, forgetRefusal, (v) => ({
-    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), ...(v.clientKey ? { clientKey: v.clientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    ...(v.alsoForgotten?.length ? { alsoForgottenIds: v.alsoForgotten } : {}),
     // REST's arrays renamed, the guard holding a key ending in Ids to uuids.
     removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins, itemIds: v.itemIds, proposalIds: v.proposalIds,
     ...(v.source ? { source: { system: v.source.system, identitySha256: v.source.identitySha256 } } : {}),

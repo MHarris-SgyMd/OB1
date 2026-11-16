@@ -951,8 +951,12 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
   });
 }
 
-/** What a forget did (139, 144; SMD-1723 PR 2): the evidence, and the client_key it was named by. */
-export type Forgotten = ForgetEvidence & { byClientKey?: string };
+/**
+ * What a forget did (139, 144; SMD-1723 PR 2 and 3): the evidence; the client_key it was named by; the thought's own
+ * client_key, read before the forget redacted it, so a copy of the call can name the thought on a brain that knows it
+ * by that key alone; and the other thoughts here the same name was, forgotten with it.
+ */
+export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[] };
 export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
 
 export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, confirm, detach_citations }: Input<"forget_thought">): Promise<Outcome<Forgotten, ForgetCode>> {
@@ -962,22 +966,45 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   if (confirm !== name) return refuse({ code: "REFUSED_CONFIRM", retryable: false, id: name.slice(0, 80) });
   // A name that is no uuid names no thought, as at delete.
   if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
-  // The thought by id, else by client_key (SMD-3314). An id the log never
-  // held may still be a deleted thought's client_key, which its tombstone
-  // kept: a forget copied from another brain names the copy so, and a delete
-  // copied before took the row (SMD-1723 PR 3). Asked only then, so an id
-  // this brain's log holds is always that thought.
-  let { id, byClientKey } = await targetNamed(ctx, principal, name);
+  // Every thought here the name is (SMD-1723 PR 3, review pass 1): one name
+  // is one thought across brains (SMD-3314's client_key), and forgetting is
+  // not undone, so none of its copies here is left with the text. First the
+  // thought with that id, else the one keeping it as its key, standing
+  // (SMD-3314's rule); then, for a key that can read, the thought the log
+  // holds under that id (deleted before), and every deleted thought whose
+  // tombstone kept it as its key — a forget copied from another brain names
+  // the copy so, and a delete copied before may have taken the row. The first
+  // forgotten is the reply's; a refusal of that one (CITED) stops the rest.
   const store = await ctx.store();
-  let result = await store.forgetThought({ id, actor: actorOf(ctx, principal), detach: detach_citations === true });
-  if (!result.ok && result.error === "NOT_FOUND" && !byClientKey && canRead(principal)) {
-    const deleted = await store.deletedThoughtKeyed(name);
-    if (deleted && deleted !== id) {
-      ({ id, byClientKey } = { id: deleted, byClientKey: name.toLowerCase() });
-      result = await store.forgetThought({ id, actor: actorOf(ctx, principal), detach: detach_citations === true });
+  const actor = actorOf(ctx, principal);
+  const detach = detach_citations === true;
+  const lower = name.toLowerCase();
+  const named = await targetNamed(ctx, principal, name);
+  const order = [named.id.toLowerCase()];
+  if (canRead(principal)) {
+    if (named.byClientKey) order.push(lower);
+    order.push(...(await store.deletedThoughtsKeyed(lower)));
+  }
+  const ids = [...new Set(order)];
+  let first: { id: string; key: string | null; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: true }> } | undefined;
+  let refused: { id: string; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: false }> } | undefined;
+  const also: string[] = [];
+  for (const id of ids) {
+    // The thought's own key before its forget redacts it: the reply names it.
+    const key = first || !canRead(principal) ? null : await store.clientKeyOf(id);
+    const r = await store.forgetThought({ id, actor, detach });
+    if (r.ok) {
+      if (!first) first = { id, key, result: r }; else also.push(id);
+    } else if (!first && !refused) {
+      refused = { id, result: r };
+      if (r.error === "CITED") break;
+    } else if (!first && refused?.result.error === "NOT_FOUND" && r.error !== "NOT_FOUND") {
+      refused = { id, result: r };
     }
   }
-  if (!result.ok) {
+  if (!first) {
+    const id = refused?.id ?? named.id;
+    const result = refused?.result ?? { ok: false as const, error: "NOT_FOUND" };
     switch (result.error) {
       case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
       case "FORGOTTEN": return refuse({ code: "FORGOTTEN", retryable: false, id, ...(result.forgottenAt ? { forgottenAt: result.forgottenAt } : {}) });
@@ -988,8 +1015,13 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   }
   // No action-log row, as delete_thought writes: 034's log is the very store
   // the forget just cleared of this id.
-  const { ok: _ok, ...evidence } = result;
-  return ok({ ...evidence, ...(byClientKey ? { byClientKey } : {}) });
+  const { ok: _ok, ...evidence } = first.result;
+  return ok({
+    ...evidence,
+    ...(first.id !== lower ? { byClientKey: lower } : {}),
+    ...(first.key && first.key !== lower ? { clientKey: first.key } : {}),
+    ...(also.length ? { alsoForgotten: also } : {}),
+  });
 }
 
 /** What the operator's reset did (086, SMD-2744): whether anything had settled the label, whether a moved label was put back, the declines that no longer count, and the label the row is left with. */
