@@ -2512,19 +2512,25 @@ Migration 143 makes `forget_thought` run as its owner (SMD-1723 PR 2). Under 139
 role calling it needed every store's privilege: `UPDATE` on `thought_audit`, the
 deletes on the append-only tables, the query log's writes and `INSERT` on the
 ledger, more than a full `--grant` issues, and a role holding them all could forget
-by hand. The function is now SECURITY DEFINER (the maintainer's choice,
-2026-11-15), its `search_path` pinned to the schemas the migration ran under with
-`pg_temp` last, and every `ob1.*` setting but `ob1.actor` pinned empty for the
-call, so a caller can't carry a replay's or an amendment's exemption in as the
-owner; a forget called inside a replay runs as a live write. `EXECUTE` is revoked
+by hand. 139's function is renamed `ob1_forget_thought_body`, and
+`forget_thought` is now a SECURITY DEFINER wrapper over it (the maintainer's
+choice, 2026-11-15): its `search_path` pinned to the schemas the migration ran
+under with `pg_temp` last, and every `ob1.*` setting but `ob1.actor` emptied for
+the call and given back after, so a caller can't carry a replay's or an
+amendment's exemption in as the owner; a forget called inside a replay runs as a
+live write. The settings are emptied by `set_config`, not pinned on the function:
+PostgreSQL refuses a custom setting there to an owner that is not a superuser.
+`ob1_forgetting()` now reads its setting through a cast that cannot raise: 139's
+raised `22P02` in every guard once a forget had left the setting empty in a
+session. `EXECUTE` is revoked
 from PUBLIC and granted to every role that may delete a thought, and to the
 **server** grant group. `ob1_text_forgotten_at(text)` answers when a text was
 forgotten, by 139's refusal rule, so the server refuses a forgotten text before it
 pays for an embedding; `ob1_forget_leftovers()` lists every forgotten thought a
 store still holds the id or text of, a write that raced the forget, which
-preflight's `forgotten` row names. A `CREATE OR REPLACE` of `forget_thought`, a
-re-applied 139 included, resets the definer: preflight's `forget definer` row says
-so. Needs 139 and 142; a re-apply is a no-op. test-schema [130], test-upgrade
+preflight's `forgotten` row names. A re-applied 139 puts its body back under
+`forget_thought`, running as its caller, until 143 is re-applied: preflight's
+`forget definer` row says so. Needs 139 and 142; a re-apply is a no-op. test-schema [130], test-upgrade
 [20ch].
 
 Migration 142 proposes a review of stale, overdue, disagreeing and settled priority

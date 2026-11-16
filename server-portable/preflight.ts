@@ -3320,9 +3320,9 @@ if (configFailed) {
         }
 
         /**
-         * Forgetting (SMD-1723 PR 2). `forget definer`: 143 made forget_thought SECURITY DEFINER with its search_path and
-         * its settings pinned, and revoked it from PUBLIC; a re-applied 139 (CREATE OR REPLACE) resets all of that, the
-         * function then running as its caller — the server's role meeting every store's privilege, or none. And whether
+         * Forgetting (SMD-1723 PR 2). `forget definer`: 143 made forget_thought a SECURITY DEFINER wrapper over 139's
+         * body, its search_path pinned, and revoked it from PUBLIC; a re-applied 139 (CREATE OR REPLACE) puts the body
+         * back under that name, running as its caller — the server's role meeting every store's privilege, or none. And whether
          * the server's role may run it at all: EXECUTE is the `server` group's, soft — without it the forget tool alone
          * fails. `forgotten`, the ticket's Work 3: every forgotten thought a store still holds the id or the text of
          * (143's ob1_forget_leftovers) — a write that raced the forget (SMD-4299) — named, since the brain promised those
@@ -3344,13 +3344,13 @@ if (configFailed) {
           } else if (!fd.has_143) {
             add("forget definer", "skip", "not checked — ob1_forget_leftovers does not exist (migration 143 not applied)");
           } else if (fd.definer !== true || fd.pinned !== true) {
-            add("forget definer", "warn", "forget_thought runs as its caller, not its owner: a re-applied 139 reset 143's SECURITY DEFINER and its pinned search_path and settings, so the forget tool fails for any role but the owner's, naming the first store it may not touch",
+            add("forget definer", "warn", "forget_thought runs as its caller, not its owner: a re-applied 139 put its body back in place of 143's SECURITY DEFINER wrapper, so the forget tool fails for any role but the owner's, naming the first store it may not touch",
                 ledgerRemedy("143", "Re-apply db/migrations/143_forget_thought_definer.sql."));
           } else if (fd.may !== true) {
             add("forget definer", "warn", "the server's role holds no EXECUTE on forget_thought: the forget tool fails naming the function, and nothing else does",
                 "Grant the server group (SMD-1723): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server (db/README.md, Grants for a capturing role).");
           } else {
-            add("forget definer", "ok", "forget_thought runs as its owner, its search_path and settings pinned; the server's role may run it");
+            add("forget definer", "ok", "forget_thought runs as its owner, its search_path pinned; the server's role may run it");
           }
 
           if (!fd?.has_143) {

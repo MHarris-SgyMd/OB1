@@ -7024,7 +7024,9 @@ console.log("\n[20ch] Migration 143: onto a populated brain at the file before i
   };
   const A = await thought("upgrade 143: the door code is 8642");
   const at142 = await forgetAs(A);
-  const definer = async () => Boolean((await sql`SELECT prosecdef AS d FROM pg_proc WHERE oid = 'forget_thought(uuid, jsonb, boolean)'::regprocedure`)[0].d);
+  // to_regprocedure, read as the statement runs: a ::regprocedure literal is resolved when the statement is planned,
+  // and the cached plan kept the OID 143 renames to ob1_forget_thought_body.
+  const definer = async () => Boolean((await sql`SELECT prosecdef AS d FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].d);
 
   // Without 139's forget_thought: refused by name, nothing changed.
   await sql`ALTER FUNCTION forget_thought(uuid, jsonb, boolean) RENAME TO forget_thought_away`;
@@ -7035,9 +7037,11 @@ console.log("\n[20ch] Migration 143: onto a populated brain at the file before i
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 });
   const may = async (role: string) => Boolean((await sql`SELECT has_function_privilege(${role}, 'forget_thought(uuid, jsonb, boolean)', 'EXECUTE') AS y`)[0].y);
-  const publicMay = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = 'forget_thought(uuid, jsonb, boolean)'::regprocedure AND a.grantee = 0) AS y`)[0].y);
+  const publicMay = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)') AND a.grantee = 0) AS y`)[0].y);
+  const shape143 = async () => JSON.stringify({ definer: await definer(), deleter: await may("ob1_upgrade_143_deleter"), reader: await may("ob1_upgrade_143_reader"), granted: await may(ROLE),
+    acl: (await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].a });
   assert(await definer() && await may("ob1_upgrade_143_deleter") && !(await may("ob1_upgrade_143_reader")) && !publicMay,
-    "applied: forget_thought its owner's; EXECUTE PUBLIC's no more, a thought deleter's, not a reader's");
+    `applied: forget_thought its owner's; EXECUTE PUBLIC's no more, a thought deleter's, not a reader's (${await shape143()})`);
 
   // The same role forgets now: the row gone, its events redacted, the ledger written, as the owner.
   const at143 = await forgetAs(A);
@@ -7058,7 +7062,7 @@ console.log("\n[20ch] Migration 143: onto a populated brain at the file before i
   // A re-apply is a no-op: still the owner's, the grants kept.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 });
   assert(await definer() && await may(ROLE) && await may("ob1_upgrade_143_deleter") && !(await may("ob1_upgrade_143_reader")),
-    "a re-apply is a no-op: the definer and the grants kept");
+    `a re-apply is a no-op: the definer and the grants kept (${await shape143()})`);
   await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ob1_upgrade_143_deleter; DROP ROLE ob1_upgrade_143_deleter;
                     DROP OWNED BY ob1_upgrade_143_reader; DROP ROLE ob1_upgrade_143_reader`);
   await sql.close();

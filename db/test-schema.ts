@@ -223,20 +223,12 @@ function definedIn(file: string): string[] {
  * rows at each apply.
  */
 const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"] };
-/**
- * A later file that ALTERs a function an earlier one defines, without
- * redefining it: re-applying the earlier file resets what the later one set,
- * so restoring it restores the later one too, after it. 143 makes 139's
- * forget_thought SECURITY DEFINER and pins its settings (SMD-1723 PR 2); a
- * re-apply of 139 (a restore of its gate, [51]) left it running as the caller.
- */
-const AMENDED_BY: Record<string, string[]> = { "139": ["143"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
     grew = false;
     for (const f of [...latest]) {
-      for (const carried of [...(CARRIES[f.slice(0, 3)] ?? []), ...(AMENDED_BY[f.slice(0, 3)] ?? [])]) {
+      for (const carried of CARRIES[f.slice(0, 3)] ?? []) {
         const base = readdirSync(MIGRATIONS).find((m) => m.startsWith(`${carried}_`));
         if (base && !latest.has(base)) { latest.add(base); grew = true; }
       }
@@ -4912,12 +4904,13 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedOids = new Set(await fnOids(listedFns));
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
-  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600).
+  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600); since 143
+  // forget_thought, granted by the server group (SMD-1723).
   const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
   const lockedOids = new Set(await fnOids(lockedFns));
   const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
-  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 1,
-    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, and 118's release in closedclaims — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 2,
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, 118's release in closedclaims and 143's forget_thought in server — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -7726,7 +7719,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 10 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm) and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 11 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && restored[10].startsWith("143") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm), 143's forget_thought and ob1_forgetting over 139's, and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -21935,7 +21928,7 @@ console.log("\n[129] Migration 139: forget a thought — refused CITED while an 
     `a re-apply keeps the ledger and the refusal (${ledAfter})`);
 }
 
-console.log("\n[130] Migration 143: forget_thought runs as its owner — SECURITY DEFINER, its search_path pinned with pg_temp last, every ob1.* setting the migrations read but ob1.actor pinned empty, EXECUTE not PUBLIC's but every thought deleter's; a role holding EXECUTE alone forgets, one without is refused; a caller's temporary table shadows nothing, and its settings come back after the call; ob1_text_forgotten_at answers as the refusal trigger does; ob1_forget_leftovers names what a raced write left, until a second forget; a re-apply a no-op (SMD-1723)");
+console.log("\n[130] Migration 143: forget_thought runs as its owner — a SECURITY DEFINER wrapper over 139's body, its search_path pinned with pg_temp last, every ob1.* setting the migrations read but ob1.actor emptied for the call, EXECUTE not PUBLIC's but every thought deleter's; a role holding EXECUTE alone forgets, one without is refused; a caller's temporary table shadows nothing, and its settings come back after the call; ob1_text_forgotten_at answers as the refusal trigger does; ob1_forget_leftovers names what a raced write left, until a second forget; a re-apply a no-op (SMD-1723)");
 {
   const file = files.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f)) ?? "no NNN_forget_thought_definer.sql";
   type J = Record<string, unknown>;
@@ -21955,17 +21948,22 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — SECURIT
   // The shape: a definer; its search_path ends with pg_temp; each runtime ob1.* setting a migration reads is pinned
   // empty but ob1.actor (who forgot) — the acl_* settings are read at migration time alone. A setting a later file
   // reads and this list lacks fails here.
-  const fn = await one<{ def: boolean; cfg: string[] | null; acl: string | null; c: string | null }>(
-    `SELECT p.prosecdef AS def, p.proconfig AS cfg, p.proacl::text AS acl, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = $1::regprocedure`, [SIG]);
+  const fn = await one<{ def: boolean; cfg: string[] | null; acl: string | null; c: string | null; src: string; body: string | null; bodyDef: boolean | null }>(
+    `SELECT p.prosecdef AS def, p.proconfig AS cfg, p.proacl::text AS acl, obj_description(p.oid, 'pg_proc') AS c, p.prosrc AS src,
+            to_regprocedure('ob1_forget_thought_body(uuid, jsonb, boolean)')::text AS body,
+            (SELECT b.prosecdef FROM pg_proc b WHERE b.oid = to_regprocedure('ob1_forget_thought_body(uuid, jsonb, boolean)')) AS "bodyDef"
+       FROM pg_proc p WHERE p.oid = $1::regprocedure`, [SIG]);
   const cfg = fn.cfg ?? [];
   const read = new Set<string>();
   for (const f of files) for (const m of readFileSync(join(MIGRATIONS, f), "utf8").matchAll(/current_setting\('(ob1\.[a-z_]+)'/g)) read.add(m[1]);
   const wanted = [...read].filter((s) => s !== "ob1.actor" && !s.startsWith("ob1.acl_")).sort();
-  const unpinned = wanted.filter((s) => !cfg.includes(`${s}=`));
+  // The wrapper's list, as its source spells it.
+  const emptied = [...(fn.src.match(/c_emptied CONSTANT text\[\] := ARRAY\[([^\]]*)\]/)?.[1] ?? "").matchAll(/'(ob1\.[a-z_]+)'/g)].map((m) => m[1]);
+  const unpinned = wanted.filter((s) => !emptied.includes(s));
   const path = cfg.find((c) => c.startsWith("search_path=")) ?? "";
-  assert(fn.def === true && unpinned.length === 0 && wanted.length >= 13 && !cfg.some((c) => c.startsWith("ob1.actor="))
-      && /^search_path=.*\bpublic\b.*, pg_temp$/.test(path) && /migration 143/i.test(fn.c ?? ""),
-    `forget_thought is SECURITY DEFINER, its search_path ending in pg_temp, each of the ${wanted.length} runtime ob1.* settings pinned empty but ob1.actor, its comment naming 143 (${path}; unpinned: ${unpinned.join(", ") || "none"})`);
+  assert(fn.def === true && unpinned.length === 0 && wanted.length >= 13 && !emptied.includes("ob1.actor") && /ob1_forget_thought_body\(p_id, p_actor, p_detach\)/.test(fn.src)
+      && fn.body !== null && fn.bodyDef === false && /^search_path=.*\bpublic\b.*, pg_temp$/.test(path) && /migration 143/i.test(fn.c ?? ""),
+    `forget_thought a SECURITY DEFINER wrapper over 139's body, its search_path ending in pg_temp, each of the ${wanted.length} runtime ob1.* settings emptied for the call but ob1.actor, its comment naming 143 (${path}; not emptied: ${unpinned.join(", ") || "none"})`);
   const may = async (role: string) => (await one<{ y: boolean }>(`SELECT has_function_privilege($1, $2, 'EXECUTE') AS y`, [role, SIG])).y;
   assert(!/(^|[{,])=X/.test(fn.acl ?? "") && await may("ob1_fg130_deleter") && !(await may("ob1_fg130_reader")) && !(await may("public")),
     `EXECUTE is not PUBLIC's; the apply granted it to a role that may delete a thought and not to one that may only read (${fn.acl})`);
@@ -22015,6 +22013,19 @@ console.log("\n[130] Migration 143: forget_thought runs as its owner — SECURIT
   assert(shadowed.err === null && shadowed.r?.ok === true && bLed === 1
       && shadowed.after.a === "backfill" && shadowed.after.f === "00000000-0000-4000-8000-000000000130",
     `a caller's temporary thought_forgotten first on its path takes no row (the brain's ledger has it); its ob1.audit_amend and ob1.forgetting are its own after the call (${shadowed.err}; ${bLed}; ${JSON.stringify(shadowed.after)})`);
+
+  // ob1_forgetting reads a setting that is no uuid as none, never raising: '' (what a forget's own set_config leaves
+  // in a session, and the wrapper's) and a word; 139's raised 22P02 in every guard asking it.
+  const reads: string[] = [];
+  for (const v of ["", "not-a-uuid"]) {
+    try {
+      await db.transaction(async (tx) => {
+        await tx.query(`SELECT set_config('ob1.forgetting', $1, true)`, [v]);
+        reads.push(String((await tx.query<{ f: string | null }>(`SELECT ob1_forgetting()::text AS f`)).rows[0].f));
+      });
+    } catch (e) { reads.push(String((e as { code?: string }).code)); }
+  }
+  assert(reads.join(",") === "null,null", `ob1_forgetting reads '' and a word as none, raising nothing (${reads.join(",")})`);
 
   // ob1_text_forgotten_at answers as 139's refusal trigger decides, case by case: a forgotten text; one never
   // forgotten; a forgotten text under ob1.reinstate_forgotten; a forgotten text reinstated since, a thought standing

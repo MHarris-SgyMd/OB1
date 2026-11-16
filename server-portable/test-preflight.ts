@@ -821,7 +821,7 @@ else {
     const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*\\S+\\s+${name}\\s{2,}\\S`).test(l))?.trim() ?? "";
     try {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      assert(/✓  forget definer\s+forget_thought runs as its owner, its search_path and settings pinned; the server's role may run it/.test(whole.out)
+      assert(/✓  forget definer\s+forget_thought runs as its owner, its search_path pinned; the server's role may run it/.test(whole.out)
           && /✓  forgotten\s+no store holds the id or the text of a forgotten thought/.test(whole.out),
              `on a brain at 143 forget_thought is its owner's and nothing holds a forgotten id: ok (${rowOf(whole.out, "forget definer")} | ${rowOf(whole.out, "forgotten")})`);
       const [{ id }] = (await fg`INSERT INTO thoughts (content) VALUES ('preflight: a thought to forget (SMD-1723)') RETURNING id::text AS id`) as { id: string }[];

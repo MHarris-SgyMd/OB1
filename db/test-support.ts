@@ -577,6 +577,7 @@ const FUNCTIONS = [
   "forget_thought(uuid, jsonb, boolean)",
   "ob1_text_forgotten_at(text)",
   "ob1_forget_leftovers()",
+  "ob1_forget_thought_body(uuid, jsonb, boolean)",
 ];
 
 /**
