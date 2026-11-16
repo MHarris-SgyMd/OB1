@@ -130,10 +130,11 @@ async function priorityCall(what: string, run: () => Promise<Record<string, unkn
  * The maker's envelope for 116's and 117's calls: the actor's own, its scope stated, and the plugin a call came
  * through (SMD-3665 PR 2: a plugin's ctx.call names it, and 117 reads it there alone — a plugin row's item is the
  * plugin's — never from an argument). Only here: the actor's `scope` is otherwise a capture key's alone, which 082
- * reads off an audit row, and a write key's envelope on a thought write states none.
+ * reads off an audit row, and a write key's envelope on a thought write states none. A read key's states none either
+ * (review_priority_finding's caller of the core's own, SMD-3671 PR 2), which the writers refuse.
  */
-const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture", plugin: string | undefined) =>
-  (actor ? { ...actorPayload(actor), scope, ...(plugin !== undefined ? { plugin } : {}) } : null);
+const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture" | undefined, plugin: string | undefined) =>
+  (actor ? { ...actorPayload(actor), ...(scope !== undefined ? { scope } : {}), ...(plugin !== undefined ? { plugin } : {}) } : null);
 
 /** A raise 117 means as a refused argument: its 22023, or a uuid Postgres could not cast (22P02); any other, the store's fault. */
 function itemRefusedOr(e: unknown): unknown {
@@ -1215,25 +1216,34 @@ export class SqlStore implements ThoughtStore {
     return normaliseSetCap(rows[0]?.r);
   }
 
-  // SMD-3671 PR 2: 142's findings, one statement. `total` is the window's count over every row matching, read before
-  // the limit cuts them; no row matching reads 0. The pending oldest found first (the queue's order), then the rest
-  // most recently decided or mooted first.
-  async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number }): Promise<{ total: number; findings: PriorityFinding[] }> {
+  // SMD-3671 PR 2: 142's findings, one statement. `total` counts every row matching, read on a row of its own so a page
+  // past the last (an offset beyond them) still says it; the page is `limit` rows from `offset`. The pending oldest found
+  // first (the queue's order), then the rest most recently decided or mooted first, ties by id, so pages do not overlap
+  // while nothing moves.
+  async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; offset: number }): Promise<{ total: number; findings: PriorityFinding[] }> {
     const rows = await this.sql`
-      SELECT f.id::text AS id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days, f.found_at, f.refreshed_at, f.moot_at,
-             f.decided_at, f.decided_by, f.decision_note, f.outcome, f.suppressed_until, count(*) OVER ()::int AS total
-        FROM priority_findings f
-       WHERE (${opts.status}::text IS NULL OR f.status = ${opts.status}::text)
-         AND (${opts.kind}::text IS NULL OR f.kind = ${opts.kind}::text)
-       ORDER BY f.status <> 'pending', CASE WHEN f.status = 'pending' THEN f.found_at END, COALESCE(f.decided_at, f.moot_at) DESC NULLS LAST, f.id
-       LIMIT ${opts.limit}::int` as Record<string, unknown>[];
-    return { total: rows.length ? Number(rows[0].total) : 0, findings: rows.map(normalisePriorityFinding) };
+      WITH m AS (
+        SELECT f.id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days, f.found_at, f.refreshed_at, f.moot_at,
+               f.decided_at, f.decided_by, f.decision_note, f.outcome, f.suppressed_until
+          FROM priority_findings f
+         WHERE (${opts.status}::text IS NULL OR f.status = ${opts.status}::text)
+           AND (${opts.kind}::text IS NULL OR f.kind = ${opts.kind}::text))
+      SELECT t.total, p.id::text AS id, p.kind, p.item_kind, p.item_key, p.status, p.evidence, p.window_days, p.found_at, p.refreshed_at, p.moot_at,
+             p.decided_at, p.decided_by, p.decision_note, p.outcome, p.suppressed_until
+        FROM (SELECT count(*)::int AS total FROM m) t
+        LEFT JOIN LATERAL (
+          SELECT m.id, m.kind, m.item_kind, m.item_key, m.status, m.evidence, m.window_days, m.found_at, m.refreshed_at, m.moot_at,
+                 m.decided_at, m.decided_by, m.decision_note, m.outcome, m.suppressed_until
+            FROM m
+           ORDER BY m.status <> 'pending', CASE WHEN m.status = 'pending' THEN m.found_at END, COALESCE(m.decided_at, m.moot_at) DESC NULLS LAST, m.id
+           LIMIT ${opts.limit}::int OFFSET ${opts.offset}::int) p ON true` as Record<string, unknown>[];
+    return { total: Number(rows[0]?.total ?? 0), findings: rows.filter((r) => r.id != null).map(normalisePriorityFinding) };
   }
 
   // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142
   // reads: write scope alone decides), every value a bind parameter.
   async reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult> {
-    const envelope = opts.actor ? { ...actorPayload(opts.actor), ...(opts.scope ? { scope: opts.scope } : {}) } : null;
+    const envelope = itemEnvelope(opts.actor, opts.scope, undefined);
     // A due time Postgres cannot read, or a 22023 the writer inside raises, is set_priority's refusal (PriorityRefused),
     // not the store's fault: the same input answers the same through both.
     let rows: Record<string, unknown>[];

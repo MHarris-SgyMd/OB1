@@ -1573,13 +1573,14 @@ export type FindingStatement = { id: string; level: number | null; maker: string
  * pool: a ticket and its own rows are one item), its status, the statements it is about, its evidence as the scan
  * wrote it, its window, when it was found, last refreshed, mooted and decided, who decided it (a key's name), the
  * operator's note, the writer's answer to an accept (`outcome`, read as review_priority_finding's answer is: one shape on
- * the contract; null for a reject or a finding not decided), and until when the decision holds the same finding
+ * the contract; null for a reject or a finding not decided, and null with `outcomeUnread` for one stored in a shape this
+ * server does not read), and until when the decision holds the same finding
  * back.
  */
 export type PriorityFinding = {
   id: string; kind: FindingKind; item: PriorityItem; status: FindingStatus; statements: FindingStatement[];
   evidence: Record<string, unknown>; windowDays: number; foundAt: string; refreshedAt: string; mootAt: string | null;
-  decidedAt: string | null; decidedBy: string | null; note: string | null; outcome: PriorityAnswer | null; suppressedUntil: string | null;
+  decidedAt: string | null; decidedBy: string | null; note: string | null; outcome: PriorityAnswer | null; outcomeUnread?: true; suppressedUntil: string | null;
 };
 
 /** A finding's statements from its evidence (see FindingStatement); anything the scan did not write there is left out. */
@@ -1596,6 +1597,17 @@ function findingStatements(evidence: Record<string, unknown>): FindingStatement[
 
 /** One priority_findings row as the list reads it. A kind, status or item 142 does not write is a fault. */
 export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
+  // The writer's answer as stored at the decision: one a later writer gave in a shape this server does not read is the
+  // finding's `outcomeUnread`, not the list's fault — history outlives the server that reads it. The review's own reply
+  // stays strict (normaliseReviewFinding): an answer it cannot read there is this call's fault.
+  let outcome: PriorityAnswer | null = null, outcomeUnread = false;
+  if (r.outcome != null) {
+    try {
+      outcome = normalisePriorityAnswer(r.outcome, "priority_findings' outcome");
+    } catch {
+      outcomeUnread = true;
+    }
+  }
   const item = priorityItemOf({ kind: r.item_kind, key: r.item_key });
   if (!(FINDING_KINDS as readonly unknown[]).includes(r.kind) || !(FINDING_STATUSES as readonly unknown[]).includes(r.status) || !item || typeof r.id !== "string") {
     throw new Error(`priority_findings answered a row this server cannot read: ${JSON.stringify({ kind: r.kind, status: r.status, item_kind: r.item_kind })}`);
@@ -1606,7 +1618,7 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
     id: r.id, kind: r.kind as FindingKind, item, status: r.status as FindingStatus, statements: findingStatements(evidence), evidence,
     windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
     decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
-    note: typeof r.decision_note === "string" ? r.decision_note : null, outcome: r.outcome == null ? null : normalisePriorityAnswer(r.outcome, "priority_findings' outcome"), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
+    note: typeof r.decision_note === "string" ? r.decision_note : null, outcome, ...(outcomeUnread ? { outcomeUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
   };
 }
 
@@ -2672,9 +2684,9 @@ export interface ThoughtStore {
   /**
    * The priority review's findings (migration 142, SMD-3671): those of one status (null: every one) and kind (null:
    * every kind), the pending oldest found first, then the rest most recently decided or mooted first; `total` counts
-   * every one matching, the list cut to `limit`. One statement. A database before 142 throws.
+   * every one matching, the page `limit` of them from `offset`. One statement. A database before 142 throws.
    */
-  listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number }): Promise<{ total: number; findings: PriorityFinding[] }>;
+  listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; offset: number }): Promise<{ total: number; findings: PriorityFinding[] }>;
   /**
    * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
    * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent

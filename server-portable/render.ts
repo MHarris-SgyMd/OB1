@@ -2490,7 +2490,8 @@ function findingWhat(f: PriorityFinding): string {
 const findingState = (f: PriorityFinding) =>
   f.status === "pending" ? `pending since ${f.foundAt}`
   : f.status === "moot" ? `moot since ${f.mootAt ?? "?"} (its condition no longer holds)`
-  : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`;
+  : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`
+    + (f.outcomeUnread ? "; what its writer answered is stored in a shape this server does not read" : "");
 const findingLine = (f: PriorityFinding) => {
   const state = findingState(f);
   return `- ${f.kind} finding ${f.id} on ${itemText(f.item)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
@@ -2500,8 +2501,13 @@ export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => ren
   const which = `${v.status === "all" ? "" : `${v.status} `}priority finding`;
   const of = v.kind ? ` of kind ${v.kind}` : "";
   if (v.total === 0) return `No ${which}s${of}.`;
+  const total = `${v.total} ${which}${v.total === 1 ? "" : "s"}${of}`;
+  if (v.findings.length === 0) return `${total}; none from offset ${v.offset}.`;
+  // A page that is not every finding names its place, and the next page's offset while more follow.
+  const last = v.offset + v.findings.length;
+  const page = v.findings.length < v.total ? `; findings ${v.offset + 1}–${last} of ${v.total}${last < v.total ? `, pass offset ${last} for more` : ""}` : "";
   return [
-    `${v.total} ${which}${v.total === 1 ? "" : "s"}${of}${v.findings.length < v.total ? `, the first ${v.findings.length} listed (raise limit, up to 200, for more)` : ""}:`,
+    `${total}${page}:`,
     ...v.findings.map(findingLine),
     ...(v.findings.some((f) => f.status === "pending")
       ? ["An operator key decides each with review_priority_finding: accept with a level (or clear), or reject. Nothing changes a priority until then."] : []),

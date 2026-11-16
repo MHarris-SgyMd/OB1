@@ -3,10 +3,10 @@
 // server answer them alike. Sleep's scan (ob1_priority_review, PR 1) proposes
 // each finding; nothing changes a priority until an operator decides one. The
 // database decides every rule of the decision — who may (a key the registry
-// classifies operator, by its agent id, with write scope), what an accept
-// states, what holds the same finding back — and this file checks the
-// arguments' shape first, passes the caller's envelope, its scope stated, and
-// turns 142's answers into values and refusals.
+// classifies operator, by its agent id, with write scope), which arguments go
+// together, what an accept states, what holds the same finding back — and this
+// file passes the caller's envelope, its scope stated, and turns 142's answers
+// into values and refusals.
 
 import type { Principal } from "../auth.ts";
 import { PriorityRefused, type FindingKind, type FindingStatus, type PriorityAssertion, type PriorityFinding, type PriorityItem } from "../store.ts";
@@ -17,14 +17,14 @@ import { ok, refuse, type FindingInputProblem, type Outcome } from "./refusal.ts
 import type { Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
 
-/** list_priority_findings' value: the filters it read under, how many findings match, and the first `limit` of them. */
-export type FindingsListed = { status: FindingStatus | "all"; kind: FindingKind | null; total: number; findings: PriorityFinding[] };
+/** list_priority_findings' value: the filters it read under, how many findings match, and the page of them from `offset`. */
+export type FindingsListed = { status: FindingStatus | "all"; kind: FindingKind | null; total: number; offset: number; findings: PriorityFinding[] };
 
-export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { status, kind, limit }: Input<"list_priority_findings">): Promise<Outcome<FindingsListed, never>> {
+export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { status, kind, limit, offset }: Input<"list_priority_findings">): Promise<Outcome<FindingsListed, never>> {
   // A brain before 142 holds no table: the read faults naming priority_findings, and the fault's hint says so
   // (render.ts findingsHint), as a listing before its migration does.
-  const page = await (await ctx.store()).listPriorityFindings({ status: status === "all" ? null : status, kind: kind ?? null, limit });
-  return ok({ status, kind: kind ?? null, total: page.total, findings: page.findings });
+  const page = await (await ctx.store()).listPriorityFindings({ status: status === "all" ? null : status, kind: kind ?? null, limit, offset });
+  return ok({ status, kind: kind ?? null, total: page.total, offset, findings: page.findings });
 }
 
 /**
@@ -41,24 +41,11 @@ export type FindingReviewed = {
 export type FindingReviewCode = "REFUSED_NOT_OPERATOR" | "PRIORITY_UNATTRIBUTED" | "WRITE_SCOPE_REQUIRED" | "NOT_FOUND" | "REFUSED_FINDING_INPUT" | "REFUSED_FINDING_DECISION" | "REFUSED_PRIORITY_INPUT";
 const inputRefused = (problem: FindingInputProblem, message: string) => refuse({ code: "REFUSED_FINDING_INPUT", retryable: false, problem, message });
 
-/**
- * The arguments that do not go together, in 142's own order and words, refused before the brain is asked: the schema
- * takes each field alone, and 142 checks them again. Null when they go together.
- */
-function argumentsRefused({ decision, level, due_at: dueAt, clear }: Input<"review_priority_finding">) {
-  const clearing = clear === true;
-  if (decision === "accept" && (level === undefined) === !clearing) {
-    return inputRefused("ACCEPT_NEEDS_OUTCOME", "accepting says what to do: a level to state (the same one re-confirms it), or clear, not both");
-  }
-  if ((decision === "reject" && (level !== undefined || dueAt !== undefined || clearing)) || (dueAt !== undefined && level === undefined)) {
-    return inputRefused("BAD_OUTCOME", "a level (0 none to 5 critical), a due time and clear go with accepting, and a due time with a level");
-  }
-  return null;
-}
-
 export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, input: Input<"review_priority_finding">): Promise<Outcome<FindingReviewed, FindingReviewCode>> {
-  const bad = argumentsRefused(input);
-  if (bad) return bad;
+  // 142 asks who first (an operator, then write scope), then whether the arguments go together, so a key that may never
+  // decide is told that and not how to mend a call it cannot make; the schema takes each field alone, and the rules that
+  // join them are 142's alone. One exception: a due time Postgres cannot read is refused binding the call, before 142
+  // runs, so any key is told so (REFUSED_PRIORITY_INPUT, naming nothing about the finding).
   // Who may is the database's to say, as for set_priority_weights: the key's registry kind by its agent id, which the
   // server does not hold. Without the agent id the database can tell no operator (a name lends no kind): the
   // registry's absence is said as set_priority says it, and a principal that has none by design is named so.

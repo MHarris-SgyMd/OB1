@@ -3455,10 +3455,34 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
         && badStatus.status === 400 && badStatus.body.code === "REFUSED_INPUT",
       `the pending listed oldest found first (the direct disagreement), the scan's stale finding with the agent's level 4, the disagreement's operator and source; one value over both doors; total ${pendingN} past a limit of 1; kind stale alone; a status not one of 142's refused 400 (${listR.status} total ${l.total}/${pendingN} first ${l.findings?.[0]?.id === missing.id} mine ${mine?.statements?.[0]?.level} ${listM.text.split("\n")[1]?.slice(0, 120)})`);
 
+    // Paged five at a time, the pages are the whole list in its order, each once; past the last, none, the total kept.
+    const pages: Finding[] = [];
+    for (let offset = 0; offset < pendingN + 5; offset += 5) {
+      const pg = (await rest("GET", `/v1/priority-findings?limit=5&offset=${offset}`)).body as unknown as Listed & { offset: number };
+      if (pg.total !== pendingN || pg.offset !== offset) pages.push({ id: `bad page at ${offset}` } as Finding);
+      pages.push(...pg.findings);
+    }
+    const pastM = await mcp("list_priority_findings", { limit: 5, offset: pendingN });
+    const firstM = await mcp("list_priority_findings", { limit: 5 });
+    const badOffset = await rest("GET", "/v1/priority-findings?offset=10001");
+    assert(pendingN > 5 && same(pages.map((f) => f.id), l.findings.map((f) => f.id)) && (pastM.sc.findings as unknown[]).length === 0 && pastM.sc.total === pendingN
+        && pastM.text === `${pendingN} pending priority findings; none from offset ${pendingN}.`
+        && firstM.text.split("\n")[0] === `${pendingN} pending priority findings; findings 1–5 of ${pendingN}, pass offset 5 for more:`
+        && badOffset.status === 400 && badOffset.body.code === "REFUSED_INPUT",
+      `${pendingN} pending paged five at a time: every finding once, in the list's order; past the last none, the total kept; the text names the next offset; an offset past 10000 refused (${pages.length}/${l.findings.length} ${firstM.text.split("\n")[0]} | ${pastM.text})`);
+
     const pendingStill = async (id: string) => (await sql`SELECT status FROM priority_findings WHERE id = ${id}::uuid`)[0]?.status === "pending";
     const byAgent = await rest("POST", `/v1/priority-findings/${stale}/review`, { decision: "reject" }, KEYS.rival);
     const byAgentM = await mcp("review_priority_finding", { id: stale, decision: "reject" }, KEYS.rival);
     const byReader = await rest("POST", `/v1/priority-findings/${stale}/review`, { decision: "reject" }, KEYS.reader);
+    // 142 asks who may before whether the arguments go together: an agent key's bad combinations are refused as no
+    // operator's, never told how to mend a call it cannot make. A due time Postgres cannot read is refused binding the
+    // call, before 142 runs: that is the time's refusal for any key, naming nothing about the finding.
+    const agentShapes = await Promise.all([{ decision: "accept" }, { decision: "accept", level: 2, clear: true }, { decision: "reject", level: 2 }, { decision: "accept", clear: true, due_at: "2027-03-01" }]
+      .map((b) => rest("POST", `/v1/priority-findings/${stale}/review`, b, KEYS.rival)));
+    const agentYear0 = await rest("POST", `/v1/priority-findings/${stale}/review`, { decision: "accept", level: 2, due_at: "0000-01-01" }, KEYS.rival);
+    assert(agentShapes.every((a) => a.status === 403 && a.body.code === "REFUSED_NOT_OPERATOR") && agentYear0.status === 400 && agentYear0.body.code === "REFUSED_PRIORITY_INPUT" && agentYear0.body.problem === "time",
+      `an agent key's arguments that do not go together: 403 REFUSED_NOT_OPERATOR each, 142's gate first; its unreadable due time 400 REFUSED_PRIORITY_INPUT, refused binding the call (${agentShapes.map((a) => a.body.code).join(",")} ${agentYear0.status}/${agentYear0.body.code})`);
     assert(byAgent.status === 403 && byAgent.body.code === "REFUSED_NOT_OPERATOR" && byAgentM.isError && byAgentM.sc.code === "REFUSED_NOT_OPERATOR"
         && /^Refused: only a key the operator classified `operator` may decide a priority finding\. This key, rival, is classified agent/.test(byAgentM.text)
         && byReader.status === 403 && byReader.body.code === "FORBIDDEN" && await pendingStill(stale!),
@@ -3531,6 +3555,17 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
       `a reject 200, nothing written; a clear with nothing of the operator's to clear 409 NOTHING_TO_CLEAR, still pending; a finding not there 404 NOT_FOUND, its id lower-cased (${rejected.status}/${rejected.body.status} ${nothing.status}/${nothing.body.problem} ${absent.status} ${absentM.text})`);
 
     const acceptedList = (await rest("GET", "/v1/priority-findings?status=accepted&limit=200")).body as unknown as Listed;
+    // A stored writer's answer in a shape this server does not read (a later writer's code): the list still answers, that
+    // finding's outcome null and marked unread, the text saying so.
+    const [{ outcome: storedOutcome }] = await sql`SELECT outcome FROM priority_findings WHERE id = ${stale}::uuid`;
+    await sql`UPDATE priority_findings SET outcome = '{"outcome": "asserted", "code": "A_LATER_CODE"}'::jsonb WHERE id = ${stale}::uuid`;
+    const laterR = await rest("GET", "/v1/priority-findings?status=accepted&limit=200");
+    const laterM = await mcp("list_priority_findings", { status: "accepted", limit: 200 });
+    await sql`UPDATE priority_findings SET outcome = ${storedOutcome}::jsonb WHERE id = ${stale}::uuid`;
+    const laterRow = ((laterR.body.findings ?? []) as (Finding & { outcomeUnread?: boolean })[]).find((f) => f.id === stale);
+    assert(laterR.status === 200 && laterRow?.outcome === null && laterRow.outcomeUnread === true && !laterM.isError
+        && laterM.text.includes(`stale finding ${stale} `) && /what its writer answered is stored in a shape this server does not read/.test(laterM.text),
+      `a stored answer this server does not read: the list 200, that finding's outcome null and marked unread, said in the text (${laterR.status} ${JSON.stringify(laterRow?.outcome)} ${laterRow?.outcomeUnread})`);
     const all = (await rest("GET", "/v1/priority-findings?status=all&limit=1")).body as unknown as Listed;
     const decidedRow = acceptedList.findings.find((f) => f.id === stale);
     const allTotal = await allN();
