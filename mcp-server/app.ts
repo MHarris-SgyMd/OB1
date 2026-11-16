@@ -499,7 +499,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   // always had. Always an event stream, as that transport answers: a JSON body would arrive only when the tool
   // ends, with nothing for withSseKeepalive to keep open (SMD-1864). Its own keepalive is off, the route's being
   // the one. No `onerror`: what it reports is a request it refused (a header that disagrees with the body, a
-  // revision it does not serve, a body that is no JSON), which the request's line already says by its status.
+  // revision it does not serve, a body not sent as JSON), which the request's line already says by its status.
   const modern = createMcpHandler((ctx) => {
     const build = (ctx.authInfo?.extra as { build?: () => McpServer } | undefined)?.build;
     if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");

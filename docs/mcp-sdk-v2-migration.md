@@ -203,6 +203,28 @@ ticket's, not this one's.
   owns its Hono app and only wants a transport; `WebStandardStreamableHTTPServerTransport`
   is the smaller surface and is already the shape `vercel-neon-telegram` uses.
 
+## Serving the 2026-07-28 revision (SMD-4345, added 2026-11-16)
+
+The stages above moved the servers onto the v2 packages while still serving the
+2025-era revisions. Since SMD-4345, `mcp-server/app.ts` serves 2026-07-28 beside them:
+
+- The route asks the SDK's `isLegacyRequest` which family a request speaks. A
+  2026-07-28 request goes to one `createMcpHandler` (`legacy: "reject"`,
+  `responseMode: "sse"`, its own keepalive off); any other goes to the per-request
+  `WebStandardStreamableHTTPServerTransport` it always had. The built-in legacy
+  handling this document called a backstop is not used: the 2025-era path is the
+  wiring already proven.
+- The handler builds each request's server through `authInfo`, which reaches its
+  factory as the same object, so the server is the caller's, built by the same
+  `buildServer`.
+- The 2026-07-28 server declares `tools.listChanged: false` and holds no connection
+  open. Claude Code 2.1.325 then opens no `subscriptions/listen` stream
+  (`docs/mcp-client-refresh.md` has what it does otherwise).
+- The SDK was moved to 2.4.0 first (SMD-4342).
+
+What a client must do differently: nothing. A client that offers 2026-07-28 probes
+with `server/discover` and is now answered; one that does not is served as before.
+
 ## Follow-ups
 
 - **SMD-2278 — server-portable → v2** (stage 1; the real migration PR; blocks
