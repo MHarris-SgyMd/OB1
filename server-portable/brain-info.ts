@@ -1123,16 +1123,19 @@ const PROPOSALS_SQL = (sql: SqlTag) => sql`
 
 /**
  * The priority review's findings (SMD-3671 PR 2): the pending by kind, the oldest pending one's age, and the decided in
- * 30 days — the rows it counts alone: decided findings stay as history, so the table grows while these do not.
+ * 30 days — the rows it counts alone: decided findings stay as history, so the table grows while these do not. Read
+ * once, grouped by kind.
  */
 const PRIORITY_FINDINGS_SQL = (sql: SqlTag) => sql`
-  SELECT count(*) FILTER (WHERE f.status = 'pending')::int AS pending,
-         extract(epoch FROM now() - min(f.found_at) FILTER (WHERE f.status = 'pending'))::float8 AS oldest_s,
-         (SELECT COALESCE(jsonb_object_agg(k.kind, k.n), '{}'::jsonb)
-            FROM (SELECT p.kind, count(*)::int AS n FROM priority_findings p WHERE p.status = 'pending' GROUP BY p.kind) k) AS by_kind,
-         count(*) FILTER (WHERE f.decided_at >= now() - interval '30 days')::int AS decided_30d
-    FROM priority_findings f
-   WHERE f.status = 'pending' OR f.decided_at >= now() - interval '30 days'`;
+  SELECT COALESCE(sum(g.n), 0)::int AS pending,
+         extract(epoch FROM now() - min(g.oldest))::float8 AS oldest_s,
+         COALESCE(jsonb_object_agg(g.kind, g.n) FILTER (WHERE g.n > 0), '{}'::jsonb) AS by_kind,
+         COALESCE(sum(g.decided), 0)::int AS decided_30d
+    FROM (SELECT f.kind, count(*) FILTER (WHERE f.status = 'pending')::int AS n, min(f.found_at) FILTER (WHERE f.status = 'pending') AS oldest,
+                 count(*) FILTER (WHERE f.decided_at >= now() - interval '30 days')::int AS decided
+            FROM priority_findings f
+           WHERE f.status = 'pending' OR f.decided_at >= now() - interval '30 days'
+           GROUP BY f.kind) g`;
 
 /** The pending rows that pair two tickets the board does not link. */
 const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
@@ -1348,6 +1351,9 @@ export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unkno
   };
 }
 
+/** The priority group's grant, as preflight's priority row and the priority findings row name it: one remedy. */
+export const PRIORITY_GRANT_FIX = "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).";
+
 /**
  * The priority findings, in one wording for brain_info's row and preflight's (SMD-3671 PR 2): ok with the pending by
  * kind and the oldest's age, and the decided in 30 days; a skip before 142; a warning when the read was refused or did
@@ -1358,7 +1364,7 @@ export function priorityFindingsRow(f: PriorityFindingsFact | null, u: Unread | 
     if (!u) return { status: "skip", detail: "not checked — priority_findings does not exist (migration 142 not applied)" };
     if (u.reason === "refused")
       return { status: "warn", detail: `could not verify: ${u.message}`,
-               fix: "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role)." };
+               fix: PRIORITY_GRANT_FIX };
     if (u.reason === "invisible") return { status: "warn", detail: `could not verify: ${u.message}`, fix: "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it." };
     return { status: "warn", detail: `could not verify: ${u.message}`,
              fix: u.reason === "timeout" ? "A migration or a long transaction may hold priority_findings; run preflight again once it has finished." : "The check reads priority_findings; the message says why it failed." };

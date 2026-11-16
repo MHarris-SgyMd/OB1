@@ -1218,7 +1218,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
-    ? r.reason === "filters" && r.made
+    ? r.reason === "filters" && r.made && "lineage" in r.made
       // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
       ? `Refused: that cursor was made with \`status: ${r.made.status}\`${r.made.lineage === null ? "" : `, \`lineage: ${r.made.lineage}\``}${r.made.judgeKey === null ? "" : `, \`judge_key: ${judgeKeyText(r.made.judgeKey)}\``}${r.made.lineage === null && r.made.judgeKey === null ? " and no other filter" : ""} — pass the same filters with it, or leave out \`after\` to start the list again.`
       : "Refused: `after` is not a list_supersession_proposals cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
@@ -2497,6 +2497,11 @@ const findingLine = (f: PriorityFinding) => {
   return `- ${f.kind} finding ${f.id} on ${itemText(f.item)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
 };
 
+/** The selection a refused findings cursor was made under, in words: its status and its kind. */
+const madeUnder = (m: unknown) => {
+  const sel = m !== null && typeof m === "object" && "kind" in m ? (m as { status: string; kind: string | null }) : null;
+  return sel ? `status ${sel.status} and ${sel.kind === null ? "every kind" : `kind ${sel.kind}`}` : "another status or kind";
+};
 export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => render(o, (v) => {
   const which = `${v.status === "all" ? "" : `${v.status} `}priority finding`;
   const of = v.kind ? ` of kind ${v.kind}` : "";
@@ -2513,7 +2518,7 @@ export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => ren
   ].join("\n");
 }, (r) => r.code === "REFUSED_CURSOR"
   ? r.reason === "filters"
-    ? "Refused: `after` was made under another status or kind — pass it with the status and kind it came with, or leave it out to start from the first page."
+    ? `Refused: \`after\` was made under ${madeUnder(r.made)} — pass it with the status and kind it came with, or leave it out to start from the first page.`
     : "Refused: `after` is not a list_priority_findings cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out to start from the first page."
   : unknownRefusal(r), AS_JSON);
 

@@ -1365,7 +1365,8 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   `cursor`). The answer is `{status, kind, total, before, findings, cursor}`: `total`
   counts every finding matching, `before` those ahead of the page, and `cursor`, while
   more follow (null at the end), is the last listed row's place, made under the status
-  and kind asked: one passed with others is refused `REFUSED_CURSOR` (400). A place, not
+  and kind asked: one passed with others is refused `REFUSED_CURSOR` (400), `made`
+  naming the status and kind it was made under. A place, not
   an offset, so a finding decided between pages, which leaves the pending listing,
   skips none not yet shown. The pending come oldest found first; the rest most
   recently decided or mooted first, ties by id. Each finding is `{id, kind, item: {kind, key}, status, statements,

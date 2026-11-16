@@ -7992,7 +7992,9 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   const foreignWords = foreign.map((o) => (o.ok ? "ok" : `${o.refusal.code}/${(o.refusal as { reason?: string }).reason}`));
   assert(nextCursor !== null && JSON.stringify(parseFindingsCursor(nextCursor)) === JSON.stringify({ selection: { status: "all", kind: "stale" }, at: NEXT })
       && listAsked.length === askedBefore && foreignWords.join() === "REFUSED_CURSOR/filters,REFUSED_CURSOR/filters,REFUSED_CURSOR/shape,REFUSED_CURSOR/shape"
-      && /^Refused: `after` was made under another status or kind/.test(text(say.renderPriorityFindings(foreign[0]))),
+      && text(say.renderPriorityFindings(foreign[0])).startsWith("Refused: `after` was made under status all and kind stale — pass it with")
+      && JSON.stringify((foreign[1] as { refusal?: { made?: unknown } }).refusal?.made) === JSON.stringify({ status: "all", kind: "stale" })
+      && JSON.stringify(refusalValue((foreign[1] as unknown as { refusal: never }).refusal)) === JSON.stringify({ code: "REFUSED_CURSOR", retryable: false, reason: "filters", made: { status: "all", kind: "stale" } }),
     `the cursor carries the selection and the last row's place; one made under another status or kind refused (filters), none of this tool's or an sk no numeric refused (shape), neither reaching the store (${foreignWords.join(",")})`);
   const [s0, d0, o0] = listed.ok ? listed.value.findings : [];
   const badRows = [{ ...staleRow, kind: "late" }, { ...staleRow, status: "open" }, { ...staleRow, item_kind: "board" }].map((r) => { try { normalisePriorityFinding(r); return "read"; } catch { return "threw"; } });
@@ -8145,6 +8147,38 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && rows[1].status === "warn" && /--groups priority/.test(rows[1].fix ?? "") && rows[2].status === "warn" && /long transaction/.test(rows[2].fix ?? "")
       && rows[3].status === "ok" && rows[3].detail === lines[3] && rows[4].detail === `4 pending (2 stale, 1 disagree, 1 settled), the oldest found at an unknown time — ${reviews}`,
     `preflight's row: a skip before 142, a refusal and a timeout warned with their fixes, the pending ok in brain_info's words (${rows.map((r) => `${r.status}: ${r.detail.slice(0, 60)}`).join(" | ")})`);
+}
+
+console.log("\n[36g] The dashboard's build stage copies every module the dashboard reaches (SMD-3671 PR 2): server-portable/Dockerfile's dashboard-build stage names the server's files it copies, and every relative import the dashboard's sources reach, followed through the server's files and the REST client's, is among them — brain-info.ts's import of priority-kinds.ts broke the image's build, which no suite saw");
+{
+  const { readFileSync, readdirSync, existsSync } = await import("node:fs");
+  const { dirname, join, relative, resolve } = await import("node:path");
+  const ROOT = resolve(import.meta.dir, "..");
+  const docker = readFileSync(join(ROOT, "server-portable/Dockerfile"), "utf8");
+  const at = docker.indexOf(" AS dashboard-build");
+  const stage = docker.slice(at, docker.indexOf("\nFROM ", at));
+  // The stage's COPY sources as repository paths: a file, a glob of one directory's files, or a directory whole.
+  const sources = stage.split("\n").filter((l) => /^COPY\s/.test(l) && !/--from/.test(l)).flatMap((l) => l.trim().split(/\s+/).slice(1, -1));
+  const copied = (p: string) => sources.some((c) => c === p || p.startsWith(`${c}/`)
+    || (c.includes("*") && new RegExp(`^${c.replace(/[.]/g, "\\.").replace(/\*/g, "[^/]*")}$`).test(p)));
+  // Every import a module makes at run time: `import type` is erased by the build, so it needs no file.
+  const IMPORT = /(?:^|[\n;])\s*(?:import|export)\s+(?!type\s)(?:[^'"]*?\sfrom\s+)?['"](\.{1,2}\/[^'"]+)['"]/g;
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : /\.(ts|js|svelte)$/.test(e.name) ? [join(dir, e.name)] : []));
+  const queue = walk(join(ROOT, "dashboard/src"));
+  const reached = new Set<string>();
+  for (let i = 0; i < queue.length; i++) {
+    const file = queue[i];
+    for (const m of readFileSync(file, "utf8").matchAll(IMPORT)) {
+      const target = resolve(dirname(file), m[1]);
+      const rel = relative(ROOT, target);
+      if (!/^(?:server-portable|rest-client|db)\//.test(rel) || reached.has(rel)) continue;
+      reached.add(rel);
+      if (existsSync(target) && /\.(ts|mjs|js)$/.test(target)) queue.push(target);
+    }
+  }
+  const missing = [...reached].filter((p) => !copied(p)).sort();
+  assert(sources.includes("server-portable/brain-info.ts") && reached.has("server-portable/brain-info.ts") && reached.has("server-portable/priority-kinds.ts") && missing.length === 0,
+    `every module the dashboard reaches through the server's and the REST client's files is copied into the dashboard-build stage (${reached.size} reached; missing: ${missing.join(", ") || "none"})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");

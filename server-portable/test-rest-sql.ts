@@ -3485,7 +3485,7 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     assert(pendingN > 10 && settled.length === 2 && same(pages.map((f) => f.id), l.findings.map((f) => f.id)) && cursor === null && lastCursor !== null
         && befores[0] === 0 && befores[1] === 3 && first.total === pendingN
         && firstM.text.split("\n")[0] === `${pendingN} pending priority findings; findings 1–5 of ${pendingN}; pass after: ${firstM.sc.cursor} for more:`
-        && [foreignStatus, foreignKind].every((a) => a.status === 400 && a.body.code === "REFUSED_CURSOR" && a.body.reason === "filters")
+        && [foreignStatus, foreignKind].every((a) => a.status === 400 && a.body.code === "REFUSED_CURSOR" && a.body.reason === "filters" && same(a.body.made, { status: "pending", kind: null }))
         && notOne.status === 400 && notOne.body.code === "REFUSED_CURSOR" && notOne.body.reason === "shape",
       `${pendingN} pending paged five at a time by the cursor: every finding once, in the list's order, two of the first page settled between pages and none skipped, the second page's place counted after them; the last page no cursor; a cursor made for another status or kind refused (filters), none of this tool's (shape) (${pages.length}/${l.findings.length} befores ${befores.join(",")} ${firstM.text.split("\n")[0].slice(0, 90)})`);
 
@@ -3585,6 +3585,8 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
         && laterM.text.includes(`stale finding ${stale} `) && /what its writer answered is stored in a shape this server does not read/.test(laterM.text),
       `a stored answer this server does not read: the list 200, that finding's outcome null and marked unread, said in the text (${laterR.status} ${JSON.stringify(laterRow?.outcome)} ${laterRow?.outcomeUnread})`);
     const all = (await rest("GET", "/v1/priority-findings?status=all&limit=1")).body as unknown as Listed;
+    // The default listing after decisions: the pending alone, every one counted (its own statement, 142's partial index's predicate in its text).
+    const pendingAfter = (await rest("GET", "/v1/priority-findings?limit=200")).body as unknown as Listed;
     const decidedRow = acceptedList.findings.find((f) => f.id === stale);
     const allTotal = await allN();
     const info = await rest("GET", "/v1/brain");
@@ -3596,6 +3598,7 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     assert(decidedRow?.status === "accepted" && decidedRow.decidedBy === "writer" && decidedRow.note === "[24] reviewed: medium now" && decidedRow.outcome?.outcome === "asserted"
         && (decidedRow.outcome?.assertion as { tierName?: string; level?: number } | undefined)?.tierName === "operator" && (decidedRow.outcome?.assertion as { level?: number }).level === 2
         && all.status === "all" && all.total === allTotal && all.findings.length === 1 && all.findings[0].status === "pending"
+        && pendingAfter.findings.every((f) => f.status === "pending") && pendingAfter.total === counts.p
         && pf != null && pf.pending === counts.p && pf.byKind.disagree === counts.d && ["stale", "overdue", "disagree", "settled"].every((k) => pf.byKind[k] === (byKind[k] ?? 0)) && (byKind.stale ?? 0) > 1 && pf.decided30d === counts.dec && counts.dec >= 2 && typeof pf.oldestPendingS === "number" && pf.oldestPendingS >= 86_000
         && new RegExp(`Priority findings:\\s+${counts.p} pending \\(`).test(infoM.text) && infoM.text.includes(`decided in the last 30 days`),
       `accepted ones listed with who decided, the note and the writer's answer; all counted in full, the pending first; brain_info's priorityFindings and its row count the pending, by kind, and the decided in 30 days (${decidedRow?.status} ${all.total}/${allTotal} ${JSON.stringify(pf)} ${JSON.stringify(counts)})`);

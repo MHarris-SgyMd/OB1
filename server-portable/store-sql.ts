@@ -1220,23 +1220,27 @@ export class SqlStore implements ThoughtStore {
   // SMD-3671 PR 2: 142's findings, one statement. The matching rows are read narrow — the id and the order's keys
   // (FindingPosition) — for `total`, `before` (those at or ahead of the cursor) and the page, one more than `limit` so
   // `next` is read rather than guessed; the wide columns (evidence and outcome jsonb) are read for the page's rows alone.
-  // The order is a strict total order: a group, a numeric key, the id.
+  // The order is a strict total order: a group, a numeric key, the id. The selection is a fragment, not `($1 IS NULL OR
+  // …)`: the pending listing says `status = 'pending'` in its text, so a cached generic plan can still use 142's partial
+  // index on the pending (a parameter proves no partial index's predicate); each selection is a statement of its own.
+  // The cursor is bound once, a one-row CTE.
   async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; after?: FindingPosition }): Promise<{ total: number; before: number; findings: PriorityFinding[]; next: FindingPosition | null }> {
     const a = opts.after;
+    const status = opts.status === null ? this.sql`true` : opts.status === "pending" ? this.sql`f.status = 'pending'` : this.sql`f.status = ${opts.status}::text`;
+    const kind = opts.kind === null ? this.sql`true` : this.sql`f.kind = ${opts.kind}::text`;
     const rows = await this.sql`
-      WITH m AS (
+      WITH cur AS (SELECT ${a?.grp ?? null}::int AS grp, ${a?.sk ?? null}::numeric AS sk, ${a?.id ?? null}::uuid AS id),
+      m AS (
         SELECT f.id, CASE WHEN f.status = 'pending' THEN 0 ELSE 1 END AS grp,
                CASE WHEN f.status = 'pending' THEN extract(epoch FROM f.found_at) ELSE -extract(epoch FROM COALESCE(f.decided_at, f.moot_at)) END AS sk
           FROM priority_findings f
-         WHERE (${opts.status}::text IS NULL OR f.status = ${opts.status}::text)
-           AND (${opts.kind}::text IS NULL OR f.kind = ${opts.kind}::text)),
+         WHERE ${status} AND ${kind}),
       c AS (
-        SELECT count(*)::int AS total,
-               count(*) FILTER (WHERE ${a?.grp ?? null}::int IS NOT NULL AND (m.grp, m.sk, m.id) <= (${a?.grp ?? null}::int, ${a?.sk ?? null}::numeric, ${a?.id ?? null}::uuid))::int AS before
-          FROM m),
+        SELECT count(*)::int AS total, count(*) FILTER (WHERE cur.grp IS NOT NULL AND (m.grp, m.sk, m.id) <= (cur.grp, cur.sk, cur.id))::int AS before
+          FROM m CROSS JOIN cur),
       p AS (
-        SELECT m.id, m.grp, m.sk FROM m
-         WHERE ${a?.grp ?? null}::int IS NULL OR (m.grp, m.sk, m.id) > (${a?.grp ?? null}::int, ${a?.sk ?? null}::numeric, ${a?.id ?? null}::uuid)
+        SELECT m.id, m.grp, m.sk FROM m CROSS JOIN cur
+         WHERE cur.grp IS NULL OR (m.grp, m.sk, m.id) > (cur.grp, cur.sk, cur.id)
          ORDER BY m.grp, m.sk, m.id
          LIMIT ${opts.limit + 1}::int)
       SELECT c.total, c.before, p.grp, p.sk::text AS sk, f.id::text AS id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days,

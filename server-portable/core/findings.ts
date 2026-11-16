@@ -32,7 +32,7 @@ export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { st
   const position = after === undefined ? undefined : parseFindingsCursor(after);
   if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
   if (position && (position.selection.status !== selection.status || position.selection.kind !== selection.kind)) {
-    return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters" });
+    return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters", made: position.selection });
   }
   // A brain before 142 holds no table: the read faults naming priority_findings, and the fault's hint says so
   // (render.ts findingsHint), as a listing before its migration does.

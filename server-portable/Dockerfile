@@ -45,7 +45,8 @@ COPY dashboard/package.json dashboard/bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY rest-client/*.ts /app/rest-client/
 COPY server-portable/oauth-edge.ts server-portable/auth.ts server-portable/brain-info.ts /app/server-portable/
-COPY server-portable/stated-status.ts /app/server-portable/
+# brain-info.ts imports priority-kinds.ts (SMD-3671 PR 2); test-server [36g] holds this list to every module the dashboard reaches.
+COPY server-portable/stated-status.ts server-portable/priority-kinds.ts /app/server-portable/
 COPY server-portable/core/filter.ts /app/server-portable/core/
 COPY dashboard/svelte.config.js dashboard/vite.config.ts ./
 COPY dashboard/src ./src
