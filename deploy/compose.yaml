@@ -1508,7 +1508,8 @@ services:
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
       OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
       # The host's slot broker (SMD-3379 PR 3b-1, deploy/federated/): its
-      # WebSocket URL, e.g. ws://host.containers.internal:8095/v1/slots, and
+      # WebSocket URL, e.g. ws://host.containers.internal:8095/v1/slots
+      # (host.docker.internal under Docker Engine on Linux), and
       # this brain's key to it (federated.ts key). The coordinator's alone: no
       # pass is handed them, each asks through it, and so does the api where
       # OB1_SLOT_RELAY_KEY is set (above, PR 3b-2). Unset, the passes and the
