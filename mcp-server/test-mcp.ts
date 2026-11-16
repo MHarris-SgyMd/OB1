@@ -1065,8 +1065,11 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   assert(mixed.status === 400 && errorOf(mixed).code === -32020 && last().status === 400, `a 2025-era initialize under a 2026-07-28 header: the handler's 400, -32020, not served (${mixed.status} ${errorOf(mixed).code})`);
 
   // Two callers at once through the one handler: each its own server, by the function its own request handed over.
+  // Each key's own count, asked one at a time of the 2025-era path first: three different numbers, so a crossed list shows.
+  const own = new Map<string, number>();
+  for (const key of ["write-raw", "read-raw", "cap-raw"]) own.set(key, ((resultOf(await rpc("tools/list", {}, key)).tools as unknown[] | undefined) ?? []).length);
   const together = await Promise.all(["write-raw", "read-raw", "cap-raw", "write-raw", "read-raw", "cap-raw"].map(async (key) => [key, ((resultOf(await rpc("tools/list", {}, key, { modern: true })).tools as unknown[] | undefined) ?? []).length] as const));
-  assert(same(together.map(([, n]) => n), [47, 24, 8, 47, 24, 8]), `six 2026-07-28 requests at once under three keys: each its own key's list (${together.map(([k, n]) => `${k} ${n}`).join(", ")})`);
+  assert(new Set(own.values()).size === 3 && together.every(([key, n]) => n === own.get(key) && n > 0), `six 2026-07-28 requests at once under three keys: each its own key's list (${together.map(([k, n]) => `${k} ${n}`).join(", ")})`);
 
   // A fault building the server (here a plugin's tool named as a core tool is): this server's 500, said once in
   // the log as a route's throw, for both. The SDK's handler catches it and would say it nowhere.
