@@ -80,7 +80,9 @@ export function gatewayFrom(out: string): { host: string } | { why: string } {
  * so both must hold — the daemon names this host (`docker info`'s Name and this host's name read the same kernel name
  * for a local daemon, by any socket), and its gateway is an address of this host's (`owned`, ownsAddress's). A daemon
  * of another host (a DOCKER_HOST, a Docker context) fails the first, which the second alone missed whenever both hosts
- * kept Docker's default 172.17.0.1; a client in a container fails both (review passes 2–4 of 3b-3a).
+ * kept Docker's default 172.17.0.1; a client in a container fails both, by design — the gateway is the daemon's, dialled
+ * here (review passes 2–4 of 3b-3a). Two hosts of one name (an image's default, `ubuntu`) on Docker's default bridge
+ * still pass: then `up` asks this host's gateway and says the broker did not come up.
  */
 export function remoteDaemon(daemonName: string, here: string, gateway: string, owned: boolean | string): string {
   const where = "run federated.ts on the daemon's own host (a DOCKER_HOST or a Docker context points it elsewhere)";
@@ -89,6 +91,20 @@ export function remoteDaemon(daemonName: string, here: string, gateway: string, 
   if (!name) return "the Docker daemon did not name its host (docker info), so whether it is this host's cannot be told";
   if (name !== here.trim().toLowerCase()) return `the Docker daemon names its host ${daemonName.trim()}, not this host (${here}): ${where}`;
   return owned ? "" : `the default bridge's gateway ${gateway} is no address of this host's: the daemon is another host's, or this runs in a container — ${where}`;
+}
+
+/**
+ * The gateway shape's address, or why there is none to publish on: the bridge's gateway read (`inspect`, its output),
+ * then the daemon's name (`info`, asked only once the gateway is read) and the gateway's ownership (`owns`) held to this
+ * host (`here`) by remoteDaemon. Its own function, so the self-check drives main's wiring (review pass 5 of 3b-3a: three
+ * mutants of that wiring survived the self-check and CI's success path alike).
+ */
+export function gatewayPlacement(o: { inspect: { ok: boolean; out: string; err: string }; info: () => { ok: boolean; out: string }; here: string; owns: (address: string) => boolean | string; runtime: string }): { host: string } | { why: string } {
+  const got = o.inspect.ok ? gatewayFrom(o.inspect.out) : { why: `${o.runtime} network inspect bridge failed: ${reason(o.inspect.err)}` };
+  if ("why" in got) return got;
+  const n = o.info();
+  const remote = remoteDaemon(n.ok ? n.out : "", o.here, got.host, o.owns(got.host));
+  return remote ? { why: remote } : { host: got.host };
 }
 
 /**
@@ -202,14 +218,14 @@ async function main(cmd: string, args: string[]) {
   // No shape, no address of its own to ask either (review pass 4 of 3b-3a: the loopback asked for a runtime refused).
   let unknown = shape === undefined;
   if (shape?.name === "gateway") {
-    const g = spawn([o.runtime, "network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"]);
-    const got = g.ok ? gatewayFrom(g.out) : { why: `${o.runtime} network inspect bridge failed: ${reason(g.err)}` };
-    if ("why" in got) { refusals.push(got.why); unknown = true; }
-    else {
-      const n = spawn([o.runtime, "info", "--format", "{{.Name}}"]);
-      const remote = remoteDaemon(n.ok ? n.out : "", hostname(), got.host, ownsAddress(got.host));
-      if (remote) { refusals.push(remote); unknown = true; } else host = got.host;
-    }
+    const placed = gatewayPlacement({
+      inspect: spawn([o.runtime, "network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"]),
+      info: () => spawn([o.runtime, "info", "--format", "{{.Name}}"]),
+      here: hostname(),
+      owns: ownsAddress,
+      runtime: o.runtime,
+    });
+    if ("why" in placed) { refusals.push(placed.why); unknown = true; } else host = placed.host;
   }
   // The port: free, or this project's broker's — asked only where its address is known and this host's (review passes 2
   // and 3 of 3b-3a: a gateway unread left the loopback asked; an exit before it for any refusal hid the port's).
@@ -252,11 +268,22 @@ function selfCheck() {
     ["a daemon of another host is refused by its name even where this host holds the same gateway; a gateway not this host's by its address; this host's daemon passes", /names its host prod-box, not this host/.test(remoteDaemon("prod-box\n", "dev-box", "172.17.0.1", true)) && /no address of this host's/.test(remoteDaemon("dev-box\n", "dev-box", "172.17.0.1", false)) && remoteDaemon("Dev-Box\n", "dev-box", "172.17.0.1", true) === "" && /cannot be told/.test(remoteDaemon("", "dev-box", "172.17.0.1", true)) && /could not be told — binding it failed \(EACCES/.test(remoteDaemon("dev-box", "dev-box", "172.17.0.1", "EACCES: denied"))],
     ["an address is this host's where a socket binds there: the loopback is, a documentation address is not (EADDRNOTAVAIL)", ownsAddress("127.0.0.1") === true && ownsAddress("203.0.113.1") === false],
     ["Docker Desktop on Linux is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", osType: "linux", desktop: true })).ok],
+    ["Docker Engine on macOS (colima, OrbStack: not Desktop, a Linux VM) is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "darwin", osType: "linux", desktop: false })).ok],
+    ["the gateway's private and shared ranges at their bounds, 192.168 among them", ["10.0.0.1", "172.16.0.1", "172.31.255.1", "192.168.5.1", "100.64.0.1", "100.127.255.254"].every((a) => { const g = gatewayFrom(a); return "host" in g && g.host === a; })
+      && ["172.15.0.1", "172.32.0.1", "172.160.0.1", "192.169.0.1", "100.63.255.1", "100.128.0.1", "11.10.0.1", "169.254.0.1"].every((a) => "why" in gatewayFrom(a))],
+    ["the daemon's name is held to this host's whole, not a part of it", remoteDaemon("box.example\n", "box", "172.17.0.1", true) !== "" && remoteDaemon("box\n", "box.example", "172.17.0.1", true) !== ""],
+    ["main's gateway wiring: the gateway read, the daemon's name and the bind each refuse; all three hold, the gateway is the address", (() => {
+      const ok = (out: string) => ({ ok: true, out, err: "" });
+      const run = (o: Partial<Parameters<typeof gatewayPlacement>[0]>) => gatewayPlacement({ inspect: ok("172.17.0.1 "), info: () => ok("runner\n"), here: "runner", owns: () => true, runtime: "docker", ...o });
+      const good = run({}), unread = run({ inspect: { ok: false, out: "", err: "no such network" } }), other = run({ info: () => ok("prod\n") }), unbound = run({ owns: () => false }), denied = run({ owns: () => "EACCES: denied" });
+      return "host" in good && good.host === "172.17.0.1" && "why" in unread && /inspect bridge failed/.test(unread.why) && "why" in other && /names its host prod/.test(other.why) && "why" in unbound && /no address of this host's/.test(unbound.why) && "why" in denied && /binding it failed/.test(denied.why);
+    })()],
+    ["a registry readable by its group alone is refused", /chmod 644/.test(modeProblem(0o100640, "f")) && /chmod 644/.test(modeProblem(0o100600, "f"))],
     ["podman on Linux is refused pointing at --runtime docker, unless docker is that podman (podman-docker)", (() => { const m = measured(facts({ platform: "linux" })), s = measured(facts({ runtime: "docker", platform: "linux" })); return !m.ok && /--runtime docker/.test(m.why) && !s.ok && !/--runtime docker/.test(s.why); })()],
     ["Docker Engine whose OS type is not linux is refused", !measured(facts({ runtime: "docker", engine: "docker", platform: "linux", osType: "windows" })).ok],
     ["a re-up under the gateway shape knows its own port: ps's binding on the gateway address is this broker's", (() => { const line = `abc|ob1-federated-slots-1|172.17.0.1:8095->8095/tcp|${PROJECT}|slots|running|||`; const c = containersIn(line)[0]; return !!c && c.project === PROJECT && holds(c.ports, { hostIp: "172.17.0.1", port: 8095, protocol: "tcp" }) && !holds(c.ports, { hostIp: "127.0.0.1", port: 8095, protocol: "tcp" }); })()],
     ["down's and logs' placeholder settings name every value compose.yaml requires", (() => { const need = [...readFileSync(COMPOSE, "utf8").matchAll(/\$\{([A-Z_]+):\?/g)].map((m) => m[1]); const e = composeEnv({}, { port: 1 }, BROKER, "down", "down", "127.0.0.1"); return need.length > 0 && need.every((k) => typeof e[k] === "string" && e[k] !== ""); })()],
-    ["the gateway shape's proof dials host.docker.internal at host-gateway, with the broker's own image", (() => { const a = probeArgs("docker", "img@sha256:x", 8095); return a.join(" ").includes("--add-host host.docker.internal:host-gateway") && a.includes("img@sha256:x") && a.at(-1) === "http://host.docker.internal:8095/health"; })()],
+    ["the gateway shape's proof dials host.docker.internal at host-gateway, with the broker's own image, removed after, bounded", (() => { const a = probeArgs("docker", "img@sha256:x", 8095), j = a.join(" "); return j.includes("--add-host host.docker.internal:host-gateway") && a.includes("img@sha256:x") && a.at(-1) === "http://host.docker.internal:8095/health" && a.includes("--rm") && j.includes("-T 5") && j.includes("--entrypoint wget") && j.includes("-O -"); })()],
     ["compose's environment drops the shell's COMPOSE_* and FEDERATED_* and sets the project's own, the port's host the loopback unless given", (() => { const e = composeEnv({ PATH: "/bin", COMPOSE_FILE: "x", FEDERATED_PORT: "1", FEDERATED_HOST: "0.0.0.0", DOCKER_HOST: "unix:///x" }, { port: 8095 }, "/r.yaml", "b", "r"); const g = composeEnv({}, { port: 8095 }, "/r.yaml", "b", "r", "172.17.0.1"); return e.PATH === "/bin" && e.DOCKER_HOST === "unix:///x" && !("COMPOSE_FILE" in e) && e.FEDERATED_HOST === "127.0.0.1" && g.FEDERATED_HOST === "172.17.0.1" && e.FEDERATED_PORT === "8095" && e.FEDERATED_REGISTRY === "/r.yaml" && e.FEDERATED_BROKER_SHA256 === "b" && e.FEDERATED_REGISTRY_SHA256 === "r"; })()],
     ["a minted key is marked, its lines read as a registry's brain, and the key finds it", minted.key.startsWith(KEY_PREFIX) && minted.key.length === KEY_PREFIX.length + 64 && !!reg && brainOf(reg.brains, minted.key)?.name === "canary" && !minted.lines.includes(minted.key)],
     ["two mints are two keys", mintKey("a").key !== mintKey("a").key],
