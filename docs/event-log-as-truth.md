@@ -394,7 +394,10 @@ leaving the log to fight it:
   once. The saying-so row is the ledger,
   `thought_forgotten`, beside the log as the next bullet asks. `forget_thought`
   redacts after the row's delete, not before it, so the tombstone the delete
-  writes, which carries the text in full, is redacted with the rest.
+  writes, which carries the text in full, is redacted with the rest. Since
+  migration 144 (SMD-1723 PR 2) it runs as its owner, a SECURITY DEFINER
+  wrapper over 139's body: a server role needs `EXECUTE` on `forget_thought` alone,
+  and no `UPDATE` on the log, so a forget by hand around it stays the owner's.
 - **A redacted thought projects to nothing.** The projector refuses a capture
   event with no content (SQLSTATE `OB003`), so a redaction that blanked the
   text would otherwise stop every fold at that thought. The rule: the

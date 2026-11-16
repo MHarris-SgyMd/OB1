@@ -173,6 +173,55 @@ export function parseProposalCursor(raw: string): { selection: ProposalSelection
 /** Whether two selections are the same listing — a cursor's and the call's it is passed with. */
 export const sameSelection = (a: ProposalSelection, b: ProposalSelection): boolean => a.status === b.status && a.lineage === b.lineage && a.judgeKey === b.judgeKey;
 
+/**
+ * What a list_work_claims page selected (SMD-3606 PR 2): the ticket filter (null: every ticket), the holder filter
+ * (null: every holder) and whether ended claims are included — the tool's `ticket`, `holder` and `include_ended`.
+ */
+export type ClaimSelection = { ticket: string | null; holder: string | null; includeEnded: boolean };
+
+/**
+ * list_work_claims' cursor (SMD-3606 PR 2): the selection the page was listed under, then the last listed row's values
+ * on the listing's order — its issue (the upper-case ticket key 115 stores), piece_key (the piece folded, '' for a
+ * whole-ticket claim), claimed_at as Postgres's text (to the microsecond) and its id — as base64url of `["claims",
+ * ticket, holder, includeEnded, issue, pieceKey, claimedAt, id]`. The values, not a row alone: a claim's four order
+ * values never change after it is made (143), so the cursor keeps the place the page ended at. The selection, so a
+ * cursor passed with other filters is refused rather than starting the listing at a place in another. The tag keeps it
+ * apart from the other listings' cursors, so one listing's is refused by another.
+ */
+export function claimCursor(sel: ClaimSelection, issue: string, pieceKey: string, claimedAt: string, id: string): string {
+  return Buffer.from(JSON.stringify(["claims", sel.ticket, sel.holder, sel.includeEnded, issue, pieceKey, claimedAt, id])).toString("base64url");
+}
+
+/** A list_work_claims cursor read back, or null for anything that is not one. */
+export function parseClaimCursor(raw: string): { selection: ClaimSelection; issue: string; pieceKey: string; claimedAt: string; id: string } | null {
+  const text = raw.trim();
+  // 2048, not the other cursors' 512: this one carries ticket, holder, issue and piece_key (each up to 200), so a max-length cursor reaches ~1200 (SMD-3606 PR 2); the schema's `after` admits 2048 too.
+  if (!/^[A-Za-z0-9_-]{1,2048}$/.test(text)) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length !== 8) return null;
+  const [tag, ticket, holder, includeEnded, issue, pieceKey, claimedAt, id] = v as unknown[];
+  if (tag !== "claims") return null;
+  // The selection: the tool's inputs, each null or a bounded string, include_ended a boolean.
+  if (ticket !== null && (typeof ticket !== "string" || ticket.length > 200)) return null;
+  if (holder !== null && (typeof holder !== "string" || holder.length > 200)) return null;
+  if (typeof includeEnded !== "boolean") return null;
+  // The position: issue the key 115 stores (non-empty, bounded), piece_key the piece folded ('' for a whole-ticket claim), id a uuid.
+  if (typeof issue !== "string" || issue.length < 1 || issue.length > 200) return null;
+  // piece is at most 100 (115's CHECK), but piece_key is lower(piece), and lower() can lengthen a few code points, so 200 gives margin; the whole cursor is bounded to 512 above regardless.
+  if (typeof pieceKey !== "string" || pieceKey.length > 200) return null;
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  const selection: ClaimSelection = { ticket, holder, includeEnded };
+  return pgStamp(claimedAt) ? { selection, issue, pieceKey, claimedAt, id: id.toLowerCase() } : null;
+}
+
+/** Whether two claim selections are the same listing — a cursor's and the call's it is passed with. */
+export const sameClaimSelection = (a: ClaimSelection, b: ClaimSelection): boolean => a.ticket === b.ticket && a.holder === b.holder && a.includeEnded === b.includeEnded;
+
 /** Whether year `y` (BC when `bc`) is a leap year in Postgres's proleptic Gregorian calendar: 1 BC is year 0. */
 const leap = (y: number, bc: boolean) => {
   const n = bc ? 1 - y : y;

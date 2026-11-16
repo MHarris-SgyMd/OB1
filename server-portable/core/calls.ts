@@ -39,6 +39,7 @@ export const CALLS = {
   capture_thought: (c, p, i) => c.capture(p, i),
   update_thought: (c, p, i) => c.updateThought(p, i),
   delete_thought: (c, p, i) => c.deleteThought(p, i),
+  forget_thought: (c, p, i) => c.forgetThought(p, i),
   reset_capture_stamp: (c, p, i) => c.resetCaptureStamp(p, i),
   append_thought_evidence: (c, p, i) => c.appendThoughtEvidence(p, i),
   review_supersession_proposal: (c, p, i) => c.reviewSupersessionProposal(p, i),

@@ -813,6 +813,39 @@ else {
     }
   }
 
+  // SMD-1723 PR 2 (migration 144): forget_thought runs as its owner, and no store holds a forgotten thought's id — a
+  // write that raced a forget is named, a warning (preflight gates the start, and the sweep runs through the server),
+  // until a second forget sweeps it; 139 re-applied resets the definer, named with 144.
+  {
+    const fg = new SQL({ url: LIVE, max: 1 });
+    const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*\\S+\\s+${name}\\s{2,}\\S`).test(l))?.trim() ?? "";
+    try {
+      const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  forget definer\s+forget_thought runs as its owner, its search_path pinned; the server's role may run it/.test(whole.out)
+          && /✓  forgotten\s+no store holds the id or the text of a forgotten thought/.test(whole.out),
+             `on a brain at 144 forget_thought is its owner's and nothing holds a forgotten id: ok (${rowOf(whole.out, "forget definer")} | ${rowOf(whole.out, "forgotten")})`);
+      const [{ id }] = (await fg`INSERT INTO thoughts (content) VALUES ('preflight: a thought to forget (SMD-1723)') RETURNING id::text AS id`) as { id: string }[];
+      await fg`SELECT forget_thought(${id}::uuid, NULL::jsonb, false)`;
+      await fg`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', ${id}::uuid)`;
+      const raced = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(raced.code === 0 && rowOf(raced.out, "forgotten").startsWith(`!  forgotten`) && rowOf(raced.out, "forgotten").includes(`1 forgotten thought(s) still held by a store, which the brain promised gone: ${id} (query_log 1)`)
+          && /forget_thought\('<id>'::uuid\)/.test(raced.out),
+             `a logged action on a forgotten id: a warning naming the id and the store, the server still starting, the sweep spelled (exit ${raced.code}; ${rowOf(raced.out, "forgotten").slice(0, 160)})`);
+      await fg`SELECT forget_thought(${id}::uuid, NULL::jsonb, false)`;
+      const swept = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  forgotten\s/.test(swept.out), `…and a second forget sweeps it: ok again (${rowOf(swept.out, "forgotten")})`);
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("139") });
+      const reset = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("144") });
+      const restored = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(reset.code === 0 && /!  forget definer\s+forget_thought runs as its caller, not its owner/.test(reset.out) && /144_forget_thought_definer\.sql/.test(reset.out)
+          && /✓  forget definer\s/.test(restored.out),
+             `139 re-applied: forget_thought its caller's, a warning naming 144; 144 re-applied: ok (${rowOf(reset.out, "forget definer").slice(0, 120)})`);
+    } finally {
+      await fg.close();
+    }
+  }
+
   // 115's work claims (SMD-3598), "ticket claims" beside 015's "worker claims": the four functions the claim
   // operations call, and a statement log that would print a renewal's or a release's token (a bind value) whole.
   {
@@ -828,11 +861,12 @@ else {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       assert(/✓  ticket claims\s+claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; the logging settings read print no bind value/.test(whole.out),
              `on a brain at 115 the four claim functions, the claims grant and no token-printing log: ok (${line(whole.out).trim()})`);
-      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer) RENAME TO list_work_claims_away");
+      // 143 redefined list_work_claims with the eight-argument keyset-cursor signature; its own, not 115's four, is what the check reads now.
+      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims_away");
       const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims");
-      assert(missing.code === 1 && /ticket claims\s+migration 115's list_work_claims\(text\[\],text,boolean,integer\) missing under 115's signature/.test(missing.out) && /115_work_claims\.sql/.test(missing.out),
-             `a claim function missing: does not start, naming it and 115 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 140)})`);
+      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims");
+      assert(missing.code === 1 && /ticket claims\s+list_work_claims\(text\[\],text,boolean,integer,text,text,timestamptz,uuid\) missing under 143's signature/.test(missing.out) && /143_work_claims_cursor\.sql/.test(missing.out),
+             `list_work_claims missing under 143's signature alone: does not start, naming it and 143 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 160)})`);
       // Statement logging, set for the database so the next connection reads it (a superuser's settings).
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_statement = 0`);
       const logging = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -892,8 +926,8 @@ else {
              `a failed statement's parameters logged: a warning naming log_parameter_max_length_on_error; log_statement=mod, which logs no claim call, ok (${line(onError.out).trim().slice(0, 120)} | ${line(mod.out).trim().slice(0, 40)})`);
     } finally {
       for (const s of SET_HERE) await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET ${s}`).catch(() => {});
-      await ticket.unsafe(`DO $r$ BEGIN IF to_regprocedure('list_work_claims_away(text[],text,boolean,integer)') IS NOT NULL THEN
-        ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims; END IF; END $r$`).catch(() => {});
+      await ticket.unsafe(`DO $r$ BEGIN IF to_regprocedure('list_work_claims_away(text[],text,boolean,integer,text,text,timestamptz,uuid)') IS NOT NULL THEN
+        ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims; END IF; END $r$`).catch(() => {});
       await ticket.close();
     }
   }

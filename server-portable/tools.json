@@ -138,6 +138,10 @@
       "scope": "write"
     },
     {
+      "name": "forget_thought",
+      "scope": "write"
+    },
+    {
       "name": "reset_capture_stamp",
       "scope": "write"
     },

@@ -446,6 +446,19 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   assert(ddo.ok && dd.content[0].text === dm.text && same(dd.structuredContent, dm.sc) && same(shapeOf(d.body), dWhole),
     `delete_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${ddo.ok ? `${firstDiff(dd.structuredContent, dm.sc)} / ${firstDiff(shapeOf(d.body) as Record<string, unknown>, dWhole)}` : "refused"})`);
 
+  // forget_thought (SMD-1723 PR 2): each door forgets its own row, the id echoed in `confirm`. The time, and the bare
+  // orphans the first forget's brain-wide prune may take, differ by call: swapped in, as the id is.
+  const fgRest = String((await rest("POST", "/v1/thoughts", { content: "eta: a note REST forgets", source: "rest-suite" })).body.id);
+  const fgMcp = String((await mcp("capture_thought", { content: "eta: a note MCP forgets", source: "rest-suite" })).sc.id);
+  const fg = await rest("POST", `/v1/thoughts/${fgRest}/forget`, { confirm: fgRest });
+  const fgm = await mcp("forget_thought", { id: fgMcp, confirm: fgMcp });
+  const fgr = rendered((v) => say.renderForget(ok(v)), swap(fg.body, fgm.sc, ["id", "forgottenAt", "orphanEntities"]));
+  const fgGone = await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE id IN (${fgRest}::uuid, ${fgMcp}::uuid)) AS rows,
+    (SELECT count(*)::int FROM thought_forgotten WHERE thought_id IN (${fgRest}::uuid, ${fgMcp}::uuid)) AS led`;
+  assert(fg.status === 200 && fg.body.id === fgRest && typeof (fg.body.removed as Record<string, unknown> | undefined)?.audit_events === "number"
+      && fgr.content[0].text === fgm.text && same(fgr.structuredContent, fgm.sc) && fgGone[0].rows === 0 && fgGone[0].led === 2,
+    `forget_thought: the REST answer is the evidence, both thoughts gone and in the ledger, and the same reply as MCP's (${fg.status}; first difference: ${firstDiff(fgr.structuredContent, fgm.sc)})`);
+
   // reset_capture_stamp (SMD-2744): the operator's alone, so the writer is
   // classified for it here and unclassified after. Each door resets the
   // hook's own row, which nothing settled: the same "nothing to reset".
@@ -853,6 +866,9 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     ["update_thought", { id: ids[2] }, "PATCH", `/v1/thoughts/${ids[2]}`, {}],
     ["update_thought", { id: missing, content: "zeta" }, "PATCH", `/v1/thoughts/${missing}`, { content: "zeta" }],
     ["delete_thought", { id: missing }, "DELETE", `/v1/thoughts/${missing}`, undefined],
+    // SMD-1723 PR 2: the echo refused before anything is read, then an id the log never held.
+    ["forget_thought", { id: missing, confirm: "not the id" }, "POST", `/v1/thoughts/${missing}/forget`, { confirm: "not the id" }],
+    ["forget_thought", { id: missing, confirm: missing }, "POST", `/v1/thoughts/${missing}/forget`, { confirm: missing }],
     // The writer is unclassified: the database refuses it the reset (SMD-2744).
     ["reset_capture_stamp", { id: ids[0] }, "POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {}],
     ["reset_capture_stamp", { id: "not-a-uuid" }, "POST", "/v1/thoughts/not-a-uuid/reset-capture-stamp", {}],
@@ -882,6 +898,8 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
   const withFacts: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, fact: string][] = [
     ["capture_thought", { content: "kappa", derived_from: [ids[0], missing] }, "POST", "/v1/thoughts", { content: "kappa", derived_from: [ids[0], missing] }, "positions"],
     ["update_thought", { id: ids[0], content: "alpha, edited", if_unchanged_since: "2020-01-01T00:00:00Z" }, "PATCH", `/v1/thoughts/${ids[0]}`, { content: "alpha, edited", if_unchanged_since: "2020-01-01T00:00:00Z" }, "currentUpdatedAt"],
+    // SMD-1723 PR 2: [3]'s forgotten text, captured again: refused, and when it was forgotten.
+    ["capture_thought", { content: "eta: a note REST forgets" }, "POST", "/v1/thoughts", { content: "eta: a note REST forgets" }, "forgottenAt"],
   ];
   for (const [tool, args, method, path, body, fact] of withFacts) {
     const r = await rest(method, path, body);
@@ -901,7 +919,7 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
   // server as a REST client says every refusal as server-portable does.
   const renderOf: Record<string, (o: never) => say.Reply> = {
     fetch: say.renderFetch, thought_changes: say.renderThoughtChanges, list_thought_ids: say.renderThoughtIds, list_logged_searches: say.renderLoggedSearches,
-    search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete,
+    search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete, forget_thought: say.renderForget,
     reset_capture_stamp: say.renderResetCaptureStamp, append_thought_evidence: say.renderAppendThoughtEvidence, review_supersession_proposal: say.renderReviewProposal, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
   };
   // A capture-only key's refusals too (review pass 1), the words its facts
@@ -3410,6 +3428,54 @@ console.log("\n[23] set_work_claim_cap through both doors (SMD-3606 PR 1b, migra
   } finally {
     // Clear through the op (the writer is the operator), so the built-in cap stands for any later section; the server passes the actor envelope.
     await rest("POST", "/v1/work-claim-cap", { cap: null });
+  }
+}
+
+console.log("\n[24] The work-claims listing cursor through both doors (SMD-3606 PR 2, migration 143): four pieces of one ticket held by a key, list_work_claims paged two at a time — GET /v1/claims?after=… and MCP list_claims after — each piece once in piece order, the cursor, remaining, truncated and pastCursor in the reply, the last page's cursor null; a bad cursor and a cursor passed with other filters refused 400 REFUSED_CURSOR; the claims released after");
+{
+  await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24] reset' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  // Four pieces of one ticket are four different works, so one key may hold all four and the ticket filter isolates them.
+  for (const p of ["PR 1", "PR 2", "PR 3", "PR 4"]) await rest("POST", "/v1/claims", { ticket: "SMD-9360", piece: p }, KEYS.fresh);
+  try {
+    // REST: page two at a time, following the body's cursor to the end.
+    const restSeen: string[] = [];
+    let body: Record<string, unknown> = {};
+    let after: string | undefined;
+    let restPages = 0;
+    for (let i = 0; i < 6; i++) {
+      const r = await rest("GET", `/v1/claims?ticket=SMD-9360&limit=2${after ? `&after=${encodeURIComponent(after)}` : ""}`, undefined, KEYS.fresh);
+      body = r.body as Record<string, unknown>;
+      restPages++;
+      for (const c of (body.claims as { piece: string }[])) restSeen.push(c.piece);
+      if (!body.cursor) break;
+      after = String(body.cursor);
+    }
+    // MCP: the same walk, from the structuredContent.
+    const mcpSeen: string[] = [];
+    let mAfter: string | undefined;
+    for (let i = 0; i < 6; i++) {
+      const r = await mcp("list_claims", { ticket: "SMD-9360", limit: 2, ...(mAfter ? { after: mAfter } : {}) }, KEYS.fresh);
+      for (const c of (r.sc.claims as { piece: string }[])) mcpSeen.push(c.piece);
+      if (!r.sc.cursor) break;
+      mAfter = String(r.sc.cursor);
+    }
+    // A bad cursor, and a good one passed with other filters (a different ticket), refused through both doors.
+    const firstPage = await rest("GET", "/v1/claims?ticket=SMD-9360&limit=2", undefined, KEYS.fresh);
+    const goodCursor = String((firstPage.body as Record<string, unknown>).cursor);
+    const badRest = await rest("GET", "/v1/claims?ticket=SMD-9360&after=not-a-cursor", undefined, KEYS.fresh);
+    const badMcp = await mcp("list_claims", { ticket: "SMD-9360", after: "not-a-cursor" }, KEYS.fresh);
+    const otherFilter = await rest("GET", `/v1/claims?ticket=SMD-9361&after=${encodeURIComponent(goodCursor)}`, undefined, KEYS.fresh);
+    // The ticket is the one filter the SQL normalizes (upper + clean), so the same cursor pages on with the ticket written in another case — not refused as other filters.
+    const lowerTicket = await rest("GET", `/v1/claims?ticket=smd-9360&limit=2&after=${encodeURIComponent(goodCursor)}`, undefined, KEYS.fresh);
+    assert(JSON.stringify(restSeen) === JSON.stringify(["PR 1", "PR 2", "PR 3", "PR 4"]) && JSON.stringify(mcpSeen) === JSON.stringify(["PR 1", "PR 2", "PR 3", "PR 4"])
+        && body.cursor === null && Number(body.remaining) === 0 && body.truncated === false && body.pastCursor === true
+        && badRest.status === 400 && badRest.body.code === "REFUSED_CURSOR" && badMcp.isError && badMcp.sc.code === "REFUSED_CURSOR"
+        && otherFilter.status === 400 && otherFilter.body.code === "REFUSED_CURSOR" && otherFilter.body.reason === "filters"
+        && lowerTicket.status === 200 && (lowerTicket.body.claims as unknown[]).length === 2
+        && restPages === 2,
+      `the cursor pages each of the four pieces once through both doors in exactly two pages (the last full page ends the walk, no extra empty fetch — remaining counts the rows after this page, not this page's), the last page cursor null / remaining 0 / truncated false / pastCursor true; a bad cursor and one with other filters refused 400 REFUSED_CURSOR, but the same ticket in another case pages on (REST ${restSeen.join(",")} in ${restPages} pages | MCP ${mcpSeen.join(",")} | bad ${badRest.status}/${String(badRest.body.code)} | other ${otherFilter.status}/${String(otherFilter.body.reason)} | lower ${lowerTicket.status})`);
+  } finally {
+    await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24]' WHERE holder_name = 'fresh' AND released_at IS NULL`;
   }
 }
 
