@@ -25,7 +25,7 @@ import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
-import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
+import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor, type FindingSelection, type ProposalSelection } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { adviceFor, type EmbeddingProviderError } from "./core/provider-refusal.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
@@ -1218,7 +1218,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
-    ? r.reason === "filters" && r.made && "lineage" in r.made
+    ? r.reason === "filters" && r.made && r.made.list === undefined
       // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
       ? `Refused: that cursor was made with \`status: ${r.made.status}\`${r.made.lineage === null ? "" : `, \`lineage: ${r.made.lineage}\``}${r.made.judgeKey === null ? "" : `, \`judge_key: ${judgeKeyText(r.made.judgeKey)}\``}${r.made.lineage === null && r.made.judgeKey === null ? " and no other filter" : ""} — pass the same filters with it, or leave out \`after\` to start the list again.`
       : "Refused: `after` is not a list_supersession_proposals cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
@@ -2498,10 +2498,8 @@ const findingLine = (f: PriorityFinding) => {
 };
 
 /** The selection a refused findings cursor was made under, in words: its status and its kind. */
-const madeUnder = (m: unknown) => {
-  const sel = m !== null && typeof m === "object" && "kind" in m ? (m as { status: string; kind: string | null }) : null;
-  return sel ? `status ${sel.status} and ${sel.kind === null ? "every kind" : `kind ${sel.kind}`}` : "another status or kind";
-};
+const madeUnder = (m: ProposalSelection | FindingSelection | undefined) =>
+  m?.list === "findings" ? `status ${m.status} and ${m.kind === null ? "every kind" : `kind ${m.kind}`}` : "another status or kind";
 export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => render(o, (v) => {
   const which = `${v.status === "all" ? "" : `${v.status} `}priority finding`;
   const of = v.kind ? ` of kind ${v.kind}` : "";
@@ -2527,6 +2525,7 @@ export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingR
     const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${v.kind} finding ${v.id} on ${itemText(v.item)}`;
     const held = v.suppressedUntil ? ` The same finding is held back until ${v.suppressedUntil} while its statements stand.` : "";
     if (v.status === "rejected") return `${lead}: no priority was changed.${held}`;
+    if (v.answerUnread) return `${lead}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements.${held}`;
     const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, v.item);
     if (v.outcome === "cleared") {
       return `${lead}: cleared your statement${v.closed.length > 1 ? `s — ${closedList(v.closed, v.item)} —` : v.closed.length ? `, ${closedList(v.closed, v.item)},` : ""} which stay${v.closed.length > 1 ? "" : "s"} in the history.${winner}${held}`;

@@ -1578,7 +1578,7 @@ export type FindingStatement = { id: string; level: number | null; maker: string
 /**
  * One priority finding as the list reads it (migration 142's priority_findings row): its kind, its item (keyed by its
  * pool: a ticket and its own rows are one item), its status, the statements it is about, its evidence as the scan
- * wrote it, its window, when it was found, last refreshed, mooted and decided, who decided it (a key's name), the
+ * wrote it less those statements, its window, when it was found, last refreshed, mooted and decided, who decided it (a key's name), the
  * operator's note, the writer's answer to an accept (`outcome`, read as review_priority_finding's answer is: one shape on
  * the contract; null for a reject or a finding not decided, and null with `outcomeUnread` for one stored in a shape this
  * server does not read), and until when the decision holds the same finding
@@ -1605,8 +1605,8 @@ function findingStatements(evidence: Record<string, unknown>): FindingStatement[
 /** One priority_findings row as the list reads it. A kind, status or item 142 does not write is a fault. */
 export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
   // The writer's answer as stored at the decision: one a later writer gave in a shape this server does not read is the
-  // finding's `outcomeUnread`, not the list's fault — history outlives the server that reads it. The review's own reply
-  // stays strict (normaliseReviewFinding): an answer it cannot read there is this call's fault.
+  // finding's `outcomeUnread`, not the list's fault — history outlives the server that reads it. The review's reply reads
+  // its answer the same way (normaliseReviewFinding's `answerUnread`).
   let outcome: PriorityAnswer | null = null, outcomeUnread = false;
   if (r.outcome != null) {
     try {
@@ -1620,9 +1620,12 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
     throw new Error(`priority_findings answered a row this server cannot read: ${JSON.stringify({ kind: r.kind, status: r.status, item_kind: r.item_kind })}`);
   }
   const obj = (v: unknown): Record<string, unknown> | null => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
-  const evidence = obj(r.evidence) ?? {};
+  const stored = obj(r.evidence) ?? {};
+  // The statements are read out of the evidence once (`statements`), and the evidence sent keeps what they do not
+  // cover: a stale finding's last_activity and window_days, an overdue one's due_at, due_from and level.
+  const { statements: _listed, operator: _operator, source: _source, ...evidence } = stored;
   return {
-    id: r.id, kind: r.kind as FindingKind, item, status: r.status as FindingStatus, statements: findingStatements(evidence), evidence,
+    id: r.id, kind: r.kind as FindingKind, item, status: r.status as FindingStatus, statements: findingStatements(stored), evidence,
     windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
     decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
     note: typeof r.decision_note === "string" ? r.decision_note : null, outcome, ...(outcomeUnread ? { outcomeUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
@@ -1637,7 +1640,7 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
  * rest in `message` alone.
  */
 export type ReviewFindingResult =
-  | { ok: true; id: string; kind: FindingKind; item: PriorityItem; status: "accepted" | "rejected"; answer: PriorityAnswer | null; suppressedUntil: string | null }
+  | { ok: true; id: string; kind: FindingKind; item: PriorityItem; status: "accepted" | "rejected"; answer: PriorityAnswer | null; answerUnread?: true; suppressedUntil: string | null }
   | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
   | { ok: false; error: "NOT_PENDING"; status: FindingStatus; message: string }
   | { ok: false; error: "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; writerCode: string | null; message: string }
@@ -1652,7 +1655,19 @@ export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
   if (o?.ok === true && typeof o.id === "string" && (o.status === "accepted" || o.status === "rejected") && (FINDING_KINDS as readonly unknown[]).includes(o.kind)) {
     const item = priorityItemOf(o.item);
     if (!item) throw new Error(`${what} answered an item this server cannot read`);
-    return { ok: true, id: o.id, kind: o.kind as FindingKind, item, status: o.status, answer: o.answer == null ? null : normalisePriorityAnswer(o.answer, what), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null) };
+    // 142 committed the decision with this answer: the writer's answer is read leniently, as the list reads it, so a
+    // writer's shape this server does not read (a brain migrated ahead of it) never reports a decision that landed as
+    // failed — a retry would meet NOT_PENDING. The envelope around it is read strictly.
+    let answer: PriorityAnswer | null = null, answerUnread = false;
+    if (o.answer != null) {
+      try {
+        answer = normalisePriorityAnswer(o.answer, what);
+      } catch {
+        answerUnread = true;
+      }
+    }
+    if (answer && answer.outcome !== "asserted" && answer.outcome !== "unchanged" && answer.outcome !== "cleared") { answer = null; answerUnread = true; }
+    return { ok: true, id: o.id, kind: o.kind as FindingKind, item, status: o.status, answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null) };
   }
   const message = word(o?.message) ?? "";
   if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message };

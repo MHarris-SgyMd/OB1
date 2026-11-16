@@ -3485,7 +3485,7 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     assert(pendingN > 10 && settled.length === 2 && same(pages.map((f) => f.id), l.findings.map((f) => f.id)) && cursor === null && lastCursor !== null
         && befores[0] === 0 && befores[1] === 3 && first.total === pendingN
         && firstM.text.split("\n")[0] === `${pendingN} pending priority findings; findings 1–5 of ${pendingN}; pass after: ${firstM.sc.cursor} for more:`
-        && [foreignStatus, foreignKind].every((a) => a.status === 400 && a.body.code === "REFUSED_CURSOR" && a.body.reason === "filters" && same(a.body.made, { status: "pending", kind: null }))
+        && [foreignStatus, foreignKind].every((a) => a.status === 400 && a.body.code === "REFUSED_CURSOR" && a.body.reason === "filters" && same(a.body.made, { list: "findings", status: "pending", kind: null }))
         && notOne.status === 400 && notOne.body.code === "REFUSED_CURSOR" && notOne.body.reason === "shape",
       `${pendingN} pending paged five at a time by the cursor: every finding once, in the list's order, two of the first page settled between pages and none skipped, the second page's place counted after them; the last page no cursor; a cursor made for another status or kind refused (filters), none of this tool's (shape) (${pages.length}/${l.findings.length} befores ${befores.join(",")} ${firstM.text.split("\n")[0].slice(0, 90)})`);
 

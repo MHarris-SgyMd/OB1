@@ -7980,7 +7980,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   const { findingsCursor, parseFindingsCursor } = await import("./core/list-cursor.ts");
   const listed = await listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3 } as never);
   const nextCursor = listed.ok ? listed.value.cursor : null;
-  const pendingOnly = await listPriorityFindings(listCore as never, P, { status: "pending", limit: 20, after: findingsCursor({ status: "pending", kind: null }, { grp: 0, sk: "1762732800.5", id: T.toUpperCase() }) } as never);
+  const pendingOnly = await listPriorityFindings(listCore as never, P, { status: "pending", limit: 20, after: findingsCursor({ list: "findings", status: "pending", kind: null }, { grp: 0, sk: "1762732800.5", id: T.toUpperCase() }) } as never);
   // A cursor made under another status or kind, or none of this tool's, is refused before the store is asked.
   const askedBefore = listAsked.length;
   const foreign = await Promise.all([
@@ -7990,11 +7990,11 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
     listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3, after: Buffer.from(JSON.stringify(["findings", "all", "stale", 0, "1e9", F])).toString("base64url") } as never),
   ]);
   const foreignWords = foreign.map((o) => (o.ok ? "ok" : `${o.refusal.code}/${(o.refusal as { reason?: string }).reason}`));
-  assert(nextCursor !== null && JSON.stringify(parseFindingsCursor(nextCursor)) === JSON.stringify({ selection: { status: "all", kind: "stale" }, at: NEXT })
+  assert(nextCursor !== null && JSON.stringify(parseFindingsCursor(nextCursor)) === JSON.stringify({ selection: { list: "findings", status: "all", kind: "stale" }, at: NEXT })
       && listAsked.length === askedBefore && foreignWords.join() === "REFUSED_CURSOR/filters,REFUSED_CURSOR/filters,REFUSED_CURSOR/shape,REFUSED_CURSOR/shape"
       && text(say.renderPriorityFindings(foreign[0])).startsWith("Refused: `after` was made under status all and kind stale — pass it with")
-      && JSON.stringify((foreign[1] as { refusal?: { made?: unknown } }).refusal?.made) === JSON.stringify({ status: "all", kind: "stale" })
-      && JSON.stringify(refusalValue((foreign[1] as unknown as { refusal: never }).refusal)) === JSON.stringify({ code: "REFUSED_CURSOR", retryable: false, reason: "filters", made: { status: "all", kind: "stale" } }),
+      && JSON.stringify((foreign[1] as { refusal?: { made?: unknown } }).refusal?.made) === JSON.stringify({ list: "findings", status: "all", kind: "stale" })
+      && JSON.stringify(refusalValue((foreign[1] as unknown as { refusal: never }).refusal)) === JSON.stringify({ code: "REFUSED_CURSOR", retryable: false, reason: "filters", made: { list: "findings", status: "all", kind: "stale" } }),
     `the cursor carries the selection and the last row's place; one made under another status or kind refused (filters), none of this tool's or an sk no numeric refused (shape), neither reaching the store (${foreignWords.join(",")})`);
   const [s0, d0, o0] = listed.ok ? listed.value.findings : [];
   const badRows = [{ ...staleRow, kind: "late" }, { ...staleRow, status: "open" }, { ...staleRow, item_kind: "board" }].map((r) => { try { normalisePriorityFinding(r); return "read"; } catch { return "threw"; } });
@@ -8002,8 +8002,10 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && listed.ok && listed.value.status === "all" && listed.value.kind === "stale" && listed.value.total === 7 && pendingOnly.ok && pendingOnly.value.kind === null
       && s0.foundAt === "2026-11-10T00:00:00.000Z" && s0.statements.length === 1 && s0.statements[0].level === 4 && s0.statements[0].maker === "rival" && s0.statements[0].assertedAt === "2026-09-01T00:00:00.000Z" && s0.statements[0].role === null
       && d0.statements.map((s) => `${s.role}:${s.level}:${s.maker}`).join() === "operator:4:op-key,source:1:linear" && d0.decidedBy === "op-key" && d0.note === "Linear is right" && d0.suppressedUntil === "2027-01-12T00:00:00.000Z"
-      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.every((r) => r === "threw"),
-    `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, a disagreement's operator and source, an overdue one's none; a kind, status or item 142 does not write throws (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
+      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.every((r) => r === "threw")
+      && JSON.stringify(s0.evidence) === JSON.stringify({ last_activity: "2026-09-01T00:00:00+00:00", window_days: 60 }) && JSON.stringify(d0.evidence) === "{}"
+      && JSON.stringify(o0.evidence) === JSON.stringify({ due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 }),
+    `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, sent once (the evidence keeps the rest), a disagreement's operator and source, an overdue one's none; a kind, status or item 142 does not write throws (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
 
   const listText = text(say.renderPriorityFindings(listed));
   const emptyText = text(say.renderPriorityFindings({ ok: true, value: { status: "pending", kind: "overdue", total: 0, before: 0, findings: [], cursor: null } }));
@@ -8079,7 +8081,18 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && text(say.renderReviewPriorityFinding(refusedTime)) === "Refused: due_at or not_before is no time Postgres can read: date/time field value out of range.",
     `a time Postgres cannot read: REFUSED_PRIORITY_INPUT (time), as set_priority answers it (${refusedTime.ok || refusedTime.refusal.code})`);
   // An envelope 142 does not answer is a fault, never a value.
-  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, { ...rejectedA, kind: "late" }, { ...assertedA, answer: { outcome: "maybe" } }, null]
+  // 142 committed a decision whose writer's answer this server does not read (a later writer's code, an outcome it does
+  // not name): reported made, the answer unread, never a fault a retry would meet as NOT_PENDING.
+  const laterA = { ...assertedA, answer: { outcome: "asserted", code: "A_LATER_CODE", assertion: null } };
+  const oddA = { ...assertedA, answer: { outcome: "nothing_to_clear", code: null } };
+  const [laterRead, oddRead] = [laterA, oddA].map((a) => { try { return normaliseReviewFinding(a); } catch { return null; } });
+  const laterMade = await R({ decision: "accept", level: 2 }, laterA).catch(() => null);
+  const laterWords = laterMade ? text(say.renderReviewPriorityFinding(laterMade)) : "";
+  assert(laterRead?.ok === true && laterRead.answer === null && laterRead.answerUnread === true && oddRead?.ok === true && oddRead.answerUnread === true
+      && laterMade?.ok === true && laterMade.value.status === "accepted" && laterMade.value.outcome === null && laterMade.value.assertion === null && laterMade.value.answerUnread === true
+      && laterWords === `Accepted the stale finding ${F} on thought ${T}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements. The same finding is held back until 2027-01-14T10:00:00.000Z while its statements stand.`,
+    `a committed decision whose writer's answer is not read: made, accepted, its outcome and assertion null and marked unread, said so (${laterWords.slice(0, 160)})`);
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, { ...rejectedA, kind: "late" }, null]
     .map((a) => { try { normaliseReviewFinding(a); return "read"; } catch { return "threw"; } });
   assert(strays.every((s) => s === "threw"), `an envelope review_priority_finding does not answer throws (${strays.join(",")})`);
   // No agent id: the registry away is PRIORITY_UNATTRIBUTED; a principal with none by design is named so; neither reaches the store.

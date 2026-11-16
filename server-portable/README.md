@@ -1371,9 +1371,11 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   skips none not yet shown. The pending come oldest found first; the rest most
   recently decided or mooted first, ties by id. Each finding is `{id, kind, item: {kind, key}, status, statements,
   evidence, windowDays, foundAt, refreshedAt, mootAt, decidedAt, decidedBy, note,
-  outcome, suppressedUntil}`: `statements` are the evidence's (a stale or settled
-  finding's statements; a disagreement's operator and source, each with its `role`; an
-  overdue finding names a due time, so none), `outcome` what an accept's writer
+  outcome, suppressedUntil}`: `statements` are read out of the evidence (a stale or
+  settled finding's statements; a disagreement's operator and source, each with its
+  `role`; an overdue finding names a due time, so none), and `evidence` keeps the rest
+  (a stale finding's `last_activity` and `window_days`, an overdue one's `due_at`,
+  `due_from` and `level`); `outcome` is what an accept's writer
   answered, in the shape `review_priority_finding`'s reply gives it (null for a
   reject). A stored answer this server does not read (a later writer's shape) is
   null with `outcomeUnread: true`, the finding still listed. A brain before 142 faults (500), the MCP text naming the migration.
@@ -1382,7 +1384,10 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   `decision` is `accept` or `reject`; an accept takes `level` (0 to 5, with `due_at`
   if wanted, a time with its offset or a date) or `clear: true`; `note` up to 2000
   characters. An accept states the operator's own statement on the item through
-  `assert_priority` (the same level re-confirms it, keeping its terms), or closes the
+  `assert_priority` — the level the operator's own statement there already has
+  re-confirms it, keeping its start (unless after a due time given), its due
+  reference (unless the finding is overdue or a due time is given), its reason with
+  no note, and its due time while still ahead (unless one is given) — or closes the
   operator's own statement there through `clear_priority`; a reject writes nothing.
   Either holds the same finding back for its window while its statements are those
   decided on. Past the scope, the database admits a key the operator classified
@@ -1390,7 +1395,10 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   (403), and while the registry cannot give the key's agent id `PRIORITY_UNATTRIBUTED`
   (503), as `set_priority_weights` answers. The answer is `{id, kind, item, status,
   outcome, assertion, closed, winner, suppressedUntil, caller}`: `outcome` is
-  `asserted`, `unchanged` (re-confirmed) or `cleared`, null for a reject. 142 asks
+  `asserted`, `unchanged` (re-confirmed) or `cleared`, null for a reject. A decision
+  142 recorded whose writer's answer this server does not read (a brain migrated
+  ahead of it) is still answered made, `outcome` and `assertion` null with
+  `answerUnread: true`, never a failure a retry would meet as `NOT_PENDING`. 142 asks
   who may decide before whether the arguments go together, so a key that may not is
   told so, whatever it sent; the schema refuses
   a level off the scale, a note past 2000 characters (counted as 142 counts them, a

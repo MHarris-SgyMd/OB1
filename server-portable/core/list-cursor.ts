@@ -124,7 +124,7 @@ function pgStamp(at: unknown): at is string {
  * What a list_supersession_proposals page selected (SMD-3249): its status word (`all` for every state), its lineage
  * filter (null: every pair) and its judge key (null: every pass) — the tool's inputs and the CLI's --list/--key alike.
  */
-export type ProposalSelection = { status: (typeof PROPOSAL_STATUSES)[number]; lineage: boolean | null; judgeKey: string | null };
+export type ProposalSelection = { status: (typeof PROPOSAL_STATUSES)[number]; lineage: boolean | null; judgeKey: string | null; list?: undefined };
 
 const PROPOSAL_STATUSES = ["pending", "accepted", "rejected", "stale", "all"] as const;
 const isProposalStatus = (v: unknown): v is ProposalSelection["status"] => (PROPOSAL_STATUSES as readonly unknown[]).includes(v);
@@ -181,8 +181,14 @@ const leap = (y: number, bc: boolean) => {
 };
 
 
-/** What a list_priority_findings page selected (SMD-3671 PR 2): its status word (`all` for every state) and its kind (null: every kind). */
-export type FindingSelection = { status: FindingStatus | "all"; kind: FindingKind | null };
+/**
+ * What a list_priority_findings page selected (SMD-3671 PR 2): its status word (`all` for every state) and its kind
+ * (null: every kind), tagged `list: "findings"` so a refusal's `made` says which listing's it is (ProposalSelection, the
+ * older shape, carries no tag, and keeps none).
+ */
+export type FindingSelection = { list: "findings"; status: FindingStatus | "all"; kind: FindingKind | null };
+/** Whether two selections are the same listing — a cursor's and the call's it is passed with (sameSelection's rule, for findings). */
+export const sameFindingSelection = (a: FindingSelection, b: FindingSelection): boolean => a.status === b.status && a.kind === b.kind;
 
 /**
  * list_priority_findings' cursor (SMD-3671 PR 2): the selection the page was listed under and the last listed row's
@@ -213,5 +219,5 @@ export function parseFindingsCursor(raw: string): { selection: FindingSelection;
   // An epoch to the microsecond, negated for the decided: numeric's text, bounded so no cast can fail on it.
   if (typeof sk !== "string" || !/^-?\d{1,15}(?:\.\d{1,6})?$/.test(sk)) return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
-  return { selection: { status: status as FindingSelection["status"], kind: kind as FindingKind | null }, at: { grp, sk, id: id.toLowerCase() } };
+  return { selection: { list: "findings", status: status as FindingSelection["status"], kind: kind as FindingKind | null }, at: { grp, sk, id: id.toLowerCase() } };
 }

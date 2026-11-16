@@ -11,7 +11,7 @@
 import type { Principal } from "../auth.ts";
 import { closedOf, PriorityRefused, type PriorityAssertion, type PriorityFinding, type PriorityItem } from "../store.ts";
 import type { FindingInputError, FindingKind, FindingStatus } from "../priority-kinds.ts";
-import { findingsCursor, parseFindingsCursor, type FindingSelection } from "./list-cursor.ts";
+import { findingsCursor, parseFindingsCursor, sameFindingSelection, type FindingSelection } from "./list-cursor.ts";
 import { dueBy } from "../priority-scale.ts";
 import type { Ctx } from "./context.ts";
 import { asked, unattributedAs, writerScope } from "./caller.ts";
@@ -28,10 +28,10 @@ export type FindingsListed = { status: FindingStatus | "all"; kind: FindingKind 
 export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { status, kind, limit, after }: Input<"list_priority_findings">): Promise<Outcome<FindingsListed, "REFUSED_CURSOR">> {
   // `after` is a cursor a page ended with, read before the store sees it, and one made under other filters is refused
   // (list_supersession_proposals' rule): it would start this listing at a place in another.
-  const selection: FindingSelection = { status, kind: kind ?? null };
+  const selection: FindingSelection = { list: "findings", status, kind: kind ?? null };
   const position = after === undefined ? undefined : parseFindingsCursor(after);
   if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
-  if (position && (position.selection.status !== selection.status || position.selection.kind !== selection.kind)) {
+  if (position && !sameFindingSelection(position.selection, selection)) {
     return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters", made: position.selection });
   }
   // A brain before 142 holds no table: the read faults naming priority_findings, and the fault's hint says so
@@ -50,6 +50,8 @@ export type FindingReviewed = {
   id: string; kind: FindingKind; item: PriorityItem; status: "accepted" | "rejected";
   outcome: "asserted" | "unchanged" | "cleared" | null; assertion: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null;
   suppressedUntil: string | null; caller: string;
+  /** The decision was recorded, but the writer's answer is in a shape this server does not read: `outcome` and `assertion` are then null. */
+  answerUnread?: true;
 };
 export type FindingReviewCode = "REFUSED_NOT_OPERATOR" | "PRIORITY_UNATTRIBUTED" | "WRITE_SCOPE_REQUIRED" | "NOT_FOUND" | "REFUSED_FINDING_INPUT" | "REFUSED_FINDING_DECISION" | "REFUSED_PRIORITY_INPUT";
 const inputRefused = (problem: FindingInputError, message: string) => refuse({ code: "REFUSED_FINDING_INPUT", retryable: false, problem, message });
@@ -85,13 +87,13 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
       default: return inputRefused(r.error, r.message);
     }
   }
+  // 142 committed the decision: it is reported made whatever the writer's answer holds. A reject reaches no writer; an
+  // accept's answer the store could not read is `answerUnread` (normaliseReviewFinding), never a fault.
   const a = r.answer;
-  // A reject reaches no writer; an accept's writer answered asserted, unchanged or cleared (142 refuses the rest).
-  if (a && a.outcome !== "asserted" && a.outcome !== "unchanged" && a.outcome !== "cleared") throw new Error(`review_priority_finding decided on a writer's ${a.outcome}`);
   // No action-log row, as set_priority_weights: a decision is no search.
   return ok({
     id: r.id, kind: r.kind, item: r.item, status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
     closed: a ? closedOf(a) : [], winner: a?.winner ?? null,
-    suppressedUntil: r.suppressedUntil, caller: principal.name,
+    suppressedUntil: r.suppressedUntil, caller: principal.name, ...(r.answerUnread ? { answerUnread: true as const } : {}),
   });
 }
