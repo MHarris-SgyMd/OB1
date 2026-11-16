@@ -6,7 +6,8 @@
 // structuredContent stopped at page one).
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import { RELATION_WORDS, UUID_RE, type ListSort, type RelationWord } from "../store.ts";
+import { RELATION_WORDS, UUID_RE, type FindingPosition, type ListSort, type RelationWord } from "../store.ts";
+import { FINDING_KINDS, FINDING_STATUSES, type FindingKind, type FindingStatus } from "../priority-kinds.ts";
 
 /**
  * list_thoughts' cursor (SMD-2995): the sort it was made under and the place
@@ -179,3 +180,38 @@ const leap = (y: number, bc: boolean) => {
   return n % 4 === 0 && (n % 100 !== 0 || n % 400 === 0);
 };
 
+
+/** What a list_priority_findings page selected (SMD-3671 PR 2): its status word (`all` for every state) and its kind (null: every kind). */
+export type FindingSelection = { status: FindingStatus | "all"; kind: FindingKind | null };
+
+/**
+ * list_priority_findings' cursor (SMD-3671 PR 2): the selection the page was listed under and the last listed row's
+ * place on the order (FindingPosition), as base64url of `["findings", status, kind, grp, sk, id]`. The place, not a
+ * count of rows: deciding a pending finding between pages takes it out of the pending listing, and an offset would then
+ * pass over one never shown. The selection, so a cursor passed with other filters is refused (the proposals' rule).
+ */
+export function findingsCursor(sel: FindingSelection, at: FindingPosition): string {
+  return Buffer.from(JSON.stringify(["findings", sel.status, sel.kind, at.grp, at.sk, at.id])).toString("base64url");
+}
+
+/** A list_priority_findings cursor read back, or null for anything that is not one: `sk` numeric's text, the id a uuid. */
+export function parseFindingsCursor(raw: string): { selection: FindingSelection; at: FindingPosition } | null {
+  const text = raw.trim();
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(v) || v.length !== 6) return null;
+  const [tag, status, kind, grp, sk, id] = v as unknown[];
+  if (tag !== "findings") return null;
+  if (status !== "all" && !(FINDING_STATUSES as readonly unknown[]).includes(status)) return null;
+  if (kind !== null && !(FINDING_KINDS as readonly unknown[]).includes(kind)) return null;
+  if (grp !== 0 && grp !== 1) return null;
+  // An epoch to the microsecond, negated for the decided: numeric's text, bounded so no cast can fail on it.
+  if (typeof sk !== "string" || !/^-?\d{1,15}(?:\.\d{1,6})?$/.test(sk)) return null;
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  return { selection: { status: status as FindingSelection["status"], kind: kind as FindingKind | null }, at: { grp, sk, id: id.toLowerCase() } };
+}

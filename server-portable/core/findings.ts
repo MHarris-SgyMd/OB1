@@ -9,22 +9,35 @@
 // into values and refusals.
 
 import type { Principal } from "../auth.ts";
-import { PriorityRefused, type FindingKind, type FindingStatus, type PriorityAssertion, type PriorityFinding, type PriorityItem } from "../store.ts";
+import { closedOf, PriorityRefused, type PriorityAssertion, type PriorityFinding, type PriorityItem } from "../store.ts";
+import type { FindingInputError, FindingKind, FindingStatus } from "../priority-kinds.ts";
+import { findingsCursor, parseFindingsCursor, type FindingSelection } from "./list-cursor.ts";
 import { dueBy } from "../priority-scale.ts";
 import type { Ctx } from "./context.ts";
 import { asked, unattributedAs, writerScope } from "./caller.ts";
-import { ok, refuse, type FindingInputProblem, type Outcome } from "./refusal.ts";
+import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { actorOf } from "./writes.ts";
 
-/** list_priority_findings' value: the filters it read under, how many findings match, and the page of them from `offset`. */
-export type FindingsListed = { status: FindingStatus | "all"; kind: FindingKind | null; total: number; offset: number; findings: PriorityFinding[] };
+/**
+ * list_priority_findings' value: the filters it read under, how many findings match and how many come before this page
+ * in the order, the page, and the cursor for the next (null at the end).
+ */
+export type FindingsListed = { status: FindingStatus | "all"; kind: FindingKind | null; total: number; before: number; findings: PriorityFinding[]; cursor: string | null };
 
-export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { status, kind, limit, offset }: Input<"list_priority_findings">): Promise<Outcome<FindingsListed, never>> {
+export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { status, kind, limit, after }: Input<"list_priority_findings">): Promise<Outcome<FindingsListed, "REFUSED_CURSOR">> {
+  // `after` is a cursor a page ended with, read before the store sees it, and one made under other filters is refused
+  // (list_supersession_proposals' rule): it would start this listing at a place in another.
+  const selection: FindingSelection = { status, kind: kind ?? null };
+  const position = after === undefined ? undefined : parseFindingsCursor(after);
+  if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
+  if (position && (position.selection.status !== selection.status || position.selection.kind !== selection.kind)) {
+    return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters" });
+  }
   // A brain before 142 holds no table: the read faults naming priority_findings, and the fault's hint says so
   // (render.ts findingsHint), as a listing before its migration does.
-  const page = await (await ctx.store()).listPriorityFindings({ status: status === "all" ? null : status, kind: kind ?? null, limit, offset });
-  return ok({ status, kind: kind ?? null, total: page.total, offset, findings: page.findings });
+  const page = await (await ctx.store()).listPriorityFindings({ status: status === "all" ? null : status, kind: kind ?? null, limit, ...(position ? { after: position.at } : {}) });
+  return ok({ status, kind: kind ?? null, total: page.total, before: page.before, findings: page.findings, cursor: page.next ? findingsCursor(selection, page.next) : null });
 }
 
 /**
@@ -39,7 +52,7 @@ export type FindingReviewed = {
   suppressedUntil: string | null; caller: string;
 };
 export type FindingReviewCode = "REFUSED_NOT_OPERATOR" | "PRIORITY_UNATTRIBUTED" | "WRITE_SCOPE_REQUIRED" | "NOT_FOUND" | "REFUSED_FINDING_INPUT" | "REFUSED_FINDING_DECISION" | "REFUSED_PRIORITY_INPUT";
-const inputRefused = (problem: FindingInputProblem, message: string) => refuse({ code: "REFUSED_FINDING_INPUT", retryable: false, problem, message });
+const inputRefused = (problem: FindingInputError, message: string) => refuse({ code: "REFUSED_FINDING_INPUT", retryable: false, problem, message });
 
 export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, input: Input<"review_priority_finding">): Promise<Outcome<FindingReviewed, FindingReviewCode>> {
   // 142 asks who first (an operator, then write scope), then whether the arguments go together, so a key that may never
@@ -78,7 +91,7 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
   // No action-log row, as set_priority_weights: a decision is no search.
   return ok({
     id: r.id, kind: r.kind, item: r.item, status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
-    closed: a ? a.closed ?? (a.outcome === "cleared" ? (a.assertion ? [a.assertion] : []) : a.replaced ? [a.replaced] : []) : [], winner: a?.winner ?? null,
+    closed: a ? closedOf(a) : [], winner: a?.winner ?? null,
     suppressedUntil: r.suppressedUntil, caller: principal.name,
   });
 }

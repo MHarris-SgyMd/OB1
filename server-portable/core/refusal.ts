@@ -27,7 +27,7 @@ export type Refusal =
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_THREAD_INPUT"; retryable: false; problem: "key_or_id" | "key_shape" | "after_needs_key"; value?: string } // thread (SMD-3306 PR 7a-2a): neither or both of key and id; a key that is no subject key (value: it, in the text alone); after without key
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
-  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort" | "filters"; sort?: "newest" | "oldest"; made?: ProposalSelection } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under); list_supersession_proposals' is none of its cursors (shape, SMD-3249) or was made under other filters (filters, made: the status, lineage and judge_key it was made under — tokens, a boolean and a pass key, review pass 1)
+  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort" | "filters"; sort?: "newest" | "oldest"; made?: ProposalSelection } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under); list_supersession_proposals' is none of its cursors (shape, SMD-3249) or was made under other filters (filters, made: the status, lineage and judge_key it was made under — tokens, a boolean and a pass key, review pass 1); list_priority_findings' is none of its cursors (shape) or was made under another status or kind (filters, SMD-3671 PR 2)
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
   | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }
@@ -121,7 +121,7 @@ export type Refusal =
   // REFUSED_FINDING_DECISION, the finding's state: decided or moot already (`status`), nothing of the operator's to
   // clear, or the writer refusing the outcome (`writerCode`, its own code), the finding left pending. `message`: 142's
   // words, or the core's.
-  | { code: "REFUSED_FINDING_INPUT"; retryable: false; problem: FindingInputProblem; message: string }
+  | { code: "REFUSED_FINDING_INPUT"; retryable: false; problem: FindingInputError; message: string }
   | { code: "REFUSED_FINDING_DECISION"; retryable: false; id: string; problem: "NOT_PENDING" | "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; message: string; status?: "accepted" | "rejected" | "moot"; writerCode?: string }
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
@@ -141,8 +141,6 @@ export type Refusal =
 
 /** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder, times and whether the caller's own key holds it — never its label, another key's free text, nor anything that proves ownership. */
 export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string; ownKey: boolean };
-/** A priority finding's decision whose arguments do not go together (142's errors, SMD-3671 PR 2): priority-kinds.ts's one list. */
-export type FindingInputProblem = FindingInputError;
 /** What a decision does not take (SMD-3338), as the CLI refuses it: a direction or force on a reject, or a note beginning with the pass's own marker (067). */
 export type ReviewArgumentProblem = "direction_on_reject" | "force_on_reject" | "note_marker";
 

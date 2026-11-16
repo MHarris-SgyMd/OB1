@@ -1361,10 +1361,13 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   migration 142): the priority review's findings, which sleep's scan proposes —
   `stale`, `overdue`, `disagree` and `settled` (`db/README.md`, migration 142). `status`
   (`pending` by default, `accepted`, `rejected`, `moot` or `all`), `kind` (one of the
-  four), `limit` (1 to 200, 20 by default) and `offset` (0 to 10000, 0 by default).
-  The answer is `{status, kind, total, offset, findings}`: `total` counts every finding
-  matching, the page `limit` of them from `offset`; the text names the next page's
-  offset while more follow. The pending come oldest found first; the rest most
+  four), `limit` (1 to 200, 20 by default) and `after` (the previous page's
+  `cursor`). The answer is `{status, kind, total, before, findings, cursor}`: `total`
+  counts every finding matching, `before` those ahead of the page, and `cursor`, while
+  more follow (null at the end), is the last listed row's place, made under the status
+  and kind asked: one passed with others is refused `REFUSED_CURSOR` (400). A place, not
+  an offset, so a finding decided between pages, which leaves the pending listing,
+  skips none not yet shown. The pending come oldest found first; the rest most
   recently decided or mooted first, ties by id. Each finding is `{id, kind, item: {kind, key}, status, statements,
   evidence, windowDays, foundAt, refreshedAt, mootAt, decidedAt, decidedBy, note,
   outcome, suppressedUntil}`: `statements` are the evidence's (a stale or settled

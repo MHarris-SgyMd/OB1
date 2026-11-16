@@ -7967,35 +7967,51 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   // A stored answer this server does not read (a later writer's code) leaves the finding listed, its outcome unread.
   const laterRow = { ...acceptedRow, outcome: { outcome: "asserted", code: "A_LATER_CODE" } };
   const later = (() => { try { return normalisePriorityFinding(laterRow); } catch { return null; } })();
-  const laterLine = later ? text(say.renderPriorityFindings({ ok: true, value: { status: "accepted", kind: null, total: 1, offset: 0, findings: [later] } })) : "";
+  const laterLine = later ? text(say.renderPriorityFindings({ ok: true, value: { status: "accepted", kind: null, total: 1, before: 0, findings: [later], cursor: null } })) : "";
   assert(readOutcome?.outcome === "asserted" && readOutcome.assertion?.tierName === "operator" && readOutcome.assertion.assertedAt === "2026-11-14T00:00:00.000Z" && !("tier_name" in (readOutcome.assertion as object))
       && normalisePriorityFinding(staleRow).outcome === null && !("outcomeUnread" in normalisePriorityFinding(acceptedRow))
       && later?.outcome === null && later.outcomeUnread === true && /; what its writer answered is stored in a shape this server does not read\.$/m.test(laterLine),
     `a decided finding's outcome read as the review's answer is (camelCase, its times ISO), none null; one this server does not read null and marked, the finding still listed (${JSON.stringify(readOutcome?.assertion)?.slice(0, 120)} ${JSON.stringify(later?.outcomeUnread)} ${laterLine.slice(-90)})`);
   const overdueRow = { ...staleRow, kind: "overdue", status: "moot", moot_at: new Date("2026-11-14T00:00:00Z"), evidence: { due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 } };
   const listAsked: Record<string, unknown>[] = [];
-  const listCore = { door: "test", store: async () => ({ listPriorityFindings: async (o: Record<string, unknown>) => { listAsked.push(o); return { total: 7, findings: [staleRow, disagreeRow, overdueRow].map((r) => normalisePriorityFinding(r)) }; } }) };
+  const NEXT = { grp: 1, sk: "-1763164800.000000", id: F };
+  const listCore = { door: "test", store: async () => ({ listPriorityFindings: async (o: Record<string, unknown>) => { listAsked.push(o); return { total: 7, before: 0, findings: [staleRow, disagreeRow, overdueRow].map((r) => normalisePriorityFinding(r)), next: NEXT }; } }) };
   const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
-  const listed = await listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3, offset: 0 } as never);
-  const pendingOnly = await listPriorityFindings(listCore as never, P, { status: "pending", limit: 20, offset: 40 } as never);
+  const { findingsCursor, parseFindingsCursor } = await import("./core/list-cursor.ts");
+  const listed = await listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3 } as never);
+  const nextCursor = listed.ok ? listed.value.cursor : null;
+  const pendingOnly = await listPriorityFindings(listCore as never, P, { status: "pending", limit: 20, after: findingsCursor({ status: "pending", kind: null }, { grp: 0, sk: "1762732800.5", id: T.toUpperCase() }) } as never);
+  // A cursor made under another status or kind, or none of this tool's, is refused before the store is asked.
+  const askedBefore = listAsked.length;
+  const foreign = await Promise.all([
+    listPriorityFindings(listCore as never, P, { status: "pending", kind: "stale", limit: 20, after: nextCursor ?? "" } as never),
+    listPriorityFindings(listCore as never, P, { status: "all", kind: "overdue", limit: 3, after: nextCursor ?? "" } as never),
+    listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3, after: "bm90LWEtY3Vyc29y" } as never),
+    listPriorityFindings(listCore as never, P, { status: "all", kind: "stale", limit: 3, after: Buffer.from(JSON.stringify(["findings", "all", "stale", 0, "1e9", F])).toString("base64url") } as never),
+  ]);
+  const foreignWords = foreign.map((o) => (o.ok ? "ok" : `${o.refusal.code}/${(o.refusal as { reason?: string }).reason}`));
+  assert(nextCursor !== null && JSON.stringify(parseFindingsCursor(nextCursor)) === JSON.stringify({ selection: { status: "all", kind: "stale" }, at: NEXT })
+      && listAsked.length === askedBefore && foreignWords.join() === "REFUSED_CURSOR/filters,REFUSED_CURSOR/filters,REFUSED_CURSOR/shape,REFUSED_CURSOR/shape"
+      && /^Refused: `after` was made under another status or kind/.test(text(say.renderPriorityFindings(foreign[0]))),
+    `the cursor carries the selection and the last row's place; one made under another status or kind refused (filters), none of this tool's or an sk no numeric refused (shape), neither reaching the store (${foreignWords.join(",")})`);
   const [s0, d0, o0] = listed.ok ? listed.value.findings : [];
   const badRows = [{ ...staleRow, kind: "late" }, { ...staleRow, status: "open" }, { ...staleRow, item_kind: "board" }].map((r) => { try { normalisePriorityFinding(r); return "read"; } catch { return "threw"; } });
-  assert(JSON.stringify(listAsked) === JSON.stringify([{ status: null, kind: "stale", limit: 3, offset: 0 }, { status: "pending", kind: null, limit: 20, offset: 40 }])
-      && pendingOnly.ok && pendingOnly.value.offset === 40 && listed.ok && listed.value.status === "all" && listed.value.kind === "stale" && listed.value.total === 7 && pendingOnly.ok && pendingOnly.value.kind === null
+  assert(JSON.stringify(listAsked) === JSON.stringify([{ status: null, kind: "stale", limit: 3 }, { status: "pending", kind: null, limit: 20, after: { grp: 0, sk: "1762732800.5", id: T } }])
+      && listed.ok && listed.value.status === "all" && listed.value.kind === "stale" && listed.value.total === 7 && pendingOnly.ok && pendingOnly.value.kind === null
       && s0.foundAt === "2026-11-10T00:00:00.000Z" && s0.statements.length === 1 && s0.statements[0].level === 4 && s0.statements[0].maker === "rival" && s0.statements[0].assertedAt === "2026-09-01T00:00:00.000Z" && s0.statements[0].role === null
       && d0.statements.map((s) => `${s.role}:${s.level}:${s.maker}`).join() === "operator:4:op-key,source:1:linear" && d0.decidedBy === "op-key" && d0.note === "Linear is right" && d0.suppressedUntil === "2027-01-12T00:00:00.000Z"
       && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.every((r) => r === "threw"),
     `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, a disagreement's operator and source, an overdue one's none; a kind, status or item 142 does not write throws (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
 
   const listText = text(say.renderPriorityFindings(listed));
-  const emptyText = text(say.renderPriorityFindings({ ok: true, value: { status: "pending", kind: "overdue", total: 0, offset: 0, findings: [] } }));
-  // A page names its place and the next page's offset while more follow; the last page none; past it, none from there.
-  const pageOf = (offset: number, n: number) => text(say.renderPriorityFindings({ ok: true, value: { ...(listed.ok ? listed.value : {} as never), offset, findings: (listed.ok ? listed.value.findings : []).slice(0, n) } })).split("\n")[0];
-  const pages = [pageOf(3, 3), pageOf(6, 1), pageOf(7, 0)];
-  assert(pages[0] === "7 priority findings of kind stale; findings 4–6 of 7, pass offset 6 for more:" && pages[1] === "7 priority findings of kind stale; findings 7–7 of 7:"
-      && pages[2] === "7 priority findings of kind stale; none from offset 7.",
-    `a page's header: its place and the next offset, the last page none, past the last none from there (${pages.join(" | ")})`);
-  assert(listText.split("\n")[0] === "7 priority findings of kind stale; findings 1–3 of 7, pass offset 3 for more:"
+  const emptyText = text(say.renderPriorityFindings({ ok: true, value: { status: "pending", kind: "overdue", total: 0, before: 0, findings: [], cursor: null } }));
+  // A page names its place in the listing as it stands and the cursor while more follow; the last page none; past it, none.
+  const pageOf = (before: number, n: number, cursor: string | null) => text(say.renderPriorityFindings({ ok: true, value: { ...(listed.ok ? listed.value : {} as never), before, cursor, findings: (listed.ok ? listed.value.findings : []).slice(0, n) } })).split("\n")[0];
+  const pages = [pageOf(3, 3, "Y3Vyc29y"), pageOf(6, 1, null), pageOf(7, 0, null)];
+  assert(pages[0] === "7 priority findings of kind stale; findings 4–6 of 7; pass after: Y3Vyc29y for more:" && pages[1] === "7 priority findings of kind stale; findings 7–7 of 7:"
+      && pages[2] === "7 priority findings of kind stale; none after the cursor given.",
+    `a page's header: its place and the cursor, the last page none, past the last none (${pages.join(" | ")})`);
+  assert(listText.split("\n")[0] === `7 priority findings of kind stale; findings 1–3 of 7; pass after: ${nextCursor} for more:`
       && listText.includes(`- stale finding ${F} on thought ${T}: urgent (4) by rival (stated 2026-09-01T00:00:00.000Z) (assertion ${A}), stated over 60 days ago, its last activity 2026-09-01T00:00:00+00:00. Pending since 2026-11-10T00:00:00.000Z.`)
       && listText.includes(`- disagree finding ${F} on ticket SMD-3671: the operator's urgent (4) by op-key (assertion ${A}) against the source's low (1) by linear (assertion ${T}). Rejected by op-key at 2026-11-13T00:00:00.000Z: "Linear is right"; held back until 2027-01-12T00:00:00.000Z.`)
       && listText.includes(`- overdue finding ${F} on thought ${T}: past its due time `) && listText.includes(", at high (3). Moot since 2026-11-14T00:00:00.000Z (its condition no longer holds).")
@@ -8058,7 +8074,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   const refusedTime = await reviewPriorityFinding({ door: "test", store: async () => ({ reviewPriorityFinding: async () => { throw new PriorityRefused("time", "due_at or not_before is no time Postgres can read: date/time field value out of range"); } }) } as never,
     P, { id: F, decision: "accept", level: 2, due_at: "0000-01-01" } as never).catch((e: unknown) => ({ ok: true as const, value: String(e) }));
   assert(!refusedTime.ok && refusedTime.refusal.code === "REFUSED_PRIORITY_INPUT" && refusedTime.refusal.problem === "time"
-      && text(say.renderReviewPriorityFinding(refusedTime)) === "Refused: due_at or not_before is no time Postgres can read: date/time field value out of range",
+      && text(say.renderReviewPriorityFinding(refusedTime)) === "Refused: due_at or not_before is no time Postgres can read: date/time field value out of range.",
     `a time Postgres cannot read: REFUSED_PRIORITY_INPUT (time), as set_priority answers it (${refusedTime.ok || refusedTime.refusal.code})`);
   // An envelope 142 does not answer is a fault, never a value.
   const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, { ...rejectedA, kind: "late" }, { ...assertedA, answer: { outcome: "maybe" } }, null]

@@ -3455,21 +3455,39 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
         && badStatus.status === 400 && badStatus.body.code === "REFUSED_INPUT",
       `the pending listed oldest found first (the direct disagreement), the scan's stale finding with the agent's level 4, the disagreement's operator and source; one value over both doors; total ${pendingN} past a limit of 1; kind stale alone; a status not one of 142's refused 400 (${listR.status} total ${l.total}/${pendingN} first ${l.findings?.[0]?.id === missing.id} mine ${mine?.statements?.[0]?.level} ${listM.text.split("\n")[1]?.slice(0, 120)})`);
 
-    // Paged five at a time, the pages are the whole list in its order, each once; past the last, none, the total kept.
-    const pages: Finding[] = [];
-    for (let offset = 0; offset < pendingN + 5; offset += 5) {
-      const pg = (await rest("GET", `/v1/priority-findings?limit=5&offset=${offset}`)).body as unknown as Listed & { offset: number };
-      if (pg.total !== pendingN || pg.offset !== offset) pages.push({ id: `bad page at ${offset}` } as Finding);
-      pages.push(...pg.findings);
+    // Paged five at a time by the cursor, the pages are the whole list in its order, each once, the last carrying no
+    // cursor. Two findings of the first page settled before the second is read (moot here, as a decision would take
+    // them out of the pending listing) skip nothing: the next page starts past the first page's last place, not past
+    // a count of rows. Every kind, a cursor made for another status or kind is refused.
+    type Page = Listed & { before: number; cursor: string | null };
+    const pageAt = async (after: string | null, query = "") => (await rest("GET", `/v1/priority-findings?limit=5${query}${after ? `&after=${after}` : ""}`)).body as unknown as Page;
+    const first = await pageAt(null);
+    const settled = first.findings.filter((f) => f.id !== stale && f.id !== missing.id && f.id !== unheld.id).slice(0, 2).map((f) => f.id);
+    await sql`UPDATE priority_findings SET status = 'moot', moot_at = now() WHERE id = ANY(${sql.array(settled, "UUID")}::uuid[])`;
+    const pages: Finding[] = [...first.findings];
+    const befores: number[] = [first.before];
+    let cursor = first.cursor, guard = 0, lastCursor: string | null = null;
+    try {
+      while (cursor && guard++ < 50) {
+        const pg = await pageAt(cursor);
+        pages.push(...pg.findings);
+        befores.push(pg.before);
+        lastCursor = cursor;
+        cursor = pg.cursor;
+      }
+    } finally {
+      await sql`UPDATE priority_findings SET status = 'pending', moot_at = NULL WHERE id = ANY(${sql.array(settled, "UUID")}::uuid[])`;
     }
-    const pastM = await mcp("list_priority_findings", { limit: 5, offset: pendingN });
     const firstM = await mcp("list_priority_findings", { limit: 5 });
-    const badOffset = await rest("GET", "/v1/priority-findings?offset=10001");
-    assert(pendingN > 5 && same(pages.map((f) => f.id), l.findings.map((f) => f.id)) && (pastM.sc.findings as unknown[]).length === 0 && pastM.sc.total === pendingN
-        && pastM.text === `${pendingN} pending priority findings; none from offset ${pendingN}.`
-        && firstM.text.split("\n")[0] === `${pendingN} pending priority findings; findings 1–5 of ${pendingN}, pass offset 5 for more:`
-        && badOffset.status === 400 && badOffset.body.code === "REFUSED_INPUT",
-      `${pendingN} pending paged five at a time: every finding once, in the list's order; past the last none, the total kept; the text names the next offset; an offset past 10000 refused (${pages.length}/${l.findings.length} ${firstM.text.split("\n")[0]} | ${pastM.text})`);
+    const foreignStatus = await rest("GET", `/v1/priority-findings?status=all&limit=5&after=${first.cursor}`);
+    const foreignKind = await rest("GET", `/v1/priority-findings?kind=stale&limit=5&after=${first.cursor}`);
+    const notOne = await rest("GET", "/v1/priority-findings?after=bm90LWEtY3Vyc29y");
+    assert(pendingN > 10 && settled.length === 2 && same(pages.map((f) => f.id), l.findings.map((f) => f.id)) && cursor === null && lastCursor !== null
+        && befores[0] === 0 && befores[1] === 3 && first.total === pendingN
+        && firstM.text.split("\n")[0] === `${pendingN} pending priority findings; findings 1–5 of ${pendingN}; pass after: ${firstM.sc.cursor} for more:`
+        && [foreignStatus, foreignKind].every((a) => a.status === 400 && a.body.code === "REFUSED_CURSOR" && a.body.reason === "filters")
+        && notOne.status === 400 && notOne.body.code === "REFUSED_CURSOR" && notOne.body.reason === "shape",
+      `${pendingN} pending paged five at a time by the cursor: every finding once, in the list's order, two of the first page settled between pages and none skipped, the second page's place counted after them; the last page no cursor; a cursor made for another status or kind refused (filters), none of this tool's (shape) (${pages.length}/${l.findings.length} befores ${befores.join(",")} ${firstM.text.split("\n")[0].slice(0, 90)})`);
 
     const pendingStill = async (id: string) => (await sql`SELECT status FROM priority_findings WHERE id = ${id}::uuid`)[0]?.status === "pending";
     const byAgent = await rest("POST", `/v1/priority-findings/${stale}/review`, { decision: "reject" }, KEYS.rival);

@@ -2502,24 +2502,27 @@ export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => ren
   const of = v.kind ? ` of kind ${v.kind}` : "";
   if (v.total === 0) return `No ${which}s${of}.`;
   const total = `${v.total} ${which}${v.total === 1 ? "" : "s"}${of}`;
-  if (v.findings.length === 0) return `${total}; none from offset ${v.offset}.`;
-  // A page that is not every finding names its place, and the next page's offset while more follow.
-  const last = v.offset + v.findings.length;
-  const page = v.findings.length < v.total ? `; findings ${v.offset + 1}–${last} of ${v.total}${last < v.total ? `, pass offset ${last} for more` : ""}` : "";
+  if (v.findings.length === 0) return `${total}; none after the cursor given.`;
+  // A page that is not every finding names its place in the listing as it stands, and the cursor while more follow.
+  const page = v.findings.length < v.total ? `; findings ${v.before + 1}–${v.before + v.findings.length} of ${v.total}${v.cursor ? `; pass after: ${v.cursor} for more` : ""}` : "";
   return [
     `${total}${page}:`,
     ...v.findings.map(findingLine),
     ...(v.findings.some((f) => f.status === "pending")
       ? ["An operator key decides each with review_priority_finding: accept with a level (or clear), or reject. Nothing changes a priority until then."] : []),
   ].join("\n");
-}, unknownRefusal, AS_JSON);
+}, (r) => r.code === "REFUSED_CURSOR"
+  ? r.reason === "filters"
+    ? "Refused: `after` was made under another status or kind — pass it with the status and kind it came with, or leave it out to start from the first page."
+    : "Refused: `after` is not a list_priority_findings cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out to start from the first page."
+  : unknownRefusal(r), AS_JSON);
 
 export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingReviewCode>): Reply {
   return render(o, (v) => {
     const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${v.kind} finding ${v.id} on ${itemText(v.item)}`;
     const held = v.suppressedUntil ? ` The same finding is held back until ${v.suppressedUntil} while its statements stand.` : "";
-    const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, v.item);
     if (v.status === "rejected") return `${lead}: no priority was changed.${held}`;
+    const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, v.item);
     if (v.outcome === "cleared") {
       return `${lead}: cleared your statement${v.closed.length > 1 ? `s — ${closedList(v.closed, v.item)} —` : v.closed.length ? `, ${closedList(v.closed, v.item)},` : ""} which stay${v.closed.length > 1 ? "" : "s"} in the history.${winner}${held}`;
     }
@@ -2534,8 +2537,7 @@ export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingR
       ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
     : r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a priority finding is decided by the operator's write key.`
     : r.code === "NOT_FOUND" ? `Refused: the brain holds no priority finding ${r.id}; list_priority_findings gives each one's id.`
-    : r.code === "REFUSED_FINDING_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}.`
-    : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
+    : r.code === "REFUSED_FINDING_INPUT" || r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300)).replace(/\.?$/, ".")}`
     : r.code === "REFUSED_FINDING_DECISION"
       ? r.problem === "NOT_PENDING"
         ? `Refused: finding ${r.id} is ${r.status ?? "decided"} already, not pending${r.status === "moot" ? " (its condition no longer holds)" : ""}; list_priority_findings with status ${r.status ?? "all"} shows it.`

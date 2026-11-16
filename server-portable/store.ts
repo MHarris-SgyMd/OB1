@@ -1561,7 +1561,14 @@ export function normaliseSetCap(r: unknown): SetCapResult {
   throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
-export { FINDING_INPUT_ERRORS, FINDING_KINDS, FINDING_STATUSES, type FindingInputError, type FindingKind, type FindingStatus };
+/**
+ * Where a page of priority findings ended (SMD-3671 PR 2): the listing's order as three keys, all ascending — `grp` 0
+ * for a pending finding and 1 for the rest, `sk` its found_at's epoch (pending: oldest first) or the negated epoch of
+ * when it was decided or mooted (the rest: newest first), as numeric's exact text, and its id. The keys, not the row:
+ * a finding decided between pages leaves the pending group, and the page after the cursor starts past these values,
+ * never past a count of rows, so nothing not yet shown is skipped.
+ */
+export type FindingPosition = { grp: 0 | 1; sk: string; id: string };
 /**
  * A statement a priority finding is about (migration 142, SMD-3671), from its evidence: a stale or settled finding's
  * `statements`, or a disagreement's operator and source (`role`). An overdue finding's evidence names a due time, not
@@ -1902,6 +1909,14 @@ function keyedOf(v: unknown, what: string): AgendaResult["keyed"] {
   });
   return { others, waiting, missing: o.missing as string[] };
 }
+
+/**
+ * Every statement a writer's answer says it closed, newest first: 138's list, or from a brain before it the one it
+ * named — a clear's own statement, a statement's `replaced`. One rule for set_priority, clear_priority and a finding's
+ * accept (SMD-3671 PR 2: it was written three times).
+ */
+export const closedOf = (a: PriorityAnswer): PriorityAssertion[] =>
+  a.closed ?? (a.outcome === "cleared" || a.outcome === "nothing_to_clear" ? (a.assertion ? [a.assertion] : []) : a.replaced ? [a.replaced] : []);
 
 /** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
 export function normalisePriorityAnswer(r: unknown, what: string): PriorityAnswer {
@@ -2683,10 +2698,11 @@ export interface ThoughtStore {
   setWorkClaimCap(opts: { cap: number | null; actor?: Actor }): Promise<SetCapResult>;
   /**
    * The priority review's findings (migration 142, SMD-3671): those of one status (null: every one) and kind (null:
-   * every kind), the pending oldest found first, then the rest most recently decided or mooted first; `total` counts
-   * every one matching, the page `limit` of them from `offset`. One statement. A database before 142 throws.
+   * every kind), the pending oldest found first, then the rest most recently decided or mooted first, ties by id; `total`
+   * counts every one matching and `before` those ahead of the page, which is `limit` of them past `after` (FindingPosition),
+   * and `next` the last listed row's place while more follow. One statement. A database before 142 throws.
    */
-  listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; offset: number }): Promise<{ total: number; findings: PriorityFinding[] }>;
+  listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; after?: FindingPosition }): Promise<{ total: number; before: number; findings: PriorityFinding[]; next: FindingPosition | null }>;
   /**
    * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
    * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent

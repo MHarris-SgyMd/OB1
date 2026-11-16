@@ -240,7 +240,8 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
  * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
  * its own too. 142's priority_findings is written by the priority review's scan and by an operator's decision on a
- * finding (SMD-3671), and read by nothing else: a clause of its own, no board lost for it.
+ * finding (SMD-3671), and read by list_priority_findings, brain_info and preflight's own priority findings row (PR 2): a
+ * clause of its own, no board lost for it.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
@@ -266,7 +267,9 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
   }
   if (findings.length) {
-    clauses.push("the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)");
+    clauses.push(findings.includes("priority_findings SELECT")
+      ? "the priority review's scan (ob1_priority_review), list_priority_findings and review_priority_finding fail naming priority_findings (migration 142), and brain_info and the priority findings row say it was not read"
+      : "the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)");
   }
   const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;

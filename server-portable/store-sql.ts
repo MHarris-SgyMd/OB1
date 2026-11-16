@@ -24,10 +24,11 @@ import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SUBJECT_POOL_PREFIX } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
+import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normalisePriorityFinding, normaliseReviewFinding, type FindingKind, type FindingStatus, type PriorityFinding, type ReviewFindingResult, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normalisePriorityFinding, normaliseReviewFinding, type FindingPosition, type PriorityFinding, type ReviewFindingResult, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1216,28 +1217,41 @@ export class SqlStore implements ThoughtStore {
     return normaliseSetCap(rows[0]?.r);
   }
 
-  // SMD-3671 PR 2: 142's findings, one statement. `total` counts every row matching, read on a row of its own so a page
-  // past the last (an offset beyond them) still says it; the page is `limit` rows from `offset`. The pending oldest found
-  // first (the queue's order), then the rest most recently decided or mooted first, ties by id, so pages do not overlap
-  // while nothing moves.
-  async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; offset: number }): Promise<{ total: number; findings: PriorityFinding[] }> {
+  // SMD-3671 PR 2: 142's findings, one statement. The matching rows are read narrow — the id and the order's keys
+  // (FindingPosition) — for `total`, `before` (those at or ahead of the cursor) and the page, one more than `limit` so
+  // `next` is read rather than guessed; the wide columns (evidence and outcome jsonb) are read for the page's rows alone.
+  // The order is a strict total order: a group, a numeric key, the id.
+  async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; after?: FindingPosition }): Promise<{ total: number; before: number; findings: PriorityFinding[]; next: FindingPosition | null }> {
+    const a = opts.after;
     const rows = await this.sql`
       WITH m AS (
-        SELECT f.id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days, f.found_at, f.refreshed_at, f.moot_at,
-               f.decided_at, f.decided_by, f.decision_note, f.outcome, f.suppressed_until
+        SELECT f.id, CASE WHEN f.status = 'pending' THEN 0 ELSE 1 END AS grp,
+               CASE WHEN f.status = 'pending' THEN extract(epoch FROM f.found_at) ELSE -extract(epoch FROM COALESCE(f.decided_at, f.moot_at)) END AS sk
           FROM priority_findings f
          WHERE (${opts.status}::text IS NULL OR f.status = ${opts.status}::text)
-           AND (${opts.kind}::text IS NULL OR f.kind = ${opts.kind}::text))
-      SELECT t.total, p.id::text AS id, p.kind, p.item_kind, p.item_key, p.status, p.evidence, p.window_days, p.found_at, p.refreshed_at, p.moot_at,
-             p.decided_at, p.decided_by, p.decision_note, p.outcome, p.suppressed_until
-        FROM (SELECT count(*)::int AS total FROM m) t
-        LEFT JOIN LATERAL (
-          SELECT m.id, m.kind, m.item_kind, m.item_key, m.status, m.evidence, m.window_days, m.found_at, m.refreshed_at, m.moot_at,
-                 m.decided_at, m.decided_by, m.decision_note, m.outcome, m.suppressed_until
-            FROM m
-           ORDER BY m.status <> 'pending', CASE WHEN m.status = 'pending' THEN m.found_at END, COALESCE(m.decided_at, m.moot_at) DESC NULLS LAST, m.id
-           LIMIT ${opts.limit}::int OFFSET ${opts.offset}::int) p ON true` as Record<string, unknown>[];
-    return { total: Number(rows[0]?.total ?? 0), findings: rows.filter((r) => r.id != null).map(normalisePriorityFinding) };
+           AND (${opts.kind}::text IS NULL OR f.kind = ${opts.kind}::text)),
+      c AS (
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE ${a?.grp ?? null}::int IS NOT NULL AND (m.grp, m.sk, m.id) <= (${a?.grp ?? null}::int, ${a?.sk ?? null}::numeric, ${a?.id ?? null}::uuid))::int AS before
+          FROM m),
+      p AS (
+        SELECT m.id, m.grp, m.sk FROM m
+         WHERE ${a?.grp ?? null}::int IS NULL OR (m.grp, m.sk, m.id) > (${a?.grp ?? null}::int, ${a?.sk ?? null}::numeric, ${a?.id ?? null}::uuid)
+         ORDER BY m.grp, m.sk, m.id
+         LIMIT ${opts.limit + 1}::int)
+      SELECT c.total, c.before, p.grp, p.sk::text AS sk, f.id::text AS id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days,
+             f.found_at, f.refreshed_at, f.moot_at, f.decided_at, f.decided_by, f.decision_note, f.outcome, f.suppressed_until
+        FROM c
+        LEFT JOIN p ON true
+        LEFT JOIN priority_findings f ON f.id = p.id
+       ORDER BY p.grp, p.sk, p.id` as Record<string, unknown>[];
+    const listed = rows.filter((r) => r.id != null);
+    const page = listed.slice(0, opts.limit);
+    const last = listed.length > opts.limit ? page[page.length - 1] : undefined;
+    return {
+      total: Number(rows[0]?.total ?? 0), before: Number(rows[0]?.before ?? 0), findings: page.map(normalisePriorityFinding),
+      next: last ? { grp: Number(last.grp) === 0 ? 0 : 1, sk: String(last.sk), id: String(last.id) } : null,
+    };
   }
 
   // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142

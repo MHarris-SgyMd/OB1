@@ -3396,6 +3396,10 @@ else {
       assert(/^\s*!\s+priority findings\s+could not verify: permission denied for table priority_findings/m.test(noFindings.out)
              && /^\s*→ Grant the priority group \(SMD-3663\): cd db && bun migrate\.ts --url <the owner's connection string> --grant <role> --groups priority/.test(fix(noFindings.out, "priority findings")),
         `…and without SELECT on priority_findings the priority findings row warns with the priority group's grant, not a skip (${row(noFindings.out, "priority findings").trim().slice(0, 160)})`);
+      // The priority row's clause for it names every reader since PR 2: the list faults, brain_info and the row above say it was not read.
+      const priorityRowNoFindings = noFindings.out.split("\n").find((l) => /!  priority\s/.test(l)) ?? "";
+      assert(/priority_findings SELECT[^:]*: .*the priority review's scan \(ob1_priority_review\), list_priority_findings and review_priority_finding fail naming priority_findings \(migration 142\), and brain_info and the priority findings row say it was not read/.test(priorityRowNoFindings),
+        `…and the priority row says without SELECT on priority_findings the list fails too, and brain_info and the findings row say it was not read (${priorityRowNoFindings.trim().slice(-260)})`);
       const threadsRowOut = row(noFacets.out, "threads");
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);
