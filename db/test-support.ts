@@ -575,6 +575,8 @@ const FUNCTIONS = [
   "ob1_forgetting_item(text)",
   "ob1_forget_fingerprints(uuid)",
   "forget_thought(uuid, jsonb, boolean)",
+  "ob1_text_forgotten_at(text)",
+  "ob1_forget_leftovers()",
 ];
 
 /**

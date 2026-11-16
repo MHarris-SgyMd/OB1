@@ -2500,6 +2500,12 @@ export const ROLE_GRANTS = Object.freeze({
     // board (SMD-2682). Soft as the rest: without it the Findings row says
     // the table is not readable by this role, and nothing else changes.
     Object.freeze({ table: "board_findings_posted", privileges: Object.freeze(["SELECT"]),           since: "087" }),
+    // forget_thought (SMD-1723) runs as its owner since 143, which revoked it
+    // from PUBLIC: EXECUTE is all a role needs to forget, and the stores it
+    // reaches stay the owner's. Soft as the rest of this group — without it
+    // the operation is refused with this grant named, and preflight's
+    // `forget definer` row says so; every other write goes on.
+    Object.freeze({ function: "forget_thought(uuid, jsonb, boolean)", privileges: Object.freeze(["EXECUTE"]),  since: "143" }),
   ]),
   // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
   // releases work, upserts its job key into `ob1_config` (reembed's

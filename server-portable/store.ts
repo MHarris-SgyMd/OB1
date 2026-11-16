@@ -1174,6 +1174,35 @@ export type MutationResult =
 export type DeleteResult =
   | { ok: true; id: string; detached?: number; inactive?: number }
   | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/**
+ * What forget_thought answers (migrations 139 and 143, SMD-1723): the
+ * evidence of what each store gave up. `removed` counts by store (139's keys:
+ * relations, inactive_citations, detached_citations, derived_refs,
+ * page_sections, query_log_rows, priority_statements, priority_findings,
+ * item_reasons, item_proposals, item_events, items, deliverable_events,
+ * audit_events), `gone` that the row was deleted before the call,
+ * `irreproducible` the thoughts derived from it and `pages` the pages a person
+ * reviews, `twins` the standing thoughts that keep the same text, `source` the
+ * record it was ingested as (its identity hashed), `outside` the copies
+ * beyond the brain's reach.
+ */
+export type ForgetEvidence = {
+  id: string; forgottenAt: string; gone: boolean; orphanEntities: number;
+  removed: Record<string, number>;
+  irreproducible: string[]; pages: string[]; twins: string[];
+  source: { system: string; identitySha256: string } | null;
+  itemIds: string[]; proposalIds: string[]; outside: string[];
+};
+/**
+ * forget_thought's refusals: NOT_FOUND (the log never held the id), FORGOTTEN
+ * (forgotten already, nothing left; `forgottenAt`, and the bare orphan
+ * entities pruned on the way), CITED (as delete_thought's), REPLAYING
+ * (rebuild_derived refused under a replay: nothing done), and any refusal of
+ * delete_thought's the forget passed through (a citation racing the check).
+ */
+export type ForgetResult =
+  | ({ ok: true } & ForgetEvidence)
+  | { ok: false; error: string; forgottenAt?: string; orphanEntities?: number; citedBy?: number; citations?: Citation[] };
 /** The three stamp keys a thought's metadata carries (050, 073), as a reset leaves them; null where the row has none. */
 export type ActorStamp = { actorKind: string | null; actorName: string | null; trust: string | null };
 /**
@@ -1270,6 +1299,49 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
           createdAt: isoTimestampOpt(c.created_at),
         }))
       : undefined,
+  };
+}
+
+/**
+ * forget_thought's jsonb (139, 143) as the store's union. A refusal keeps its
+ * own word; CITED's count and rows are read as delete_thought's are. A body
+ * that is no envelope throws: an answer this server cannot read is a fault,
+ * and a forget the caller cannot see the evidence of must not read as done.
+ */
+export function normaliseForget(r: unknown): ForgetResult {
+  const o = r !== null && typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : undefined;
+  if (!o || typeof o.ok !== "boolean") throw new Error(`forget_thought answered no envelope: ${JSON.stringify(r)?.slice(0, 120)}`);
+  const ids = (v: unknown): string[] => (Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === "string") : []);
+  const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  if (o.ok === true) {
+    const removed: Record<string, number> = {};
+    if (o.removed !== null && typeof o.removed === "object" && !Array.isArray(o.removed)) {
+      for (const [k, v] of Object.entries(o.removed as Record<string, unknown>)) removed[k] = count(v);
+    }
+    const src = o.source !== null && typeof o.source === "object" && !Array.isArray(o.source) ? (o.source as Record<string, unknown>) : null;
+    return {
+      ok: true,
+      id: String(o.id),
+      forgottenAt: isoTimestampOpt(o.forgotten_at) ?? String(o.forgotten_at ?? ""),
+      gone: o.gone === true,
+      orphanEntities: count(o.orphan_entities),
+      removed,
+      irreproducible: ids(o.irreproducible),
+      pages: ids(o.pages),
+      twins: ids(o.twins),
+      source: src && typeof src.system === "string" && typeof src.identity_sha256 === "string" ? { system: src.system, identitySha256: src.identity_sha256 } : null,
+      itemIds: ids(o.item_ids),
+      proposalIds: ids(o.proposal_ids),
+      outside: ids(o.outside),
+    };
+  }
+  const cited = o.error === "CITED" ? normaliseMutation(o) : undefined;
+  return {
+    ok: false,
+    error: typeof o.error === "string" ? o.error : "NOT_FOUND",
+    forgottenAt: isoTimestampOpt(o.forgotten_at),
+    orphanEntities: typeof o.orphan_entities === "number" ? o.orphan_entities : undefined,
+    ...(cited && !cited.ok ? { citedBy: cited.citedBy, citations: cited.citations } : {}),
   };
 }
 
@@ -2477,6 +2549,29 @@ export interface ThoughtStore {
   }): Promise<DeleteResult>;
 
   /**
+   * Forget a thought (migrations 139 and 143, SMD-1723): forget_thought, which
+   * removes the row and every store holding its text or id, redacts its
+   * events, writes the ledger, and answers the evidence. Refused CITED while
+   * an active citation leans on it, unless `detach`, which deletes the citing
+   * rows with the rest. Runs as the function's owner since 143: the
+   * connecting role needs EXECUTE on it alone, and a role without it throws
+   * (42501).
+   */
+  forgetThought(opts: {
+    id: string;
+    actor?: Actor;
+    detach?: boolean;
+  }): Promise<ForgetResult>;
+
+  /**
+   * When the brain forgot this text, or null (migration 143's
+   * ob1_text_forgotten_at: 139's refusal rule, asked before an embedding is
+   * paid for). Null on a brain before 143, whose refusal trigger still
+   * answers at the write.
+   */
+  textForgottenAt(content: string): Promise<string | null>;
+
+  /**
    * The operator's reset of a capture-only key's label that a re-capture
    * settled or moved (migration 086, SMD-2744): ob1_reset_capture_stamp,
    * which decides who may — a key the registry classifies operator — and
@@ -2959,7 +3054,7 @@ export function maskUrl(url: string): string {
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
-  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
+  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,

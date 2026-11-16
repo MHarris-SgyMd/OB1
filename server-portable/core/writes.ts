@@ -17,7 +17,7 @@ import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
 import { decideCalls, type EgressSubject } from "../egress.ts";
-import { UUID_RE, type ActorStamp, type Citation, type RecaptureLabel, type ThoughtStore } from "../store.ts";
+import { UUID_RE, type ActorStamp, type Citation, type ForgetEvidence, type RecaptureLabel, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
 import { EVIDENCE_LIMITS, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
@@ -310,6 +310,12 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       const own = present && writer !== null && writer.agentId !== null && writer.agentId === principal.agentId && !taken;
       if (!own) pointer = undefined;
     }
+    // A text the brain forgot (SMD-1723 PR 2) is refused here, before the
+    // embedding and the metadata are paid for, so the model provider never
+    // sees it again. The write's refusal trigger (139) stays the authority:
+    // its OB005 is caught below.
+    const forgottenAt = await (await ctx.store()).textForgottenAt(content);
+    if (forgottenAt !== null) return refuse(forgottenText(forgottenAt, reader));
     // What may leave the box (SMD-1903): asked once, for both calls, and
     // only the allowed ones are made — a refused capture costs no request
     // and lands all the same, without the vector or the tags the refused
@@ -612,6 +618,11 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     });
   } catch (err: unknown) {
     const msg = (err as Error)?.message ?? "";
+    // 139's refusal trigger: a forgotten text the ledger check above did not
+    // see (a forget that landed between the two), a refusal and not a fault —
+    // it reached the caller as a 500 (SMD-1723 PR 2).
+    const raised = forgottenRaised(err);
+    if (raised) return refuse(forgottenText(raised.forgottenAt, reader));
     // 025's self-FK is what refuses a reader's first capture whose supersedes
     // names no thought (a key that cannot read has the pointer mended above,
     // and a re-capture writes no pointer, so it never fires there —
@@ -712,6 +723,31 @@ export type Updated = {
   noVectorReason?: string;
 };
 
+/**
+ * A text the brain forgot (139, SMD-1723 PR 2) as a refusal: when, to a key
+ * that can read. A capture-only key is told the text was forgotten and not
+ * when, which says no more than a refusal must.
+ */
+function forgottenText(forgottenAt: string | null | undefined, reader: boolean): Refusal {
+  return { code: "FORGOTTEN", retryable: false, ...(reader && forgottenAt ? { forgottenAt } : {}) };
+}
+/**
+ * The refusal trigger's OB005 (139), with the time its DETAIL carries
+ * ({forgotten_at}); null for any other error. A DETAIL that is no such JSON
+ * leaves the time out, not the refusal.
+ */
+function forgottenRaised(e: unknown): { forgottenAt?: string } | null {
+  const { errno, detail } = (e ?? {}) as { errno?: unknown; detail?: unknown };
+  if (errno !== "OB005") return null;
+  try {
+    const at = (JSON.parse(String(detail ?? "")) as { forgotten_at?: unknown })?.forgotten_at;
+    const when = typeof at === "string" ? new Date(at) : null;
+    return when && !Number.isNaN(when.getTime()) ? { forgottenAt: when.toISOString() } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** A store's refusal of an edit or a delete (018, 032, 042) as a typed refusal. */
 function storeRefusal(r: { error: string; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] }, id: string): Refusal {
   switch (r.error) {
@@ -758,6 +794,12 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   const { id, byClientKey } = await targetNamed(ctx, principal, name);
   if (typeof supersedes === "string") supersedes = (await targetNamed(ctx, principal, supersedes)).id;
 
+  // A forgotten text, before its embedding is paid for (SMD-1723 PR 2), as at capture.
+  if (content !== undefined) {
+    const forgottenAt = await (await ctx.store()).textForgottenAt(content);
+    if (forgottenAt !== null) return refuse(forgottenText(forgottenAt, canRead(principal)));
+  }
+
   // Only re-embed when the text actually changed. A metadata-only edit
   // must not spend two model calls, nor risk replacing a good vector.
   // The gate as at capture (SMD-1903), asked only when the text moves:
@@ -795,23 +837,31 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
     }
   }
 
-  const result = await (await ctx.store()).updateThought({
-    id,
-    content,
-    metadataPatch: metadata_patch,
-    embedding: embedded?.embedding,
-    chunks: embedded?.chunks,
-    ifUnchangedSince: if_unchanged_since,
-    actor: { ...actorOf(ctx, principal), ...(gate?.record ? { egress: gate.record } : {}) },
-    // Read by update_thought only with content, when the vector moves (021).
-    embeddingModel: embedded?.model,
-    // 061: the windows' recipe when the new text made windows; the patch
-    // is the caller's, so no tag recipe (SMD-1731).
-    lineage: captureLineage(cfg, embedded, undefined),
-    // 032: only the key the caller named reaches the envelope — absent
-    // must stay absent, since null means CLEAR at the function.
-    provenance: supersedes !== undefined ? { supersedes } : undefined,
-  });
+  let result: Awaited<ReturnType<ThoughtStore["updateThought"]>>;
+  try {
+    result = await (await ctx.store()).updateThought({
+      id,
+      content,
+      metadataPatch: metadata_patch,
+      embedding: embedded?.embedding,
+      chunks: embedded?.chunks,
+      ifUnchangedSince: if_unchanged_since,
+      actor: { ...actorOf(ctx, principal), ...(gate?.record ? { egress: gate.record } : {}) },
+      // Read by update_thought only with content, when the vector moves (021).
+      embeddingModel: embedded?.model,
+      // 061: the windows' recipe when the new text made windows; the patch
+      // is the caller's, so no tag recipe (SMD-1731).
+      lineage: captureLineage(cfg, embedded, undefined),
+      // 032: only the key the caller named reaches the envelope — absent
+      // must stay absent, since null means CLEAR at the function.
+      provenance: supersedes !== undefined ? { supersedes } : undefined,
+    });
+  } catch (e) {
+    // 139's refusal trigger, as at capture.
+    const raised = forgottenRaised(e);
+    if (raised) return refuse(forgottenText(raised.forgottenAt, canRead(principal)));
+    throw e;
+  }
 
   if (!result.ok) return refuse(storeRefusal(result, id));
 
@@ -898,6 +948,36 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
     ...(result.detached ? { detached: result.detached } : {}),
     ...(result.inactive ? { inactive: result.inactive } : {}),
   });
+}
+
+/** What a forget did (139, 143; SMD-1723 PR 2): the evidence, and the client_key it was named by. */
+export type Forgotten = ForgetEvidence & { byClientKey?: string };
+export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
+
+export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, confirm, detach_citations }: Input<"forget_thought">): Promise<Outcome<Forgotten, ForgetCode>> {
+  // The echo first, before anything is read (the ticket's Work 4): the name
+  // exactly as sent, an id or a client_key, not as it resolves — a copy of
+  // the call to another brain carries the same pair, where the id differs.
+  if (confirm !== name) return refuse({ code: "REFUSED_CONFIRM", retryable: false, id: name.slice(0, 80) });
+  // A name that is no uuid names no thought, as at delete.
+  if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
+  // The thought by id, else by client_key (SMD-3314). A thought deleted
+  // before keeps no key to resolve: its id alone names it then.
+  const { id, byClientKey } = await targetNamed(ctx, principal, name);
+  const result = await (await ctx.store()).forgetThought({ id, actor: actorOf(ctx, principal), detach: detach_citations === true });
+  if (!result.ok) {
+    switch (result.error) {
+      case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
+      case "FORGOTTEN": return refuse({ code: "FORGOTTEN", retryable: false, id, ...(result.forgottenAt ? { forgottenAt: result.forgottenAt } : {}) });
+      case "CITED": return refuse({ code: "REFUSED_CITED", retryable: false, id, op: "forget", ...(result.citedBy !== undefined ? { citedBy: result.citedBy } : {}), ...(result.citations ? { citations: result.citations } : {}) });
+      case "REPLAYING": return refuse({ code: "REPLAYING", retryable: true, id });
+      default: return refuse({ code: "REFUSED", retryable: false, error: result.error });
+    }
+  }
+  // No action-log row, as delete_thought writes: 034's log is the very store
+  // the forget just cleared of this id.
+  const { ok: _ok, ...evidence } = result;
+  return ok({ ...evidence, ...(byClientKey ? { byClientKey } : {}) });
 }
 
 /** What the operator's reset did (086, SMD-2744): whether anything had settled the label, whether a moved label was put back, the declines that no longer count, and the label the row is left with. */

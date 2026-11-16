@@ -55,7 +55,11 @@ export type Refusal =
   | { code: "REFUSED_STALE_READ"; retryable: false; id: string; currentUpdatedAt?: string } // changed since the if_unchanged_since passed
   | { code: "REFUSED_DUPLICATE_CONTENT"; retryable: false }           // the text is another thought's
   | { code: "REFUSED_WOULD_CYCLE"; retryable: false; id: string }     // the supersedes pointer would close a loop
-  | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[] } // statements in other thoughts rest on it (042)
+  | { code: "REFUSED_CITED"; retryable: false; id: string; citedBy?: number; citations?: Citation[]; op?: "forget" } // statements in other thoughts rest on it (042); op: forget_thought's refusal, whose way through deletes the citations
+  // forget_thought (139, 143; SMD-1723 PR 2), and a capture or an edit of a forgotten text.
+  | { code: "REFUSED_CONFIRM"; retryable: false; id: string }        // forget_thought: `confirm` is not the `id` echoed exactly
+  | { code: "FORGOTTEN"; retryable: false; id?: string; forgottenAt?: string } // forget_thought: forgotten already, nothing left to take (id); capture_thought, update_thought: the text was forgotten, and writing it again is the operator's (forgottenAt: when, to a key that can read)
+  | { code: "REPLAYING"; retryable: true; id: string }               // forget_thought: a replay is rebuilding the brain's derived rows, and the forget, which rebuilds them for this thought, did nothing
   | { code: "REFUSED"; retryable: false; error: string }              // a refusal the store named that this server does not know
   // reset_capture_stamp (086, SMD-2744).
   | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null; unidentified?: true } // the key is not one the registry classifies operator (kind: what it is), or is capture-only; unidentified: it reached the server with no agent id, so it has no registry kind (set_priority_weights, SMD-4193 PR 2)
@@ -208,6 +212,10 @@ const FACTS: Facts = {
   REFUSED_DUPLICATE_CONTENT: none,
   REFUSED_WOULD_CYCLE: none,
   REFUSED_CITED: (r) => (r.citedBy !== undefined ? { citedBy: r.citedBy } : {}),
+  REFUSED_CONFIRM: none,
+  // When the text was forgotten, as a value: never the text, nor a fingerprint of it.
+  FORGOTTEN: (r) => ({ ...(r.id ? { id: r.id } : {}), ...(r.forgottenAt ? { forgottenAt: r.forgottenAt } : {}) }),
+  REPLAYING: (r) => ({ id: r.id }),
   REFUSED: none,
   // The key's own name and kind are in the text, not here: a name is the
   // env's, not a token, and the kind is the registry's word about the key.

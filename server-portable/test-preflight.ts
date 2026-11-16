@@ -813,6 +813,39 @@ else {
     }
   }
 
+  // SMD-1723 PR 2 (migration 143): forget_thought runs as its owner, and no store holds a forgotten thought's id — a
+  // write that raced a forget is named, a warning (preflight gates the start, and the sweep runs through the server),
+  // until a second forget sweeps it; 139 re-applied resets the definer, named with 143.
+  {
+    const fg = new SQL({ url: LIVE, max: 1 });
+    const rowOf = (out: string, name: string) => out.split("\n").find((l) => new RegExp(`^\\s*\\S+\\s+${name}\\s{2,}\\S`).test(l))?.trim() ?? "";
+    try {
+      const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  forget definer\s+forget_thought runs as its owner, its search_path and settings pinned; the server's role may run it/.test(whole.out)
+          && /✓  forgotten\s+no store holds the id or the text of a forgotten thought/.test(whole.out),
+             `on a brain at 143 forget_thought is its owner's and nothing holds a forgotten id: ok (${rowOf(whole.out, "forget definer")} | ${rowOf(whole.out, "forgotten")})`);
+      const [{ id }] = (await fg`INSERT INTO thoughts (content) VALUES ('preflight: a thought to forget (SMD-1723)') RETURNING id::text AS id`) as { id: string }[];
+      await fg`SELECT forget_thought(${id}::uuid, NULL::jsonb, false)`;
+      await fg`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', ${id}::uuid)`;
+      const raced = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(raced.code === 0 && rowOf(raced.out, "forgotten").startsWith(`!  forgotten`) && rowOf(raced.out, "forgotten").includes(`1 forgotten thought(s) still held by a store, which the brain promised gone: ${id} (query_log 1)`)
+          && /forget_thought\('<id>'::uuid\)/.test(raced.out),
+             `a logged action on a forgotten id: a warning naming the id and the store, the server still starting, the sweep spelled (exit ${raced.code}; ${rowOf(raced.out, "forgotten").slice(0, 160)})`);
+      await fg`SELECT forget_thought(${id}::uuid, NULL::jsonb, false)`;
+      const swept = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  forgotten\s/.test(swept.out), `…and a second forget sweeps it: ok again (${rowOf(swept.out, "forgotten")})`);
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("139") });
+      const reset = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("143") });
+      const restored = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(reset.code === 0 && /!  forget definer\s+forget_thought runs as its caller, not its owner/.test(reset.out) && /143_forget_thought_definer\.sql/.test(reset.out)
+          && /✓  forget definer\s/.test(restored.out),
+             `139 re-applied: forget_thought its caller's, a warning naming 143; 143 re-applied: ok (${rowOf(reset.out, "forget definer").slice(0, 120)})`);
+    } finally {
+      await fg.close();
+    }
+  }
+
   // 115's work claims (SMD-3598), "ticket claims" beside 015's "worker claims": the four functions the claim
   // operations call, and a statement log that would print a renewal's or a release's token (a bind value) whole.
   {

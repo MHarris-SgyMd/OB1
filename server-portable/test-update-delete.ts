@@ -34,6 +34,8 @@ const DIM = 64;
 const EMB_MODEL = "stub-embed";
 await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
 
+/** Every text the stub was asked to embed, so [12] can say a forgotten text never reached the provider. */
+const embeddedTexts: string[] = [];
 /** Vector keyed off text length, so a changed embedding is observable. */
 const provider = Bun.serve({
   port: 0,
@@ -42,6 +44,7 @@ const provider = Bun.serve({
     const url = new URL(req.url);
     const body = (await req.json()) as Record<string, unknown>;
     if (url.pathname.endsWith("/embeddings")) {
+      embeddedTexts.push(...[body.input].flat().map(String));
       const v = new Array(DIM).fill(0);
       v[String(body.input ?? "").length % DIM] = 1;
       return Response.json({ data: [{ embedding: v }], model: body.model });
@@ -524,6 +527,76 @@ console.log("\n[11] A patch naming trust, actor_kind or actor_name says which th
   await sql`ALTER TABLE thoughts ENABLE TRIGGER USER`;
   const legacyReply = await writer.call("update_thought", { id: legacy, metadata_patch: { actor_name: "someone" } });
   assert(/^Updated [0-9a-f-]{36} \(actor_name not taken\)\./.test(legacyReply), `a row with no updated_at still has its kept key reported (${legacyReply.split("\n")[0]})`);
+}
+
+console.log("\n[12] forget_thought: refused without the id echoed and while cited; then forgotten with its citations, the evidence said; its text refused on capture and on edit before the provider sees it, and by the trigger's OB005 on a brain without the ledger check; forgotten again FORGOTTEN, an unknown id NOT_FOUND; a read key cannot see it (SMD-1723 PR 2)");
+{
+  const idOf = (reply: string) => reply.match(/id ([0-9a-f-]{36})/)?.[1] ?? "";
+  const full = async (name: string, args: Record<string, unknown>, client = writer) => {
+    const body = (await client.rpc("tools/call", { name, arguments: args })) as { result?: { content?: { text?: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean }; error?: { message?: string } };
+    return { text: (body.result?.content ?? []).map((c) => c.text ?? "").join("\n") || String(body.error?.message ?? ""), sc: body.result?.structuredContent ?? {}, isError: body.result?.isError === true || body.error !== undefined };
+  };
+  const SECRET = "[12] the vault code is 4417-ALPHA";
+  const id = idOf(await writer.call("capture_thought", { content: SECRET }));
+  const note = idOf(await writer.call("capture_thought", { content: "[12] a note that cites the vault code" }));
+  const cited = ((await sql`SELECT record_citation(${note}::uuid, ${id}::uuid, ${"the code is 4417"}, ${"retrieved"}) AS r`)[0] as { r: { ok: boolean } }).r;
+  assert(id.length === 36 && cited.ok === true, "(a thought, and a citation of it on another)");
+
+  const listed = ((await writer.rpc("tools/list")) as { result?: { tools?: { name: string }[] } }).result?.tools?.map((t) => t.name) ?? [];
+  const viewed = ((await viewer.rpc("tools/list")) as { result?: { tools?: { name: string }[] } }).result?.tools?.map((t) => t.name) ?? [];
+  assert(listed.includes("forget_thought") && !viewed.includes("forget_thought"), "a write key sees forget_thought, a read key does not");
+
+  // The echo: missing, then not the id; nothing touched.
+  const noEcho = await full("forget_thought", { id });
+  const wrongEcho = await full("forget_thought", { id, confirm: id.toUpperCase() });
+  const standing = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${id}::uuid`)[0].c);
+  assert(noEcho.isError && /confirm/i.test(noEcho.text) && wrongEcho.isError && wrongEcho.sc.code === "REFUSED_CONFIRM" && /`confirm` must be the `id` again, exactly as passed/.test(wrongEcho.text) && (await standing()) === 1,
+    `without confirm, or with it not the id exactly, refused and nothing touched (${wrongEcho.text.slice(0, 60)})`);
+
+  // Cited: refused, the way through spelled for a forget.
+  const citedRefusal = await full("forget_thought", { id, confirm: id });
+  assert(citedRefusal.isError && citedRefusal.sc.code === "REFUSED_CITED" && /To forget anyway, pass detach_citations: true — the citation is deleted with it/.test(citedRefusal.text) && (await standing()) === 1,
+    `a cited thought is refused, the reply saying the citation goes with it (${citedRefusal.text.split("\n").pop()?.slice(0, 90)})`);
+
+  // Forgotten: the evidence, the row gone, its events redacted, the citation deleted, the ledger naming the key.
+  const forgot = await full("forget_thought", { id, confirm: id, detach_citations: true });
+  const removed = forgot.sc.removed as Record<string, number> | undefined;
+  const after = (await sql`SELECT
+      (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${id}::uuid AND (redacted_at IS NULL OR diff::text LIKE '%4417-ALPHA%')) AS open,
+      (SELECT count(*)::int FROM thought_facets WHERE thought_id = ${note}::uuid AND kind = 'citation') AS cites,
+      (SELECT actor_name FROM thought_forgotten WHERE thought_id = ${id}::uuid) AS who`)[0] as { open: number; cites: number; who: string };
+  assert(!forgot.isError && new RegExp(`^Forgot ${id} at `).test(forgot.text) && /^Removed or redacted, by store: .*audit events \d+.*detached citations 1/m.test(forgot.text) && removed?.detached_citations === 1 && (removed?.audit_events ?? 0) >= 2
+      && forgot.sc.id === id && typeof forgot.sc.forgottenAt === "string" && (await standing()) === 0 && after.open === 0 && after.cites === 0 && after.who === "laptop",
+    `forgotten: the evidence in words and values, the row gone, every event redacted, the citation deleted, the ledger naming the key (${forgot.text.split("\n")[1]}; ${JSON.stringify(after)})`);
+
+  // Its text again: refused at capture and at an edit, before the provider is asked.
+  const asked = embeddedTexts.length;
+  const recapture = await full("capture_thought", { content: SECRET });
+  const other = idOf(await writer.call("capture_thought", { content: "[12] a note someone will try to overwrite" }));
+  const askedBetween = embeddedTexts.length;
+  const reedit = await full("update_thought", { id: other, content: SECRET });
+  const otherText = String((await sql`SELECT content FROM thoughts WHERE id = ${other}::uuid`)[0].content);
+  assert(recapture.isError && recapture.sc.code === "FORGOTTEN" && typeof recapture.sc.forgottenAt === "string" && /this text was forgotten on .*do not retry/.test(recapture.text)
+      && reedit.isError && reedit.sc.code === "FORGOTTEN" && /the thought keeps its text/.test(reedit.text) && otherText === "[12] a note someone will try to overwrite"
+      && !embeddedTexts.slice(asked).includes(SECRET) && askedBetween === embeddedTexts.length,
+    `its text refused FORGOTTEN on capture and on edit, the provider never asked (${recapture.text.slice(0, 60)})`);
+
+  // A brain without 143's ledger check: the trigger's OB005 is the same refusal, not a fault — after the embedding.
+  await sql`DROP FUNCTION ob1_text_forgotten_at(text)`;
+  const raised = await full("capture_thought", { content: SECRET });
+  const raisedEdit = await full("update_thought", { id: other, content: SECRET });
+  const migration143 = await Bun.file(new URL("../db/migrations/143_forget_thought_definer.sql", import.meta.url)).text();
+  await sql.unsafe(migration143);
+  assert(raised.isError && raised.sc.code === "FORGOTTEN" && typeof raised.sc.forgottenAt === "string" && raisedEdit.isError && raisedEdit.sc.code === "FORGOTTEN"
+      && embeddedTexts.slice(asked).includes(SECRET),
+    `without the ledger check the trigger's OB005 is refused FORGOTTEN, with its time, on capture and on edit (${raised.text.slice(0, 60)})`);
+
+  // Again: FORGOTTEN. An id the log never held: NOT_FOUND.
+  const again = await full("forget_thought", { id, confirm: id });
+  const ghost = "00000000-0000-4000-8000-000000001723";
+  const never = await full("forget_thought", { id: ghost, confirm: ghost });
+  assert(again.isError && again.sc.code === "FORGOTTEN" && /was forgotten already/.test(again.text) && never.isError && never.sc.code === "NOT_FOUND" && /was ever in the brain's log/.test(never.text),
+    `forgotten again is FORGOTTEN; an unknown id NOT_FOUND (${again.text.slice(0, 50)} | ${never.text.slice(0, 50)})`);
 }
 
 await sql.close();

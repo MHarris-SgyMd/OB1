@@ -456,7 +456,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
@@ -3316,6 +3316,60 @@ if (configFailed) {
                 "Grant the deliverables group (SMD-1715): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups deliverables (db/README.md, Grants for a capturing role).");
           } else {
             add("deliverables", "ok", "record_deliverable, verify_deliverable, and deliverable_history present; the server's role holds the deliverables group");
+          }
+        }
+
+        /**
+         * Forgetting (SMD-1723 PR 2). `forget definer`: 143 made forget_thought SECURITY DEFINER with its search_path and
+         * its settings pinned, and revoked it from PUBLIC; a re-applied 139 (CREATE OR REPLACE) resets all of that, the
+         * function then running as its caller — the server's role meeting every store's privilege, or none. And whether
+         * the server's role may run it at all: EXECUTE is the `server` group's, soft — without it the forget tool alone
+         * fails. `forgotten`, the ticket's Work 3: every forgotten thought a store still holds the id or the text of
+         * (143's ob1_forget_leftovers) — a write that raced the forget (SMD-4299) — named, since the brain promised those
+         * gone. A warning, not the ticket's failure: preflight gates the server's start, and the sweep — a second
+         * forget — runs through the server; the brain serves correctly meanwhile. Nothing to read before 143: a skip.
+         */
+        {
+          const fRows = await sql.unsafe(`
+            SELECT to_regprocedure('public.ob1_forget_leftovers()') IS NOT NULL AS has_143,
+                   (SELECT p.prosecdef FROM pg_proc p WHERE p.oid = to_regprocedure('public.forget_thought(uuid, jsonb, boolean)')) AS definer,
+                   (SELECT EXISTS (SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}')) c WHERE c LIKE 'search_path=%pg_temp')
+                      FROM pg_proc p WHERE p.oid = to_regprocedure('public.forget_thought(uuid, jsonb, boolean)')) AS pinned,
+                   CASE WHEN to_regprocedure('public.forget_thought(uuid, jsonb, boolean)') IS NULL THEN NULL
+                        ELSE has_function_privilege('public.forget_thought(uuid, jsonb, boolean)', 'EXECUTE') END AS may`)
+            .then((r) => r as { has_143: boolean; definer: boolean | null; pinned: boolean | null; may: boolean | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const fd = Array.isArray(fRows) ? fRows[0] : null;
+          if (!fd) {
+            add("forget definer", "warn", `could not verify: ${(fRows as Error).message}`, "The check reads forget_thought in pg_proc; the message says why it failed.");
+          } else if (!fd.has_143) {
+            add("forget definer", "skip", "not checked — ob1_forget_leftovers does not exist (migration 143 not applied)");
+          } else if (fd.definer !== true || fd.pinned !== true) {
+            add("forget definer", "warn", "forget_thought runs as its caller, not its owner: a re-applied 139 reset 143's SECURITY DEFINER and its pinned search_path and settings, so the forget tool fails for any role but the owner's, naming the first store it may not touch",
+                ledgerRemedy("143", "Re-apply db/migrations/143_forget_thought_definer.sql."));
+          } else if (fd.may !== true) {
+            add("forget definer", "warn", "the server's role holds no EXECUTE on forget_thought: the forget tool fails naming the function, and nothing else does",
+                "Grant the server group (SMD-1723): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups server (db/README.md, Grants for a capturing role).");
+          } else {
+            add("forget definer", "ok", "forget_thought runs as its owner, its search_path and settings pinned; the server's role may run it");
+          }
+
+          if (!fd?.has_143) {
+            add("forgotten", "skip", fd ? "not checked — ob1_forget_leftovers does not exist (migration 143 not applied)" : "not checked — forget_thought could not be read (the row above)");
+          } else {
+            const left = await sql.unsafe(`SELECT thought_id::text AS id, store, n::int AS n FROM ob1_forget_leftovers()`)
+              .then((r) => r as { id: string; store: string; n: number }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+            if (!Array.isArray(left)) {
+              add("forgotten", "warn", `could not verify: ${left.message}`,
+                "ob1_forget_leftovers reads every store forget_thought reaches; a role lacking SELECT on one (the query log's, the priority group's, the items group's, the pages group's) cannot run it. The message names the table.");
+            } else if (left.length) {
+              const byId = new Map<string, string[]>();
+              for (const r of left) byId.set(r.id, [...(byId.get(r.id) ?? []), `${r.store} ${r.n}`]);
+              const named = [...byId.entries()].slice(0, 5).map(([id, stores]) => `${id} (${stores.join(", ")})`);
+              add("forgotten", "warn", `${byId.size} forgotten thought(s) still held by a store, which the brain promised gone: ${named.join("; ")}${byId.size > 5 ? `; and ${byId.size - 5} more` : ""}`,
+                  "A write that raced the forget left these (SMD-4299). Forget each again — the forget_thought tool with the id as `confirm`, or SELECT forget_thought('<id>'::uuid); a second forget sweeps what the first could not see. SELECT thought_id, store, n FROM ob1_forget_leftovers() lists them all.");
+            } else {
+              add("forgotten", "ok", "no store holds the id or the text of a forgotten thought");
+            }
           }
         }
 

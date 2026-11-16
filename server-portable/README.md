@@ -1074,6 +1074,34 @@ Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed`,
 gated by a **write** key (stricter than the read routes; a read/capture/no key gets the
 bodiless `ok`).
 
+## Forgetting a thought (SMD-1723)
+
+**`forget_thought(id, confirm, detach_citations?)`** is a **write-scoped** tool
+(`POST /v1/thoughts/{id}/forget`) that removes a thought and every copy of its text
+or id the brain holds, where `delete_thought` keeps the removed text in the audit
+trail. It calls migration 139's `forget_thought`, which since 143 runs as its owner:
+the server's role needs `EXECUTE` on it (the **server** grant group) and nothing on
+the stores it reaches. Forgetting cannot be undone, so `confirm` must be the `id`
+again, exactly as sent (an id or a `client_key`), or the call is refused
+`REFUSED_CONFIRM` before anything is read. A thought another cites is refused
+`REFUSED_CITED` unless `detach_citations` is true, which deletes the citations with
+it. The answer is the evidence: what each store gave up (`removed`), the thoughts
+derived from it and the pages for a person to review (prose that absorbed the text
+can't be removed mechanically), the twins that keep the same text, the hashed
+record it was ingested as, and the copies outside the brain. Forgotten already,
+it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log
+row: the query log is one of the stores it clears.
+
+A capture or an edit of a forgotten text is refused `FORGOTTEN` before the
+embedding call (143's `ob1_text_forgotten_at`), so the model provider never sees
+it again; the refusal trigger's `OB005`, raised if a forget lands between that
+check and the write, is the same refusal. A capture-only key is told the text was
+forgotten, not when. Writing it again is the operator's, in SQL, under
+`ob1.reinstate_forgotten`. Preflight's `forget definer` row warns when a re-applied
+139 has reset the definer or the server's role lacks `EXECUTE`, and its
+`forgotten` row names any forgotten thought a store still holds, a write that
+raced the forget, which a second `forget_thought` sweeps.
+
 ## The operator's label reset (SMD-2744)
 
 **`reset_capture_stamp(id)`** is a **write-scoped** tool for the operator alone: the key
@@ -1182,8 +1210,9 @@ repeats a write on a second brain (the canary, SMD-2872) passes **`client_key`**
 `capture_thought`: a UUID, by convention the thought's id on the brain where it was
 first written. The copy keeps it as `metadata.client_key`, one thought per key
 (migration 112's unique index), and every name a write takes resolves to **the thought
-with that id, else the one keeping it as its key**: `update_thought`'s and
-`delete_thought`'s `id` (and the REST paths `PATCH`/`DELETE /v1/thoughts/{id}`), and
+with that id, else the one keeping it as its key**: `update_thought`'s,
+`delete_thought`'s and `forget_thought`'s `id` (and the REST paths
+`PATCH`/`DELETE /v1/thoughts/{id}` and `POST /v1/thoughts/{id}/forget`), and
 the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
 second brain the same ids it sent the first. A thought a refresh copied has the same id
 on both brains, and a key equal to it names that thought.
@@ -1537,7 +1566,7 @@ MCP tools do rather than a copy of it:
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
   `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought`,
-  `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
+  `forget_thought`, `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
   trimmed provenance and owned pointers, the egress gate, the model calls, the write and
   its cites. `core/workers.ts` holds the worker actions (`retry_failed`,
   `release_stale_leases`, `run_worker`'s dry run), which the keyed REST POSTs

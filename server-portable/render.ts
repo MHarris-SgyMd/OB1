@@ -42,7 +42,7 @@ import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
-import type { Captured, Deleted, EvidenceAppended, EvidenceCode, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, EvidenceAppended, EvidenceCode, ForgetCode, Forgotten, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
@@ -78,7 +78,9 @@ const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest|notBefore)$/;
-const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Id$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Ids?$/;
+/** A sha256 in hex, as forget_thought's evidence names the record a thought was ingested as (139): no sentence fits. */
+const SHA256 = /^[0-9a-f]{64}$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -104,6 +106,7 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
   // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
   if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
+  if (typeof v === "string" && key === "identitySha256") return SHA256.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -1562,8 +1565,17 @@ function captureRefusal(r: Refusal): string {
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
     case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the capture");
+    case "FORGOTTEN": return forgottenTextRefusal(r, "capture");
     default: return unknownRefusal(r);
   }
+}
+
+/**
+ * A capture or an edit of a text the brain forgot (139, SMD-1723 PR 2): refused before the embedding, nothing written.
+ * Final: writing it again is the operator's, in SQL, on purpose — said so, so a hook does not retry it.
+ */
+function forgottenTextRefusal(r: Extract<Refusal, { code: "FORGOTTEN" }>, what: "capture" | "edit"): string {
+  return `Refused: this text was forgotten${r.forgottenAt ? ` on ${r.forgottenAt}` : ""} (forget_thought), and the brain does not take it back. Nothing was written${what === "edit" ? " and the thought keeps its text" : ""}. Writing it again is an operator's decision, made in the database (ob1.reinstate_forgotten); do not retry.`;
 }
 
 /** capture_thought's value: the id, what the text was (a reader's only), and whether the vector's call was made. */
@@ -1750,6 +1762,7 @@ function mutationRefusalText(r: Refusal): string {
     case "REFUSED_SOURCE_RESERVED": return `Refused: \`metadata_patch.source: "${r.source}"\` is the board's own label, which only its importers write. Patch without it.`;
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
     case "EMBEDDING_PROVIDER_ERROR": return providerErrorText(r, "the edit (its new text needs its vector)");
+    case "FORGOTTEN": return forgottenTextRefusal(r, "edit");
     case "NOT_FOUND":
       return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
     case "REFUSED_STALE_READ":
@@ -1774,7 +1787,8 @@ function mutationRefusalText(r: Refusal): string {
       // spelled once (seventh review pass).
       const one = total === 1;
       const subject = `${total} citation${one ? "" : "s"} on other thoughts rest${one ? "s" : ""} on ${id} as ${one ? "its" : "their"} source`;
-      const through = `To delete anyway, pass detach_citations: true`;
+      const forget = r.op === "forget";
+      const through = `To ${forget ? "forget" : "delete"} anyway, pass detach_citations: true`;
       const reread = `re-read the thought (fetch takes the id) before deciding. ${through}.`;
       // The count and rows come from the guard's own refusal (042 carries them
       // in the error), so a CITED envelope with neither is one the function did
@@ -1783,7 +1797,10 @@ function mutationRefusalText(r: Refusal): string {
       // A count with no rows (a proxy that dropped the array): no list, no
       // dangling colon, the same advice.
       if (rows.length === 0) return `Refused: ${subject}, but the citing rows were not returned — ${reread}`;
-      return `Refused: ${subject} — deleting it would leave ${one ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). ${through} — each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
+      const after = forget
+        ? `the citation${one ? " is" : "s are"} deleted with it, since ${one ? "it" : "each"} may restate its text; the thoughts that made them stay.`
+        : `each citation keeps its text and stance, loses its source, and records ${id} and the time as the deleted source.`;
+      return `Refused: ${subject} — ${forget ? "forgetting" : "deleting"} it would leave ${one ? "that statement" : "those statements"} resting on nothing:\n${rows.join("\n")}${more > 0 ? `\n  …and ${more} more` : ""}\nRead the citing thoughts first (fetch takes the id). ${through} — ${after}`;
     }
     case "REFUSED": return `Refused: ${r.error}`;
     default: return unknownRefusal(r);
@@ -1899,6 +1916,51 @@ function explainDetached(r: Deleted): string {
 export function renderDelete(o: Outcome<Deleted>): Reply {
   return render(o, (v) => `Deleted ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
     mutationRefusalText, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
+}
+
+/** forget_thought's refusals (139, 143; SMD-1723 PR 2). CITED is delete_thought's, its way through the forget's. */
+function forgetRefusal(r: Refusal): string {
+  switch (r.code) {
+    case "REFUSED_CONFIRM":
+      return `Refused: \`confirm\` must be the \`id\` again, exactly as passed (${r.id}). Forgetting cannot be undone: read the thought first (fetch takes the id), then repeat the call with confirm set to the same id.`;
+    case "NOT_FOUND":
+      return `No thought with id ${r.id} was ever in the brain's log, so there is nothing to forget. A client_key names only a thought still standing: a thought deleted earlier is forgotten by its id.`;
+    case "FORGOTTEN":
+      return `Refused: ${r.id ?? "this thought"} was forgotten already${r.forgottenAt ? ` on ${r.forgottenAt}` : ""}, and nothing of it is left to remove.`;
+    case "REPLAYING":
+      return `Error: a replay is rebuilding the brain's derived rows, and the forget, which rebuilds them for ${r.id}, did nothing. Retry once the replay is done.`;
+    default: return mutationRefusalText(r);
+  }
+}
+
+/** A count of what one store gave up, in words: the store's key from 139's evidence, with a space for each underscore. */
+const removedText = (removed: Record<string, number>): string => {
+  const parts = Object.entries(removed).filter(([, n]) => n > 0).map(([k, n]) => `${k.replace(/_/g, " ")} ${n}`);
+  return parts.length ? parts.join(", ") : "nothing beyond the row";
+};
+
+/**
+ * forget_thought's reply (139, 143; SMD-1723 PR 2): what each store gave up, then what the forget could not do
+ * mechanically and a person reviews — the thoughts derived from it, the pages, the twins that keep the text, and the
+ * copies outside the brain. The values are the database's: ids, counts, and the ingested record's hashed identity.
+ */
+export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
+  return render(o, (v) => {
+    const lines = [
+      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting, and the same text is refused if captured again.`,
+      `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
+    ];
+    if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync from now on.`);
+    if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
+    if (v.pages.length) lines.push(`Pages to review — an earlier render may hold its text: ${v.pages.join(", ")}.`);
+    if (v.twins.length) lines.push(`Standing thoughts that keep the same text (not forgotten): ${v.twins.join(", ")}.`);
+    if (v.outside.length) lines.push(`Outside the brain's reach: ${v.outside.join("; ")}.`);
+    return lines.join("\n");
+  }, forgetRefusal, (v) => ({
+    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins,
+    ...(v.source ? { source: { system: v.source.system, identitySha256: v.source.identitySha256 } } : {}),
+  }));
 }
 
 /**
@@ -2052,6 +2114,17 @@ export const resetHint = (msg: string): string =>
   /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied"
     : "";
+
+/**
+ * forget_thought's fault (SMD-1723 PR 2): a role without EXECUTE on the function (143 revoked it from PUBLIC), or a
+ * brain before 139, named with the step that mends it.
+ */
+export const forgetHint = (msg: string): string =>
+  /permission denied for function forget_thought/i.test(msg)
+    ? " — the server's database role needs EXECUTE on forget_thought (migration 143): cd db && bun migrate.ts --grant <role> --url $DATABASE_URL"
+    : /forget_thought/.test(msg) && /does not exist|could not find/i.test(msg)
+      ? " — migration 139 (db/migrations/139_forget_thought.sql) is not applied"
+      : "";
 
 // ── append_thought_evidence (SMD-2690 PR 3b) ─────────────────────────────────
 
