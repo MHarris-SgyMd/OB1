@@ -148,6 +148,12 @@ export type Judgement = {
    * judge's answers.
    */
   decide?: Record<string, unknown>;
+  /**
+   * Decide version 5 (consolidate-decide.ts's foldEvolves, SMD-3306 PR 7b): a related chosen over H2O's evolves folded
+   * into related, so the relation it records stands at the related and evolves words' share together
+   * (relationConfidence), the recipe keeping H2O's five as they came.
+   */
+  foldedEvolves?: boolean;
 };
 
 /**
@@ -688,9 +694,17 @@ export function relationConfidence(j: Judgement): { confidence: number; mass: nu
   if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, mass: j.confidence, source: "stated" };
   const p = d.p as Record<string, number>;
   const r2 = (x: number) => Math.round(x * 100) / 100;
-  const own = r2(p[j.verdict] ?? 0);
+  // A related chosen over evolves folded in (decide version 5) records both words' share: the tier's strongest links
+  // would else rank last among a thought's relations, and read 0.00 on the board (SMD-3306 PR 7b's review pass 1,
+  // run-it). Summed in hundredths of a cent, so an exact half-cent rounds up as its recipe's four places do (its review
+  // pass 2, cold read: 0.0001 + 0.2849 read 0.28).
+  const units = (x: number | undefined) => Math.round((x ?? 0) * 10000);
+  const own = j.foldedEvolves ? Math.round((units(p.related) + units(p.evolves)) / 100) / 100 : r2(p[j.verdict] ?? 0);
   if (j.verdict === "unrelated") return { confidence: own, mass: Math.min(1, own), source: "token" };
-  return { confidence: own, mass: Math.min(1, r2(RELATION_VERDICTS.reduce((m, w) => m + (p[w] ?? 0), 0))), source: "token" };
+  // The floor's mass in the same units, so a folded related is never stored at more than the mass that let it be,
+  // and a pair is not floored on how H2O split one sum between two words (review pass 3, cold read: related 0.4553
+  // and evolves 0.0897 read 0.55 and floored at 0.54).
+  return { confidence: own, mass: Math.min(1, Math.round(RELATION_VERDICTS.reduce((m, w) => m + units(p[w]), 0) / 100) / 100), source: "token" };
 }
 
 /** proposalConfidence uses the token distribution only when the alternatives naming a verdict held at least this share of the token's mass. */

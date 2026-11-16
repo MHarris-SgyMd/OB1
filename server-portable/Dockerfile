@@ -98,7 +98,7 @@ COPY plugins /app/plugins
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /app/db/
 COPY db/coordinator.ts db/supervise.ts db/slot-relay.ts db/sleep.ts db/extract-entities.ts db/consolidate.ts db/sync-linear.ts \
      db/board-findings.ts db/linear-api.ts db/subject-sweep.ts db/rebuild.ts db/reembed.ts db/env.ts \
-     db/cli.ts db/connect.ts db/lease.ts db/pass-stamp.ts db/worker-bootstrap.ts \
+     db/cli.ts db/connect.ts db/lease.ts db/claim-loop.ts db/pass-stamp.ts db/worker-bootstrap.ts \
      db/ingest-contract.ts db/ingest-linear.ts db/ingest-structure.ts db/priority-writers.ts /app/db/
 COPY releases.json /app/releases.json
 

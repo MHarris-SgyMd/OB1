@@ -100,6 +100,10 @@ const TABLES = [
   // place is free. Its CASCADE takes the helpers whose arguments or result are
   // its row type, and its triggers.
   "deliverable_events",
+  // 139's ledger of forgotten thoughts (SMD-1723): no foreign key either way —
+  // it records thoughts that are gone — so its place is free. Its CASCADE takes
+  // its triggers.
+  "thought_forgotten",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -562,6 +566,15 @@ const FUNCTIONS = [
   "deliverable_history(text)",
   "ob1_deliverable_projection_drift()",
   "ob1_rebuild_deliverable_projection()",
+  // 139 (SMD-1723): forgetting — the redaction's diff, the forget's setting,
+  // the ledger's guard, the refusal on thoughts, the item test, every text's fingerprints and the call.
+  "ob1_audit_redacted_diff(jsonb, text)",
+  "ob1_forgetting()",
+  "ob1_forgotten_guard()",
+  "ob1_refuse_forgotten_text()",
+  "ob1_forgetting_item(text)",
+  "ob1_forget_fingerprints(uuid)",
+  "forget_thought(uuid, jsonb, boolean)",
 ];
 
 /**
@@ -914,8 +927,8 @@ export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextpro
  * server-portable and mcp-server to, the two installs that serve MCP.
  */
 export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
-  "@modelcontextprotocol/core": "2.1.0",
-  "@modelcontextprotocol/server": "2.1.0",
+  "@modelcontextprotocol/core": "2.4.0",
+  "@modelcontextprotocol/server": "2.4.0",
 };
 
 /** The environment variable naming the file report() appends each run's counts to (recordCount). */

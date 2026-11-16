@@ -204,8 +204,7 @@
  */
 
 import type { SQL } from "bun";
-import { hostname } from "node:os";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
@@ -218,8 +217,9 @@ import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, setFront, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
+import { claimWorker } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 import { endOnRefusal, passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
@@ -1567,9 +1567,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * pass 3: a reserved count patched at three sites, each with its own edge).
    */
   const taken = new Set<string>();
-  let claiming = 0;
+  const claiming = { n: 0 };
   function limitReached(): boolean {
-    return LIMIT > 0 && taken.size + claiming >= LIMIT;
+    return LIMIT > 0 && taken.size + claiming.n >= LIMIT;
   }
   /**
    * This pass retries the last outage's suspects (SMD-2641, ProviderOutage's `isolating`): one worker, one thought a
@@ -1591,487 +1591,399 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   };
 
   async function worker(n: number): Promise<void> {
-    const workerId = `extract-${hostname()}-${process.pid}-${n}-${randomUUID().slice(0, 8)}`;
-    activeWorkers.add(workerId);
-    const hb = startHeartbeat({
-      sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-      onLost: (ids) => { if (!hardStopped) errAside(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`); },
-      onError: (e, consecutive) => { if (consecutive === 1) errAside(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
-    });
-    /**
-     * A suspect of this follower's outage handed back at the pool's front (SMD-2641, review pass 1), out of the
-     * heartbeat's set first; the database refusing it, the finally returns it with this worker's leases, where it stood.
-     * Handed back, it leaves --limit's `taken`, as a set-back does: the finally gives back only the rows still held
-     * (review pass 2: a --limit follower ended at its limit, its suspects never retried).
-     */
-    const backFirst = async (id: string): Promise<void> => {
-      hb.held.delete(id);
-      const back = await setFront(sql, JOB, workerId, id).catch(() => null);
-      if (back === null) hb.held.add(id);
-      else if (back && LIMIT > 0) taken.delete(id);
-    };
-    try {
-      while (!stopping && outage.reason === null && !limitReached()) {
-        // The last outage's suspects all retried (SMD-2641): the isolated pass ends, the next polled at once with every worker.
-        if (isolated && !outage.isolating()) {
-          pollNow = true;
-          return;
-        }
-        // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
-        // here holding no claim, and a stop while it waits ends it.
-        if (ADMIT) {
-          if (!(await admitted(ADMIT, gate))) return;
-          if (stopping || outage.reason !== null || limitReached()) return;
-        }
-        let batch: { thought_id: string; attempt: number }[];
-        let byId: Map<string, Row>;
-        /** When the batch's rows were read (performance.now()): each thought's first `asked` (SMD-3379 PR 1c-3a, review pass 1). */
-        let readAt = 0;
-        try {
-          const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
-          if (room <= 0) return;
-          const want = Math.min(isolated ? 1 : BATCH, room);
-          claiming += want;
-          try {
-            batch = (await sql`
-              SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
-          } finally {
-            claiming -= want;
-          }
-          // Tracked under --limit only: a follower without one runs for months (review pass 4).
-          if (LIMIT > 0) for (const b of batch) taken.add(b.thought_id);
-          if (batch.length === 0) return;
-          // A thought no suspect, its suspects at the pool's front: none is left there to retry (review pass 1).
-          if (isolated) for (const b of batch) outage.claimed(b.thought_id);
-          const ids = batch.map((b) => b.thought_id);
-          hb.claimed(ids);
-          readAt = performance.now();
-          const rows = (await sql`
-            SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata, md5(metadata::text) AS metadata_hash
-              FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
-          byId = new Map(rows.map((r) => [r.id, r]));
-        } catch (e) {
-          // A follower outlasts the database going away; the end — a function
-          // missing, a grant revoked, a statement cancelled or past its
-          // statement_timeout — ends the run, as the pass's own errors do
-          // (review pass 3) and as re-embed's claim does (followClassify's
-          // db-end, SMD-2636 PR 4: a timeout here cost the poll, every poll,
-          // the sleep scheduler's budget never told); a passing one — a
-          // serialization failure, a lock — costs this worker its poll (review pass 4).
-          if (FOLLOW && followClassify(e) === "db-end") throw e;
-          err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
-          return;
-        }
-        for (const b of batch) {
-          if (stopping || outage.reason !== null) return;
-          if (hb.lost.has(b.thought_id)) {
-            // A beat found this row no longer ours. Nothing to release, and
-            // repeating the provider's work would only race the holder; the row
-            // says why (db/lease.ts reportLost), and which count it joins.
-            if ((await reportLost(sql, JOB, workerId, b.thought_id, err)) === "deleted") vanished++;
-            else lost++;
-            continue;
-          }
-          const row = byId.get(b.thought_id);
-          if (b.attempt > 1) err(`  ${b.thought_id}: attempt ${b.attempt} — an earlier lease on it expired`);
-          let outcome: Outcome | null = null;
-          if (!row) {
-            outcome = { outcome: "vanished" };
-          } else {
-            let stopAfter = false;
-            if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
-            inCall.begin(workerId);
-            const asked = { at: readAt };
-            /** Whether any error in this thought's streak could be its own (`fault`'s suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
-            let streakSuspect = false;
-            /**
-             * Another worker's outage halted this thought's streak mid-pause (SMD-2641): a suspect of that outage too when
-             * the streak could be its own — a crash meets every call in flight, and whose pauses end first, beginning the
-             * outage, is a race — so it is retried alone after it, not beside the rest, and says so (review pass 3). Not on
-             * a stopping pass.
-             */
-            const joinHalted = async (): Promise<void> => {
-              if (stopping || outage.reason === null || !streakSuspect) return;
-              outage.begin(outage.reason, b.thought_id);
-              await backFirst(b.thought_id);
-              err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded`);
-            };
-            for (let attempt = 0; outcome === null; attempt++) {
-              try {
-                // A wait for a slot on the model-call seam is neither the call's
-                // time nor the thought's held (review pass 3).
-                outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId), stallWaits(workerId)), () => processRow(row, workerId, asked, attempt > 0));
-              } catch (e) {
-                // The calls a thrown thought made — its fourth window timing out
-                // is four calls — count too (second review pass).
-                calls += callsMadeBy(e);
-                // The admit gate's own error, not the thought's: the pass ends with it.
-                if (e instanceof AdmitThrow) throw e.error;
-                // The hard stop aborted the call: the thought is abandoned, not failed.
-                if (hardStopped) return;
-                // A first stop that found its call waiting for a slot (review pass 6): as a stop between windows,
-                // those answered kept, no stop counted — not the caller's abort below.
-                if (e instanceof StoppedWaiting) return;
-                // The pass's caller aborted the call in hand (abortInHand): its stop
-                // counted on it, as a wake's (093), its windows answered kept, and
-                // the thought to the back of the queue; the worker goes on with its
-                // next claim. A set-back the database refuses leaves the claim for
-                // the finally's release (SMD-3379 PR 1b-2).
-                if (e instanceof AbortedInHand) {
-                  // Counted once: out of inHand first, so a hard stop racing the
-                  // count finds none to count again (review pass 1).
-                  const held = inHand.get(workerId);
-                  inHand.delete(workerId);
-                  // The hard stop's release waits for this count, which it chains on (review passes 2 and 3).
-                  const counting = noteStop(workerId, held);
-                  stopNotes.set(workerId, counting);
-                  await counting;
-                  if (hardStopped) return;
-                  hb.held.delete(b.thought_id);
-                  let back: boolean;
-                  try {
-                    back = await setBack(sql, JOB, workerId, b.thought_id);
-                  } catch (re) {
-                    hb.held.add(b.thought_id);
-                    err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
-                    return;
-                  }
-                  // Not ours to set back: deleted, or edited or reaped meanwhile, and said so.
-                  if (back && LIMIT > 0) taken.delete(b.thought_id);
-                  outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
-                  continue;
-                }
-                // A first stop ended it between windows, those answered kept: it
-                // goes back to the pool with the leases the finally returns, its
-                // attempt refunded, no stop counted (review pass 5).
-                if (e instanceof StoppedBetweenWindows) return;
-                // Deleted or edited while the worker waited at the gate: not ours to finish (review pass 3).
-                if (e instanceof ClaimGoneAtGate) {
-                  // Still ours, its text moved under a key nothing requeues, or its
-                  // metadata, which the egress gate reads (review pass 6): back to the
-                  // pool for the new text, as a stale write is, out of the heartbeat's
-                  // set first; if that fails, the finally returns it with this worker's
-                  // leases (review passes 4 and 5).
-                  if (e.claim === "moved") {
-                    hb.held.delete(b.thought_id);
-                    const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
-                    if (requeued !== null) {
-                      hb.held.add(b.thought_id);
-                      err(`  ${workerId}: could not put ${b.thought_id}, edited while this worker waited at the admit gate, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
-                      return;
-                    }
-                  }
-                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : e.claim === "lost" ? { outcome: "lost" } : { outcome: "superseded" };
-                  continue;
-                }
-                // The database went away under the write: not the thought's, so
-                // nothing is recorded; the worker ends, and the follower waits
-                // for the database before its next pass (SMD-2599).
-                if (FOLLOW && databaseUnavailable(e)) {
-                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
-                  return;
-                }
-                // Any other database error at the write is read as re-embed's is (followClassify, SMD-2636 PR 4):
-                // the end — a privilege or a function gone, a statement cancelled or past its statement_timeout —
-                // ends the follower, its row failed, the error thrown for the sleep scheduler's budget to read; a
-                // moment's — a deadlock, a lock not available, resources, a read-only transaction — sends the thought
-                // back unrecorded and stops this worker; any other — a function's own guard, the thought's data — is
-                // the thought's, recorded failed below (`fault` reads it so). Before, every one was the thought's.
-                const dbVerdict = FOLLOW ? followClassify(e) : null;
-                if (dbVerdict === "db-end") throw e;
-                if (dbVerdict === "db-moment") {
-                  err(`  ${workerId}: the write met the database's moment (${(e as Error).message.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
-                  return;
-                }
-                const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
-                const escalationGone = !!WINDOWING.escalateModel && missingModelIs(e, WINDOWING.escalateModel) && !missingModelIs(e, cfg.metadataModel);
-                // Under --follow, what to do is worker-bootstrap.ts's `fault` (SMD-2636 PR 3a): the provider's state
-                // — paused for, then an outage; the model missing (Ollama pulling it; the start probe saw it answer),
-                // an outage at once, but the escalation model the start could not confirm the request's — or the
-                // probe's to decide, or the thought's, or the request's shape. A run without --follow keeps
-                // classifyError's rules.
-                const kind = FOLLOW ? null : classifyError(e, { maxTokensFatal: true });
-                const read: FollowerFault = kind === null ? fault(e, { requestFault: extractRequestFault, missing: () => (escalationGone && !escalationSeen ? "fatal" : "outage") }) : { act: kind === "transient" ? "pause" : kind, suspect: true };
-                let act = read.act;
-                streakSuspect ||= read.suspect;
-                // The model whose call was refused is the one probed — an answered refusal names it; a deadline or a
-                // lost connection names none, probed on the metadata model as before — so the escalation model's
-                // refusal is not the metadata model's to answer (review pass 1).
-                const escalationCalled = !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
-                // The probe decides — a deadline with no answer, a 4xx no rule reads — given the call's whole
-                // timeout, as a model busy with another worker's call may need it: answered, the thought's;
-                // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
-                // and another worker's outage is joined unprobed (review pass 1).
-                let probeWhy: string | null = null;
-                /** The probe answered: the thought's, and said so, so an operator reads why it failed and that a retry revisits it (review pass 3). */
-                let probeAnswered = false;
-                /** That probe found no answer: a suspect alone is blamed on it, not probed twice (SMD-2641). */
-                let probedOut = false;
-                if (act === "probe") {
-                  if (stopping) return;
-                  if (outage.reason !== null) act = "outage";
-                  else {
-                    const p = await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
-                    act = probedFault(p);
-                    // The refusal is the probe's, said beside the call's (review pass 2).
-                    if (p.state === "refused") probeWhy = p.why;
-                    probeAnswered = p.state === "up";
-                    probedOut = isOut(p);
-                  }
-                }
-                let down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
-                const begins = outage.reason === null;
-                // A suspect retried alone that errs again (SMD-2641): blamed only on a probe made at once, or the one
-                // just made — answered, the provider up while this thought fails, its own; refused, the request's; no
-                // answer, an outage it was alone at, and at the ALONE_OUTAGES-th its own.
-                let blamed: "outage" | "answered" | "alone" | null = null;
-                if (down && !stopping && streakSuspect && outage.blames(b.thought_id)) {
-                  const p = probedOut ? null : await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
-                  if (p?.state === "refused") {
-                    act = "fatal";
-                    probeWhy = p.why;
-                    down = false;
-                  } else if (!stopping) blamed = outage.blame(b.thought_id, msg, p?.state === "up");
-                }
-                if (down) {
-                  // On a stopping pass the thought goes back to the pool, as a transient's does.
-                  if (stopping) return;
-                  if ((blamed ?? outage.begin(msg, streakSuspect ? b.thought_id : undefined)) === "outage") {
-                    providerStops++;
-                    // The escalation model gone since the start: the outage probes it (review pass 2).
-                    if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
-                    halt.abort();
-                    const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES} before it is recorded failed)` : "";
-                    err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
-                    // A suspect goes back at the pool's front, for the isolated pass to claim first (review pass 1).
-                    if (streakSuspect) await backFirst(b.thought_id);
-                    return;
-                  }
-                  // Isolated, `begin` never says "thought": only the blame says whose.
-                  if (blamed !== "alone") {
-                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg} (--retry-failed revisits it)` };
-                  } else {
-                    // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
-                    // this worker stops after recording it.
-                    outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)` };
-                    outage.begin(msg);
-                    providerStops++;
-                    halt.abort();
-                    stopAfter = true;
-                  }
-                } else if (act === "thought") {
-                  outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
-                } else if (act === "fatal") {
-                  // Every thought would fail the same way. Stop everyone, mark
-                  // nothing, and say what to fix; this row goes back with the
-                  // leases the finally returns. The escalation model's call
-                  // refused, its remedy names it (review passes 1 and 2).
-                  if (escalationCalled) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
-                  configError = probeWhy === null ? msg : `a one-token call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
-                  stopping = true;
-                  passEnds.abort();
-                  err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
-                  return;
-                } else if (stopping || outage.reason !== null) {
-                  // A transient error on a stopping pass, or one another worker's
-                  // outage has halted: neither called again nor recorded failed —
-                  // the thought goes back to the pool with the leases the finally
-                  // returns (SMD-2401, SMD-2599); one whose streak could be its own
-                  // joins the outage as its suspect (SMD-2641).
-                  await joinHalted();
-                  return;
-                } else if (attempt < TRANSIENT_PAUSES_MS.length) {
-                  err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
-                  // A first stop wakes the pause too, and the thought goes back
-                  // the same way: main slept the pause out, called again, and
-                  // recorded the thought failed "after 3 retries" after one (SMD-2401).
-                  // So does another worker's outage (SMD-2599).
-                  // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
-                  await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
-                  // The pause was the provider's: the thought's clock starts again (review pass 3).
-                  const paused = inHand.get(workerId);
-                  if (paused) paused.since = Date.now();
-                  if (stopping || outage.reason !== null) {
-                    await joinHalted();
-                    return;
-                  }
-                } else {
-                  // Still failing after the pauses. This row is recorded failed
-                  // with the error — if the provider is down it is one row per
-                  // worker, and if this thought is what draws the error every
-                  // time it is now visible instead of cycling for ever — and the
-                  // worker stops, its other leases going back to the pool.
-                  outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
-                  stopAfter = true;
-                }
-              }
-            }
-            // Its extraction is over: a stop from here on took no window from it.
-            inHand.delete(workerId);
-            inCall.end(workerId);
-            if (hardStopped) return;
-            if (stopAfter && outcome.outcome === "failed") {
-              hb.held.delete(b.thought_id);
-              let recorded = false;
-              try {
-                const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
-                recorded = rows[0]?.ok === true;
-              } catch (e) {
-                // The database went away under the failure's record: nothing is
-                // recorded, the row is this worker's again for the finally to
-                // return, and it is not counted lost (review pass 3).
-                if (FOLLOW && databaseUnavailable(e)) {
-                  hb.held.add(b.thought_id);
-                  err(`  ${workerId}: the database is not answering (${(e as Error).message}) — recording nothing for ${b.thought_id}; it returns to the pool when the database answers`);
-                  return;
-                }
-                err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
-              }
-              if (recorded) {
-                failed++;
-                // A suspect no longer once its failure is recorded — not before,
-                // so one the database kept from its record stays one (review pass 4).
-                outage.settled(b.thought_id);
-              }
-              // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
-              else if (hardStopped) return;
-              else {
-                // Not ours to record: the lease lapsed during the pauses, or the
-                // row was returned by hand. Counted with the rows this worker lost.
-                lost++;
-                err(`  ${b.thought_id}: the claim was no longer this worker's at release; the failure below was not recorded`);
-              }
-              // Said once the record is settled, not before (review pass 4).
-              err(`  ${workerId}: provider still failing — this worker stops after this thought; ${FOLLOW ? "the next poll goes on" : "re-run when it is back"}`);
-              err(`  ${b.thought_id}: ${outcome.error}`);
-              return;
-            }
-          }
-          // Never true here (the hard stop returned above); it narrows `outcome` for the release below.
-          if (outcome.outcome === "abandoned") return;
-          // Out of the heartbeat's set before the release goes out, so a beat in
-          // flight across the release does not read the released row as lost.
-          hb.held.delete(b.thought_id);
-          if (outcome.outcome === "vanished") {
-            vanished++;
-            continue;
-          }
-          if (outcome.outcome === "lost") {
-            lost++;
-            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — its lease reaped or returned; nothing more of it was sent`);
-            continue;
-          }
-          if (outcome.outcome === "setBack") {
-            if (outcome.gone === "deleted") vanished++;
-            else if (outcome.gone === "lost") lost++;
-            else abortedInHand++;
-            continue;
-          }
-          if (outcome.outcome === "superseded") {
-            // The claim is already pending again with no holder — the trigger
-            // did that — so there is nothing to release.
-            superseded++;
-            err(`  ${b.thought_id}: edited while it was being extracted; it is pending again and will be extracted from the new text`);
-            continue;
-          }
-          let ok: boolean;
-          let gone = false;
-          try {
-            const release = () => sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
-                                     ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
-            // A succeeded release spends the thought's kept windows (093), in
-            // the same statement: a delete after it, failed or cut short by an
-            // exit, left the row's stops beside a finished claim, which a later
-            // requeue of the same text revived (review pass 2). Of any text: a
-            // release that went through proves the claim still this worker's,
-            // and a row of earlier text kept would revive as well on a revert
-            // (review pass 4). A failed release keeps them, so --retry-failed resumes.
-            const spend = keeping && outcome.outcome === "succeeded";
-            if (spend) {
-              try {
-                [{ ok }] = await sql`
-                  WITH r AS (${release()}),
-                       d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND (SELECT ok FROM r))
-                  SELECT ok FROM r`;
-              } catch (e) {
-                // The table or its grant gone since the start: the release alone, said once.
-                const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
-                // Only 093's table's: a refusal on the claims themselves is the release's own (review pass 3).
-                if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
-                keepingFailed(e, "clear");
-                [{ ok }] = await release();
-              }
-            } else {
-              [{ ok }] = await release();
-            }
-            if (!ok) {
-              const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
-              gone = !exists;
-            }
-          } catch (e) {
-            // The database went away under the release: the row is this
-            // worker's again, for the finally to return and --limit to give
-            // back (review pass 4).
-            if (FOLLOW && databaseUnavailable(e)) hb.held.add(b.thought_id);
-            err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
-            return;
-          }
-          if (gone) {
-            vanished++;
-            err(`  ${b.thought_id}: deleted while it was being extracted`);
-            continue;
-          }
-          if (!ok) {
-            // The hard stop's release beat this one to the row: not a lapse to
-            // report, the caller's own stop; a release that went through first
-            // is counted below as any is — as reembed's (SMD-2425).
-            if (hardStopped) return;
-            // Either the lease expired, or the content was edited and migration
-            // 016's trigger put the row back in the pool to be extracted from the
-            // new text. Not ours to finish either way: counted with the rows this
-            // worker lost, not the ones it finished.
-            err(`  ${b.thought_id}: the claim was no longer this worker's at release — an edit requeued it, its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
-            if (outcome.outcome === "failed") err(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
-            lost++;
-            progress();
-            continue;
-          }
-          if (outcome.outcome === "failed") {
-            failed++;
-            err(`  ${b.thought_id}: ${outcome.error}`);
-          } else {
-            done++;
-            if (outcome.leftOut) { leftOut++; leftOutWindows += outcome.leftOut; } else if (outcome.caveat) partial++;
-          }
-          outage.settled(b.thought_id);
-          progress();
-        }
-      }
-    } finally {
-      inHand.delete(workerId);
-      inCall.end(workerId);
-      hb.stop();
-      beats += hb.beats;
-      // Rows still held are handed back unfinished: out of --limit's count
-      // before the release goes out, so another worker's claim of one counts it.
-      for (const id of hb.held) taken.delete(id);
-      let freed = 0;
+    // The loop is db/claim-loop.ts's (SMD-4308): the gate, the claim, the heartbeat and the leases' return. What a
+    // thought's processing does with an error, and its release, are below.
+    await claimWorker<Row>({
+      sql, job: JOB, prefix: "extract", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: !!FOLLOW, admit: ADMIT,
+      gate: () => gate, err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
+      stopping: () => stopping, hardStopped: () => hardStopped, isolated: () => isolated, pollNow: () => { pollNow = true; },
+      count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
+      finallyFirst: (workerId) => { inHand.delete(workerId); },
       // The hard stop's count first, while the claim is still this worker's;
       // then the entry goes, so a follower's aborts keep none (review pass 3).
-      await stopNotes.get(workerId);
-      stopNotes.delete(workerId);
-      try {
-        [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
-      } catch (e) {
-        // A follower returns them once the database answers again (SMD-2599).
-        if (FOLLOW) unreturned.add(workerId);
-        err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s${FOLLOW ? ", or return when the database answers again" : ""}`);
-      }
-      activeWorkers.delete(workerId);
-      // Outside the release's try: a Writer's throw here is the Writer's, not a
-      // lease left unreturned (review pass 2).
-      if (freed > 0 && !FOLLOW) err(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
-    }
+      beforeReturn: async (workerId) => {
+        await stopNotes.get(workerId);
+        stopNotes.delete(workerId);
+      },
+      readRows: async (ids) => (await sql`
+          SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata, md5(metadata::text) AS metadata_hash
+            FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[],
+      row: async (b, row, { workerId, hb, backFirst, readAt }) => {
+        if (b.attempt > 1) err(`  ${b.thought_id}: attempt ${b.attempt} — an earlier lease on it expired`);
+        let outcome: Outcome | null = null;
+        if (!row) {
+          outcome = { outcome: "vanished" };
+        } else {
+          let stopAfter = false;
+          if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
+          inCall.begin(workerId);
+          const asked = { at: readAt };
+          /** Whether any error in this thought's streak could be its own (`fault`'s suspect): the streak's, not its last error's — a call that crashes the provider and then meets a gateway's 503 while it restarts is still the suspect (SMD-3311 review pass 5; after the subject sweep's streakPoison, which reads the streak's first error alone). */
+          let streakSuspect = false;
+          /**
+           * Another worker's outage halted this thought's streak mid-pause (SMD-2641): a suspect of that outage too when
+           * the streak could be its own — a crash meets every call in flight, and whose pauses end first, beginning the
+           * outage, is a race — so it is retried alone after it, not beside the rest, and says so (review pass 3). Not on
+           * a stopping pass.
+           */
+          const joinHalted = async (): Promise<void> => {
+            if (stopping || outage.reason === null || !streakSuspect) return;
+            outage.begin(outage.reason, b.thought_id);
+            await backFirst(b.thought_id);
+            err(`  ${workerId}: ${b.thought_id} was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded`);
+          };
+          for (let attempt = 0; outcome === null; attempt++) {
+            try {
+              // A wait for a slot on the model-call seam is neither the call's
+              // time nor the thought's held (review pass 3).
+              outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId), stallWaits(workerId)), () => processRow(row, workerId, asked, attempt > 0));
+            } catch (e) {
+              // The calls a thrown thought made — its fourth window timing out
+              // is four calls — count too (second review pass).
+              calls += callsMadeBy(e);
+              // The admit gate's own error, not the thought's: the pass ends with it.
+              if (e instanceof AdmitThrow) throw e.error;
+              // The hard stop aborted the call: the thought is abandoned, not failed.
+              if (hardStopped) return "stop";
+              // A first stop that found its call waiting for a slot (review pass 6): as a stop between windows,
+              // those answered kept, no stop counted — not the caller's abort below.
+              if (e instanceof StoppedWaiting) return "stop";
+              // The pass's caller aborted the call in hand (abortInHand): its stop
+              // counted on it, as a wake's (093), its windows answered kept, and
+              // the thought to the back of the queue; the worker goes on with its
+              // next claim. A set-back the database refuses leaves the claim for
+              // the finally's release (SMD-3379 PR 1b-2).
+              if (e instanceof AbortedInHand) {
+                // Counted once: out of inHand first, so a hard stop racing the
+                // count finds none to count again (review pass 1).
+                const held = inHand.get(workerId);
+                inHand.delete(workerId);
+                // The hard stop's release waits for this count, which it chains on (review passes 2 and 3).
+                const counting = noteStop(workerId, held);
+                stopNotes.set(workerId, counting);
+                await counting;
+                if (hardStopped) return "stop";
+                hb.held.delete(b.thought_id);
+                let back: boolean;
+                try {
+                  back = await setBack(sql, JOB, workerId, b.thought_id);
+                } catch (re) {
+                  hb.held.add(b.thought_id);
+                  err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+                  return "stop";
+                }
+                // Not ours to set back: deleted, or edited or reaped meanwhile, and said so.
+                if (back && LIMIT > 0) taken.delete(b.thought_id);
+                outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
+                continue;
+              }
+              // A first stop ended it between windows, those answered kept: it
+              // goes back to the pool with the leases the finally returns, its
+              // attempt refunded, no stop counted (review pass 5).
+              if (e instanceof StoppedBetweenWindows) return "stop";
+              // Deleted or edited while the worker waited at the gate: not ours to finish (review pass 3).
+              if (e instanceof ClaimGoneAtGate) {
+                // Still ours, its text moved under a key nothing requeues, or its
+                // metadata, which the egress gate reads (review pass 6): back to the
+                // pool for the new text, as a stale write is, out of the heartbeat's
+                // set first; if that fails, the finally returns it with this worker's
+                // leases (review passes 4 and 5).
+                if (e.claim === "moved") {
+                  hb.held.delete(b.thought_id);
+                  const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
+                  if (requeued !== null) {
+                    hb.held.add(b.thought_id);
+                    err(`  ${workerId}: could not put ${b.thought_id}, edited while this worker waited at the admit gate, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
+                    return "stop";
+                  }
+                }
+                outcome = e.claim === "deleted" ? { outcome: "vanished" } : e.claim === "lost" ? { outcome: "lost" } : { outcome: "superseded" };
+                continue;
+              }
+              // The database went away under the write: not the thought's, so
+              // nothing is recorded; the worker ends, and the follower waits
+              // for the database before its next pass (SMD-2599).
+              if (FOLLOW && databaseUnavailable(e)) {
+                err(`  ${workerId}: the database is not answering (${(e as Error).message}) — this worker stops, recording nothing for ${b.thought_id}`);
+                return "stop";
+              }
+              // Any other database error at the write is read as re-embed's is (followClassify, SMD-2636 PR 4):
+              // the end — a privilege or a function gone, a statement cancelled or past its statement_timeout —
+              // ends the follower, its row failed, the error thrown for the sleep scheduler's budget to read; a
+              // moment's — a deadlock, a lock not available, resources, a read-only transaction — sends the thought
+              // back unrecorded and stops this worker; any other — a function's own guard, the thought's data — is
+              // the thought's, recorded failed below (`fault` reads it so). Before, every one was the thought's.
+              const dbVerdict = FOLLOW ? followClassify(e) : null;
+              if (dbVerdict === "db-end") throw e;
+              if (dbVerdict === "db-moment") {
+                err(`  ${workerId}: the write met the database's moment (${(e as Error).message.split("\n")[0]}) — ${b.thought_id} goes back to the pool unrecorded`);
+                return "stop";
+              }
+              const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
+              const escalationGone = !!WINDOWING.escalateModel && missingModelIs(e, WINDOWING.escalateModel) && !missingModelIs(e, cfg.metadataModel);
+              // Under --follow, what to do is worker-bootstrap.ts's `fault` (SMD-2636 PR 3a): the provider's state
+              // — paused for, then an outage; the model missing (Ollama pulling it; the start probe saw it answer),
+              // an outage at once, but the escalation model the start could not confirm the request's — or the
+              // probe's to decide, or the thought's, or the request's shape. A run without --follow keeps
+              // classifyError's rules.
+              const kind = FOLLOW ? null : classifyError(e, { maxTokensFatal: true });
+              const read: FollowerFault = kind === null ? fault(e, { requestFault: extractRequestFault, missing: () => (escalationGone && !escalationSeen ? "fatal" : "outage") }) : { act: kind === "transient" ? "pause" : kind, suspect: true };
+              let act = read.act;
+              streakSuspect ||= read.suspect;
+              // The model whose call was refused is the one probed — an answered refusal names it; a deadline or a
+              // lost connection names none, probed on the metadata model as before — so the escalation model's
+              // refusal is not the metadata model's to answer (review pass 1).
+              const escalationCalled = !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
+              // The probe decides — a deadline with no answer, a 4xx no rule reads — given the call's whole
+              // timeout, as a model busy with another worker's call may need it: answered, the thought's;
+              // refused, the request's; no answer, the provider's. A stopping pass hands the thought back,
+              // and another worker's outage is joined unprobed (review pass 1).
+              let probeWhy: string | null = null;
+              /** The probe answered: the thought's, and said so, so an operator reads why it failed and that a retry revisits it (review pass 3). */
+              let probeAnswered = false;
+              /** That probe found no answer: a suspect alone is blamed on it, not probed twice (SMD-2641). */
+              let probedOut = false;
+              if (act === "probe") {
+                if (stopping) return "stop";
+                if (outage.reason !== null) act = "outage";
+                else {
+                  const p = await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
+                  act = probedFault(p);
+                  // The refusal is the probe's, said beside the call's (review pass 2).
+                  if (p.state === "refused") probeWhy = p.why;
+                  probeAnswered = p.state === "up";
+                  probedOut = isOut(p);
+                }
+              }
+              let down = FOLLOW && (act === "outage" || (act === "pause" && attempt >= TRANSIENT_PAUSES_MS.length));
+              const begins = outage.reason === null;
+              // A suspect retried alone that errs again (SMD-2641): blamed only on a probe made at once, or the one
+              // just made — answered, the provider up while this thought fails, its own; refused, the request's; no
+              // answer, an outage it was alone at, and at the ALONE_OUTAGES-th its own.
+              let blamed: "outage" | "answered" | "alone" | null = null;
+              if (down && !stopping && streakSuspect && outage.blames(b.thought_id)) {
+                const p = probedOut ? null : await probe(TIMEOUT_S * 1000, halt.signal, escalationCalled ? WINDOWING.escalateModel : cfg.metadataModel);
+                if (p?.state === "refused") {
+                  act = "fatal";
+                  probeWhy = p.why;
+                  down = false;
+                } else if (!stopping) blamed = outage.blame(b.thought_id, msg, p?.state === "up");
+              }
+              if (down) {
+                // On a stopping pass the thought goes back to the pool, as a transient's does.
+                if (stopping) return "stop";
+                if ((blamed ?? outage.begin(msg, streakSuspect ? b.thought_id : undefined)) === "outage") {
+                  providerStops++;
+                  // The escalation model gone since the start: the outage probes it (review pass 2).
+                  if (begins && escalationGone && WINDOWING.escalateModel) outageModel = WINDOWING.escalateModel;
+                  halt.abort();
+                  const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the one-token call after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES} before it is recorded failed)` : "";
+                  err(`  ${workerId}: the provider is not answering (${msg.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
+                  // A suspect goes back at the pool's front, for the isolated pass to claim first (review pass 1).
+                  if (streakSuspect) await backFirst(b.thought_id);
+                  return "stop";
+                }
+                // Isolated, `begin` never says "thought": only the blame says whose.
+                if (blamed !== "alone") {
+                  outcome = { outcome: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg} (--retry-failed revisits it)` };
+                } else {
+                  // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
+                  // this worker stops after recording it.
+                  outcome = { outcome: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)` };
+                  outage.begin(msg);
+                  providerStops++;
+                  halt.abort();
+                  stopAfter = true;
+                }
+              } else if (act === "thought") {
+                outcome = { outcome: "failed", error: probeAnswered ? `${msg} (a one-token call right after answered, so this thought's; --retry-failed revisits it)` : msg };
+              } else if (act === "fatal") {
+                // Every thought would fail the same way. Stop everyone, mark
+                // nothing, and say what to fix; this row goes back with the
+                // leases the finally returns. The escalation model's call
+                // refused, its remedy names it (review passes 1 and 2).
+                if (escalationCalled) refusedKnob = "OB1_EXTRACT_ESCALATE_MODEL";
+                configError = probeWhy === null ? msg : `a one-token call was refused (${probeWhy.slice(0, 160)}), right after ${msg}`;
+                stopping = true;
+                passEnds.abort();
+                err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
+                return "stop";
+              } else if (stopping || outage.reason !== null) {
+                // A transient error on a stopping pass, or one another worker's
+                // outage has halted: neither called again nor recorded failed —
+                // the thought goes back to the pool with the leases the finally
+                // returns (SMD-2401, SMD-2599); one whose streak could be its own
+                // joins the outage as its suspect (SMD-2641).
+                await joinHalted();
+                return "stop";
+              } else if (attempt < TRANSIENT_PAUSES_MS.length) {
+                err(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
+                // A first stop wakes the pause too, and the thought goes back
+                // the same way: main slept the pause out, called again, and
+                // recorded the thought failed "after 3 retries" after one (SMD-2401).
+                // So does another worker's outage (SMD-2599).
+                // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
+                await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
+                // The pause was the provider's: the thought's clock starts again (review pass 3).
+                const paused = inHand.get(workerId);
+                if (paused) paused.since = Date.now();
+                if (stopping || outage.reason !== null) {
+                  await joinHalted();
+                  return "stop";
+                }
+              } else {
+                // Still failing after the pauses. This row is recorded failed
+                // with the error — if the provider is down it is one row per
+                // worker, and if this thought is what draws the error every
+                // time it is now visible instead of cycling for ever — and the
+                // worker stops, its other leases going back to the pool.
+                outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
+                stopAfter = true;
+              }
+            }
+          }
+          // Its extraction is over: a stop from here on took no window from it.
+          inHand.delete(workerId);
+          inCall.end(workerId);
+          if (hardStopped) return "stop";
+          if (stopAfter && outcome.outcome === "failed") {
+            hb.held.delete(b.thought_id);
+            let recorded = false;
+            try {
+              const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
+              recorded = rows[0]?.ok === true;
+            } catch (e) {
+              // The database went away under the failure's record: nothing is
+              // recorded, the row is this worker's again for the finally to
+              // return, and it is not counted lost (review pass 3).
+              if (FOLLOW && databaseUnavailable(e)) {
+                hb.held.add(b.thought_id);
+                err(`  ${workerId}: the database is not answering (${(e as Error).message}) — recording nothing for ${b.thought_id}; it returns to the pool when the database answers`);
+                return "stop";
+              }
+              err(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
+            }
+            if (recorded) {
+              failed++;
+              // A suspect no longer once its failure is recorded — not before,
+              // so one the database kept from its record stays one (review pass 4).
+              outage.settled(b.thought_id);
+            }
+            // The hard stop's release beat this one: the caller's own stop, not a lapse (SMD-2425).
+            else if (hardStopped) return "stop";
+            else {
+              // Not ours to record: the lease lapsed during the pauses, or the
+              // row was returned by hand. Counted with the rows this worker lost.
+              lost++;
+              err(`  ${b.thought_id}: the claim was no longer this worker's at release; the failure below was not recorded`);
+            }
+            // Said once the record is settled, not before (review pass 4).
+            err(`  ${workerId}: provider still failing — this worker stops after this thought; ${FOLLOW ? "the next poll goes on" : "re-run when it is back"}`);
+            err(`  ${b.thought_id}: ${outcome.error}`);
+            return "stop";
+          }
+        }
+        // Never true here (the hard stop returned above); it narrows `outcome` for the release below.
+        if (outcome.outcome === "abandoned") return "stop";
+        // Out of the heartbeat's set before the release goes out, so a beat in
+        // flight across the release does not read the released row as lost.
+        hb.held.delete(b.thought_id);
+        if (outcome.outcome === "vanished") {
+          vanished++;
+          return "next";
+        }
+        if (outcome.outcome === "lost") {
+          lost++;
+          err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — its lease reaped or returned; nothing more of it was sent`);
+          return "next";
+        }
+        if (outcome.outcome === "setBack") {
+          if (outcome.gone === "deleted") vanished++;
+          else if (outcome.gone === "lost") lost++;
+          else abortedInHand++;
+          return "next";
+        }
+        if (outcome.outcome === "superseded") {
+          // The claim is already pending again with no holder — the trigger
+          // did that — so there is nothing to release.
+          superseded++;
+          err(`  ${b.thought_id}: edited while it was being extracted; it is pending again and will be extracted from the new text`);
+          return "next";
+        }
+        let ok: boolean;
+        let gone = false;
+        try {
+          const release = () => sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
+                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
+          // A succeeded release spends the thought's kept windows (093), in
+          // the same statement: a delete after it, failed or cut short by an
+          // exit, left the row's stops beside a finished claim, which a later
+          // requeue of the same text revived (review pass 2). Of any text: a
+          // release that went through proves the claim still this worker's,
+          // and a row of earlier text kept would revive as well on a revert
+          // (review pass 4). A failed release keeps them, so --retry-failed resumes.
+          const spend = keeping && outcome.outcome === "succeeded";
+          if (spend) {
+            try {
+              [{ ok }] = await sql`
+                WITH r AS (${release()}),
+                     d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND (SELECT ok FROM r))
+                SELECT ok FROM r`;
+            } catch (e) {
+              // The table or its grant gone since the start: the release alone, said once.
+              const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+              // Only 093's table's: a refusal on the claims themselves is the release's own (review pass 3).
+              if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
+              keepingFailed(e, "clear");
+              [{ ok }] = await release();
+            }
+          } else {
+            [{ ok }] = await release();
+          }
+          if (!ok) {
+            const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
+            gone = !exists;
+          }
+        } catch (e) {
+          // The database went away under the release: the row is this
+          // worker's again, for the finally to return and --limit to give
+          // back (review pass 4).
+          if (FOLLOW && databaseUnavailable(e)) hb.held.add(b.thought_id);
+          err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
+          return "stop";
+        }
+        if (gone) {
+          vanished++;
+          err(`  ${b.thought_id}: deleted while it was being extracted`);
+          return "next";
+        }
+        if (!ok) {
+          // The hard stop's release beat this one to the row: not a lapse to
+          // report, the caller's own stop; a release that went through first
+          // is counted below as any is — as reembed's (SMD-2425).
+          if (hardStopped) return "stop";
+          // Either the lease expired, or the content was edited and migration
+          // 016's trigger put the row back in the pool to be extracted from the
+          // new text. Not ours to finish either way: counted with the rows this
+          // worker lost, not the ones it finished.
+          err(`  ${b.thought_id}: the claim was no longer this worker's at release — an edit requeued it, its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
+          if (outcome.outcome === "failed") err(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
+          lost++;
+          progress();
+          return "next";
+        }
+        if (outcome.outcome === "failed") {
+          failed++;
+          err(`  ${b.thought_id}: ${outcome.error}`);
+        } else {
+          done++;
+          if (outcome.leftOut) { leftOut++; leftOutWindows += outcome.leftOut; } else if (outcome.caveat) partial++;
+        }
+        outage.settled(b.thought_id);
+        progress();
+        return "next";
+      },
+    });
   }
 
   // The pass's stop (db/lease.ts's PassStop), handed to the caller here, where

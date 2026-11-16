@@ -535,12 +535,17 @@ console.log("\n[9] The MCP reply: the value as JSON text and as structured conte
     stamp: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/stamp", input: {}, output: { at: z.string().default("never"), n: z.number() }, async handler() { return ok({ n: 1 }); } }),
   } });
   const [op] = loadPlugins("probe-kit", [defaulted])[0].operations;
-  const server = new McpServer({ name: "probe", version: "1" });
-  (server.registerTool as unknown as (n: string, s: unknown, h: (i: unknown) => Promise<unknown>) => unknown)(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output },
-    async (input) => renderPlugin(await runOperation(op, { core, principal: { name: "r", scope: "read" } as Principal }, input)));
-  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-  await server.connect(transport);
-  const send = async (id: number, method: string, params: unknown) => (await (await transport.handleRequest(new Request("http://probe/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) }))).json()) as { result?: { isError?: boolean; structuredContent?: Record<string, unknown> } };
+  // A server and a stateless transport for each request, as mcp-server/app.ts builds them: since SDK 2.3.0 a
+  // stateless transport serves one request and a server one connection (SMD-4342).
+  const transportFor = async () => {
+    const server = new McpServer({ name: "probe", version: "1" });
+    (server.registerTool as unknown as (n: string, s: unknown, h: (i: unknown) => Promise<unknown>) => unknown)(op.tool, { title: op.title, description: op.description, annotations: op.annotations, inputSchema: op.input, outputSchema: op.output },
+      async (input) => renderPlugin(await runOperation(op, { core, principal: { name: "r", scope: "read" } as Principal }, input)));
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    await server.connect(transport);
+    return transport;
+  };
+  const send = async (id: number, method: string, params: unknown) => (await (await (await transportFor()).handleRequest(new Request("http://probe/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) }))).json()) as { result?: { isError?: boolean; structuredContent?: Record<string, unknown> } };
   await send(0, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } });
   const stamped = await send(1, "tools/call", { name: "probe_kit_stamp", arguments: {} });
   assert(stamped.result?.isError !== true && JSON.stringify(stamped.result?.structuredContent) === '{"at":"never","n":1}', `the SDK takes the held answer, its default filled (${JSON.stringify(stamped.result)})`);
