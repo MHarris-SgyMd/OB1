@@ -47,7 +47,7 @@ export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { st
  * when the decision holds the same finding back.
  */
 export type FindingReviewed = {
-  id: string; kind: FindingKind; item: PriorityItem; status: "accepted" | "rejected";
+  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: PriorityItem; status: "accepted" | "rejected";
   outcome: "asserted" | "unchanged" | "cleared" | null; assertion: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null;
   suppressedUntil: string | null; caller: string;
   /** The decision was recorded, but the writer's answer is in a shape this server does not read: `outcome` and `assertion` are then null. */
@@ -59,8 +59,9 @@ const inputRefused = (problem: FindingInputError, message: string) => refuse({ c
 export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, input: Input<"review_priority_finding">): Promise<Outcome<FindingReviewed, FindingReviewCode>> {
   // 142 asks who first (an operator, then write scope), then whether the arguments go together, so a key that may never
   // decide is told that and not how to mend a call it cannot make; the schema takes each field alone, and the rules that
-  // join them are 142's alone. One exception: a due time Postgres cannot read is refused binding the call, before 142
-  // runs, so any key is told so (REFUSED_PRIORITY_INPUT, naming nothing about the finding).
+  // join them are 142's alone. One exception: a due time Postgres cannot read is refused binding the call, after the
+  // agent-id check below and before 142's operator check, so any key with an agent id is told so (REFUSED_PRIORITY_INPUT,
+  // naming nothing about the finding).
   // Who may is the database's to say, as for set_priority_weights: the key's registry kind by its agent id, which the
   // server does not hold. Without the agent id the database can tell no operator (a name lends no kind): the
   // registry's absence is said as set_priority says it, and a principal that has none by design is named so.
@@ -92,7 +93,7 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
   const a = r.answer;
   // No action-log row, as set_priority_weights: a decision is no search.
   return ok({
-    id: r.id, kind: r.kind, item: r.item, status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
+    id: r.id, kind: r.kind, ...(r.kindUnread ? { kindUnread: true as const } : {}), item: r.item, status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
     closed: a ? closedOf(a) : [], winner: a?.winner ?? null,
     suppressedUntil: r.suppressedUntil, caller: principal.name, ...(r.answerUnread ? { answerUnread: true as const } : {}),
   });

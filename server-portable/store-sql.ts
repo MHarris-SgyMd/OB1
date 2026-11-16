@@ -108,11 +108,12 @@ const SERVER_RAISE = /^[a-z_]+(?:\(\))?(?: needs a maker:|: p_actor must be a JS
  * 22009: a year 0000, an offset out of range) as one too, problem `time` (review pass 2: a 500); any other raise as it
  * was, the store's fault.
  */
-function priorityRefusedOr(e: unknown): unknown {
+function priorityRefusedOr(e: unknown, times = "due_at or not_before"): unknown {
   const message = String((e as Error)?.message ?? "");
   // The server's own envelope refused is its fault, as for the item calls (review pass 3).
   if (SERVER_RAISE.test(message)) return e;
-  if (timeCastFailed(e)) return new PriorityRefused("time", `due_at or not_before is no time Postgres can read: ${message}`);
+  // `times`: the time arguments the call takes, so the words name no argument it has not (review_priority_finding: due_at).
+  if (timeCastFailed(e)) return new PriorityRefused("time", `${times} is no time Postgres can read: ${message}`);
   return String((e as { errno?: unknown }).errno ?? "") === "22023" ? new PriorityRefused(priorityProblemOf(message), message) : e;
 }
 
@@ -1270,7 +1271,7 @@ export class SqlStore implements ThoughtStore {
         SELECT review_priority_finding(${opts.id}::uuid, ${opts.decision}::text, ${opts.level ?? null}::int, ${opts.dueAt ?? null}::timestamptz,
                                        ${opts.clear === true}::boolean, ${opts.note ?? null}::text, ${envelope}::jsonb) AS r` as Record<string, unknown>[];
     } catch (e) {
-      throw priorityRefusedOr(e);
+      throw priorityRefusedOr(e, "due_at");
     }
     return normaliseReviewFinding(rows[0]?.r);
   }

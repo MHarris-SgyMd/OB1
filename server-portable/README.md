@@ -1378,7 +1378,9 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   `due_from` and `level`); `outcome` is what an accept's writer
   answered, in the shape `review_priority_finding`'s reply gives it (null for a
   reject). A stored answer this server does not read (a later writer's shape) is
-  null with `outcomeUnread: true`, the finding still listed. A brain before 142 faults (500), the MCP text naming the migration.
+  null with `outcomeUnread: true`, the finding still listed; so is one of a kind or a
+  status this server does not know, kept as written with `kindUnread` or
+  `statusUnread`. A brain before 142 faults (500), the MCP text naming the migration.
 - **`review_priority_finding`** (`POST /v1/priority-findings/{id}/review`, write scope;
   SMD-3671 PR 2, migration 142): an operator's decision on a pending finding.
   `decision` is `accept` or `reject`; an accept takes `level` (0 to 5, with `due_at`
@@ -1404,8 +1406,9 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   a level off the scale, a note past 2000 characters (counted as 142 counts them, a
   character past the BMP one) or an id that is no uuid (`REFUSED_INPUT`). A due time
   Postgres cannot read (a year 0000, or past 9999) is `REFUSED_PRIORITY_INPUT` with
-  problem `time`, as `set_priority` answers it; it is refused binding the call, before
-  142's gate, so any key is told so, and told nothing about the finding.
+  problem `time` (naming `due_at`), as `set_priority` answers it; it is refused binding
+  the call, after the server's agent-id check and before 142's operator check, so any
+  key with an agent id is told so, and told nothing about the finding.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while

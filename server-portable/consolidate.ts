@@ -29,6 +29,7 @@
  * definition of the candidate set.
  */
 
+import { isRecord } from "./is-record.ts";
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
@@ -269,7 +270,6 @@ export function buildJudgeMessages(older: PairSide, newer: PairSide): { role: "s
   return [{ role: "user", content }];
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
  * Untrusted text about to be rendered — a thought's content, an entity's name,

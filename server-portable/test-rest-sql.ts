@@ -3531,7 +3531,9 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     const year0 = await review(stale!, { decision: "accept", level: 2, due_at: "0000-01-01" });
     const year9999 = await review(stale!, { decision: "accept", level: 2, due_at: "9999-12-31" });
     const setYear0 = await rest("POST", `/v1/priorities/thought/${thought}`, { level: 2, due_at: "0000-01-01" });
+    const year0M = await mcp("review_priority_finding", { id: stale, decision: "accept", level: 2, due_at: "0000-01-01" });
     assert([year0, year9999].every((a) => a.status === 400 && a.body.code === "REFUSED_PRIORITY_INPUT" && a.body.problem === "time")
+        && /^Refused: due_at is no time Postgres can read: /.test(year0M.text)
         && setYear0.status === 400 && setYear0.body.code === "REFUSED_PRIORITY_INPUT" && setYear0.body.problem === "time" && await pendingStill(stale!),
       `a due time Postgres cannot read, 0000-01-01 or 9999-12-31: 400 REFUSED_PRIORITY_INPUT (time), as set_priority answers it; the finding still pending (${year0.status}/${year0.body.code}/${year0.body.problem} ${year9999.status}/${year9999.body.problem} set ${setYear0.status}/${setYear0.body.problem})`);
 

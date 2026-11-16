@@ -2484,17 +2484,25 @@ function findingWhat(f: PriorityFinding): string {
     const op = f.statements.find((s) => s.role === "operator"), src = f.statements.find((s) => s.role === "source");
     return op && src ? `the operator's ${findingStatementText(op)} against the source's ${findingStatementText(src)}` : said;
   }
-  return `${said || "a statement"} left on it, though it has settled`;
+  if (f.kind === "settled") return `${said || "a statement"} left on it, though it has settled`;
+  return `a ${oneLine(snipText(f.kind, 40))} finding, a kind this server does not know${said ? `, about ${said}` : ""}`;
 }
+/** What a decided finding's writer wrote, as the list says it: a level stated or re-confirmed, a clear, or its answer unread. */
+const findingOutcome = (f: PriorityFinding) =>
+  f.outcomeUnread ? "; what its writer answered is stored in a shape this server does not read"
+  : f.outcome?.outcome === "asserted" && f.outcome.assertion ? `; stated ${levelText(f.outcome.assertion.level)}`
+  : f.outcome?.outcome === "unchanged" && f.outcome.assertion ? `; re-confirmed ${levelText(f.outcome.assertion.level)}`
+  : f.outcome?.outcome === "cleared" ? "; cleared the operator's statement"
+  : "";
 /** Where a finding's decision stands: pending, moot since when, or decided by whom, when, with what note, holding it back how long. */
 const findingState = (f: PriorityFinding) =>
   f.status === "pending" ? `pending since ${f.foundAt}`
   : f.status === "moot" ? `moot since ${f.mootAt ?? "?"} (its condition no longer holds)`
-  : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`
-    + (f.outcomeUnread ? "; what its writer answered is stored in a shape this server does not read" : "");
+  : f.statusUnread ? `${oneLine(snipText(f.status, 40))}, a status this server does not know`
+  : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${findingOutcome(f)}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`;
 const findingLine = (f: PriorityFinding) => {
   const state = findingState(f);
-  return `- ${f.kind} finding ${f.id} on ${itemText(f.item)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
+  return `- ${oneLine(snipText(f.kind, 40))} finding ${f.id} on ${itemText(f.item)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
 };
 
 /** The selection a refused findings cursor was made under, in words: its status and its kind. */
@@ -2522,7 +2530,7 @@ export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => ren
 
 export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingReviewCode>): Reply {
   return render(o, (v) => {
-    const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${v.kind} finding ${v.id} on ${itemText(v.item)}`;
+    const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${oneLine(snipText(v.kind, 40))} finding ${v.id}${v.kindUnread ? " (a kind this server does not know)" : ""} on ${itemText(v.item)}`;
     const held = v.suppressedUntil ? ` The same finding is held back until ${v.suppressedUntil} while its statements stand.` : "";
     if (v.status === "rejected") return `${lead}: no priority was changed.${held}`;
     if (v.answerUnread) return `${lead}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements.${held}`;

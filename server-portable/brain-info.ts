@@ -18,11 +18,12 @@
 // deadline keeps what was read and names the rest. (A transaction per read,
 // each with its own budget, added past one deadline and lost every fact at it.)
 //
-// No imports but priority-kinds.ts, a leaf that imports nothing (142's finding
-// kinds, SMD-3671 PR 2, one list): the SQL client is taken structurally rather
+// No imports but priority-kinds.ts and is-record.ts, leaves that import nothing
+// (142's finding kinds and the plain-object guard, SMD-3671 PR 2): the SQL client is taken structurally rather
 // than from "bun", so a suite can hand it a fake.
 
 import { FINDING_KINDS, type FindingKind } from "./priority-kinds.ts";
+import { isRecord } from "./is-record.ts";
 
 /** A tagged-template SQL client — Bun's `SQL`, structurally. */
 export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<any[]>;
@@ -1335,18 +1336,21 @@ export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest
  * number of seconds for the oldest pending one (found_at defaults to the scan's now, which a clock moved back can leave
  * ahead of the read's: held at 0).
  */
-export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number>; decided30d: number };
+/** `byKind.other`: pending findings of kinds this server does not know (a brain migrated ahead), so the counts sum to `pending`. */
+export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number> & { other: number }; decided30d: number };
 export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unknown; by_kind?: unknown; decided_30d?: unknown } | undefined): PriorityFindingsFact {
   if (!row) throw new Error("the priority findings read answered no row");
   const pending = countOf("priority findings", row.pending);
   const age = row.oldest_s == null ? null : Number(row.oldest_s);
   if (age !== null && !Number.isFinite(age)) throw new Error("the priority findings read answered an age that is not a number");
-  const by = row.by_kind !== null && typeof row.by_kind === "object" && !Array.isArray(row.by_kind) ? (row.by_kind as Record<string, unknown>) : null;
+  const by = isRecord(row.by_kind) ? row.by_kind : null;
   if (!by) throw new Error("the priority findings read answered no counts by kind");
+  // Each of 142's kinds, none pending a 0; any other kind's count summed into `other`.
+  const known = Object.fromEntries(FINDING_KINDS.map((k) => [k, countOf("priority findings", by[k] ?? 0)])) as Record<FindingKind, number>;
+  const other = Object.entries(by).filter(([k]) => !(FINDING_KINDS as readonly string[]).includes(k)).reduce((n, [, v]) => n + countOf("priority findings", v), 0);
   return {
     pending, oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)),
-    // Each of 142's kinds, none pending a 0: a kind the scan does not write is no count here.
-    byKind: Object.fromEntries(FINDING_KINDS.map((k) => [k, countOf("priority findings", by[k] ?? 0)])) as Record<FindingKind, number>,
+    byKind: { ...known, other },
     decided30d: countOf("priority findings", row.decided_30d),
   };
 }
@@ -1371,7 +1375,8 @@ export function priorityFindingsRow(f: PriorityFindingsFact | null, u: Unread | 
   }
   const decided = f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : "";
   if (f.pending === 0) return { status: "ok", detail: `none pending${decided}` };
-  const kinds = FINDING_KINDS.filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`).join(", ");
+  const kinds = [...FINDING_KINDS.filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`),
+    ...(f.byKind.other > 0 ? [`${f.byKind.other} of kinds this server does not know`] : [])].join(", ");
   const oldest = f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`;
   return { status: "ok", detail: `${f.pending} pending (${kinds}), the oldest found ${oldest}${decided} — an operator key reviews them: list_priority_findings, then review_priority_finding for each` };
 }

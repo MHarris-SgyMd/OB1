@@ -7970,7 +7970,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   const laterLine = later ? text(say.renderPriorityFindings({ ok: true, value: { status: "accepted", kind: null, total: 1, before: 0, findings: [later], cursor: null } })) : "";
   assert(readOutcome?.outcome === "asserted" && readOutcome.assertion?.tierName === "operator" && readOutcome.assertion.assertedAt === "2026-11-14T00:00:00.000Z" && !("tier_name" in (readOutcome.assertion as object))
       && normalisePriorityFinding(staleRow).outcome === null && !("outcomeUnread" in normalisePriorityFinding(acceptedRow))
-      && later?.outcome === null && later.outcomeUnread === true && /; what its writer answered is stored in a shape this server does not read\.$/m.test(laterLine),
+      && later?.outcome === null && later.outcomeUnread === true && /; what its writer answered is stored in a shape this server does not read; held back until /.test(laterLine),
     `a decided finding's outcome read as the review's answer is (camelCase, its times ISO), none null; one this server does not read null and marked, the finding still listed (${JSON.stringify(readOutcome?.assertion)?.slice(0, 120)} ${JSON.stringify(later?.outcomeUnread)} ${laterLine.slice(-90)})`);
   const overdueRow = { ...staleRow, kind: "overdue", status: "moot", moot_at: new Date("2026-11-14T00:00:00Z"), evidence: { due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 } };
   const listAsked: Record<string, unknown>[] = [];
@@ -8002,12 +8002,17 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && listed.ok && listed.value.status === "all" && listed.value.kind === "stale" && listed.value.total === 7 && pendingOnly.ok && pendingOnly.value.kind === null
       && s0.foundAt === "2026-11-10T00:00:00.000Z" && s0.statements.length === 1 && s0.statements[0].level === 4 && s0.statements[0].maker === "rival" && s0.statements[0].assertedAt === "2026-09-01T00:00:00.000Z" && s0.statements[0].role === null
       && d0.statements.map((s) => `${s.role}:${s.level}:${s.maker}`).join() === "operator:4:op-key,source:1:linear" && d0.decidedBy === "op-key" && d0.note === "Linear is right" && d0.suppressedUntil === "2027-01-12T00:00:00.000Z"
-      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.every((r) => r === "threw")
+      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.join() === "read,read,threw"
       && JSON.stringify(s0.evidence) === JSON.stringify({ last_activity: "2026-09-01T00:00:00+00:00", window_days: 60 }) && JSON.stringify(d0.evidence) === "{}"
       && JSON.stringify(o0.evidence) === JSON.stringify({ due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 }),
-    `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, sent once (the evidence keeps the rest), a disagreement's operator and source, an overdue one's none; a kind, status or item 142 does not write throws (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
+    `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, sent once (the evidence keeps the rest), a disagreement's operator and source, an overdue one's none; a kind or status this server does not know read (marked, below), an item kind 142 does not write a fault (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
 
   const listText = text(say.renderPriorityFindings(listed));
+  const decidedLines = [acceptedRow, { ...acceptedRow, outcome: { ...acceptedRow.outcome, outcome: "unchanged" } }, { ...acceptedRow, outcome: { ...acceptedRow.outcome, outcome: "cleared" } }]
+    .map((r) => text(say.renderPriorityFindings({ ok: true, value: { status: "accepted", kind: null, total: 1, before: 0, findings: [normalisePriorityFinding(r)], cursor: null } })));
+  assert(decidedLines[0].includes(`Accepted by op-key at 2026-11-14T00:00:00.000Z; stated medium (2); held back until 2027-01-13T00:00:00.000Z.`)
+      && decidedLines[1].includes("; re-confirmed medium (2); held back") && decidedLines[2].includes("; cleared the operator's statement; held back"),
+    `a decided finding's line names what its decision wrote: a level stated, re-confirmed, or a clear (${decidedLines.map((l) => l.split("\n")[1]?.slice(-110)).join(" | ")})`);
   const emptyText = text(say.renderPriorityFindings({ ok: true, value: { status: "pending", kind: "overdue", total: 0, before: 0, findings: [], cursor: null } }));
   // A page names its place in the listing as it stands and the cursor while more follow; the last page none; past it, none.
   const pageOf = (before: number, n: number, cursor: string | null) => text(say.renderPriorityFindings({ ok: true, value: { ...(listed.ok ? listed.value : {} as never), before, cursor, findings: (listed.ok ? listed.value.findings : []).slice(0, n) } })).split("\n")[0];
@@ -8075,11 +8080,27 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
     `142's refusals: NOT_OPERATOR with the key's kind, NOT_FOUND naming the finding, NOT_PENDING with its status, NOTHING_TO_CLEAR, WRITER_REFUSED with the writer's code, a settled finding's BAD_OUTCOME; each value its tokens alone, never the words (${[agentR, foundR, mootR, clearR, writerR, settledR].map((r) => r && ("problem" in r ? r.problem : r.code)).join(",")})`);
   // A due time Postgres cannot read, or a 22023 of the writer inside, is set_priority's refusal, not a fault.
   const { PriorityRefused } = await import("./store.ts");
-  const refusedTime = await reviewPriorityFinding({ door: "test", store: async () => ({ reviewPriorityFinding: async () => { throw new PriorityRefused("time", "due_at or not_before is no time Postgres can read: date/time field value out of range"); } }) } as never,
+  const refusedTime = await reviewPriorityFinding({ door: "test", store: async () => ({ reviewPriorityFinding: async () => { throw new PriorityRefused("time", "due_at is no time Postgres can read: date/time field value out of range"); } }) } as never,
     P, { id: F, decision: "accept", level: 2, due_at: "0000-01-01" } as never).catch((e: unknown) => ({ ok: true as const, value: String(e) }));
   assert(!refusedTime.ok && refusedTime.refusal.code === "REFUSED_PRIORITY_INPUT" && refusedTime.refusal.problem === "time"
-      && text(say.renderReviewPriorityFinding(refusedTime)) === "Refused: due_at or not_before is no time Postgres can read: date/time field value out of range.",
+      && text(say.renderReviewPriorityFinding(refusedTime)) === "Refused: due_at is no time Postgres can read: date/time field value out of range.",
     `a time Postgres cannot read: REFUSED_PRIORITY_INPUT (time), as set_priority answers it (${refusedTime.ok || refusedTime.refusal.code})`);
+  // A brain migrated ahead of this server: a stored finding of a fifth kind, or a status it does not know, is listed and
+  // marked; a decision on one is reported made. One rule reads a decision's writer's answer, stored or answered: asserted,
+  // unchanged or cleared, and anything else unread.
+  const { readAnswerLeniently } = await import("./store.ts");
+  const fifthRow = (() => { try { return normalisePriorityFinding({ ...staleRow, kind: "fifth", status: "deferred" }); } catch { return null; } })();
+  const fifthText = fifthRow ? text(say.renderPriorityFindings({ ok: true, value: { status: "all", kind: null, total: 1, before: 0, findings: [fifthRow], cursor: null } })) : "";
+  const fifthMade = await R({ decision: "reject" }, { ...rejectedA, kind: "fifth" }).catch(() => null);
+  const fifthWords = fifthMade ? text(say.renderReviewPriorityFinding(fifthMade)) : "";
+  const rule = [null, { outcome: "asserted", code: null, assertion: assertion(2) }, { outcome: "nothing_to_clear", code: null }, { outcome: "refused", code: "ITEM_NOT_FOUND" }, { outcome: "asserted", code: "A_LATER_CODE" }]
+    .map((a) => { const r = readAnswerLeniently(a, "test"); return `${r.answer?.outcome ?? "null"}/${r.unread}`; });
+  const listedOdd = (() => { try { return normalisePriorityFinding({ ...staleRow, status: "accepted", outcome: { outcome: "nothing_to_clear", code: null } }); } catch { return null; } })();
+  assert(fifthRow?.kind === "fifth" && fifthRow.kindUnread === true && fifthRow.status === "deferred" && fifthRow.statusUnread === true
+      && fifthText.includes(`- fifth finding ${F} on thought ${T}: a fifth finding, a kind this server does not know, about urgent (4) by rival`) && fifthText.includes("Deferred, a status this server does not know.")
+      && fifthMade?.ok === true && fifthMade.value.kind === "fifth" && fifthMade.value.kindUnread === true && fifthWords.startsWith(`Rejected the fifth finding ${F} (a kind this server does not know) on thought ${T}: no priority was changed.`)
+      && rule.join() === "null/false,asserted/false,null/true,null/true,null/true" && listedOdd?.outcome === null && listedOdd.outcomeUnread === true,
+    `a fifth kind and an unknown status listed and marked, a decision on one reported made; one rule for a decision's writer's answer, stored or answered (${rule.join()} | ${fifthWords.slice(0, 100)})`);
   // An envelope 142 does not answer is a fault, never a value.
   // 142 committed a decision whose writer's answer this server does not read (a later writer's code, an outcome it does
   // not name): reported made, the answer unread, never a fault a retry would meet as NOT_PENDING.
@@ -8092,7 +8113,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
       && laterMade?.ok === true && laterMade.value.status === "accepted" && laterMade.value.outcome === null && laterMade.value.assertion === null && laterMade.value.answerUnread === true
       && laterWords === `Accepted the stale finding ${F} on thought ${T}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements. The same finding is held back until 2027-01-14T10:00:00.000Z while its statements stand.`,
     `a committed decision whose writer's answer is not read: made, accepted, its outcome and assertion null and marked unread, said so (${laterWords.slice(0, 160)})`);
-  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, { ...rejectedA, kind: "late" }, null]
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, null]
     .map((a) => { try { normaliseReviewFinding(a); return "read"; } catch { return "threw"; } });
   assert(strays.every((s) => s === "threw"), `an envelope review_priority_finding does not answer throws (${strays.join(",")})`);
   // No agent id: the registry away is PRIORITY_UNATTRIBUTED; a principal with none by design is named so; neither reaches the store.
@@ -8133,21 +8154,27 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
   // brain_info: the row for each state, and the read's value.
   // The kinds as the SQL groups them, a kind with none absent: each of 142's four read, none a 0.
   const read = (r: unknown) => { try { return priorityFindingsValue(r as never); } catch { return null; } };
-  const value = read({ pending: 4, oldest_s: 3 * 86400 + 5, by_kind: { stale: 2, disagree: 1, settled: 1 }, decided_30d: 4 }) ?? { pending: -1, oldestPendingS: null, byKind: { stale: 0, overdue: 0, disagree: 0, settled: 0 }, decided30d: 0 };
+  const value = read({ pending: 4, oldest_s: 3 * 86400 + 5, by_kind: { stale: 2, disagree: 1, settled: 1 }, decided_30d: 4 }) ?? { pending: -1, oldestPendingS: null, byKind: { stale: 0, overdue: 0, disagree: 0, settled: 0, other: 0 }, decided30d: 0 };
   const lines = [
     priorityFindingsLine({ priorityFindings: null, unread: {} }),
     priorityFindingsLine({ priorityFindings: null, unread: { priorityFindings: { reason: "refused", message: "permission denied for table priority_findings" } as never } }),
     priorityFindingsLine({ priorityFindings: read({ pending: 0, oldest_s: null, by_kind: {}, decided_30d: 0 }), unread: {} }),
     priorityFindingsLine({ priorityFindings: value, unread: {} }),
   ];
-  const badRead = [undefined, { pending: "x", by_kind: {} }, { pending: 1, oldest_s: "soon", by_kind: { stale: 1 }, decided_30d: 0 }, { pending: 1, oldest_s: 5, decided_30d: 0 }, { pending: 1, oldest_s: 5, by_kind: { stale: "one" }, decided_30d: 0 }]
+  const badRead = [undefined, { pending: "x", by_kind: {} }, { pending: 1, oldest_s: "soon", by_kind: { stale: 1 }, decided_30d: 0 }, { pending: 1, oldest_s: 5, decided_30d: 0 }, { pending: 1, oldest_s: 5, by_kind: { stale: "one" }, decided_30d: 0 }, { pending: 1, oldest_s: 5, by_kind: [1], decided_30d: 0 }]
     .map((r) => { try { priorityFindingsValue(r as never); return "read"; } catch { return "threw"; } });
   const reviews = "an operator key reviews them: list_priority_findings, then review_priority_finding for each";
-  assert(value.oldestPendingS === 259205 && JSON.stringify(value.byKind) === JSON.stringify({ stale: 2, overdue: 0, disagree: 1, settled: 1 }) && value.decided30d === 4
+  assert(value.oldestPendingS === 259205 && JSON.stringify(value.byKind) === JSON.stringify({ stale: 2, overdue: 0, disagree: 1, settled: 1, other: 0 }) && value.decided30d === 4
       && lines[0] === "no table — migration 142 is not applied" && /^\? \(priority_findings /.test(lines[1]) && lines[2] === "none pending"
       && lines[3] === `4 pending (2 stale, 1 disagree, 1 settled), the oldest found 3 d ago; 4 decided in the last 30 days — ${reviews}`
       && badRead.every((r) => r === "threw"),
     `brain_info's Priority findings row: before 142, unread, none pending, pending by kind in 142's order with the oldest's age and the decided; a read answering no counts throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+  // A kind this server does not know (a brain migrated ahead) counted as `other`, so the kinds sum to the pending, and said.
+  const ahead = read({ pending: 3, oldest_s: 60, by_kind: { stale: 1, fifth: 2 }, decided_30d: 0 });
+  const aheadLine = ahead ? priorityFindingsLine({ priorityFindings: ahead, unread: {} }) : "";
+  assert(ahead !== null && JSON.stringify(ahead.byKind) === JSON.stringify({ stale: 1, overdue: 0, disagree: 0, settled: 0, other: 2 })
+      && aheadLine.startsWith("3 pending (1 stale, 2 of kinds this server does not know), the oldest found"),
+    `a pending kind this server does not know: counted as other, the kinds summing to the pending, and said (${JSON.stringify(ahead?.byKind)} | ${aheadLine.slice(0, 90)})`);
   // Preflight's row and brain_info's are one wording (priorityFindingsRow): each state, and an age not known.
   const rows = [
     priorityFindingsRow(null, undefined),
@@ -8175,14 +8202,20 @@ console.log("\n[36g] The dashboard's build stage copies every module the dashboa
   const copied = (p: string) => sources.some((c) => c === p || p.startsWith(`${c}/`)
     || (c.includes("*") && new RegExp(`^${c.replace(/[.]/g, "\\.").replace(/\*/g, "[^/]*")}$`).test(p)));
   // Every import a module makes at run time: `import type` is erased by the build, so it needs no file.
+  // A static import or export, and a dynamic import() of a string literal: both load a file at run time.
   const IMPORT = /(?:^|[\n;])\s*(?:import|export)\s+(?!type\s)(?:[^'"]*?\sfrom\s+)?['"](\.{1,2}\/[^'"]+)['"]/g;
+  const DYNAMIC = /\bimport\s*\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g;
+  const importsOf = (text: string): string[] => [...text.matchAll(IMPORT), ...text.matchAll(DYNAMIC)].map((m) => m[1]);
+  const sample = 'import { a } from "./a.ts";\nimport type { B } from "./b.ts";\nexport { c } from "../c.ts";\nconst d = await import("./d.ts");\nconst e = await import( \'../e.ts\' );\nimport "./f.ts";';
+  assert(JSON.stringify(importsOf(sample).sort()) === JSON.stringify(["../c.ts", "../e.ts", "./a.ts", "./d.ts", "./f.ts"]),
+    `the matcher reads static imports and exports, a bare import and dynamic import() calls, and passes over \`import type\` (${importsOf(sample).join(",")})`);
   const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : /\.(ts|js|svelte)$/.test(e.name) ? [join(dir, e.name)] : []));
   const queue = walk(join(ROOT, "dashboard/src"));
   const reached = new Set<string>();
   for (let i = 0; i < queue.length; i++) {
     const file = queue[i];
-    for (const m of readFileSync(file, "utf8").matchAll(IMPORT)) {
-      const target = resolve(dirname(file), m[1]);
+    for (const spec of importsOf(readFileSync(file, "utf8"))) {
+      const target = resolve(dirname(file), spec);
       const rel = relative(ROOT, target);
       if (!/^(?:server-portable|rest-client|db)\//.test(rel) || reached.has(rel)) continue;
       reached.add(rel);
