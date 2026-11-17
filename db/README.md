@@ -5886,6 +5886,56 @@ the bound on a lock wait (a held table, and a held REINDEX under an unbounded
 count), a role that may not read a table, a report that cannot be written, and
 the refusals.
 
+## Backfilling a thought's type and sensitivity tier (SMD-3318)
+
+### `backfill-metadata.ts`
+
+```bash
+bun backfill-metadata.ts                    # both passes, a dry run: what would be written (DATABASE_URL from the env or ./.env)
+bun backfill-metadata.ts --apply            # write
+bun backfill-metadata.ts --pass type --apply  # one pass
+#   --pass type|sensitivity (both)   --apply (none: a dry run)   --limit N (rows written; 0: none)   --batch N (rows a page reads; 500)   --statement-timeout SECONDS (60; 0: none)   --url (shows the password to ps; prefer DATABASE_URL)
+#   exits 0 the run ended · 1 a read or a write failed (rows already written stay) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+```
+
+`recipes/thought-enrichment`'s `backfill-type.mjs` and
+`backfill-sensitivity.mjs` (SMD-2139), one script (SMD-3318). Both passes write
+the metadata key through `update_thought`, and `schemas/enhanced-thoughts`'
+column too where a brain has it, for that schema's readers (its search and
+stats functions, the bio worker, ops views). A row's writes are one
+transaction: its keys in one `update_thought` call (one audit event,
+`actor_name` `backfill-metadata`; the row's own actor stamp kept), then its
+columns (a column's write alone records no audit event, as the old scripts' did
+not); a row written since its page was read is left for the next run
+(`if_unchanged_since` on `COALESCE(updated_at, created_at)`, as the function
+compares it), and metadata that is not a JSON object has its keys counted, not
+written. The **type** pass writes a `metadata.type` the capture would have
+written otherwise (another case or spacing, or an alias such as `todo` or
+`fact`) as the capture's type, by its own rule (`server-portable/thoughts.ts`'s
+`canonicalType`), an alias's words in `type_raw`; a type naming none of the
+capture's is left, and so is a row an importer owns (trust `ingested`), whose
+next sync would write its own value back. The `type` column takes the old rule
+on the type as the capture names it: `reference` becomes it when it is one of
+the old eight (so `Task` and `todo` now set it, an importer's row's included).
+The **sensitivity** pass reads a thought's text against the sensitivity
+patterns (`db/sensitivity.ts`, which `db/weekly-digest.ts` reads too: the
+recipe's, reworked, and the session-capture hook's secret table), and each place
+takes the highest of their tier and the other place's when that is higher than
+what it says (absent, empty and `standard`, in any case, lowest), so the key
+and the column agree; a tier is never lowered, an unknown one left, and no text
+is printed. Pages are read by the primary key, one statement each, so a run
+holds no snapshot or lock for its length; a page holds its rows' whole text, so
+a brain of long documents takes a smaller `--batch`. A role needs what `bun
+db/migrate.ts --grant <role>` gives (`update_thought` reads `ob1_agents` and
+`ob1_config`). test-live [51] holds the patterns label by label (the copied
+secret table against the hook's own, rule for rule), a dry
+run writing nothing (and the same over pages of two), each pass's writes and
+audit events, the cases left, the digest's read with and without the column
+(its patterns before any backfill included), a row edited or deleted mid-run, a
+failure, a second run writing nothing, `--pass`, `--limit`, the statement bound
+and the refusals. The recipe's `enrich-thoughts.mjs` becomes SMD-2298's re-tag
+worker (SMD-3318 PR 3b).
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
@@ -7654,12 +7704,19 @@ as the actor — and one term opts the sink in: `OB1_EGRESS_ALLOW=type:digest` (
 `source:weekly-digest`, or `actor:<key>`). Under the default deny with no such
 term the send is refused, the refusal names the rule, and the digest is printed
 to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
-the box (the synthesis still does). The sensitivity boundary is fail-closed: with
-no `sensitivity_tier` column the run refuses rather than page every row, unless
-`--no-sensitivity-filter` says so. A row is left out by the column or by its
-`metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
-`--include-personal`): the import recipes set the facet and leave the column
-at its default (SMD-2493). The prompt takes a share of each day and writer
+the box (the synthesis still does). A row is left out by its
+`metadata.sensitivity_tier`, by `schemas/enhanced-thoughts`' column where a
+brain has it (each in any case and white space; a column the role may not read
+refuses the run), or by the sensitivity patterns (`db/sensitivity.ts`: the
+recipe's, widened, and the session-capture hook's secret table) over its whole
+text and the type, topics and tags the prompt sends, whichever says
+`restricted` (or `personal` without `--include-personal`): the import recipes
+set the key and leave the column at its default (SMD-2493),
+`db/backfill-metadata.ts` sets both, and the patterns hold back what neither
+tags yet, a capture since the backfill's last run included, the run saying
+how many. The patterns are a denylist: they narrow what leaves, they do not
+prove nothing does. A brain without the column refused to run until SMD-3318;
+`--no-sensitivity-filter` sends every row. The prompt takes a share of each day and writer
 (`metadata.actor_name`), a turn at a time, so neither a busy day nor one key's
 burst fills it, and each share what matters most first: open work before
 closed (a settled ticket or item keeps its level in the read; the maintainer,
