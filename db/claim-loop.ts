@@ -9,9 +9,11 @@
  * admit gate before each claim, --limit's count of what is taken and being
  * claimed, the claim itself, the row a beat found no longer this worker's, and
  * the finally that returns what is still held; and, for the thought in hand,
- * what an error its call threw means (thoughtFault) and the record of a
- * failure the worker stops after (recordFailedAndStop). How a finished claim
- * is released is still each engine's.
+ * what an error its call threw means (thoughtFault), the record of a
+ * failure the worker stops after (recordFailedAndStop), the set-back of a
+ * call its caller aborted (setBackAborted) and the release of a finished
+ * claim with what it finds (releaseFinished). The release statement itself,
+ * and each engine's own exceptions, are still the engine's.
  *
  * The engine's state is read where the loop needs it, not copied: a flag that
  * changes under a running worker — the stop, the hard stop, the pass's gate,
@@ -22,7 +24,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import type { SQL } from "bun";
 import { PROVIDER_ERROR_CHARS } from "../server-portable/embed.ts";
-import { admitted, idleWhile, reportLost, setFront, sleepUnless, startHeartbeat, type Admit, type Heartbeat, type InHandCall } from "./lease.ts";
+import { admitted, idleWhile, reportLost, setBack, setFront, sleepUnless, startHeartbeat, type Admit, type Heartbeat, type InHandCall } from "./lease.ts";
 import { ALONE_OUTAGES, databaseUnavailable, followClassify, isOut, probedFault, TRANSIENT_PAUSES_MS, type FollowerFault, type Probe, type ProviderOutage, type Unreturned } from "./worker-bootstrap.ts";
 
 /** A row of claim_thoughts: the thought, and which attempt at it this claim is. */
@@ -446,4 +448,104 @@ export async function recordFailedAndStop(o: FaultHost, t: {
   // Said once the record is settled, not before (review pass 4).
   err(`  ${workerId}: provider still failing — this worker stops after this thought; ${o.follow ? "the next poll goes on" : "re-run when it is back"}`);
   err(`  ${id}: ${t.error}`);
+}
+
+/** What an engine gives the loop to hand a claim back or finish it with: its own state where it is read. */
+export type ReleaseHost = {
+  sql: SQL;
+  job: string;
+  follow: boolean;
+  err: (line: string) => void;
+  hardStopped: () => boolean;
+  outage: ProviderOutage;
+  /** --limit, 0 for none, and its thoughts taken. */
+  limit: number;
+  taken: Set<string>;
+  count: { failed(): void; lost(): void; vanished(): void };
+  /** The pass's progress line, after a thought is settled. */
+  progress: () => void;
+};
+
+/**
+ * The pass's caller aborted the call in hand (abortInHand): the thought to the back of the queue, what it wrote so far
+ * standing, and the worker goes on with its next claim (SMD-3379 PR 1b-2; SMD-4308: the engines each held a copy).
+ * "stop" when the database refuses the set-back: the claim is left for the finally's release. `gone`: not ours to set
+ * back — deleted, or edited or reaped meanwhile — and said so (review pass 1). `call` names the call in the line.
+ */
+export async function setBackAborted(o: ReleaseHost, t: { id: string; workerId: string; hb: Heartbeat }, call: string): Promise<"stop" | { gone?: "deleted" | "lost" }> {
+  const { id, workerId, hb } = t;
+  hb.held.delete(id);
+  let back: boolean;
+  try {
+    back = await setBack(o.sql, o.job, workerId, id);
+  } catch (re) {
+    hb.held.add(id);
+    o.err(`  ${workerId}: could not set ${id} back in the queue after its ${call} was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+    return "stop";
+  }
+  if (back && o.limit > 0) o.taken.delete(id);
+  return back ? {} : { gone: await reportLost(o.sql, o.job, workerId, id, o.err) };
+}
+
+/**
+ * The release of a thought the engine finished, succeeded or failed, and what the release found (SMD-4308: the engines
+ * each held a copy). The thought is out of the heartbeat's set already. "stop" ends the worker; "next" goes on.
+ */
+export async function releaseFinished(o: ReleaseHost, t: { id: string; workerId: string; hb: Heartbeat }, f: {
+  /** The engine's release statement: whether the claim was still this worker's. */
+  release: () => Promise<boolean>;
+  /** The thought's error when it failed, null when it succeeded. */
+  failed: string | null;
+  /** What the engine does to a thought, for "deleted while it was being …". */
+  doing: string;
+  /** Why a claim may be no longer this worker's at release, as the engine knows them. */
+  lapsedWhy: string;
+  /** The engine's counts of a thought finished. */
+  succeeded: () => void;
+}): Promise<"stop" | "next"> {
+  const { sql, err } = o;
+  const { id, hb } = t;
+  let ok: boolean;
+  let gone = false;
+  try {
+    ok = await f.release();
+    if (!ok) {
+      const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${id}::uuid) AS exists`;
+      gone = !exists;
+    }
+  } catch (e) {
+    // The database went away under the release: the row is this
+    // worker's again, for the finally to return and --limit to give
+    // back (review pass 4).
+    if (o.follow && databaseUnavailable(e)) hb.held.add(id);
+    err(`  ${id}: could not release the claim (${(e as Error).message}) — this worker stops`);
+    return "stop";
+  }
+  if (gone) {
+    o.count.vanished();
+    err(`  ${id}: deleted while it was being ${f.doing}`);
+    return "next";
+  }
+  if (!ok) {
+    // The hard stop's release beat this one to the row: not a lapse to
+    // report, the caller's own stop; a release that went through first
+    // is counted below as any is — as reembed's (SMD-2425).
+    if (o.hardStopped()) return "stop";
+    // Not ours to finish: counted with the rows this worker lost, not
+    // the ones it finished, so the workers' summaries add up.
+    err(`  ${id}: the claim was no longer this worker's at release — ${f.lapsedWhy}; the row is the pool's or another worker's now`);
+    if (f.failed !== null) err(`  ${id}: ${f.failed} (not recorded — the row was not this worker's)`);
+    o.count.lost();
+    o.progress();
+    return "next";
+  }
+  if (f.failed !== null) {
+    o.count.failed();
+    err(`  ${id}: ${f.failed}`);
+  } else {
+    f.succeeded();
+  }
+  o.outage.settled(id);
+  o.progress();
+  return "next";
 }

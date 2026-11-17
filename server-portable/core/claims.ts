@@ -10,7 +10,7 @@
 // refusal, error message or log line carries it.
 
 import type { Principal } from "../auth.ts";
-import { ClaimRefused, ListCursorRefused, UUID_RE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type WorkClaim } from "../store.ts";
+import { ClaimRefused, ListCursorRefused, UUID_RE, type ClaimLease, type ClaimLeaseWork, type ClosedTicket, type ReleasedClaim, type WorkClaim } from "../store.ts";
 import { asked, unattributedAs } from "./caller.ts";
 import type { Ctx } from "./context.ts";
 import { claimCursor, parseClaimCursor, sameClaimSelection, type ClaimSelection } from "./list-cursor.ts";
@@ -280,4 +280,30 @@ export async function setWorkClaimCap(ctx: Ctx, principal: Principal, { cap }: I
   }
   // No action-log row, as set_priority_weights: a setting is no search.
   return ok({ changed: result.changed, cap: result.cap, previous: result.previous, setAt: result.setAt, setBy: result.setBy, caller: principal.name });
+}
+
+/**
+ * What release_holder_claims ended (SMD-3606 PR 3, migration 145): the holder whose live claims an operator released,
+ * how many, and which (id, ticket, piece), ordered as list_work_claims lists them.
+ */
+export type HolderRelease = { holder: string; released: number; claims: ReleasedClaim[] };
+export type HolderReleaseCode = "REFUSED_NOT_OPERATOR" | "RELEASE_HOLDER_UNATTRIBUTED";
+
+export async function releaseHolderClaims(ctx: Ctx, principal: Principal, { holder, reason }: Input<"release_holder_claims">): Promise<Outcome<HolderRelease, HolderReleaseCode>> {
+  // Who may is the database's to say (migration 145): the key's registry kind by its agent id, which the server does not
+  // hold. Without the agent id the database can tell no operator (a name lends no kind): the registry's absence is said
+  // as set_work_claim_cap says it, and a principal that has none by design is named so, never told to classify a key
+  // that may be the operator's already (132's rule).
+  const away = unattributedAs("RELEASE_HOLDER_UNATTRIBUTED", principal);
+  if (away) return away;
+  if (principal.agentId === undefined) return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true });
+  const result = await (await ctx.store()).releaseHolderClaims({ holder, reason, actor: actorOf(ctx, principal) });
+  if (!result.ok) {
+    if (result.error === "NOT_OPERATOR") return refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: result.kind });
+    // NO_HOLDER / NO_REASON are unreachable: the schema requires a non-empty holder and reason, exactly what 145 checks;
+    // a database refusing one the schema requires means the two have diverged — a fault, not the caller's.
+    throw new Error(`release_holder_claims: the database refused an argument the schema requires (${result.message})`);
+  }
+  // No action-log row, as the other claim writes: a release is no search.
+  return ok({ holder: result.holder, released: result.released, claims: result.claims });
 }
