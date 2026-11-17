@@ -306,8 +306,11 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const over = await readThoughts(full.sql, opts);
   ok(over.rows.length === 5000 && over.more === true, `a window past 5,000 is read to 5,000 and said to hold more (${over.rows.length}, ${over.more})`);
   ok(/left\(content, 280\) AS content/.test(full.asked[0] ?? "") && /LIMIT 5001\b/.test(full.asked[0] ?? ""), "the text is read only as far as the prompt reads it");
-  const under = await readThoughts(window(5000).sql, opts);
+  const exact = window(5000);
+  const under = await readThoughts(exact.sql, opts);
   ok(under.rows.length === 5000 && under.more === false, "a window of exactly 5,000 is all read, with nothing more said");
+  // The patterns' second read takes the window 100 ids a statement, so a window of long documents is never held whole.
+  ok(exact.asked.filter((q) => /id = ANY/.test(q)).length === 50, `the second read in batches of 100: 50 statements for 5,000 rows (${exact.asked.filter((q) => /id = ANY/.test(q)).length})`);
 }
 
 // ---------------------------------------------------------------------------

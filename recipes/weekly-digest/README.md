@@ -39,8 +39,9 @@ The verb keeps the recipe's behaviour — a `--window` of days, the
 (`--no-sensitivity-filter` sends every row), and
 `--output telegram|stdout|file` — and adds two things. The sensitivity
 patterns (`db/sensitivity.ts`, the ones `bun db/backfill-metadata.ts` tags
-with) read each row's whole text and the type, topics and tags the prompt
-sends, so an untagged capture is held back too; they narrow what leaves, they
+with, the session-capture hook's secret table among them) read each row's
+whole text and the type, topics and tags the prompt sends, so an untagged
+capture is held back too; they narrow what leaves, they
 do not prove nothing does (a denylist misses what it does not name, and takes
 some harmless numbers for an SSN). And the gate: both the LLM synthesis and the Telegram send are decided by
 the egress policy, so brain content leaves only when an operator opts the digest

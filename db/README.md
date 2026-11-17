@@ -7704,8 +7704,9 @@ to stdout instead — nothing reaches Telegram; `--output stdout|file` never lea
 the box (the synthesis still does). A row is left out by its
 `metadata.sensitivity_tier`, by `schemas/enhanced-thoughts`' column where a
 brain has it (each in any case and white space; a column the role may not read
-refuses the run), or by the sensitivity patterns (`db/sensitivity.ts`) over
-its whole text and the type, topics and tags the prompt sends, whichever says
+refuses the run), or by the sensitivity patterns (`db/sensitivity.ts`: the
+recipe's, widened, and the session-capture hook's secret table) over its whole
+text and the type, topics and tags the prompt sends, whichever says
 `restricted` (or `personal` without `--include-personal`): the import recipes
 set the key and leave the column at its default (SMD-2493),
 `db/backfill-metadata.ts` sets both, and the patterns hold back what neither

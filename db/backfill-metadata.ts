@@ -52,7 +52,8 @@
  * and where its tier came from (the patterns' labels, or the other place),
  * never its text (an API key, a card number), where the recipe printed the
  * first 80 characters of every restricted thought and of the first 30 it
- * scanned.
+ * scanned. An unknown type is named in the report unless the patterns rate it
+ * (a key stored as a type), when it is withheld and only its label shown.
  *
  * ── What a run guarantees ───────────────────────────────────────────────────
  * Without --apply nothing is written: the run says what would be. With it, a
@@ -205,7 +206,10 @@ export async function run(opts: BackfillOptions): Promise<number> {
             }
           } else if (!named) {
             c.type.unknown++;
-            const key = typeof row.type === "string" ? row.type.slice(0, 40) : JSON.stringify(row.type).slice(0, 40);
+            // Named in the report, unless the patterns rate it (a key stored as a type): then only what it looks like.
+            const named40 = typeof row.type === "string" ? row.type.slice(0, 40) : JSON.stringify(row.type).slice(0, 40);
+            const looks = sensitivityOf(typeof row.type === "string" ? row.type : JSON.stringify(row.type));
+            const key = looks.tier === "standard" ? named40 : `<withheld: ${looks.labels[0]}>`;
             c.type.unknownValues.set(key, (c.type.unknownValues.get(key) ?? 0) + 1);
           }
           // The column: the recipe's rule, on the type as the capture names it (or as written, when it names none).
