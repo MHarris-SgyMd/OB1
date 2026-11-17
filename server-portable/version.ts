@@ -7,7 +7,7 @@
 export const BRAIN_VERSION = "2.1.0";
 
 /** The migration range releases.json records for BRAIN_VERSION, or null when it records none (a version bumped and not yet cut). */
-export const RELEASE_RANGE: readonly [number, number] | null = null;
+export const RELEASE_RANGE: readonly [number, number] | null = [122, 146];
 
 /** The highest migration file in the tree this server was built from — what a brain migrated for it has applied. */
 export const LATEST_MIGRATION = 146;
