@@ -31,6 +31,7 @@ export const OPERATIONS = {
   propose_item_close: { method: "POST", path: "/v1/items/{id}/proposals" },
   relations: { method: "GET", path: "/v1/relations" },
   release_claim: { method: "POST", path: "/v1/claims/{id}/release" },
+  release_holder_claims: { method: "POST", path: "/v1/claims/release-holder" },
   release_stale_leases: { method: "POST", path: "/v1/workers/release-leases" },
   renew_claim: { method: "POST", path: "/v1/claims/{id}/renew" },
   reset_capture_stamp: { method: "POST", path: "/v1/thoughts/{id}/reset-capture-stamp" },

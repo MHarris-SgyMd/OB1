@@ -789,12 +789,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // without 115 ([20ch]); 144 renames 139's forget_thought to its body and
   // makes forget_thought a SECURITY DEFINER wrapper over it, EXECUTE not
   // PUBLIC's, and adds ob1_text_forgotten_at and ob1_forget_leftovers,
-  // refusing by name without 139 or 142 ([20ci]) — all recorded by the
+  // refusing by name without 139 or 142 ([20ci]); 145 adds release_holder_claims,
+  // an operator's one-call release of every live claim a holder holds, refusing
+  // by name without 046 or 115 ([20cj]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 115, `030 is among the last one hundred and fifteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 116, `030 is among the last one hundred and sixteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7121,6 +7123,48 @@ console.log("\n[20ci] Migration 144: onto a populated brain at the file before i
     `a re-apply is a no-op: the definer and the grants kept (${await shape144()})`);
   await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ob1_upgrade_144_deleter; DROP ROLE ob1_upgrade_144_deleter;
                     DROP OWNED BY ob1_upgrade_144_reader; DROP ROLE ob1_upgrade_144_reader`);
+  await sql.close();
+}
+console.log("\n[20cj] Migration 145: onto a populated brain at the file before it — refused by name without 115's ob1_work_claim_actor, release_holder_claims not made; then applied: an operator ends every live claim one holder holds with the reason, counted and named; an agent key refused NOT_OPERATOR, nothing more released; a re-apply a no-op (SMD-3606)");
+{
+  const the145 = MIGRATIONS.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the145 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('up-op', 'operator')`;
+  await sql`SELECT set_agent_kind('up-h', 'agent')`;
+  const opid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'up-op'`)[0].id);
+  const hid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'up-h'`)[0].id);
+  const OP = JSON.stringify({ name: "up-op", agent_id: opid });
+  const H = JSON.stringify({ name: "up-h", agent_id: hid });
+  const live = async (name: string) => Number((await sql`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = ${name} AND released_at IS NULL AND expires_at > now()`)[0].n);
+
+  // Without 115's ob1_work_claim_actor (the body calls it): refused by name, the function not made.
+  await sql`ALTER FUNCTION ob1_work_claim_actor(jsonb, text) RENAME TO ob1_work_claim_actor_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_actor_away(jsonb, text) RENAME TO ob1_work_claim_actor`;
+  const made = async () => (await sql`SELECT to_regprocedure('release_holder_claims(text,text,jsonb)') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 145 needs 115 \(ob1_work_claim_actor\); this schema lacks it/.test(without) && !(await made()),
+    `without 115's ob1_work_claim_actor the file is refused by name; release_holder_claims not made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 });
+
+  // Three live claims by one holder (the built-in cap 50 allows); an operator ends them all.
+  for (const n of [1, 2, 3]) await sql`SELECT claim_work(${`SMD-720${n}`}, NULL, NULL, 14500, NULL, (${H}::text)::jsonb)`;
+  const out = (await sql`SELECT release_holder_claims(${"up-h"}, ${"upgrade cleanup"}, (${OP}::text)::jsonb) AS r`)[0].r as { ok: boolean; holder: string; released: number; claims: { issue: string }[] };
+  // Two more claims, then an agent key is refused — nothing more released.
+  for (const n of [4, 5]) await sql`SELECT claim_work(${`SMD-720${n}`}, NULL, NULL, 14500, NULL, (${H}::text)::jsonb)`;
+  const byAgent = (await sql`SELECT release_holder_claims(${"up-h"}, ${"nope"}, (${H}::text)::jsonb) AS r`)[0].r as { ok: boolean; error: string; kind: string | null };
+  assert(out.ok === true && out.holder === "up-h" && out.released === 3 && out.claims.length === 3
+         && byAgent.ok === false && byAgent.error === "NOT_OPERATOR" && byAgent.kind === "agent" && (await live("up-h")) === 2,
+    `an operator ends the holder's three live claims (released ${out.released}, ${out.claims.length} named); an agent key refused NOT_OPERATOR, the two later claims left (${byAgent.error}:${byAgent.kind}, ${await live("up-h")} live)`);
+
+  // A re-apply is a no-op: the operator still releases the two left.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 });
+  const after = (await sql`SELECT release_holder_claims(${"up-h"}, ${"after re-apply"}, (${OP}::text)::jsonb) AS r`)[0].r as { released: number };
+  assert(after.released === 2 && (await live("up-h")) === 0,
+    `a re-apply is a no-op: the operator still releases the two left (${after.released})`);
+
   await sql.close();
 }
 
