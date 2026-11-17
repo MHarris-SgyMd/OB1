@@ -27,7 +27,7 @@ import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -45,6 +45,7 @@ import type {
   ResetStampResult,
   SetWeightsResult,
   SetCapResult,
+  ReleaseHolderResult,
   ProvenanceNode,
   QueryActionLog,
   QueryAgendaLog,
@@ -1288,6 +1289,13 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT set_work_claim_cap(${opts.cap}, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseSetCap(rows[0]?.r);
+  }
+
+  // SMD-3606 PR 3: 145's operator write, one statement. The holder and reason ride as text; the function decides who may and ends every live claim of the holder.
+  async releaseHolderClaims(opts: { holder: string; reason: string; actor?: Actor }): Promise<ReleaseHolderResult> {
+    const rows = await this.sql`
+      SELECT release_holder_claims(${opts.holder}, ${opts.reason}, ${actorPayload(opts.actor)}::jsonb) AS r`;
+    return normaliseReleaseHolder(rows[0]?.r);
   }
 
   // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope, the

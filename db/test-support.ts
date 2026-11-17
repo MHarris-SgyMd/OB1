@@ -433,6 +433,8 @@ const FUNCTIONS = [
   "work_claim_cap_setting()",
   "ob1_work_claim_holder_lock(text, uuid)",
   "ob1_work_claim_holder_live_count(text, uuid, timestamp with time zone)",
+  // 145 (SMD-3606): the operator's one-call release of every live claim a holder holds.
+  "release_holder_claims(text, text, jsonb)",
   // 116 (SMD-3663): priority assertions — the five calls, the drift check, the
   // rebuild and the helpers (those taking or returning priority_assertions'
   // row type go with its CASCADE, and are named anyway).

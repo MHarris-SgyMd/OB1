@@ -7006,6 +7006,27 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && curShape.isError === true && /not a list_claims cursor/.test(text(curShape)) && curFilters.isError === true && /made with other filters/.test(text(curFilters)),
     `release_claim's two answers in words, and list_claims' JSON with 143's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
 
+  // release_holder_claims' render (SMD-3606 PR 3, migration 145): the count and holder in words, the claims in the value; the refusals name the key's kind or the registry away; the fault names a brain before 145.
+  const relMany = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 3, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }, { id: "c", issue: "SMD-2", piece: "PR 2" }] } } as never);
+  const relOne = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 1, claims: [{ id: "a", issue: "SMD-1", piece: null }] } } as never);
+  const relZero = say.renderReleaseHolderClaims({ ok: true, value: { holder: "ghost", released: 0, claims: [] } } as never);
+  const relAgent = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key: "bob", kind: "agent" } } as never);
+  const relUnid = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key: "bob", kind: null, unidentified: true } } as never);
+  const relAway = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "RELEASE_HOLDER_UNATTRIBUTED", retryable: true, cause: "registry_away" } } as never);
+  const relStuck = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "RELEASE_HOLDER_UNATTRIBUTED", retryable: false, cause: "registry_refused" } } as never);
+  const relSv = relMany.structuredContent;
+  assert(text(relMany) === "Released 3 live claims held by codex across 2 tickets, each with the reason. The rows stay as history; list_claims and the per-holder cap no longer count them."
+      && text(relOne) === "Released 1 live claim held by codex, with the reason. The rows stay as history; list_claims and the per-holder cap no longer count them."
+      && text(relZero) === "No live claims held by ghost; nothing was released."
+      && relAgent.isError === true && text(relAgent).includes("This key, bob, is classified agent") && !text(relAgent).includes("\n")
+      && relUnid.isError === true && /reached the brain with none; call with the operator's own key\.$/.test(text(relUnid))
+      && relAway.isError === true && text(relAway) === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && relStuck.isError === true && /the agent registry cannot give this server until an operator acts/.test(text(relStuck))
+      && relSv.holder === "codex" && relSv.released === 3 && (relSv.claims as unknown[]).length === 3 && !/wc_/i.test(JSON.stringify(relSv)),
+    `release_holder_claims' render: the count and holder, the claims in the value, the refusals and the registry away (${text(relMany)} | ${text(relAgent).slice(0, 60)})`);
+  assert(/migration 145/.test(say.releaseHolderHint("function release_holder_claims(text, text, jsonb) does not exist")) && say.releaseHolderHint("connection refused") === "",
+    `release_holder_claims' hint names a brain before 145 (${say.releaseHolderHint("function release_holder_claims does not exist").slice(0, 60)})`);
+
   // The list_work_claims cursor codec (SMD-3606 PR 2): this listing's own round-trips with its selection; another tag, a
   // wrong length, a non-boolean include_ended, an over-long or non-string ticket/holder, an empty issue, an over-long
   // piece_key, a non-uuid id, a day that does not exist, a clock past 23:59 and a null time are none of its cursors;
@@ -8030,6 +8051,46 @@ console.log("\n[36e] The operator's work-claim cap in the core and the words (SM
       && lines[4] === "the operator's, REFUSED, so every new claim fails: 200000 (set 2026-11-14T03:30:44.937Z by op-key): a cap above 100000 (200000). An operator key sets it again, or clears it, through set_work_claim_cap"
       && badRead.every((r) => r === "threw"),
     `brain_info's Work-claim cap row: before 140, unread, built in, the operator's, the operator's refused; a read answering no cap throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+}
+
+console.log("\n[36f] The operator's holder-release in the core and the words (SMD-3606 PR 3, migration 145): releaseHolderClaims passing the holder, reason and the caller's key to the store; its answer and its NOT_OPERATOR refusal said; the no-agent-id paths (the registry away RELEASE_HOLDER_UNATTRIBUTED, a principal with none REFUSED_NOT_OPERATOR, neither reaching the store); an envelope the store cannot read a fault");
+{
+  const { releaseHolderClaims } = await import("./core/claims.ts");
+  const { normaliseReleaseHolder } = await import("./store.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ releaseHolderClaims: async (o: Record<string, unknown>) => { asked.push(o); return normaliseReleaseHolder(answer); } }) });
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  // 144's envelopes, as the scratch brain answers them.
+  const okA = { ok: true, holder: "codex", released: 2, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }] };
+  const agentA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may release a holder's claims; op-key is agent" };
+  const holderA = { ok: false, error: "NO_HOLDER", message: "name the holder whose live claims to release: a key's name, as list_work_claims shows it" };
+  const released = await releaseHolderClaims(core(okA) as never, P, { holder: "codex", reason: "cleanup" } as never);
+  const agent = await releaseHolderClaims(core(agentA) as never, P, { holder: "codex", reason: "cleanup" } as never);
+  const sent = asked[0] as Record<string, unknown> | undefined;
+  const actor = sent?.actor as Record<string, unknown> | undefined;
+  assert(sent?.holder === "codex" && sent?.reason === "cleanup" && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test"
+      && released.ok && released.value.holder === "codex" && released.value.released === 2 && released.value.claims.length === 2
+      && !agent.ok && agent.refusal.code === "REFUSED_NOT_OPERATOR" && agent.refusal.kind === "agent",
+    `the holder and reason reach the store with the caller's key, its agent id and the door; the answer and the NOT_OPERATOR refusal said (${JSON.stringify(sent)} | ${released.ok} | ${!agent.ok ? agent.refusal.code : "?"})`);
+
+  // The no-agent-id paths: the registry away is RELEASE_HOLDER_UNATTRIBUTED (retryable, or not when an operator must act); a principal with none by design is REFUSED_NOT_OPERATOR, named so; neither reaches the store.
+  const before = asked.length;
+  const away = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { holder: "codex", reason: "x" } as never);
+  const stuck = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { holder: "codex", reason: "x" } as never);
+  const none = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write" } as never, { holder: "codex", reason: "x" } as never);
+  assert(asked.length === before && !away.ok && away.refusal.code === "RELEASE_HOLDER_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "RELEASE_HOLDER_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR" && none.refusal.unidentified === true
+      && /reached the brain with none; call with the operator's own key\.$/.test(text(say.renderReleaseHolderClaims(none))),
+    `with no agent id nothing reaches the store: the registry away RELEASE_HOLDER_UNATTRIBUTED (retryable or not), a principal with none REFUSED_NOT_OPERATOR unidentified (${!away.ok ? away.refusal.code : "?"}/${!stuck.ok ? String(stuck.refusal.retryable) : "?"}/${!none.ok ? none.refusal.code : "?"})`);
+
+  // NO_HOLDER/NO_REASON are unreachable from the schema (holder and reason are required, non-blank): a database that answers one is a divergence fault, a throw, not the caller's refusal.
+  let threw = "";
+  try { await releaseHolderClaims(core(holderA) as never, P, { holder: "codex", reason: "cleanup" } as never); } catch (e) { threw = (e as Error).message; }
+  assert(/release_holder_claims: the database refused an argument the schema requires/.test(threw),
+    `a NO_HOLDER the schema should have caught throws as a divergence fault (${threw.slice(0, 70)})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");

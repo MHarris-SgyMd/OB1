@@ -1638,6 +1638,36 @@ export function normaliseSetCap(r: unknown): SetCapResult {
   throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
+/** A claim release_holder_claims ended, as list_work_claims identifies it: its id, ticket and piece (null for a whole-ticket claim). */
+export type ReleasedClaim = { id: string; issue: string; piece: string | null };
+
+/**
+ * release_holder_claims' answer (145, SMD-3606 PR 3). Released: the holder's live claims that ended (unreleased and
+ * unexpired), each kept as history with the operator and reason. Refused: NOT_OPERATOR (not a key the registry
+ * classifies operator by its agent id; `kind` what it is), NO_HOLDER or NO_REASON (a blank argument — the surface's
+ * schema requires both, so from a client these are unreachable, a fault if they come).
+ */
+export type ReleaseHolderResult =
+  | { ok: true; holder: string; released: number; claims: ReleasedClaim[] }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "NO_HOLDER" | "NO_REASON"; message: string };
+
+/** release_holder_claims' jsonb (145) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseReleaseHolder(r: unknown): ReleaseHolderResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  if (o?.ok === true && typeof o.holder === "string" && typeof o.released === "number" && Array.isArray(o.claims)) {
+    const claims: ReleasedClaim[] = o.claims.map((c) => {
+      const e = (c !== null && typeof c === "object" ? c : {}) as Record<string, unknown>;
+      return { id: String(e.id), issue: String(e.issue), piece: typeof e.piece === "string" ? e.piece : null };
+    });
+    return { ok: true, holder: o.holder, released: o.released, claims };
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
+  if (o?.ok === false && (o.error === "NO_HOLDER" || o.error === "NO_REASON") && typeof o.message === "string") return { ok: false, error: o.error, message: o.message };
+  throw new Error(`release_holder_claims answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
 /**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
@@ -2708,6 +2738,12 @@ export interface ThoughtStore {
    */
   setWorkClaimCap(opts: { cap: number | null; actor?: Actor }): Promise<SetCapResult>;
   /**
+   * An operator ends every live claim one holder holds, in one call (migration 145's release_holder_claims, SMD-3606
+   * PR 3): the holder's key name and a reason, each released claim kept as history. The function decides who may — a key
+   * the registry classifies operator, by its agent id. A database before 144 throws.
+   */
+  releaseHolderClaims(opts: { holder: string; reason: string; actor?: Actor }): Promise<ReleaseHolderResult>;
+  /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
    * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
@@ -3084,7 +3120,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true, thoughtsKeyed: true, clientKeyOf: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 
