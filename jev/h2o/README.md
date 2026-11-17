@@ -43,6 +43,8 @@ Knobs:
   conformance run, against 0.69 with float16 and these kernels;
 - `H2O_SHARE` (1): the decisions of one request that share a context read it
   once. 0 reads every prompt whole;
+- `H2O_ATTENTION` (`one-way`) and `H2O_TWO_WAY_MAX_TOKENS` (8000): the reading
+  mode and the two-way length limit, under "Two-way reading" below;
 - `JEV_MAX_QUEUED` (8) and `JEV_MAX_QUEUED_BYTES` (33554432, 32 MiB):
   SMD-2082's admission bound, below. A value that isn't a positive whole number
   stops the start, naming it.
@@ -134,6 +136,49 @@ Through the client, a context of 4-byte characters stops at the client's own
 check first: JavaScript counts each as two UTF-16 units, so 19,000 of them pass
 its 20,000-unit cap. Python counts code points, so the adapter would accept
 them.
+
+## Two-way reading (SMD-4369)
+
+From v1.3 H2O's weights answer under two attention patterns. One-way is the
+causal read every earlier release has. Two-way lets the model's eight
+full-attention layers (every fourth of its 32) read the prompt in both
+directions, its Gated DeltaNet layers staying causal, so the answer slot sees
+the record, the question and the options whole. H2O recommends two-way and
+serves it through its own build of vLLM. This adapter reads it in one forward
+pass: `transformers`' Qwen3.5 text model takes `attention_mask` by layer type
+and uses it as given, so the full-attention layers get an all-attend mask.
+
+```bash
+H2O_REVISION=v1.4.2 H2O_ATTENTION=two-way JEV_PORT=8023 \
+  ~/decider-probe/.venv/bin/python jev/h2o/serve.py
+```
+
+- **The default is one-way, at `v1.2.3`.** Nothing changes until
+  `H2O_ATTENTION=two-way` is set (`one-way`, or H2O's `causal` and
+  `bidirectional`, are read too; another word stops the start).
+- **It needs weights trained for it.** A revision whose `serve_config.json`
+  has no `two_way.probe_reference` (any before v1.3) is refused at start.
+- **It checks itself at start, with H2O's own check.** `serve_config.json`
+  records the release weights' two-way answers to three fixed probes at
+  temperature 1. The adapter reads the same probes both ways and serves only
+  if its two-way answers are within `two_way.probe_tolerance` (0.05) of them
+  and at least 0.05 from its one-way answers on some question. The start line
+  says both numbers; at v1.4.2 on this Mac they are 0.0012 and 0.0967.
+- **It shares no prefix.** A two-way prefix is not reusable, so every question
+  of a request reads its record again, whatever `H2O_SHARE` says. Decide mode
+  asks one question a pair and pays nothing for that; a request asking eight
+  of one pair reads it eight times.
+- **It has a length limit of its own.** A two-way read's attention grows with
+  the square of its length. A context over `H2O_TWO_WAY_MAX_TOKENS` (8000, the
+  longest read measured here: 7,821 tokens in 6.7 s) gets the 422 a record over
+  the model's limit gets, naming the setting, and `/info`'s `max_tokens` says
+  that limit.
+- **`/info`'s `rules` says the mode.** It is `198e4c78db4c23dd` one-way, as it
+  always was, and `7a682316774558f0` two-way, so a judgement's lineage says how
+  it was read.
+
+Whether two-way judges this brain's pairs better than `v1.2.3` read one-way is
+not measured yet, so the pin and decide mode's settings stay as they are.
 
 ## How the contract maps onto H2O's questions
 

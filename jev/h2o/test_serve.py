@@ -21,8 +21,13 @@ jev/h2o/test_serve.py`); the real model's burst is the PR's own run against the 
   [11] a body that stalls, or trickles past its deadline, is a 408; the token count runs off the event loop; a context
       the tokenizer cannot encode is a 422
   [12] each prompt holds the decision's record
+  [13] H2O_ATTENTION's mode, the two-way length limit, and the rules string by mode (SMD-4369)
+  [14] serve_config.json's two_way block: read, or refused when absent or not the probes this port asks
+  [15] H2O's start-up guard: within the tolerance of the recorded answers, and apart from the one-way ones
+  [16] a two-way read is one whole pass a prompt, sharing nothing; the guard reads every probe question both ways
+  [17] a context over the two-way limit is a 422 naming the setting
 """
-import asyncio, importlib.util, json, os, sys, threading, time
+import asyncio, importlib.util, json, math, os, sys, threading, time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("h2o_serve", Path(__file__).with_name("serve.py"))
@@ -388,6 +393,137 @@ async def main():
     marked = "THOUGHT A: the quarterly audit moved to March. THOUGHT B: the auditors confirmed it."
     s, _, _ = await post(R, gate, body(context=marked))
     check(s == 200 and R.prompted and all(marked in p for p in R.prompted), f"each prompt holds the decision's record ({s}, {len(R.prompted)} prompts)")
+
+    print("\n[13] the reading mode, its limit and its rules")
+    modes = [serve.attention_of(v) for v in (None, "", " One-Way ", "causal", "two-way", "TWO_WAY", "bidirectional")]
+    check(modes == ["one-way", "one-way", "one-way", "one-way", "two-way", "two-way", "two-way"], f"unset is one-way, and H2O's words for each mode are read ({modes})")
+    refused = []
+    for bad in ("both", "2", "two way"):
+        try:
+            serve.attention_of(bad)
+            refused.append(False)
+        except SystemExit as e:
+            refused.append("H2O_ATTENTION" in str(e) and bad in str(e))
+    check(all(refused), f"another word is refused by the setting's name ({refused})")
+    limits = (serve.read_limit(32000, "one-way", 8000), serve.read_limit(32000, "two-way", 8000), serve.read_limit(4000, "two-way", 8000), serve.read_limit(0, "two-way", 8000))
+    check(limits == (32000, 8000, 4000, 8000), f"one-way keeps the model's limit; two-way takes the smaller, and a model with none still gets one ({limits})")
+    check(serve.rules_of("one-way") == serve.RULES and serve.rules_of("two-way") != serve.RULES and "two-way" in serve.rules_of("two-way")
+          and "shared context" not in serve.rules_of("two-way") and "shared context read once per request" in serve.RULES,
+          "the one-way rules are the string they were, and the two-way rules say two-way and no shared context")
+    import hashlib
+    hashes = [hashlib.sha256(serve.rules_of(m).encode()).hexdigest()[:16] for m in ("one-way", "two-way")]
+    check(hashes == ["198e4c78db4c23dd", "7a682316774558f0"], f"/info's rules value is the one earlier lineage rows carry one-way, and the README's two-way ({hashes})")
+
+    print("\n[14] serve_config.json's two_way block")
+    made_up = {2: [0.7, 0.3], 3: [0.7, 0.2, 0.1], 4: [0.7, 0.2, 0.06, 0.04]}   # a distribution per option count
+    reference = [{qid: dict(zip(serve.probe_options(typ, crit)[0], made_up[len(serve.probe_options(typ, crit)[0])]))
+                  for qid, typ, _, crit in qs} for _, qs in serve.TWO_WAY_PROBES]
+    good = {"temperature": {"choice": 0.75, "noul": 0.8, "score": 0.65},
+            "two_way": {"probe_reference": reference, "probe_tolerance": 0.05, "temperature": {"choice": 0.5, "noul": 0.6, "score": 0.7}}}
+    ref, tol, temps = serve.two_way_config(good, "v9")
+    check(ref is reference and tol == 0.05 and temps == {"choice": 0.5, "noul": 0.6, "score": 0.7}, f"the block's reference, tolerance and own temperatures are read ({tol}, {temps})")
+    no_temps = {"temperature": good["temperature"], "two_way": {"probe_reference": reference}}
+    check(serve.two_way_config(no_temps, "v9")[1:] == (0.05, good["temperature"]), "without its own, the tolerance is 0.05 and the temperatures the one-way ones")
+
+    def config_refused(cfg):
+        try:
+            serve.two_way_config(cfg, "v1.2.3")
+            return None
+        except SystemExit as e:
+            return str(e)
+    missing = config_refused({"temperature": good["temperature"]})
+    check(missing is not None and "v1.2.3" in missing and "not trained to read two-way" in missing, f"a release with no two_way block is refused, naming the revision ({missing})")
+    short = config_refused({**good, "two_way": {**good["two_way"], "probe_reference": reference[:2]}})
+    other = [dict(r) for r in reference]
+    other[1] = {**other[1], "next": {"wait": 0.5, "trace": 0.5}}
+    wrong_options = config_refused({**good, "two_way": {**good["two_way"], "probe_reference": other}})
+    bad_tol = [config_refused({**good, "two_way": {**good["two_way"], "probe_tolerance": t}}) for t in (0, 0.5, "0.05", True)]
+    check(short is not None and "2 probes" in short and wrong_options is not None and "'next'" in wrong_options and all(bad_tol),
+          f"two probes, a probe question without an answer per option, or a tolerance outside (0, 0.5) is refused ({short}, {wrong_options}, {bad_tol})")
+
+    print("\n[15] H2O's start-up guard")
+    def answers(shift):
+        out = []
+        for (_, qs), r in zip(serve.TWO_WAY_PROBES, reference):
+            row = {}
+            for qid, typ, _, crit in qs:
+                names = serve.probe_options(typ, crit)[0]
+                p = [r[qid][n] for n in names]
+                row[qid] = [p[0] - shift, p[1] + shift] + p[2:]
+            out.append(row)
+        return out
+    ok, gap, sep, why = serve.two_way_verdict(reference, 0.05, answers(0.09), answers(0.001))
+    check(ok and why is None and abs(gap - 0.001) < 1e-9 and abs(sep - 0.089) < 1e-9, f"two-way answers at the reference and apart from the one-way ones pass ({ok}, {gap:.4f}, {sep:.4f})")
+    ok, gap, _, why = serve.two_way_verdict(reference, 0.05, answers(0.2), answers(0.06))
+    check(not ok and abs(gap - 0.06) < 1e-9 and "0.0600 from the ones H2O recorded" in why, f"two-way answers 0.06 from the reference fail on the reference ({why})")
+    ok, _, sep, why = serve.two_way_verdict(reference, 0.05, answers(0.03), answers(0.0))
+    check(not ok and abs(sep - 0.03) < 1e-9 and "the mask was not applied" in why, f"two-way answers within 0.03 of the one-way ones fail on the separation ({why})")
+    one_apart = answers(0.0)
+    one_apart[2]["issue"] = [x + d for x, d in zip(one_apart[2]["issue"], (-0.06, 0.06, 0.0, 0.0))]
+    check(serve.two_way_verdict(reference, 0.05, one_apart, answers(0.0))[0], "one question 0.06 apart is enough: the other five may agree")
+    check(serve.two_way_verdict(reference, 0.05, answers(0.2), answers(0.049))[0] and not serve.two_way_verdict(reference, 0.05, answers(0.2), answers(0.051))[0]
+          and serve.two_way_verdict(reference, 0.05, answers(0.051), answers(0.0))[0] and not serve.two_way_verdict(reference, 0.05, answers(0.049), answers(0.0))[0],
+          "each rule turns at its own number: 0.049 from the reference passes and 0.051 fails; 0.051 apart passes and 0.049 fails")
+
+    print("\n[16] a two-way read")
+    class Rows:
+        def __matmul__(self, h): return Vec([h, h + 1.0])
+    class Vec:
+        def __init__(self, v): self.v = v
+        def tolist(self): return self.v
+    class NoGrad:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    class Torch:
+        @staticmethod
+        def inference_mode(): return NoGrad()
+    calls = []
+    R = object.__new__(serve.Reader)
+    R.torch, R.w, R.share, R.two_way = Torch, Rows(), True, True
+    R._run_two_way = lambda ids: calls.append(("two", tuple(ids))) or float(len(ids))
+    R._run = lambda ids, cache=None, keep=False: (calls.append(("one", tuple(ids), cache is not None, keep)) or float(len(ids)), "cache" if keep else None)
+    prompts = [[1, 2, 3, 4], [1, 2, 3, 5, 6]]
+    out = R.read(prompts)
+    check(calls == [("two", (1, 2, 3, 4)), ("two", (1, 2, 3, 5, 6))] and out == [[4.0, 5.0], [5.0, 6.0]],
+          f"under two-way each prompt is one whole two-way pass, though sharing is on and they share a prefix ({calls})")
+    calls.clear()
+    R.read(prompts, two_way=False, share=False)
+    check(calls == [("one", (1, 2, 3, 4), False, False), ("one", (1, 2, 3, 5, 6), False, False)], f"the guard's one-way read of the same prompts takes the causal path ({calls})")
+    calls.clear()
+    R.two_way = False
+    R.read(prompts)
+    check([c[0] for c in calls] == ["one", "one", "one"] and calls[0] == ("one", (1, 2, 3), False, True), f"under one-way the shared prefix is still read once ({calls})")
+
+    # the guard as the Reader runs it: every probe question read both ways, the answers at temperature 1
+    R = object.__new__(serve.Reader)
+    R.torch, R.probe_reference, R.probe_tolerance, R.temperature = Torch, reference, 0.05, {"choice": 0.75, "noul": 0.8, "score": 0.65}
+    R.encode, asked = (lambda text: text), []
+    R.prompt = lambda state, instr, names, descs: (state, instr, tuple(names))
+    by_instr = {instr: (qid, serve.probe_options(typ, crit)[0]) for _, qs in serve.TWO_WAY_PROBES for qid, typ, instr, crit in qs}
+    probe_of = {qid: k for k, (_, qs) in enumerate(serve.TWO_WAY_PROBES) for qid, _, _, _ in qs}
+    def fake_read(prompts, share=None, two_way=None):
+        (state, instr, names), = prompts
+        qid, want = by_instr[instr]
+        asked.append((qid, two_way, share, state))
+        p = [reference[probe_of[qid]][qid][n] for n in want]
+        if not two_way: p = [p[0] - 0.08, p[1] + 0.08] + p[2:]
+        return [[math.log(x) for x in p] + [0.0] * 3]   # more logits than options: only the question's own are read
+    R.read = fake_read
+    ok, gap, sep, why = R.two_way_matches()
+    check(ok and gap < 1e-9 and abs(sep - 0.08) < 1e-9, f"a reader whose two-way answers are the recorded ones passes, at temperature 1 whatever the type's own ({ok}, {gap:.6f}, {sep:.4f}, {why})")
+    check(len(asked) == 12 and sum(1 for a in asked if a[1]) == 6 and all(a[2] is False for a in asked)
+          and asked[0][3] == '{"ticket":"Checkout returns HTTP 500 for every customer since 09:12.","plan":"enterprise"}' and asked[4][3].startswith("The parcel left"),
+          f"each of the six questions is read once each way, unshared, a structured record as compact JSON and a string as it is ({len(asked)})")
+
+    print("\n[17] a context over the two-way limit")
+    R, gate = FakeReader(), serve.Gate()
+    R.two_way, R.model_max_state_tokens, R.max_state_tokens = True, 32000, 1000
+    s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
+    check(s == 422 and "1500 tokens" in b["error"] and "1000" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" in b["error"] and "head and tail" not in b["error"] and R.reads == 0,
+          f"under the model's limit and over the two-way one: a 422 naming the setting, nothing read ({s}, {b.get('error')})")
+    R.model_max_state_tokens = 1200
+    s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
+    check(s == 422 and "head and tail" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" not in b["error"], f"over the model's own limit too: the model's refusal, as one-way gives ({b.get('error')})")
 
 
 asyncio.run(main())

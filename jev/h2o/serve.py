@@ -43,11 +43,26 @@ tail as H2O's own shim cuts it, so a caller never gets a verdict on a record who
 an adapter answer a cut it can read faithfully, `truncated: true`; this adapter reads no cut as faithful, so every
 result it answers says `truncated: false`.
 
+Two-way reading (SMD-4369). From v1.3 H2O's weights answer under two attention patterns: one-way, the causal read
+above, and two-way, where the model's full-attention layers (8 of its 32) read the prompt in both directions and its
+Gated DeltaNet layers stay causal, so the answer slot sees the record, the question and the options whole. H2O serves
+two-way through its own vLLM build; here it is one forward pass whose `attention_mask` names an all-attend mask for the
+full-attention layers, which transformers' Qwen3.5 text model takes by layer type and uses as given. H2O_ATTENTION=two-way
+asks for it, on a revision whose serve_config.json carries a `two_way` block (none before v1.3: refused at start).
+H2O ships the check, and this port applies it at start as the shim does: the release weights' two-way answers to three
+fixed probes at temperature 1 (`two_way.probe_reference`) must be matched within `two_way.probe_tolerance` (0.05), and
+must differ from the one-way answers by at least 0.05 on some question, or the tier does not serve. A two-way read
+shares no prefix (a two-way prefix is not reusable), so every question of a request reads its record again, and its
+memory grows with the square of its length: a context over H2O_TWO_WAY_MAX_TOKENS (8,000, the longest measured here)
+gets the 422 above, and /info's max_tokens says that limit. /info's `rules` differs by mode, so a judgement's lineage
+says how it was read; the one-way value is what it was before this mode existed.
+
 Endpoints (ob1-jev/1): GET /health, GET /info, POST /decide.
 Knobs: JEV_HOST (127.0.0.1), JEV_PORT (8022), JEV_MAX_QUEUED (8), JEV_MAX_QUEUED_BYTES (33554432, 32 MiB),
 H2O_MODEL (h2oai/h2o-lightning-4b), H2O_REVISION (v1.2.3), H2O_DEVICE (mps), H2O_SHARE (1), H2O_DTYPE (float16 on MPS,
 as decider runs; bfloat16 elsewhere), H2O_MPS_PATCH (1: decider's MPS kernels for the gated-delta layers, when the
-decider package is installed).
+decider package is installed), H2O_ATTENTION (one-way; two-way on a revision trained for it), H2O_TWO_WAY_MAX_TOKENS
+(8000).
 """
 import asyncio, copy, hashlib, json, math, os, time
 from concurrent.futures import ThreadPoolExecutor
@@ -77,6 +92,113 @@ RULES = ("h2o_lightning_shim.py v1.2.3 text path: chat template, serve_config sy
          "question + `id: description` (an `id: ` prefix dropped); binary = noul, true = proposition, false = 'It is not "
          "the case that ' + proposition; INSUFFICIENT_EVIDENCE at probability 0; shared context read once per request")
 
+# Two-way reading (SMD-4369). The one-way RULES string is unchanged, so its hash is what earlier lineage rows carry.
+RULES_TWO_WAY = RULES.replace("shared context read once per request",
+                              "two-way reading: an all-attend mask on the full-attention layers, the Gated DeltaNet "
+                              "layers causal, every prompt read whole, H2O's three probes checked at start")
+ATTENTION_MODES = {"one-way": "one-way", "one_way": "one-way", "oneway": "one-way", "causal": "one-way",
+                   "two-way": "two-way", "two_way": "two-way", "twoway": "two-way", "bidirectional": "two-way"}
+DEFAULT_TWO_WAY_MAX_TOKENS = 8000   # the longest two-way read measured on this Mac (SMD-4369): 7,821 tokens, 6.7 s
+TWO_WAY_MIN_SEPARATION = 0.05       # the shim's: the two modes' answers differ by at least this on some probe question
+# H2O's three probes (h2o_lightning_shim.py's TWO_WAY_PROBES at v1.4.2, Apache-2.0), whose two-way answers on the
+# release weights serve_config.json records: (the record, [(question id, type, instructions, criteria)]).
+TWO_WAY_PROBES = [
+    ({"ticket": "Checkout returns HTTP 500 for every customer since 09:12.", "plan": "enterprise"},
+     [("outage", "noul", "Is this a full outage?", {"true": "yes", "false": "no"}),
+      ("team", "choice", "Which team should take it?", {"payments": "Payments", "web": "Web frontend", "support": "Customer support"})]),
+    ("The parcel left the depot on Monday, was scanned in Lyon on Tuesday and has not moved since.",
+     [("lost", "noul", "Should the parcel be declared lost?", {"true": "yes", "false": "no"}),
+      ("next", "choice", "What should happen next?", {"wait": "Wait two more days", "trace": "Open a trace with the carrier", "refund": "Refund the customer now"})]),
+    ({"review": "Battery lasts two days, screen is dim outdoors, support replaced it once without fuss.", "stars": 3},
+     [("tone", "score", "How positive is the review?", ["Negative", "Mixed", "Positive"]),
+      ("issue", "choice", "What is the main complaint?", {"battery": "Battery", "screen": "Screen", "support": "Support", "none": "No complaint"})]),
+]
+
+
+def attention_of(raw):
+    """H2O_ATTENTION's mode, "one-way" or "two-way" (H2O's own words for them are read too), or a refusal to start."""
+    v = (raw or "").strip().lower()
+    if not v:
+        return "one-way"
+    if v not in ATTENTION_MODES:
+        raise SystemExit(f"H2O_ATTENTION is one-way or two-way, not {raw!r}")
+    return ATTENTION_MODES[v]
+
+
+def probe_options(typ, criteria):
+    """(option names, descriptions) of a probe question, as the shim's options_of builds them."""
+    if typ == "noul":
+        return ["true", "false"], [criteria["true"], criteria["false"]]
+    if typ == "score":
+        return [str(i) for i in range(len(criteria))], list(criteria)
+    return list(criteria), [criteria[k] for k in criteria]
+
+
+def probe_state(state):
+    """A probe's record as the shim renders it: a string verbatim, anything else as compact JSON."""
+    return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+
+
+def two_way_config(cfg, revision):
+    """(the probes' recorded answers, the tolerance, the temperatures by type) from serve_config.json's `two_way`
+    block, or a refusal to start: weights from before v1.3 were not trained to read two-way, and an all-attend mask on
+    them is no read H2O measured."""
+    tw = cfg.get("two_way")
+    if not isinstance(tw, dict) or not isinstance(tw.get("probe_reference"), list):
+        raise SystemExit(f"H2O_ATTENTION=two-way, but {revision}'s serve_config.json has no two_way.probe_reference: "
+                         f"these weights were not trained to read two-way (H2O's are from v1.3)")
+    ref = tw["probe_reference"]
+    if len(ref) != len(TWO_WAY_PROBES):
+        raise SystemExit(f"two_way.probe_reference holds {len(ref)} probes, not the {len(TWO_WAY_PROBES)} this port asks")
+    for (_, questions), entry in zip(TWO_WAY_PROBES, ref):
+        for qid, typ, _, criteria in questions:
+            names = probe_options(typ, criteria)[0]
+            got = entry.get(qid) if isinstance(entry, dict) else None
+            if (not isinstance(got, dict) or sorted(got) != sorted(names)
+                    or not all(isinstance(got[n], (int, float)) and not isinstance(got[n], bool) for n in names)):
+                raise SystemExit(f"two_way.probe_reference has no answer per option for the probe question {qid!r}: not the probes this port asks")
+    tol = tw.get("probe_tolerance", 0.05)
+    if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 < tol < 0.5:
+        raise SystemExit(f"two_way.probe_tolerance is a number in (0, 0.5), not {tol!r}")
+    t = tw.get("temperature", cfg["temperature"])
+    return ref, float(tol), {k: float(t[k] if isinstance(t, dict) else t) for k in ("choice", "noul", "score")}
+
+
+def two_way_verdict(reference, tolerance, one_way, two_way, min_separation=TWO_WAY_MIN_SEPARATION):
+    """H2O's start-up guard over the probes' answers at temperature 1, each a list of {question id: [p per option]}
+    beside `reference`'s {question id: {option: p}}, in the probes' option order: (ok, the largest gap between a
+    two-way answer and the recorded one, the largest gap between the two modes' answers, why not).
+
+    Both rules must hold. A read that is not two-way (the mask ignored) agrees with the one-way read and fails the
+    separation; other weights, another dtype or another prompt miss the reference."""
+    gap = sep = 0.0
+    for (_, questions), ref, one, two in zip(TWO_WAY_PROBES, reference, one_way, two_way):
+        for qid, typ, _, criteria in questions:
+            names = probe_options(typ, criteria)[0]
+            want = [float(ref[qid][n]) for n in names]
+            gap = max(gap, max(abs(a - b) for a, b in zip(two[qid], want)))
+            sep = max(sep, max(abs(a - b) for a, b in zip(two[qid], one[qid])))
+    if gap > tolerance:
+        return False, gap, sep, (f"its two-way answers are up to {gap:.4f} from the ones H2O recorded on the release weights "
+                                 f"(tolerance {tolerance:g}): other weights, another dtype, or a prompt that is not the shim's")
+    if sep < min_separation:
+        return False, gap, sep, (f"its two-way answers are within {sep:.4f} of its one-way ones on every probe (two-way is at "
+                                 f"least {min_separation:g} apart on some question): the mask was not applied")
+    return True, gap, sep, None
+
+
+def read_limit(max_state_tokens, attention, two_way_max):
+    """The most tokens of context one read takes: serve_config.json's max_state_tokens, and under two-way no more than
+    H2O_TWO_WAY_MAX_TOKENS, since a two-way read's attention grows with the square of its length."""
+    if attention != "two-way":
+        return max_state_tokens
+    return min(max_state_tokens, two_way_max) if max_state_tokens else two_way_max
+
+
+def rules_of(attention):
+    """The rules string whose hash /info reports: by mode, the one-way one as it always was."""
+    return RULES_TWO_WAY if attention == "two-way" else RULES
+
 
 def common_prefix_len(seqs):
     """The length of the longest common prefix of several token id lists."""
@@ -90,7 +212,7 @@ def common_prefix_len(seqs):
 class Reader:
     """The model, its tokenizer and serve_config.json, and the shim's prompt and readout."""
 
-    def __init__(self, path, device="mps", share=True):
+    def __init__(self, path, device="mps", share=True, attention="one-way", two_way_max=DEFAULT_TWO_WAY_MAX_TOKENS):
         import torch
         from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
         self.torch, self.path, self.share = torch, Path(path), share
@@ -113,6 +235,14 @@ class Reader:
         self.default_instructions = p.get("default_instructions", "Answer the question below.")
         t = self.cfg["temperature"]
         self.temperature = {k: float(t[k] if isinstance(t, dict) else t) for k in ("choice", "noul", "score")}
+        # Two-way (SMD-4369): its own block's temperatures (shipped equal to the one-way ones), no shared prefix, and
+        # a limit on a read's length below the model's own
+        self.attention, self.two_way = attention, attention == "two-way"
+        self.model_max_state_tokens = self.max_state_tokens
+        if self.two_way:
+            self.probe_reference, self.probe_tolerance, self.temperature = two_way_config(self.cfg, self.path.name)
+            self.share = False
+            self.max_state_tokens = read_limit(self.max_state_tokens, attention, two_way_max)
         self.labels = [str(l) for l in self.cfg["labels"]][: int(self.cfg.get("max_options", len(self.cfg["labels"])))]
         self.tok = AutoTokenizer.from_pretrained(path)
         model = Qwen3_5ForConditionalGeneration.from_pretrained(path, dtype=getattr(torch, self.dtype))
@@ -174,11 +304,26 @@ class Reader:
         out = self.lm(input_ids=x, past_key_values=cache, use_cache=keep or cache is not None)
         return out.last_hidden_state[0, -1].float(), (out.past_key_values if keep else None)
 
-    def read(self, prompts, share=None):
+    def _run_two_way(self, ids):
+        """The final hidden state at the last position of a two-way read: one pass, every position of the full-attention
+        layers attending to every position (an additive mask of zeros, given by layer type, which the text model uses
+        as it is given), the Gated DeltaNet layers causal as they always are, and no cache: a two-way prefix is not
+        reusable."""
+        x = self.torch.tensor([ids], dtype=self.torch.long, device=self.dev)
+        emb = self.lm.get_input_embeddings()(x)
+        full = self.torch.zeros((1, 1, len(ids), len(ids)), dtype=emb.dtype, device=self.dev)
+        out = self.lm(inputs_embeds=emb, attention_mask={"full_attention": full, "linear_attention": None}, use_cache=False)
+        return out.last_hidden_state[0, -1].float()
+
+    def read(self, prompts, share=None, two_way=None):
         """The label logits at the answer slot of each prompt (token id lists). With sharing, the prompts' common
-        prefix is read once and each tail continues from a copy of its cache."""
+        prefix is read once and each tail continues from a copy of its cache. A two-way read shares nothing: each
+        prompt is one whole pass."""
         share = self.share if share is None else share
+        two_way = self.two_way if two_way is None else two_way
         with self.torch.inference_mode():
+            if two_way:
+                return [(self.w @ self._run_two_way(p)).tolist() for p in prompts]
             k = common_prefix_len(prompts) if len(prompts) > 1 else 0
             k = min(k, min(len(p) for p in prompts) - 1)
             if not share or k < 1:
@@ -201,6 +346,22 @@ class Reader:
         e = [math.exp(x - m) for x in s]
         z = sum(e)
         return raw, [x / z for x in e]
+
+    def two_way_matches(self):
+        """The start-up check under two-way, H2O's own (two_way_verdict): the three probes read both ways at
+        temperature 1 against the answers recorded on the release weights. (ok, gap, separation, why not)"""
+        one, two = [], []
+        for state, questions in TWO_WAY_PROBES:
+            a, b = {}, {}
+            for qid, typ, instr, criteria in questions:
+                names, descs = probe_options(typ, criteria)
+                ids = self.encode(self.prompt(probe_state(state), instr, names, descs))
+                for out, mode in ((a, False), (b, True)):
+                    raw = self.answer(self.read([ids], share=False, two_way=mode)[0], len(names), typ)[0]
+                    out[qid] = [math.exp(x) for x in raw]
+            one.append(a)
+            two.append(b)
+        return two_way_verdict(self.probe_reference, self.probe_tolerance, one, two)
 
     def shared_read_matches(self):
         """The start-up check: a shared read gives the answers of whole reads (bf16 noise aside)."""
@@ -468,6 +629,10 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                     except Exception as e:
                         return 422, {"error": f"decision {i}: its context cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
                 if seen[ctx] is not None:
+                    if getattr(R, "two_way", False) and seen[ctx] <= R.model_max_state_tokens:
+                        return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
+                                              f"tier reads two-way (H2O_TWO_WAY_MAX_TOKENS): a two-way read's memory grows with the "
+                                              f"square of its length, so it is refused"}, {}
                     return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
                                           f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}
             return None
@@ -532,23 +697,32 @@ def snapshot():
 def main():
     import uvicorn
     gate = Gate(knob("JEV_MAX_QUEUED", DEFAULT_MAX_QUEUED), knob("JEV_MAX_QUEUED_BYTES", DEFAULT_MAX_QUEUED_BYTES))
+    # Read before the weights are hashed and loaded, so a mistyped setting stops the start at once
+    attention, two_way_max = attention_of(os.environ.get("H2O_ATTENTION")), knob("H2O_TWO_WAY_MAX_TOKENS", DEFAULT_TWO_WAY_MAX_TOKENS)
     t0 = time.time()
     path = snapshot()
     weights = Path(path) / "model.safetensors"
     h = hashlib.sha256()
     with open(weights, "rb") as f:
         for chunk in iter(lambda: f.read(8 << 20), b""): h.update(chunk)
-    R = Reader(path, os.environ.get("H2O_DEVICE", "mps"), SHARE)
-    if SHARE:
+    R = Reader(path, os.environ.get("H2O_DEVICE", "mps"), SHARE, attention, two_way_max)
+    reading = "every prompt read whole"
+    if R.two_way:
+        ok, gap, sep, why = R.two_way_matches()
+        if not ok: raise SystemExit(f"this is not H2O's two-way read: {why}")
+        reading = (f"two-way, every prompt read whole, at most {R.max_state_tokens} tokens of context (H2O's probes matched "
+                   f"within {gap:.4f}, {sep:.4f} from the one-way read)")
+    elif SHARE:
         ok, worst = R.shared_read_matches()
         if not ok: raise SystemExit(f"a shared read differs from whole reads (worst log-probability gap {worst:.3f}); set H2O_SHARE=0")
+        reading = "a shared context read once per request (checked)"
     model_info = {"name": MODEL_NAME, "source": REPO, "revision": Path(path).name, "weights_sha256": h.hexdigest(),
                   "calibrator_sha256": hashlib.sha256((Path(path) / "serve_config.json").read_bytes()).hexdigest(),
-                  "rules": hashlib.sha256(RULES.encode()).hexdigest()[:16]}
+                  "rules": hashlib.sha256(rules_of(attention).encode()).hexdigest()[:16]}
     host, port = os.environ.get("JEV_HOST", "127.0.0.1"), int(os.environ.get("JEV_PORT", "8022"))
     print(f"jev-h2o: {MODEL_NAME} ({REPO}@{REVISION} = {Path(path).name[:8]}, weights {h.hexdigest()[:12]}) ready in "
           f"{time.time() - t0:.0f} s; {R.dtype}{', decider MPS kernels' if R.patched else ''}; T {R.temperature}; serving {CONTRACT} on http://{host}:{port}; "
-          f"{'a shared context read once per request (checked)' if SHARE else 'every prompt read whole'}; "
+          f"{reading}; "
           f"one read at a time, at most {gate.max_queued} requests and {gate.max_bytes} bytes admitted", flush=True)
     uvicorn.run(build_app(R, model_info, gate), host=host, port=port, log_level="warning")
 
