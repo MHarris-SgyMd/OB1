@@ -44,7 +44,7 @@ import {
   type ChunkTokensFrom,
   type ExtractWindowFrom,
 } from "../db/config.mjs";
-import { flagOn, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
+import { flagOn, hostOf, mayLeaveBox, resolveEgressPolicy, type EgressDecision, type EgressPolicy, type EgressSubject } from "./egress.ts";
 import { statusType, usageOf, withProviderSpan } from "./spans.ts";
 import { currentCallClass, modelCall } from "./model-call.ts";
 
@@ -270,19 +270,28 @@ export function providerFault(e: unknown): { retryable: boolean; reason: string;
  * reason — an AbortError for a plain abort(), never OB1_LLM_TIMEOUT's error —
  * rather than running out OB1_LLM_TIMEOUT. The deadline still holds beside
  * it, and a deadline that passes is still the timeout, named.
+ *
+ * `subject` may be several: a call that carries several rows' text (lint-sweep's
+ * Tier 3, SMD-3318 PR 2b) names each row, and goes only when the gate lets every
+ * one leave; the first refused refuses the call. An empty list is refused too:
+ * a call that names no row has nothing the policy could have judged.
  */
-export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, subject: EgressSubject, signal?: AbortSignal): Promise<T> {
+export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, subject: EgressSubject | readonly EgressSubject[], signal?: AbortSignal): Promise<T> {
   const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
   // The endpoint the PATH selects, and the one every message below names: a
   // chat call that fails names the chat base, which since SMD-1902 need not be
   // the embeddings base.
   const at = endpointFor(cfg, path);
-  const gate = mayLeaveBox(subject, at, cfg.egress);
-  if (!gate.allowed) throw refuseEgress(what, at.base, gate);
+  const subjects: readonly EgressSubject[] = Array.isArray(subject) ? subject : [subject as EgressSubject];
+  if (subjects.length === 0) throw new Error(`${what}: no subject for the egress gate to judge; the text was not sent to ${hostOf(at.base)}`);
+  for (const one of subjects) {
+    const gate = mayLeaveBox(one, at, cfg.egress);
+    if (!gate.allowed) throw refuseEgress(what, at.base, gate);
+  }
   const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
   // Through the model-call seam (SMD-3379 PR 2a), the gate's refusal before it, so a refused call waits for no slot,
   // and the span inside it, so the span times the call and not a wait; the deadline starts in exchange.
-  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, local: at.local, purpose: subject.kind, ...(signal ? { signal } : {}) },
+  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model: typeof model === "string" ? model : undefined, base: at.base, local: at.local, purpose: subjects[0].kind, ...(signal ? { signal } : {}) },
     () => withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
       const answer = await exchange<T>(cfg, path, body, at, what, signal);
       span.set(usageOf(answer));

@@ -269,6 +269,17 @@ console.log("\n[5] The diallers refuse BEFORE the request: the stub sees nothing
          "judgePair: one side allowed and one not is refused — the more restricted row decides for the pair");
   assert(await kindOf(judgePair({ content: "a", createdAt: null, metadata: { type: "reference" } }, { content: "b", createdAt: null, metadata: { type: "reference" } }, byType)) === "ok" && requests() === before + 1,
          "…and both allowed is one request");
+  // A call carrying several rows (lint-sweep's Tier 3, SMD-3318 PR 2b) names each: one refused refuses the call, every
+  // one allowed is one request, and a list naming none is refused before the request too.
+  const rows = (...types: string[]): EgressSubject[] => types.map((type) => ({ kind: "lint", metadata: { type }, content: `a ${type}` }));
+  const chat = { model: META_MODEL, messages: [] };
+  const r0 = requests();
+  const mixed = await kindOf(providerCall(byType, "/chat/completions", chat, rows("reference", "person_note", "reference")));
+  const none = await kindOf(providerCall(byType, "/chat/completions", chat, []));
+  assert(mixed === "egress" && /no subject for the egress gate to judge/.test(none) && requests() === r0,
+         `providerCall with several subjects: one refused of three refuses the call, an empty list is refused, neither dialled (${mixed}; ${none.slice(0, 60)}; ${requests() - r0})`);
+  assert(await kindOf(providerCall(byType, "/chat/completions", chat, rows("reference", "reference"))) === "ok" && requests() === r0 + 1,
+         "…and every one allowed is one request");
 
   // Declared local: every dialler dials.
   const declared = resolveEmbedConfig({ OB1_LLM_BASE_URL: STUB, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL });

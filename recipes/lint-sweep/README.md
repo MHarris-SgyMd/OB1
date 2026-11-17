@@ -1,10 +1,10 @@
 # Lint Sweep
 
-> **In Daemonic Brain (SMD-3318) — moved to `db/`.** Tiers 1 and 2 now live
-> in [`db/lint-sweep.ts`](../../db/lint-sweep.ts), a `db/` script on Bun's
-> Postgres client that reads the core's tables. Tier 3, a model's reading of
-> sampled thoughts, follows in SMD-3318 PR 2b through the brain's provider and
-> egress gate. The original `lint-sweep.js` reached the brain as a PostgREST
+> **In Daemonic Brain (SMD-3318) — moved to `db/`.** The sweep lives in
+> [`db/lint-sweep.ts`](../../db/lint-sweep.ts), a `db/` script on Bun's
+> Postgres client that reads the core's tables; Tier 3, a model's reading of
+> sampled thoughts, goes through the brain's own chat endpoint and egress gate.
+> The original `lint-sweep.js` reached the brain as a PostgREST
 > client, then through `compat/supabase-sql` (SMD-2144), which retires
 > (SMD-3216). The script is gone; `views.sql` stays (below).
 
@@ -23,8 +23,9 @@ so the password is not on a command line:
 
 ```bash
 # ~/lint/.env (chmod 600):  DATABASE_URL=postgres://<role>:<password>@127.0.0.1:<port>/openbrain
-cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts                 # both tiers; ./lint-report-YYYY-MM-DD.md (UTC date)
+cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts                 # every tier; ./lint-report-YYYY-MM-DD.md (UTC date)
 cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
+cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 1 and 2 alone: no model call
 ```
 
 - **The connection.** On the stack, a checkout reaches Postgres only when the
@@ -46,10 +47,12 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   `OPEN_BRAIN_URL`) to `DATABASE_URL`, and call `bun ../../db/lint-sweep.ts`
   where you called `bun lint-sweep.js`. Flags take their value after a space
   (`--tier 1`, `--report week.md`); `--tier=1` is refused, and so are `-v` and
-  `-h` (`--help` prints the flags). `--sample-size`, `--max-llm-calls`, `--days`
-  and `--llm-model` went with Tier 3 and `--verbose` with the recipe's progress
-  lines; each is refused saying why, so drop `--max-llm-calls 0` from the line.
-  `OPENROUTER_API_KEY` is not read. A read-only role the old README granted
+  `-h` (`--help` prints the flags). `--sample-size`, `--max-llm-calls` and
+  `--days` are Tier 3's as before; `--llm-model` is `--model` now, and
+  `--verbose` went with the recipe's progress lines (each refused saying why).
+  `OPENROUTER_API_KEY` is not read: Tier 3 reaches the brain's own chat
+  endpoint, and only as the egress policy lets each thought leave (below), so a
+  job that ran Tier 3 needs that policy to say so, or runs tiers 1 and 2 alone. A read-only role the old README granted
   `entities` and `edges` needs SELECT on `ob1_entities` and `ob1_entity_edges`
   in their place: the run locks every table its tiers read first, so a missing
   grant fails the whole run, Tier 1 included (`--tier 1` needs `thoughts`
@@ -63,6 +66,22 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   `--statement-timeout` (60 s; 0 for none), lifted for the whole-table counts,
   and every lock wait by the same bound. In `pg_stat_activity` the run is
   `lint-sweep`.
+- **Tier 3's egress.** The thoughts go to the chat endpoint and model the
+  brain's server resolves (`OB1_CHAT_BASE_URL` or `OB1_LLM_BASE_URL`,
+  `OB1_METADATA_MODEL`; `--model` names another), each put to the egress gate on
+  its own units: `OB1_WORKER_KEY`'s name as the actor, its source, type and
+  topics, the text sent as the marker. A refused thought is left out. Under the
+  default deny, with no allow term and no endpoint declared local, the tier is
+  skipped before any read, and the report says why. Release it with
+  `OB1_EGRESS_ALLOW=actor:<the worker key>`, or with a source, type, topic or
+  marker the thoughts to send carry, or run a local model (`OB1_LLM_LOCAL=1`);
+  under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
+  thoughts back. Before the gate, a thought `restricted`, or `personal` unless
+  `--include-personal`, by its `sensitivity_tier` key or column or by the
+  sensitivity patterns over what is sent and its whole text, is never sent
+  (weekly-digest's hold-back, `db/sensitivity.ts`). With `OB1_WORKER_KEY` set, the
+  key is resolved first, as every worker's is: the agent registry records it,
+  or its last use, the run's one write to the brain.
 - **Size and time.** Measured on a scratch brain: about half a second warm and
   5 s cold for a million thoughts, so minutes at 100 million and about an hour
   at a billion, the locks and the snapshot held throughout.
@@ -86,8 +105,20 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --tier 1 --report week.md
   those no entity mention names (extraction found nothing in them, has not
   reached them, failed on them — `bun db/extract-entities.ts --retry-failed` —
   or is off); the entities with no edge (exact).
+- **Tier 3, a model's reading:** the newest dated thoughts of the last
+  `--days` (365) whose text, trimmed, is 20 characters or more, up to
+  `--sample-size` (100) once the hold-back and the gate have kept theirs back,
+  sent 20 a call, at most `--max-llm-calls` (5; 0 turns it off). Each goes as a
+  ref (`t1`…), its date, type, first 400 characters and five topics and tags,
+  with today's date. The model names contradictions, stale facts, superseded
+  decisions, orphans and missing links; each finding lists its thoughts' ids,
+  and its words are made safe as a preview is and cut to 300 characters. Fewer
+  than 10 thoughts left to send skips the tier. The sample is read in the
+  sweep's snapshot, and the calls go after its transaction ends.
 
-A run that fails writes no report and exits 1 with the reason. The samples
+A run that fails writes no report and exits 1 with the reason; a Tier 3 call
+that fails (after its transient retries) stops that tier alone, and the report
+is written with what came before, exit 1. The samples
 read the created_at index; among thoughts sharing a `created_at` at a sample's
 edge (an import's transaction, a day-precision date), which are read is the
 index's order. A far-future `created_at` (a mistyped year) is the newest, and
@@ -122,6 +153,14 @@ leads both samples.
   the very-long check and the 120-character previews.
 - **The connection** is `--url` or `DATABASE_URL`, not `SUPABASE_URL`, and the
   run refuses (exit 2) when `PGDATABASE` would point it at another database.
+- **Tier 3 goes through the brain:** the brain's chat endpoint and model, not
+  OpenRouter with a key of its own; the egress gate on each thought; and
+  weekly-digest's sensitivity hold-back. Its `low_signal` kind is gone (it read
+  `importance`), and so is its `source_type`, which it read but never sent. A
+  thought is named by its id; the model sees a ref, mapped back, and a finding
+  naming no thought of its batch is dropped and counted. An answer that is no
+  JSON object loses its batch's findings, counted, where the recipe stopped the
+  run. Today's date goes with each batch, for what is stale.
 
 ## The views
 

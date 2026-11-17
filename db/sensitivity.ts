@@ -1,6 +1,7 @@
 /**
  * sensitivity.ts — the sensitivity patterns and tiers `db/backfill-metadata.ts`
- * writes and `db/weekly-digest.ts` holds a row back by (SMD-3318).
+ * writes, and the hold-back `db/weekly-digest.ts` and `db/lint-sweep.ts`'s Tier 3
+ * keep a row from a model by (SMD-3318).
  *
  * The patterns began as `recipes/thought-enrichment/sensitivity-patterns.json`'s,
  * copied when the recipe's backfill-sensitivity.mjs moved to `db/`, and were
@@ -36,6 +37,8 @@
  * white space) 0, `personal` 1, `restricted` 2; anything else (a number,
  * `secret`) is no tier this ranks, and a writer leaves it.
  */
+
+import type { SQL } from "bun";
 
 export const PATTERNS: { readonly restricted: readonly (readonly [string, string, string])[]; readonly personal: readonly (readonly [string, string, string])[] } = {
   restricted: [
@@ -205,3 +208,61 @@ export const sqlTier = (expr: string) => `lower(regexp_replace(${expr}, '^[[:spa
 
 export const RANK: Readonly<Record<Tier, number>> = { standard: 0, personal: 1, restricted: 2 };
 export const TIER_OF_RANK: readonly Tier[] = ["standard", "personal", "restricted"];
+
+// ── The hold-back: what keeps a row from a model (weekly-digest, lint-sweep's Tier 3) ──
+
+/** The rows whose whole text one statement reads for the patterns: a window of long documents is read a batch at a time, never whole. */
+export const PATTERN_BATCH = 100;
+
+/** The tiers held back: `restricted` always, `personal` unless the caller includes it. */
+export const heldTiers = (includePersonal: boolean): readonly string[] => (includePersonal ? ["restricted"] : ["restricted", "personal"]);
+
+/**
+ * Whether `public.thoughts` has `schemas/enhanced-thoughts`' sensitivity_tier column, found in the catalog, not
+ * information_schema, which hides a column the role may not read. With `mustRead`, such a column throws `refusal`:
+ * a reader that cannot see the column cannot hold back the rows it marks.
+ */
+export async function sensitivityColumn(sql: SQL, mustRead: boolean, refusal: string): Promise<boolean> {
+  const [cols] = await sql`
+    SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                   WHERE attrelid = 'public.thoughts'::regclass AND attname = 'sensitivity_tier' AND NOT attisdropped) AS has_sensitivity`;
+  const has = Boolean(cols.has_sensitivity);
+  if (mustRead && has) {
+    const [{ readable }] = await sql`SELECT has_column_privilege('public.thoughts', 'sensitivity_tier', 'SELECT') AS readable`;
+    if (!readable) throw new Error(refusal);
+  }
+  return has;
+}
+
+/**
+ * The SQL conditions, each led by AND, that leave out a row whose tier is one the text array `param` names: by the
+ * column where `hasColumn`, and by `metadata.sensitivity_tier` always, each read as tierRank reads it. The tier a row's
+ * metadata carries counts as the column's does: an import through the ingestion pipeline sets the facet, and the column
+ * keeps its default 'standard' (SMD-2493). Without the column the key is the tier.
+ */
+export function tierExcluded(hasColumn: boolean, param: string): string {
+  let where = "";
+  if (hasColumn) where += ` AND (sensitivity_tier IS NULL OR ${sqlTier("sensitivity_tier")} <> ALL(${param}))`;
+  where += ` AND (metadata->>'sensitivity_tier' IS NULL OR ${sqlTier("metadata->>'sensitivity_tier'")} <> ALL(${param}))`;
+  return where;
+}
+
+/**
+ * The ids the patterns hold back among `rows`: each row's `sent` (what its prompt would carry) and its whole text, read
+ * again, PATTERN_BATCH at a time, so a secret past the part sent is seen. A row that second read does not return
+ * (deleted, or out of sight) is held back too.
+ */
+export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent: string }[], tiers: readonly string[]): Promise<Set<string>> {
+  const held = new Set<string>();
+  const hold = new Set(tiers);
+  for (let i = 0; i < rows.length; i += PATTERN_BATCH) {
+    const batch = rows.slice(i, i + PATTERN_BATCH);
+    const texts = (await sql.unsafe("SELECT id::text AS id, content FROM thoughts WHERE id = ANY($1::uuid[])", [sql.array(batch.map((r) => r.id), "TEXT")])) as { id: string; content: string }[];
+    const whole = new Map(texts.map((t) => [t.id, t.content]));
+    for (const r of batch) {
+      const text = whole.get(r.id);
+      if (text === undefined || hold.has(sensitivityOf(`${r.sent}\n${text}`).tier)) held.add(r.id);
+    }
+  }
+  return held;
+}

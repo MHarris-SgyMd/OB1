@@ -149,6 +149,8 @@ if (!URL_) {
  * extract's floor. SMD-3318's [50], the backup's ~13-25 s with its lock and
  * signal waits, went to sweep (~141 s of live step on main's runs to
  * 27ea5b19) rather than the rest, by then the run's longest cell (~562 s).
+ * SMD-3318 PR 2b's Tier 3 cases took [26], lint-sweep's, from the rest
+ * (~519 s on ci-parity, 2026-11-17) to sweep (~158 s) for the same reason.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -157,7 +159,7 @@ const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["5d", "10g", "37b", "38"],
   long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
   extract: ["10f", "10h"],
-  sweep: ["38s", "50", "51"],
+  sweep: ["26", "38s", "50", "51"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -22243,10 +22245,10 @@ if (want("25")) {
 }
 
 if (want("26")) {
-  console.log("\n[26] db/lint-sweep.ts on a real Postgres: Tier 1's counts over the newest 2,000 dated thoughts and the whole table, Tier 2's over the newest 500 and the entity graph, each the planted table's; undated thoughts in no sample; the report written through a file of its own, 0600, its previews made safe; a statement past --statement-timeout and a table the role may not read write no report; the refusals (SMD-3318)");
+  console.log("\n[26] db/lint-sweep.ts on a real Postgres: Tier 1's counts over the newest 2,000 dated thoughts and the whole table, Tier 2's over the newest 500 and the entity graph, each the planted table's; undated thoughts in no sample; the report written through a file of its own, 0600, its previews made safe; a statement past --statement-timeout and a table the role may not read write no report; Tier 3 against a stub: the hold-back, each thought put to the egress gate, the batches and their refs, an unreadable answer and a refused call; the refusals (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
-    // recipes/lint-sweep's tiers 1 and 2 as the db/ script (SMD-3318 PR 2; Tier 3 is PR 2b), driven as deployed:
+    // recipes/lint-sweep as the db/ script (SMD-3318 PR 2, Tier 3 PR 2b), driven as deployed:
     // `bun db/lint-sweep.ts` with DATABASE_URL alone, in a directory of its own. The planted rows set every count.
     const sql = new SQL({ url: URL_, max: 2 });
     const scratch = mkdtempSync(join(tmpdir(), "ob1-live-3318-lint-"));
@@ -22327,7 +22329,8 @@ if (want("26")) {
              && overLines.map((l) => l.slice(4, 40)).sort().join(",") === newestOverTagged.join(",")
              && /Empty content \(newest 2000\): \*\*4\*\*/.test(text) && /Very long content \(over 20,000 characters once trimmed; newest 2000\): \*\*3\*\*/.test(text)
              && /Thoughts no entity mention names \(newest 500\): \*\*490\*\* — .*failed on them/.test(text) && /^  - …and 475 more$/m.test(text)
-             && /Entities with no edge either way \(exact, of 3\): \*\*1\*\*/.test(text) && /not ported yet \(SMD-3318 PR 2b/.test(text),
+             && /Entities with no edge either way \(exact, of 3\): \*\*1\*\*/.test(text) && /^- \*\*Tier 3\*\* — skipped: OB1_EGRESS_POLICY=deny \(the default\)/m.test(text)
+             && both.stdout.includes("[tier 3] skipped: OB1_EGRESS_POLICY=deny (the default)") && !/## Tier 3/.test(text),
         `…the report carries its frontmatter, scope and safety lines, the counts, the 15 newest of the 16 over-tagged and the last counted, 15 of the 490 unmentioned and the rest counted (${overLines.length} over-tagged lines; ${text.length} chars)`);
       const listed = text.split("## Tier 2")[1] ?? "";
       const row12 = /^  - [0-9a-f-]{36} \(\d{4}-\d\d-\d\d\) — 26 row 12 .*$/m.exec(listed)?.[0] ?? "";
@@ -22461,7 +22464,7 @@ if (want("26")) {
           `…a role with SELECT on thoughts alone: Tier 2 exits 1 naming 42501 on thought_entities, no report; Tier 1 runs (${denied.code}: ${denied.stderr.split("\n")[0]}; tier 1 ${t1Only.code})`);
       }
 
-      // The refusals, exit 2 and no report: --tier 3 (PR 2b's) and 4, a removed flag (saying why), a --report climbing
+      // The refusals, exit 2 and no report: --tier 4, Tier 3's flags out of range, a removed flag (saying why), a --report climbing
       // out of the working directory, naming a directory (before any read; `~` too) or too long for its temporary file,
       // a --statement-timeout out of range, another database than the URL's (PGDATABASE). A name only starting with two
       // dots is inside; an absolute path outside the working directory is taken as given (here with --url and no bound).
@@ -22469,9 +22472,11 @@ if (want("26")) {
       const refusedDir = join(scratch, "refused");
       mkdirSync(refusedDir);
       const r = (extra: Record<string, string>, ...flags: string[]) => lintIn(refusedDir, extra, ...flags);
-      const three = await r({ DATABASE_URL: URL_ }, "--tier", "3");
+      const sampleZero = await r({ DATABASE_URL: URL_ }, "--tier", "3", "--sample-size", "0");
+      const callsOver = await r({ DATABASE_URL: URL_ }, "--max-llm-calls", "101");
+      const daysZero = await r({ DATABASE_URL: URL_ }, "--days", "0");
       const four = await r({ DATABASE_URL: URL_ }, "--tier", "4");
-      const removed = await r({ DATABASE_URL: URL_ }, "--max-llm-calls", "5");
+      const removed = await r({ DATABASE_URL: URL_ }, "--llm-model", "x");
       const climb = await r({ DATABASE_URL: URL_ }, "--report", "../../climbed.md");
       const dir = await r({ DATABASE_URL: URL_ }, "--report", refusedDir);
       const other = await r({ DATABASE_URL: URL_, PGDATABASE: "template1" }, "--report", "other.md");
@@ -22484,8 +22489,9 @@ if (want("26")) {
       const absReport = join(scratch, "abs.md");
       const abs = await r({}, "--url", URL_, "--tier", "1", "--statement-timeout", "0", "--report", absReport);
       const left = readdirSync(refusedDir);
-      assert(three.code === 2 && /--tier 3 is not ported yet/.test(three.stderr) && four.code === 2 && /--tier must be 1, 2 or all/.test(four.stderr)
-             && removed.code === 2 && /^--max-llm-calls was Tier 3's model calls, and is removed/m.test(removed.stderr) && climb.code === 2 && /climbs out of the working directory/.test(climb.stderr)
+      assert(sampleZero.code === 2 && /sample-size/.test(sampleZero.stderr) && callsOver.code === 2 && /max-llm-calls/.test(callsOver.stderr) && daysZero.code === 2 && /days/.test(daysZero.stderr)
+             && four.code === 2 && /--tier must be 1, 2, 3 or all/.test(four.stderr)
+             && removed.code === 2 && /^--llm-model is --model now/m.test(removed.stderr) && climb.code === 2 && /climbs out of the working directory/.test(climb.stderr)
              && dir.code === 2 && /is a directory/.test(dir.stderr) && !/\[lint-sweep\] database/.test(dir.stdout)
              && other.code === 2 && /lint-sweep refused — the connection reached database "template1"/.test(other.stderr)
              && dots.code === 0 && left.join(" ") === "..dots.md" && long.code === 2 && /longer than 220 bytes/.test(long.stderr)
@@ -22493,7 +22499,121 @@ if (want("26")) {
              && negative.code === 2 && /statement-timeout/.test(negative.stderr) && huge.code === 2 && /statement-timeout/.test(huge.stderr)
              && abs.code === 0 && existsSync(absReport)
              && refused.code === 1 && /lint-sweep FAILED — ERR_POSTGRES_CONNECTION_REFUSED /.test(refused.stderr),
-        `…--tier 3 and 4, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0; a refused connection exit 1 naming the client's code (${[three, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs, refused].map((x) => x.code).join(" ")}; ${left.join(" ")}; ${refused.stderr.split("\n")[0]})`);
+        `…--tier 4, a --sample-size of 0, a --max-llm-calls of 101, a --days of 0, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0; a refused connection exit 1 naming the client's code (${[sampleZero, callsOver, daysZero, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs, refused].map((x) => x.code).join(" ")}; ${left.join(" ")}; ${refused.stderr.split("\n")[0]})`);
+
+      // Tier 3 (SMD-3318 PR 2b): a model's reading, against a stub chat endpoint. A brain of its own: 30 thoughts on
+      // the release train a minute apart (12 carrying `zq3-public`, 4 `zq3-few`), then the ones that must never reach
+      // the model: an SSN and a password past the 400 characters sent (the patterns over the whole text), a `restricted`
+      // key and a `personal` one (the hold-back), a `health` topic and a `zq3-private` marker (the deny terms under
+      // allow), and the ones never read: one 400 days old, one under 20 characters, one undated.
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at)
+        SELECT 'zq3 thought ' || i || ' on the release train' || CASE WHEN i <= 12 THEN ' zq3-public' WHEN i <= 16 THEN ' zq3-few' ELSE '' END,
+               '{"topics": ["release"], "type": "note"}'::jsonb, now() - (i || ' minutes')::interval
+          FROM generate_series(1, 30) i`);
+      await sql.unsafe(`INSERT INTO thoughts (content, metadata, created_at) VALUES
+        ('zq3 held: my ssn is 123-45-6789 for the form', '{}', now() - interval '40 minutes'),
+        ('zq3 held: a long one ' || repeat('word ', 100) || 'password: hunter22!', '{}', now() - interval '41 minutes'),
+        ('zq3 held: restricted by its key, long enough', '{"sensitivity_tier": " Restricted"}', now() - interval '42 minutes'),
+        ('zq3 held: personal by its key, long enough', '{"sensitivity_tier": "personal"}', now() - interval '43 minutes'),
+        ('zq3 held: a health thought, long enough', '{"topics": ["health"]}', now() - interval '44 minutes'),
+        ('zq3 held: a marked one zq3-private, long enough', '{}', now() - interval '45 minutes'),
+        ('zq3 unread: four hundred days old, long enough', '{}', now() - interval '400 days'),
+        ('zq3 unread', '{}', now() - interval '46 minutes'),
+        ('zq3 unread: no date at all, long enough', '{}', NULL)`);
+      const idOf = new Map(((await sql`SELECT id::text AS id, content FROM thoughts`) as { id: string; content: string }[]).map((r) => [r.content, r.id]));
+      let mode: "answer" | "prose" | "refuse" = "answer";
+      const prompts: string[] = [];
+      const stub = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        async fetch(req) {
+          const body = (await req.json()) as { messages?: { content?: string }[] };
+          prompts.push(String(body.messages?.at(-1)?.content ?? ""));
+          if (mode === "refuse") return new Response("bad request", { status: 400 });
+          const content = mode === "prose" ? "I could not find any issues worth naming."
+            : "```json\n" + JSON.stringify({
+              contradictions: [{ refs: ["t1", "t2"], issue: `zq3 <i>conflict</i> \`x\` ${"z".repeat(400)}`, suggested_action: "merge them" }],
+              stale_facts: [{ refs: [2, "t2", "t77"], issue: "zq3 old news" }],
+              orphans: [{ refs: ["t99"], issue: "zq3 names no thought" }, "not an object"],
+            }) + "\n```";
+          return Response.json({ choices: [{ message: { content } }] });
+        },
+      });
+      try {
+        const t3Env = (extra: Record<string, string>) => ({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...extra });
+        const ALLOW = { OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "topic:health,marker:zq3-private" };
+        // The sent rows of every prompt, by their content.
+        const sentRows = (from: number) => prompts.slice(from).flatMap((p) => JSON.parse(p.split("THOUGHTS:\n")[1].split("\n\nAudit")[0]) as { ref: string; content: string }[]);
+        const held = [...idOf.keys()].filter((c) => /^zq3 (held|unread)/.test(c));
+
+        let from = prompts.length;
+        const allowed = await lint(t3Env(ALLOW), "--tier", "3", "--sample-size", "25", "--report", join(scratch, "t3.md"));
+        const sent = sentRows(from);
+        const t3Text = read(join(scratch, "t3.md"));
+        const t3Part = t3Text.split("## Tier 3")[1] ?? "";
+        // Call 1's t1 and t2 are the two newest of the release train, its t2 stale too (2 and "t2" one thought); call 2's
+        // t1 is the 21st. t77 and t99 name none of a batch: the orphan is dropped, and so is the item that is no object.
+        const first = (i: number) => idOf.get(`zq3 thought ${i} on the release train${i <= 12 ? " zq3-public" : i <= 16 ? " zq3-few" : ""}`)!;
+        const contradiction = (a: number, b: number) => new RegExp(`^- ${first(a)}, ${first(b)} — zq3 iconflict/i x z{282}… → merge them$`, "m");
+        assert(allowed.code === 0 && prompts.length - from === 2 && sent.length === 25 && sent.every((r) => r.content.startsWith("zq3 thought "))
+               && held.every((c) => !prompts.slice(from).some((p) => p.includes(c.slice(0, 30)))) && !prompts.slice(from).some((p) => p.includes("hunter22"))
+               && prompts[from].includes(`Today: ${new Date().toISOString().slice(0, 10)}`) && sent[0].ref === "t1" && sent[20].ref === "t1"
+               && allowed.stdout.includes("[tier 3] 36 read, 4 held back by sensitivity, 2 by the egress policy; 25 sent in 2 call(s): 4 finding(s), 4 dropped")
+               && !/## Tier 1|## Tier 2/.test(t3Text) && /Read \(dated, the last 365 days, 20 characters or more, newest first\): \*\*36\*\*/.test(t3Part)
+               && /sensitivity patterns: \*\*4\*\*/.test(t3Part) && /egress policy: \*\*2\*\*/.test(t3Part)
+               && contradiction(1, 2).test(t3Part) && contradiction(21, 22).test(t3Part) && /### Contradictions \(2\)/.test(t3Part)
+               && new RegExp(`^- ${first(2)} — zq3 old news$`, "m").test(t3Part) && new RegExp(`^- ${first(22)} — zq3 old news$`, "m").test(t3Part)
+               && /### Orphans \(0\)/.test(t3Part) && /\*\*4\*\* finding\(s\) dropped/.test(t3Part),
+          `…Tier 3 under allow with two deny terms: 36 of the window read (not the old, short or undated), the SSN, the password past 400 characters, the restricted and personal keys held back, the health topic and the marked one refused by the gate, 25 sent in a batch of 20 and one of 5 with today's date; each ref mapped to its batch's thought, a repeated ref once, the model's words made safe and cut at 300, the refs naming none and the item no object dropped (exit ${allowed.code}; ${prompts.length - from} calls; ${allowed.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).join(" / ")}; ${allowed.stderr.trim().split("\n").pop()})`);
+
+        from = prompts.length;
+        const personal = await lint(t3Env(ALLOW), "--tier", "3", "--include-personal", "--report", join(scratch, "t3p.md"));
+        const sentP = sentRows(from);
+        from = prompts.length;
+        const capped = await lint(t3Env(ALLOW), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3c.md"));
+        const sentC = sentRows(from);
+        from = prompts.length;
+        const denied = await lint(t3Env({}), "--tier", "3", "--report", join(scratch, "t3d.md"));
+        const deniedCalls = prompts.length - from;
+        from = prompts.length;
+        const marked = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-public" }), "--tier", "3", "--report", join(scratch, "t3m.md"));
+        const sentM = sentRows(from);
+        from = prompts.length;
+        const few = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-few" }), "--tier", "3", "--report", join(scratch, "t3f.md"));
+        const off = await lint(t3Env(ALLOW), "--tier", "3", "--max-llm-calls", "0", "--report", join(scratch, "t3o.md"));
+        // An actor: term releases a keyed run's thoughts, and the same term with no key skips the tier before any read.
+        const { hashKey } = await import("../server-portable/auth.ts");
+        const lintKey = "c".repeat(64);
+        const byActor = { OB1_EGRESS_ALLOW: "actor:lint-live", MCP_ACCESS_KEYS: `lint-live:write:${hashKey(lintKey)}` };
+        const unkeyed = await lint(t3Env(byActor), "--tier", "3", "--report", join(scratch, "t3n.md"));
+        const quiet = prompts.length - from;
+        const keyed = await lint(t3Env({ ...byActor, OB1_WORKER_KEY: lintKey }), "--tier", "3", "--report", join(scratch, "t3k.md"));
+        const sentK = sentRows(from + quiet);
+        assert(personal.code === 0 && sentP.length === 31 && /3 held back by sensitivity/.test(personal.stdout) && sentP.some((r) => r.content.includes("personal by its key"))
+               && capped.code === 0 && sentC.length === 20 && /20 sent in 1 call/.test(capped.stdout)
+               && denied.code === 0 && deniedCalls === 0 && /\[tier 3\] skipped: OB1_EGRESS_POLICY=deny \(the default\)/.test(denied.stdout) && /- \*\*Tier 3\*\* — skipped: OB1_EGRESS_POLICY=deny/.test(read(join(scratch, "t3d.md")))
+               && marked.code === 0 && sentM.length === 12 && sentM.every((r) => r.content.includes("zq3-public")) && /20 by the egress policy; 12 sent in 1 call/.test(marked.stdout)
+               && few.code === 0 && /\[tier 3\] skipped: 4 thought\(s\) left to send of 36 read in the last 365 days, fewer than 10/.test(few.stdout)
+               && off.code === 0 && /\[tier 3\] skipped: --max-llm-calls 0/.test(off.stdout) && quiet === 0
+               && unkeyed.code === 0 && /\[tier 3\] skipped: OB1_EGRESS_POLICY=deny/.test(unkeyed.stdout)
+               && keyed.code === 0 && /agent: {2}lint-live/.test(keyed.stdout) && sentK.length === 32 && /0 by the egress policy; 32 sent in 2 call/.test(keyed.stdout),
+          `…--include-personal sends the personal one; --max-llm-calls 1 sends one batch of 20; under the default deny nothing is read or sent; under deny an allow term releases its own thoughts alone, 12 in one call; four left to send, --max-llm-calls 0 and an actor: term with no worker key skip the tier with no call; with the key the term releases every thought the hold-back leaves, the deny terms unread under deny (exit ${personal.code} ${denied.code} ${marked.code} ${few.code} ${off.code} ${unkeyed.code} ${keyed.code}; ${sentP.length}, ${deniedCalls}, ${sentM.length}, ${quiet}, ${sentK.length} sent/calls; ${keyed.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
+
+        mode = "prose";
+        const prose = await lint(t3Env(ALLOW), "--tier", "3", "--report", join(scratch, "t3u.md"));
+        mode = "refuse";
+        from = prompts.length;
+        const failed = await lint(t3Env(ALLOW), "--report", join(scratch, "t3x.md"));
+        const failedText = read(join(scratch, "t3x.md"));
+        mode = "answer";
+        assert(prose.code === 0 && /30 sent in 2 call\(s\): 0 finding\(s\), 2 answer\(s\) not JSON/.test(prose.stdout) && /\*\*2\*\* answer\(s\) not JSON, their findings lost/.test(read(join(scratch, "t3u.md")))
+               && failed.code === 1 && prompts.length - from === 1 && /## Tier 1 — thoughts/.test(failedText) && /## Tier 2 — the entity graph/.test(failedText)
+               && /\*Stopped: call 1 of 2: .*400/.test(failedText) && /lint-sweep: Tier 3 stopped — call 1 of 2: .*The report was written with tiers 1 and 2 and the findings before it\./.test(failed.stderr),
+          `…an answer that is no JSON object loses its batch, counted; a refused call (400, not retried) stops the tier: every tier's report written, the stop named, exit 1 (exit ${prose.code}, ${failed.code}; ${failed.stderr.trim().split("\n").pop()})`);
+      } finally {
+        stub.stop(true);
+      }
     } finally {
       rmSync(scratch, { recursive: true, force: true });
       await sql`DELETE FROM thoughts`;

@@ -1,6 +1,6 @@
 {
   "name": "Lint Sweep — bounded brain quality audit",
-  "description": "Moved to db/ in Daemonic Brain (SMD-3318): tiers 1 and 2 of the read-only quality audit are db/lint-sweep.ts, over the core's thoughts and entity graph; Tier 3, a model's reading of sampled thoughts, follows in SMD-3318 PR 2b. The lint-sweep.js script is gone; views.sql stays the recipe's.",
+  "description": "Moved to db/ in Daemonic Brain (SMD-3318): the read-only quality audit is db/lint-sweep.ts, over the core's thoughts and entity graph, its Tier 3 a model's reading of sampled thoughts through the brain's chat endpoint, egress gate and sensitivity hold-back. The lint-sweep.js script is gone; views.sql stays the recipe's.",
   "category": "recipes",
   "version": "2.0.0",
   "author": {
@@ -20,5 +20,5 @@
   "difficulty": "intermediate",
   "estimated_time": "10 minutes",
   "created": "2026-04-17",
-  "updated": "2026-11-14"
+  "updated": "2026-11-17"
 }
