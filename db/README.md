@@ -6037,15 +6037,17 @@ beside it.
 ```bash
 bun bench-brains.ts load    --brains brains.json --brain canary --arm B --ids ids-canary.txt   # the arm's 150 notes
 bun bench-brains.ts sample  --brains brains.json --arm B --minutes 20 --out samples.jsonl --ollama http://127.0.0.1:11434
-bun bench-brains.ts clean   --brains brains.json --brain canary --ids ids-canary.txt
+bun bench-brains.ts clean   --brains brains.json --brain canary --ids ids-canary.txt [--arm B]
 bun bench-brains.ts summary --out samples.jsonl --split 12 --live live-B-canary.jsonl --live live-B-scratch.jsonl
-bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic; what CI runs
+bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic, clean against a brain in memory; what CI runs
 ```
 
 `--brains` is a JSON file naming each brain: `{"canary": {"connector":
 "open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
 `bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
-"keyFile": "…"}}` takes a url and a file holding the key alone. No key is printed.
+"keyFile": "…"}}` takes a url and a file holding the key alone. Only the brain a
+command names is read from it. No key is printed. Each subcommand refuses a flag
+it does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
   so every brain gets the same text and no arm's note is another's. Each starts
@@ -6054,30 +6056,39 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
   with `bench-live.ts`, only a brain whose `brain_info` says tier `canary` or
   `working` takes them.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
-  seconds (15), and the model server's loaded models from Ollama's `/api/ps`. It
-  only reads, so stable can be one of the brains.
+  seconds (15), and, with `--ollama`, the model server's loaded models from
+  Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
+  if a brain never answered.
 - **clean** deletes the listed ids, then searches for measure notes whose ids never
-  came back and deletes those whose text starts as one does. It exits 1 if one is
-  left.
+  came back and deletes those whose text starts as one does: the arm's alone with
+  `--arm`, else every measure note on the brain, of any arm or run. A delete counts
+  only when the brain deletes the thought or says it has no thought of that id. A
+  last search finds any note still there. It exits 1 if one is left, or if a
+  delete, a read or a search failed.
 - **summary** prints, for each arm and brain, its sleep's background calls in two
   windows: before `--split` minutes, with no live load from the harness, and after
   it, with `bench-live.ts` running. For each window it gives:
   - the calls, and their time;
-  - the mean number in flight: their time over the window's, which is the slots
-    the brain's background held on average;
-  - the slot waits.
+  - the mean number in flight: their time over the window's. That is the slots the
+    brain's background held on average, near enough: it counts failed calls too,
+    and any call that ran without a slot;
+  - the slot waits, of every model server the sleep asks, its decide tier's
+    included.
 
-  It also says whether the brain's extraction backlog ran dry, how often the model
-  server's loaded models changed, and each `--live` file's latencies by label.
+  It also gives the brain's extraction backlog (first, last, most, and when it ran
+  dry), how often the model server's loaded models changed, and each `--live`
+  file's latencies by label.
 
 A heartbeat's tallies count since the sleep's process began. It stamps them about
 once a minute, and a call counts when it ends. So a window's figures are the sum
 of the increases from stamp to stamp, over the time between its first and last
-stamps, and a call running across a stamp counts in the next one. A tally that
-falls marks the process begun again: its new value is the increase since, and the
-summary counts the restarts. Two restarts between one pair of stamps lose the
-calls before the second. Each sample keeps the coordinator's children, whose
-`for_s` says when one began. A build
+stamps. A call running across a stamp counts in the next one, so a long call (a
+27B model's, minutes) counts whole in the window it ends in. A pair of stamps in
+which any pass's tally falls, or a pass drops out, marks the process begun again:
+every pass's value then is the increase since, and the summary counts the
+restarts. Two restarts between one pair of stamps lose the calls before the
+second. Each sample keeps the coordinator's children and the time of its stamp,
+whose `for_s` says when one began. A build
 before SMD-3379 PR 2b-2a stamps no tallies: for it, the summary gives the share of
 samples in which its sleep was working.
 

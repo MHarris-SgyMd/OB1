@@ -12,7 +12,7 @@
  *
  *   bun db/bench-brains.ts load    --brains FILE --brain NAME --arm A --ids FILE [--notes 150] [--parallel 2]
  *   bun db/bench-brains.ts sample  --brains FILE --arm A --minutes 20 --out FILE [--every 15] [--ollama URL]
- *   bun db/bench-brains.ts clean   --brains FILE --brain NAME --ids FILE
+ *   bun db/bench-brains.ts clean   --brains FILE --brain NAME --ids FILE [--arm A]
  *   bun db/bench-brains.ts summary --out FILE [--split 12] [--live FILE …]
  *   bun db/bench-brains.ts --self-check
  *
@@ -30,27 +30,32 @@
  * sample  reads every brain's brain_info and worker_status each --every
  *         seconds for --minutes, and the model server's loaded models from
  *         Ollama's /api/ps when --ollama names it, appending one line per brain
- *         a round to --out. Reads alone, so any tier.
+ *         a round to --out. Reads alone, so any tier. Exits 1 if a brain never
+ *         answered a round.
  * clean   deletes the ids in --ids, then searches the brain for measure notes
  *         whose ids never came back (a capture cut off can still land) and
- *         deletes those whose text is a measure note's from its first character.
- *         Exits 1 if one is left.
+ *         deletes those whose text is a measure note's from its first character:
+ *         the arm's alone with --arm, else every measure note on the brain, any
+ *         arm's or run's. A delete counts only when the brain deletes or says the
+ *         id is gone (`No thought with id`); a last search finds what is left, and
+ *         it exits 1 if anything is, or a delete, read or search failed.
  * summary prints, for each arm and brain, what its sleep's heartbeat says its
  *         background calls held over the arm's two windows — before --split
  *         minutes (no live load from the harness) and after (bench-live
  *         running): the calls, their time, the mean number in flight (their
- *         time over the window's), and their slot waits. And whether its
- *         extraction backlog ran dry, the model server's loaded models, and
- *         each --live file's latencies (bench-live.ts's samples), by label.
+ *         time over the window's), and their slot waits. And its extraction
+ *         backlog, first to last and when it ran dry, the model server's loaded
+ *         models, and each --live file's latencies (bench-live.ts's samples).
  *
  * What the numbers are. A heartbeat's model tallies are the sleep process's
  * since it began (db/pass-stamp.ts `models`), stamped about once a minute, and a
  * call is counted when it ends: a window's figures are the sum of the increases
  * from stamp to stamp, over the time between its first and last stamps, and a
- * call running across a stamp counts in the stamp after. A tally that falls is a
- * process begun again, its value the increase since (windowOf); a sample keeps
- * the coordinator's children, whose for_s says when. Stable's build may stamp no
- * tallies (before SMD-3379 PR 2b-2a): its sleep's state is shown.
+ * call running across a stamp counts in the stamp after. A pass's tally that
+ * falls, or a pass that drops out, is the process begun again, and every pass's
+ * value is then the increase since (windowOf); a sample keeps the coordinator's
+ * children and its stamp's time, whose for_s says when. Stable's build may stamp
+ * no tallies (before SMD-3379 PR 2b-2a): its sleep's state is shown.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -85,10 +90,19 @@ export function brainOf(name: string, entry: unknown, claude: () => unknown, rea
   throw new Error(`brain ${name}: give "connector" (a ~/.claude.json mcpServers name), or "mcp" and "keyFile"`);
 }
 
+const claudeJson = () => JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"));
+const readKeyFile = (p: string) => readFileSync(p, "utf8");
+
+/** Every brain --brains names. */
 function brainsFrom(path: string): Brain[] {
   const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  const claude = () => JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"));
-  return Object.entries(raw).map(([name, entry]) => brainOf(name, entry, claude, (p) => readFileSync(p, "utf8")));
+  return Object.entries(raw).map(([name, entry]) => brainOf(name, entry, claudeJson, readKeyFile));
+}
+
+/** The one brain named, its entry alone resolved (another's broken entry does not block it); null when none is. */
+function brainFrom(path: string, name: string): Brain | null {
+  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  return Object.hasOwn(raw, name) ? brainOf(name, raw[name], claudeJson, readKeyFile) : null;
 }
 
 /** A small seeded generator (mulberry32), so an arm's notes are the same text on every run and in every brain. */
@@ -153,11 +167,16 @@ export function notesFor(arm: string, i: number): string {
     `Open question: whether ${t1} or ${t2} should own the retry logic for ${project} long term.`;
 }
 
-/** Whether a thought's text is a measure note, from its first character (an ingested thought's notice read past). */
-export function isMeasureNote(text: string): boolean {
+/** Whether a thought's text is a measure note, the arm's when one is named, from its first character (an ingested thought's notice read past). */
+export function isMeasureNote(text: string, arm?: string): boolean {
   const body = text.startsWith(`${INGESTED_NOTICE}\n\n`) ? text.slice(INGESTED_NOTICE.length + 2) : text;
-  return /^SMD-3379 measure note \(arm [A-Za-z0-9-]+ #\d+\)\. /.test(body);
+  const m = /^SMD-3379 measure note \(arm ([A-Za-z0-9-]+) #\d+\)\. /.exec(body);
+  return m !== null && (arm === undefined || m[1] === arm);
 }
+
+/** The brain's own answer to a delete of an id it does not hold (render.ts): gone already. Nothing else counts as gone —
+ *  not a key without write scope's "Tool delete_thought not found" (review pass 1). */
+export const ALREADY_GONE = /^No thought with id /;
 
 function rpcFor(b: Brain): (method: string, params: Record<string, unknown>, ms?: number) => Promise<Answer> {
   let seq = 0;
@@ -193,49 +212,101 @@ async function load(b: Brain, arm: string, n: number, parallel: number, ids: str
   const rpc = rpcFor(b);
   await writable(b, rpc);
   appendFileSync(ids, "");
-  let next = 0, ok = 0, failed = 0;
+  let next = 0, ok = 0, degraded = 0, unsaved = 0;
   const t0 = performance.now();
   const worker = async () => {
     for (let i = next++; i < n; i = next++) {
       const r = await tool(b, rpc, "capture_thought", { content: notesFor(arm, i), source: NOTE_SOURCE }, CAPTURE_MS).catch((e) => ({ _ok: false, _error: (e as Error).message, _id: undefined }));
       if (typeof r._id === "string") appendFileSync(ids, r._id + "\n");
       if (r._ok) ok++;
-      else { failed++; console.error(`  ${b.name} #${i}: ${r._error}`); }
+      else {
+        // Saved but degraded (no vector, no tags) is in the backlog all the same; no id back is not saved, or not known to be.
+        if (typeof r._id === "string") degraded++; else unsaved++;
+        console.error(`  ${b.name} #${i}: ${r._error}`);
+      }
     }
   };
   await Promise.all(Array.from({ length: parallel }, worker));
-  console.log(`${b.name}: arm ${arm}, ${ok} of ${n} notes captured (${failed} not) in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
-  return failed ? 1 : 0;
+  console.log(`${b.name}: arm ${arm}, ${ok} of ${n} notes captured cleanly, ${degraded} saved degraded, ${unsaved} not saved in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
+  return degraded + unsaved ? 1 : 0;
 }
 
-async function clean(b: Brain, ids: string): Promise<number> {
-  const rpc = rpcFor(b);
-  await writable(b, rpc);
-  const listed = [...new Set(readFileSync(ids, "utf8").split("\n").map((s) => s.trim()).filter(Boolean))];
-  const left: string[] = [];
-  let gone = 0;
+/** A tool call as clean reads it: its structured answer, or why not. Never throws. */
+export type Call = (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; sc: Record<string, any> }>;
+
+/**
+ * Deletes the listed ids, then the measure notes (the arm's, when one is named) a search by content finds, each read
+ * back first; then searches once more for what is left. Every id is tried once. Returns what went and what did not, with
+ * why: a delete the brain refused, a read or a search that failed, a note still there at the end.
+ */
+export async function cleanWith(call: Call, listed: readonly string[], arm?: string): Promise<{ gone: number; found: number; left: Map<string, string> }> {
+  const left = new Map<string, string>();
+  const tried = new Set<string>();
+  let gone = 0, found = 0;
   const del = async (id: string) => {
-    const r = await tool(b, rpc, "delete_thought", { id }).catch((e) => ({ _error: (e as Error).message }));
-    if ((r as { _error?: string })._error && !/not found|no thought/i.test(String((r as { _error?: string })._error))) left.push(`${id} (${(r as { _error?: string })._error})`);
-    else gone++;
+    tried.add(id);
+    const r = await call("delete_thought", { id });
+    if (r.ok || ALREADY_GONE.test(r.error ?? "")) gone++;
+    else left.set(id, `its delete failed: ${r.error}`);
   };
-  for (const id of listed) await del(id);
+  for (const id of new Set(listed)) await del(id);
+  const query = arm === undefined ? `${NOTE_PREFIX} (arm` : `${NOTE_PREFIX} (arm ${arm} #`;
+  /** Every hit's id, paged; null when a search failed (said in left). */
+  const search = async (): Promise<string[] | null> => {
+    const out: string[] = [];
+    for (let offset = 0; offset < 5000; offset += 100) {
+      const r = await call("search_thoughts_keyword", { query, limit: 100, offset });
+      if (!r.ok) { left.set(`(search at ${offset})`, `the search failed: ${r.error}`); return null; }
+      const hits: unknown[] = Array.isArray(r.sc.hits) ? r.sc.hits : [];
+      for (const h of hits) { const id = (h as { id?: unknown })?.id; if (typeof id === "string") out.push(id); }
+      if (hits.length < 100 || offset + hits.length >= Number(r.sc.total)) return out;
+    }
+    left.set("(search)", "the search read 5,000 matches and stopped");
+    return out;
+  };
+  /** Whether an id is a measure note of the arm, by its text read back; null when the read failed (said in left). */
+  const isNote = async (id: string): Promise<boolean | null> => {
+    const f = await call("fetch", { id });
+    if (!f.ok || typeof f.sc.text !== "string") { left.set(id, `its read failed: ${f.error ?? "no text"}`); return null; }
+    return isMeasureNote(f.sc.text, arm);
+  };
   // Notes whose ids never came back: by content, read back, deleted only when their text is a measure note's.
-  let found = 0;
   for (let round = 0; round < 20; round++) {
-    const sc = await tool(b, rpc, "search_thoughts_keyword", { query: `${NOTE_PREFIX} (arm`, limit: 100 });
-    const hits: string[] = (Array.isArray(sc.hits) ? sc.hits : []).map((h: { id?: unknown }) => h?.id).filter((id: unknown): id is string => typeof id === "string");
-    let deleted = 0;
+    const hits = await search();
+    if (hits === null) break;
+    let more = 0;
     for (const id of hits) {
-      const f = await tool(b, rpc, "fetch", { id }).catch(() => null);
-      if (typeof f?.text !== "string" || !isMeasureNote(f.text)) continue;
-      found++; deleted++;
+      if (tried.has(id)) continue;
+      tried.add(id);
+      if ((await isNote(id)) !== true) continue;
+      found++; more++;
       await del(id);
     }
-    if (deleted === 0) break;
+    if (more === 0) break;
   }
-  console.log(`${b.name}: ${gone} measure notes deleted (${listed.length} listed, ${found} more found by content)`);
-  if (left.length) { console.log(`  NOT deleted: ${left.join(", ")}`); return 1; }
+  // What is left, by a search of its own: a delete that answered but did not delete shows here.
+  const after = await search();
+  for (const id of after ?? []) {
+    if (left.has(id)) continue;
+    const note = await isNote(id);
+    if (note === true) left.set(id, "still there after its delete");
+  }
+  return { gone, found, left };
+}
+
+async function clean(b: Brain, ids: string, arm: string | undefined): Promise<number> {
+  const rpc = rpcFor(b);
+  await writable(b, rpc);
+  const listed = readFileSync(ids, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
+  const call: Call = async (name, args) => {
+    let a: Answer;
+    try { a = await rpc("tools/call", { name, arguments: args }); } catch (e) { return { ok: false, error: `no answer from ${shownUrl(b.mcp)} (${errorKind(e)})`, sc: {} }; }
+    const o = outcomeOf(a.status, a.msg, name);
+    return { ok: o.ok, error: o.error, sc: a.msg?.result?.structuredContent ?? {} };
+  };
+  const { gone, found, left } = await cleanWith(call, listed, arm);
+  console.log(`${b.name}: ${gone} measure notes deleted${arm === undefined ? "" : ` (arm ${arm})`} (${new Set(listed).size} listed, ${found} more found by content)`);
+  if (left.size) { console.log(`  NOT deleted, or not known to be: ${[...left].map(([id, why]) => `${id} (${why})`).join(", ")}`); return 1; }
   return 0;
 }
 
@@ -251,6 +322,7 @@ export function keptOf(info: Record<string, any>): Record<string, unknown> {
     })),
     relay: w.coordinator?.relay ?? null,
     children: w.coordinator?.children ?? null,
+    childrenAt: w.coordinator?.at ?? null,
   };
 }
 
@@ -269,7 +341,10 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
   const rpcs = new Map(brains.map((b) => [b.name, rpcFor(b)]));
   const end = Date.now() + minutes * 60_000;
   let stop = false;
-  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { stop = true; });
+  let wake = () => {};
+  // The first signal ends the wait at once and the round in hand; a second exits now.
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { if (stop) process.exit(130); stop = true; wake(); });
+  const answered = new Set<string>();
   console.log(`sampling arm ${arm}: ${brains.map((b) => `${b.name} (${shownUrl(b.mcp)})`).join(", ")} every ${everyS} s for ${minutes} min into ${out}`);
   while (!stop && Date.now() < end) {
     const t = new Date().toISOString();
@@ -277,6 +352,7 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
       const rpc = rpcs.get(b.name)!;
       try {
         const [info, status] = await Promise.all([tool(b, rpc, "brain_info", {}), tool(b, rpc, "worker_status", {})]);
+        answered.add(b.name);
         return { t, arm, brain: b.name, ...keptOf(info), backlog: backlogOf(status) };
       } catch (e) {
         return { t, arm, brain: b.name, error: (e as Error).message };
@@ -286,6 +362,7 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
       round.push((async () => {
         try {
           const r = await fetch(`${ollama.replace(/\/+$/, "")}/api/ps`, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
+          if (!r.ok) return { t, arm, brain: "(ollama)", error: `HTTP ${r.status}` };
           const j = (await r.json()) as { models?: { name?: string }[] };
           return { t, arm, brain: "(ollama)", loaded: (j.models ?? []).map((m) => m.name ?? "?").sort() };
         } catch (e) {
@@ -295,10 +372,11 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
     }
     for (const line of await Promise.all(round)) appendFileSync(out, JSON.stringify(line) + "\n");
     const wait = Math.min(everyS * 1000, end - Date.now());
-    if (wait > 0 && !stop) await new Promise((r) => setTimeout(r, wait));
+    if (wait > 0 && !stop) await new Promise<void>((r) => { const tm = setTimeout(r, wait); wake = () => { clearTimeout(tm); r(); }; });
   }
-  console.log(`sampled arm ${arm}${stop ? " (stopped early)" : ""}`);
-  return 0;
+  const silent = brains.filter((b) => !answered.has(b.name)).map((b) => b.name);
+  console.log(`sampled arm ${arm}${stop ? " (stopped early)" : ""}${silent.length ? `; never answered: ${silent.join(", ")}` : ""}`);
+  return silent.length ? 1 : 0;
 }
 
 type Tally = { calls: number; callMs: number; waited: number; waitMs: number };
@@ -315,27 +393,37 @@ export function talliesOf(models: unknown): Record<string, Tally> | null {
 }
 
 /**
- * A window's increase over its stamps, pass by pass and stamp by stamp: null with fewer than two. The sleep's tallies
- * count since its process began, so a tally that falls is the process begun again: its new value is the increase
- * since. Two restarts between one pair of stamps lose the calls before the second.
+ * A window's increase over its stamps, stamp by stamp: null with fewer than two. The sleep's tallies count since its
+ * process began, so a pair of stamps in which any pass's tally falls, or a pass drops out, is the process begun again:
+ * every pass's value then is the increase since. Two restarts between one pair of stamps lose the calls before the second.
  */
 export function windowOf(stamps: Stamp[]): { s: number; total: Tally; byPass: Record<string, Tally>; restarts: number } | null {
   if (stamps.length < 2) return null;
   const zero = (): Tally => ({ calls: 0, callMs: 0, waited: 0, waitMs: 0 });
+  const fields = ["calls", "callMs", "waited", "waitMs"] as const;
   const total = zero();
   const byPass: Record<string, Tally> = {};
   let restarts = 0;
   for (let k = 1; k < stamps.length; k++) {
-    for (const [pass, t] of Object.entries(stamps[k].byPass)) {
-      const p = stamps[k - 1].byPass[pass] ?? zero();
-      const fell = t.calls < p.calls || t.callMs < p.callMs || t.waited < p.waited || t.waitMs < p.waitMs;
-      if (fell) restarts++;
-      const d = fell ? t : { calls: t.calls - p.calls, callMs: t.callMs - p.callMs, waited: t.waited - p.waited, waitMs: t.waitMs - p.waitMs };
+    const [prev, cur] = [stamps[k - 1].byPass, stamps[k].byPass];
+    const restarted = Object.keys(prev).some((pass) => !(pass in cur) || fields.some((f) => cur[pass][f] < prev[pass][f]));
+    if (restarted) restarts++;
+    for (const [pass, t] of Object.entries(cur)) {
+      const p = restarted ? zero() : prev[pass] ?? zero();
       const b = (byPass[pass] ??= zero());
-      for (const f of ["calls", "callMs", "waited", "waitMs"] as const) { b[f] += d[f]; total[f] += d[f]; }
+      for (const f of fields) { b[f] += t[f] - p[f]; total[f] += t[f] - p[f]; }
     }
   }
   return { s: (stamps[stamps.length - 1].at - stamps[0].at) / 1000, total, byPass, restarts };
+}
+
+/** An arm's extraction backlog in sample order: first, last and most, and when it ran dry — the first empty sample after the last that was not, when the last is empty. */
+export function backlogLine(sizes: readonly { t: string; n: number }[]): string {
+  if (!sizes.length) return "-";
+  const lastBusy = sizes.map((x) => x.n > 0).lastIndexOf(true);
+  const dry = lastBusy < sizes.length - 1 ? sizes[lastBusy + 1].t : null;
+  const most = Math.max(...sizes.map((x) => x.n));
+  return `${sizes[0].n} first, ${sizes[sizes.length - 1].n} last, ${most} most${lastBusy === -1 ? "; empty throughout" : dry ? `; ran dry at ${dry}` : "; never dry at the end"}`;
 }
 
 function summary(out: string, splitMin: number, live: readonly string[]): number {
@@ -358,20 +446,21 @@ function summary(out: string, splitMin: number, live: readonly string[]): number
       }
       const all = [...stamps.values()].sort((x, y) => x.at - y.at);
       for (const [name, lo, hi] of [["before", t0, split], ["after", split, t1 + 1]] as const) {
-        const w = windowOf(all.filter((s) => s.at >= lo && s.at < hi));
+        const inWindow = all.filter((s) => s.at >= lo && s.at < hi);
+        const w = windowOf(inWindow);
         if (w === null) {
           const sleeping = rows.filter((r) => Date.parse(r.t) >= lo && Date.parse(r.t) < hi);
           const working = sleeping.filter((r) => (r.heartbeats ?? []).some((h: Record<string, any>) => h.worker === "sleep" && h.running && h.slept && h.slept.to === null)).length;
-          console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} no model tallies stamped; sleep working in ${working} of ${sleeping.length} samples`);
+          const why = all.length === 0 ? "no model tallies stamped in the arm (a build before SMD-3379 PR 2b-2a, or no sleep)" : `${inWindow.length} sleep stamp(s) in the window, fewer than two`;
+          console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${why}; sleep working in ${working} of ${sleeping.length} samples`);
           continue;
         }
         const f = (v: number, d = 0) => v.toFixed(d);
         const passes = Object.entries(w.byPass).filter(([, t]) => t.calls > 0).map(([p, t]) => `${p} ${t.calls}/${f(t.callMs / 1000)}s`).join(", ");
-        console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${f(w.s).padStart(5)} ${String(w.total.calls).padStart(7)} ${f(w.total.callMs / 1000).padStart(7)} ${f(w.total.callMs / 1000 / Math.max(1, w.s), 2).padStart(10)} ${String(w.total.waited).padStart(7)} ${f(w.total.waitMs / 1000, 1).padStart(7)}   ${passes || "-"}${w.restarts ? ` (${w.restarts} pass restart(s))` : ""}`);
+        console.log(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${f(w.s).padStart(5)} ${String(w.total.calls).padStart(7)} ${f(w.total.callMs / 1000).padStart(7)} ${f(w.total.callMs / 1000 / Math.max(1, w.s), 2).padStart(10)} ${String(w.total.waited).padStart(7)} ${f(w.total.waitMs / 1000, 1).padStart(7)}   ${passes || "-"}${w.restarts ? ` (the sleep begun again ${w.restarts} time(s))` : ""}`);
       }
-      const dry = rows.filter((r) => !Object.keys(r.backlog ?? {}).some((k) => k.startsWith("extract:")));
-      const sizes = rows.map((r) => Object.entries(r.backlog ?? {}).filter(([k]) => k.startsWith("extract:")).reduce((s, [, n]) => s + Number(n), 0));
-      console.log(`  ${"".padEnd(10)} extraction backlog ${sizes.length ? `${Math.max(...sizes)} to ${Math.min(...sizes)}` : "-"}${dry.length ? `; none in ${dry.length} of ${rows.length} samples, from ${dry[0].t}` : ""}`);
+      const sizes = rows.map((r) => ({ t: r.t as string, n: Object.entries(r.backlog ?? {}).filter(([k]) => k.startsWith("extract:")).reduce((s, [, n]) => s + Number(n), 0) }));
+      console.log(`  ${"".padEnd(10)} extraction backlog: ${backlogLine(sizes)}`);
     }
     const ol = mine.filter((l) => l.brain === "(ollama)" && Array.isArray(l.loaded));
     if (ol.length) {
@@ -400,10 +489,11 @@ function summary(out: string, splitMin: number, live: readonly string[]): number
   return 0;
 }
 
-/** The pure parts, checked without a brain or a provider: what CI runs (--self-check). */
-export function selfCheck(): number {
+/** The pure parts, and clean against a brain in memory, checked without a brain or a provider: what CI runs (--self-check). */
+export async function selfCheck(): Promise<number> {
   const rows: [string, boolean][] = [];
   const ok = (pass: boolean, what: string) => rows.push([what, pass]);
+  const finish = () => { for (const [what, pass] of rows) console.log((pass ? "ok   " : "FAIL ") + what); return rows.every(([, p]) => p) ? 0 : 1; };
   const throws = (f: () => unknown, re: RegExp) => { try { f(); return false; } catch (e) { return re.test((e as Error).message); } };
 
   const a0 = notesFor("A", 0);
@@ -438,8 +528,66 @@ export function selfCheck(): number {
   const np = windowOf([st(0, 0, 0), { at: 60_000, byPass: { extract: { calls: 0, callMs: 0, waited: 0, waitMs: 0 }, consolidate: { calls: 3, callMs: 9_000, waited: 1, waitMs: 500 } } }]);
   ok(np !== null && np.restarts === 0 && np.byPass.consolidate.calls === 3 && np.total.waited === 1, "a pass first stamped inside the window counts from zero");
 
-  for (const [what, pass] of rows) console.log((pass ? "ok   " : "FAIL ") + what);
-  return rows.every(([, p]) => p) ? 0 : 1;
+  // A restart is decided once a pair of stamps (review pass 1): one pass falling, or one dropping out, starts every pass over.
+  const two = (at: number, ex: number, co?: number) => ({ at, byPass: { extract: { calls: ex, callMs: ex * 1000, waited: 0, waitMs: 0 }, ...(co === undefined ? {} : { consolidate: { calls: co, callMs: co * 1000, waited: 0, waitMs: 0 } }) } });
+  const fellOne = windowOf([two(0, 100, 2), two(60_000, 5, 3)]);
+  ok(fellOne !== null && fellOne.restarts === 1 && fellOne.byPass.consolidate.calls === 3 && fellOne.byPass.extract.calls === 5, "one pass falling restarts every pass: consolidate's 3 since the restart counted whole, not +1");
+  const dropped = windowOf([two(0, 100, 10), { at: 60_000, byPass: { consolidate: { calls: 12, callMs: 12_000, waited: 0, waitMs: 0 } } }]);
+  ok(dropped !== null && dropped.restarts === 1 && dropped.byPass.consolidate.calls === 12, "a pass that drops out is a restart: consolidate's 12 counted whole, not +2");
+
+  ok(backlogLine([{ t: "a", n: 0 }, { t: "b", n: 150 }, { t: "c", n: 40 }, { t: "d", n: 0 }, { t: "e", n: 0 }]) === "0 first, 0 last, 150 most; ran dry at d", "the backlog ran dry at the first empty sample after the last busy one, not at an empty one before the load");
+  ok(backlogLine([{ t: "a", n: 9 }, { t: "b", n: 3 }]).endsWith("never dry at the end") && backlogLine([{ t: "a", n: 0 }]).endsWith("empty throughout") && backlogLine([]) === "-", "a backlog still there at the end, one never there, and no samples are each said");
+  ok(isMeasureNote(notesFor("C3", 4), "C3") && !isMeasureNote(notesFor("C3", 4), "C") && !isMeasureNote(notesFor("B", 4), "C3"), "a note is the arm's only when its arm is that arm, a prefix of the name not enough");
+  await cleanChecks(ok);
+  return finish();
+}
+
+/** A brain of thoughts in memory, answering clean's four tools as the server does (render.ts's NOT_FOUND text); `scope` false answers as a key without write scope. */
+function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLies?: string; fetchFails?: string } = {}): { call: Call; held: Map<string, string> } {
+  const held = new Map(Object.entries(texts));
+  const call: Call = async (name, args) => {
+    const id = String(args.id ?? "");
+    if (name === "delete_thought") {
+      if (!scope) return { ok: false, error: "Tool delete_thought not found", sc: {} };
+      if (!held.has(id)) return { ok: false, error: `No thought with id ${id}. It may already have been deleted`, sc: {} };
+      if (id !== opts.deleteLies) held.delete(id);
+      return { ok: true, sc: {} };
+    }
+    if (name === "fetch") return id === opts.fetchFails || !held.has(id) ? { ok: false, error: "HTTP 500", sc: {} } : { ok: true, sc: { text: held.get(id) } };
+    if (name === "search_thoughts_keyword") {
+      const q = String(args.query).toLowerCase();
+      const all = [...held].filter(([, t]) => t.toLowerCase().includes(q)).map(([i]) => ({ id: i }));
+      const off = Number(args.offset ?? 0);
+      return { ok: true, sc: { hits: all.slice(off, off + Number(args.limit)), total: all.length } };
+    }
+    return { ok: false, error: "unknown tool", sc: {} };
+  };
+  return { call, held };
+}
+
+/** clean's rows, against fakeBrain: async, so run after the pure rows. */
+export async function cleanChecks(ok: (pass: boolean, what: string) => void): Promise<void> {
+  const notes = (arm: string, n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${arm}-${i}`, notesFor(arm, i)]));
+  const base = { ...notes("A", 3), ...notes("B", 2), q: `A record quoting one: ${notesFor("A", 0)}`, other: "an ordinary thought" };
+  let b = fakeBrain(base);
+  let r = await cleanWith(b.call, ["A-0", "gone-already"]);
+  ok(r.left.size === 0 && [...b.held.keys()].sort().join(",") === "other,q" && r.found === 4, "clean deletes the listed ids and every measure note found by content, an id already gone counted gone, a quoting thought kept");
+  b = fakeBrain(base);
+  r = await cleanWith(b.call, ["A-0"], "A");
+  ok(r.left.size === 0 && b.held.has("B-0") && b.held.has("B-1") && !b.held.has("A-2"), "with --arm, clean's search deletes that arm's notes alone");
+  b = fakeBrain(base, false);
+  r = await cleanWith(b.call, ["A-0", "A-1"]);
+  ok(r.left.size >= 5 && b.held.size === Object.keys(base).length && r.gone === 0, "a key without write scope ('Tool delete_thought not found') deletes nothing and says every note left, never counted gone");
+  b = fakeBrain(base, true, { deleteLies: "B-1" });
+  r = await cleanWith(b.call, []);
+  ok(r.left.get("B-1") === "still there after its delete", "a delete that answers but leaves the note is found by the last search");
+  b = fakeBrain(base, true, { fetchFails: "B-0" });
+  r = await cleanWith(b.call, []);
+  ok(/its read failed/.test(r.left.get("B-0") ?? "") && b.held.has("B-0"), "a note whose read fails is said, not skipped in silence");
+  const quotes = Object.fromEntries(Array.from({ length: 120 }, (_, i) => [`q${i}`, `A record quoting one: ${notesFor("C", i)}`]));
+  b = fakeBrain({ ...quotes, ...notes("C", 30) });
+  r = await cleanWith(b.call, []);
+  ok(r.left.size === 0 && b.held.size === 120 && r.found === 30, "clean's search pages past 100 hits: 30 notes behind 120 thoughts quoting one found and deleted");
 }
 
 async function main(): Promise<number> {
@@ -451,14 +599,29 @@ async function main(): Promise<number> {
     hints: { brains: "<brains.json>", brain: "<name>", arm: "<arm>", ids: "<ids.txt>", notes: "<n>", parallel: "<n>", minutes: "<n>", every: "<seconds>", out: "<samples.jsonl>", ollama: "<http://127.0.0.1:11434>", split: "<minutes>", live: "<bench-live samples.jsonl>" },
     note: "load|sample|clean|summary first; --self-check alone",
   });
-  if (cli.has("self-check")) return selfCheck();
   const cmd = cli.positionals[0];
+  // Each subcommand's flags; any other given is refused, not ignored (review pass 1: summary --arm looked like a filter).
+  const takes: Record<string, readonly string[]> = {
+    load: ["brains", "brain", "arm", "ids", "notes", "parallel"],
+    sample: ["brains", "arm", "minutes", "every", "out", "ollama"],
+    clean: ["brains", "brain", "ids", "arm"],
+    summary: ["out", "split", "live"],
+  };
+  const given = ["brains", "brain", "arm", "ids", "notes", "parallel", "minutes", "every", "out", "ollama", "split", "live", "self-check"].filter((f) => cli.has(f as "brains"));
+  if (cli.has("self-check")) {
+    if (cmd !== undefined || given.length > 1) { console.error("bench-brains.ts: --self-check takes no subcommand and no other flag"); return 2; }
+    return selfCheck();
+  }
+  if (cmd !== undefined && takes[cmd]) {
+    const stray = given.filter((f) => !takes[cmd].includes(f));
+    if (stray.length) { console.error(`bench-brains.ts ${cmd}: ${stray.map((f) => `--${f}`).join(", ")} is not ${cmd}'s (it takes ${takes[cmd].map((f) => `--${f}`).join(", ")})`); return 2; }
+  }
   const need = (...names: ("brains" | "brain" | "arm" | "ids" | "out")[]) => {
     const missing = names.filter((n) => !cli.value(n));
     if (missing.length) { console.error(`bench-brains.ts ${cmd}: give ${missing.map((n) => `--${n}`).join(", ")} (--help lists every flag)`); process.exit(2); }
   };
   const one = (name: string) => {
-    const b = brainsFrom(cli.value("brains")!).find((x) => x.name === name);
+    const b = brainFrom(cli.value("brains")!, name);
     if (!b) { console.error(`bench-brains.ts: no brain ${JSON.stringify(name)} in ${cli.value("brains")}`); process.exit(2); }
     return b;
   };
@@ -473,10 +636,10 @@ async function main(): Promise<number> {
       return sample(brainsFrom(cli.value("brains")!), arm!, cli.int("minutes", { absent: 20, min: 1, max: 600 }), cli.int("every", { absent: 15, min: 5, max: 600 }), cli.value("out")!, cli.value("ollama"));
     case "clean":
       need("brains", "brain", "ids");
-      return clean(one(cli.value("brain")!), cli.value("ids")!);
+      return clean(one(cli.value("brain")!), cli.value("ids")!, arm);
     case "summary":
       need("out");
-      return summary(cli.value("out")!, cli.int("split", { absent: 12, min: 0, max: 600 }), cli.values("live"));
+      return summary(cli.value("out")!, cli.int("split", { absent: 12, min: 1, max: 600 }), cli.values("live"));
     default:
       console.error("bench-brains.ts: first say load, sample, clean or summary (--help lists every flag)");
       return 2;
