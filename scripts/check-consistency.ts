@@ -294,8 +294,9 @@
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
- *      moved onto the shim (SMD-2144, SMD-2139; brain-backup's and
- *      lint-sweep's since to db/backup.ts and db/lint-sweep.ts, SMD-3318),
+ *      moved onto the shim (SMD-2144, SMD-2139; brain-backup's,
+ *      lint-sweep's and thought-enrichment's two backfills since to
+ *      db/backup.ts, db/lint-sweep.ts and db/backfill-metadata.ts, SMD-3318),
  *      weekly-digest retired for the db/ verb db/weekly-digest.ts (SMD-2239),
  *      brain-smoke-test retired into deploy/smoke.sh (SMD-2103), and ob-graph's
  *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
@@ -6494,7 +6495,8 @@ checkWorkflowPins();
 // more reach the gateway through a lib; twenty-eight until the two retirements,
 // obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
 // the first five ports: brain-backup and lint-sweep — SMD-2144 — and
-// thought-enrichment's three — SMD-2139 — weekly-digest's retirement for
+// thought-enrichment's three — SMD-2139; its two backfills since one db/ script,
+// db/backfill-metadata.ts, SMD-3318 — weekly-digest's retirement for
 // the db/ verb db/weekly-digest.ts — SMD-2239 — brain-smoke-test's into
 // deploy/smoke.sh — SMD-2103 — and ob-graph's smoke-graph-rpcs.mjs with its
 // recipe — SMD-2920)
@@ -6613,7 +6615,7 @@ const REST_CLIENT = "a script still to port; it becomes a REST-core client throu
  * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land — both since moved
  * again, to db/backup.ts and db/lint-sweep.ts (SMD-3318) — and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
- * the first writers.
+ * the first writers — the two backfills since one db/ script, db/backfill-metadata.ts (SMD-3318).
  */
 const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // Imports → the ingestion contract (after SMD-2136).
