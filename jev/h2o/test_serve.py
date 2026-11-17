@@ -50,7 +50,8 @@ def check(ok, label):
 class FakeReader:
     """The parts of serve.Reader the request path uses. A read sleeps `delay` seconds on the calling thread and
     records the most reads ever in flight at once."""
-    max_state_tokens = 1000
+    max_state_tokens = model_max_state_tokens = 1000
+    two_way = False
     temperature = {"choice": 1.0, "noul": 1.0, "score": 1.0}
     answer = serve.Reader.answer
 
@@ -412,7 +413,7 @@ async def main():
           "the one-way rules are the string they were, and the two-way rules say two-way and no shared context")
     import hashlib
     hashes = [hashlib.sha256(serve.rules_of(m).encode()).hexdigest()[:16] for m in ("one-way", "two-way")]
-    check(hashes == ["198e4c78db4c23dd", "7a682316774558f0"], f"/info's rules value is the one earlier lineage rows carry one-way, and the README's two-way ({hashes})")
+    check(hashes == ["198e4c78db4c23dd", "72fa9c992f907dc0"], f"/info's rules value is the one earlier lineage rows carry one-way, and the README's two-way ({hashes})")
 
     print("\n[14] serve_config.json's two_way block")
     made_up = {2: [0.7, 0.3], 3: [0.7, 0.2, 0.1], 4: [0.7, 0.2, 0.06, 0.04]}   # a distribution per option count
@@ -515,6 +516,40 @@ async def main():
           and asked[0][3] == '{"ticket":"Checkout returns HTTP 500 for every customer since 09:12.","plan":"enterprise"}' and asked[4][3].startswith("The parcel left"),
           f"each of the six questions is read once each way, unshared, a structured record as compact JSON and a string as it is ({len(asked)})")
 
+    # Review pass 1's findings, each held here.
+    nan_two = answers(0.0)
+    nan_two[1]["lost"] = [float("nan"), float("nan")]
+    ok, _, _, why = serve.two_way_verdict(reference, 0.05, answers(0.09), nan_two)
+    check(not ok and "'lost'" in why and "two-way" in why and "not a probability per option" in why,
+          f"a two-way answer that is no number fails the guard by its question, though the other five pass ({why})")
+    nan_one = answers(0.09)
+    nan_one[0]["team"] = [0.5, float("inf"), 0.1]
+    short_two = answers(0.0)
+    short_two[2]["issue"] = short_two[2]["issue"][:3]
+    check(not serve.two_way_verdict(reference, 0.05, nan_one, answers(0.0))[0] and "one-way" in serve.two_way_verdict(reference, 0.05, nan_one, answers(0.0))[3]
+          and not serve.two_way_verdict(reference, 0.05, answers(0.09), short_two)[0],
+          "so does a one-way answer that is infinite, and an answer with an option missing")
+    temps_ok = (serve.temperatures_of(0.7, "temperature"), serve.temperatures_of({"choice": 1, "noul": 0.8, "score": 0.65, "other": "x"}, "temperature"))
+    check(temps_ok == ({"choice": 0.7, "noul": 0.7, "score": 0.7}, {"choice": 1.0, "noul": 0.8, "score": 0.65}), f"temperatures: one number for all, or one a type ({temps_ok})")
+    temp_refusals = []
+    for bad in ({"noul": 0.7}, None, {"choice": 0.75, "noul": "0.8", "score": 0.65}, 0, -1, True, float("nan"), {"choice": 0.75, "noul": 0, "score": 0.65}):
+        try:
+            serve.two_way_config({**good, "two_way": {**good["two_way"], "temperature": bad}}, "v9")
+            temp_refusals.append(False)
+        except SystemExit as e:
+            temp_refusals.append("two_way.temperature" in str(e))
+        except Exception:
+            temp_refusals.append(False)
+    check(all(temp_refusals), f"a two_way.temperature for one type alone, null, a string, zero, negative, true or NaN is refused by its name, never a bare error ({temp_refusals})")
+    saved = serve.REVISION
+    serve.REVISION = "v1.2.3"
+    label = serve.revision_label("/cache/snapshots/acaf0d4ea251e54de928c75ef4352670d33192d3")
+    serve.REVISION = saved
+    check(label == "v1.2.3 (acaf0d4e)", f"a refusal names the revision as it was set, with the commit it resolved to ({label})")
+    check(all(serve.RULES.count(old) == 1 and new in serve.RULES_TWO_WAY and old not in serve.RULES_TWO_WAY.replace(new, "") for old, new in serve._TWO_WAY_RULES)
+          and "two_way block" in serve.RULES_TWO_WAY and "bounded whole" in serve.RULES_TWO_WAY,
+          "each clause the two-way rules replace is in the one-way rules exactly once, and replaced")
+
     print("\n[17] a context over the two-way limit")
     R, gate = FakeReader(), serve.Gate()
     R.two_way, R.model_max_state_tokens, R.max_state_tokens = True, 32000, 1000
@@ -524,6 +559,30 @@ async def main():
     R.model_max_state_tokens = 1200
     s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
     check(s == 422 and "head and tail" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" not in b["error"], f"over the model's own limit too: the model's refusal, as one-way gives ({b.get('error')})")
+    R.model_max_state_tokens = 0
+    s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
+    check(s == 422 and "H2O_TWO_WAY_MAX_TOKENS" in b["error"] and "head and tail" not in b["error"], f"a model with no limit of its own: the two-way limit's refusal ({b.get('error')})")
+    # The prompt is what a two-way read squares: a short record under long options is counted whole. The fake
+    # tokenizer reads a token for every four characters, so 24 options of 400 characters are about 2,400 tokens.
+    R.model_max_state_tokens = 32000
+    options = [{"id": f"o{k}", "description": "d" * 400} for k in range(24)]
+    wide = {"decisions": [{"kind": "binary", "context": "short record", "proposition": "it holds"},
+                          {"kind": "choice", "context": "short record", "question": "Which?", "options": options}]}
+    s, b, _ = await post(R, gate, json.dumps(wide).encode())
+    check(s == 422 and "decision 1: its prompt" in b["error"] and "the question and its options" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" in b["error"] and R.reads == 0,
+          f"a short record under options that take the prompt past the limit: a 422 naming the prompt, nothing read ({s}, {b.get('error')})")
+    s, b, _ = await post(R, gate, json.dumps({"decisions": wide["decisions"][:1]}).encode())
+    check(s == 200 and R.reads == 1, f"the same record under a short question is read ({s})")
+    R.two_way = False
+    s, _, _ = await post(R, gate, json.dumps(wide).encode())
+    check(s == 200, f"one-way, whose cost does not square, still reads the wide question ({s})")
+    class Unpromptable(FakeReader):
+        def prompt(self, *a):
+            raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+    R = Unpromptable()
+    R.two_way, R.model_max_state_tokens = True, 32000
+    s, b, _ = await post(R, gate, body())
+    check(s == 422 and "question or options cannot be encoded" in b["error"] and R.reads == 0 and gate.admitted == 0, f"a question the tokenizer cannot encode is that decision's 422 under two-way ({s}, {b.get('error')})")
 
 
 asyncio.run(main())

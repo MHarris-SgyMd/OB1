@@ -53,8 +53,8 @@ H2O ships the check, and this port applies it at start as the shim does: the rel
 fixed probes at temperature 1 (`two_way.probe_reference`) must be matched within `two_way.probe_tolerance` (0.05), and
 must differ from the one-way answers by at least 0.05 on some question, or the tier does not serve. A two-way read
 shares no prefix (a two-way prefix is not reusable), so every question of a request reads its record again, and its
-memory grows with the square of its length: a context over H2O_TWO_WAY_MAX_TOKENS (8,000, the longest measured here)
-gets the 422 above, and /info's max_tokens says that limit. /info's `rules` differs by mode, so a judgement's lineage
+memory grows with the square of its length: a prompt (the record, the question and its options) over
+H2O_TWO_WAY_MAX_TOKENS (8,000, the longest measured here) gets the 422 above, and /info's max_tokens says that limit. /info's `rules` differs by mode, so a judgement's lineage
 says how it was read; the one-way value is what it was before this mode existed.
 
 Endpoints (ob1-jev/1): GET /health, GET /info, POST /decide.
@@ -93,9 +93,18 @@ RULES = ("h2o_lightning_shim.py v1.2.3 text path: chat template, serve_config sy
          "the case that ' + proposition; INSUFFICIENT_EVIDENCE at probability 0; shared context read once per request")
 
 # Two-way reading (SMD-4369). The one-way RULES string is unchanged, so its hash is what earlier lineage rows carry.
-RULES_TWO_WAY = RULES.replace("shared context read once per request",
-                              "two-way reading: an all-attend mask on the full-attention layers, the Gated DeltaNet "
-                              "layers causal, every prompt read whole, H2O's three probes checked at start")
+# The two-way string says what differs: whose temperatures, no shared context, and that the prompt, still rendered as
+# the v1.2.3 text path renders it, is held to the release's own recorded two-way answers at every start.
+_TWO_WAY_RULES = (("per-type temperature,", "per-type temperature from serve_config's two_way block,"),
+                  ("shared context read once per request",
+                   "two-way reading on weights trained for it (from v1.3): an all-attend mask on the full-attention layers, "
+                   "the Gated DeltaNet layers causal, every prompt read whole and bounded whole, the prompt held at start "
+                   "to the release's recorded two-way answers to H2O's three probes"))
+RULES_TWO_WAY = RULES
+for _old, _new in _TWO_WAY_RULES:
+    if RULES_TWO_WAY.count(_old) != 1:  # a reworded RULES would leave the modes one string and one hash (review pass 1)
+        raise SystemExit(f"serve.py: RULES no longer holds {_old!r} once, so the two-way rules cannot be told from the one-way ones")
+    RULES_TWO_WAY = RULES_TWO_WAY.replace(_old, _new)
 ATTENTION_MODES = {"one-way": "one-way", "one_way": "one-way", "oneway": "one-way", "causal": "one-way",
                    "two-way": "two-way", "two_way": "two-way", "twoway": "two-way", "bidirectional": "two-way"}
 DEFAULT_TWO_WAY_MAX_TOKENS = 8000   # the longest two-way read measured on this Mac (SMD-4369): 7,821 tokens, 6.7 s
@@ -139,6 +148,19 @@ def probe_state(state):
     return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, separators=(",", ":"))
 
 
+def temperatures_of(t, where):
+    """serve_config.json's temperatures by question type: one number for all three, or one per type. Anything else
+    stops the start by name (review pass 1: a block giving one type alone was a bare KeyError), and so does a value
+    that is not a positive finite number, which `answer` would otherwise read as its floor."""
+    out = {}
+    for k in ("choice", "noul", "score"):
+        v = t.get(k) if isinstance(t, dict) else t
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+            raise SystemExit(f"serve_config.json's {where} gives no positive number for {k!r} (one number, or one per type: choice, noul, score)")
+        out[k] = float(v)
+    return out
+
+
 def two_way_config(cfg, revision):
     """(the probes' recorded answers, the tolerance, the temperatures by type) from serve_config.json's `two_way`
     block, or a refusal to start: weights from before v1.3 were not trained to read two-way, and an all-attend mask on
@@ -160,8 +182,9 @@ def two_way_config(cfg, revision):
     tol = tw.get("probe_tolerance", 0.05)
     if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 < tol < 0.5:
         raise SystemExit(f"two_way.probe_tolerance is a number in (0, 0.5), not {tol!r}")
-    t = tw.get("temperature", cfg["temperature"])
-    return ref, float(tol), {k: float(t[k] if isinstance(t, dict) else t) for k in ("choice", "noul", "score")}
+    if "temperature" in tw:
+        return ref, float(tol), temperatures_of(tw["temperature"], "two_way.temperature")
+    return ref, float(tol), temperatures_of(cfg.get("temperature"), "temperature")
 
 
 def two_way_verdict(reference, tolerance, one_way, two_way, min_separation=TWO_WAY_MIN_SEPARATION):
@@ -176,6 +199,12 @@ def two_way_verdict(reference, tolerance, one_way, two_way, min_separation=TWO_W
         for qid, typ, _, criteria in questions:
             names = probe_options(typ, criteria)[0]
             want = [float(ref[qid][n]) for n in names]
+            # max() passes over a NaN, so an answer that is no number would count for nothing in either rule and a
+            # read that overflowed on one probe could serve (review pass 1)
+            for mode, got in (("two-way", two[qid]), ("one-way", one[qid])):
+                if len(got) != len(names) or not all(isinstance(x, float) and math.isfinite(x) for x in got):
+                    return False, float("nan"), float("nan"), (f"its {mode} answer to the probe question {qid!r} is not a probability "
+                                                               f"per option ({got}): the read failed, in this dtype or on this device")
             gap = max(gap, max(abs(a - b) for a, b in zip(two[qid], want)))
             sep = max(sep, max(abs(a - b) for a, b in zip(two[qid], one[qid])))
     if gap > tolerance:
@@ -185,6 +214,12 @@ def two_way_verdict(reference, tolerance, one_way, two_way, min_separation=TWO_W
         return False, gap, sep, (f"its two-way answers are within {sep:.4f} of its one-way ones on every probe (two-way is at "
                                  f"least {min_separation:g} apart on some question): the mask was not applied")
     return True, gap, sep, None
+
+
+def revision_label(path):
+    """The revision as its operator named it, with the commit it resolved to: a snapshot's directory is the commit's
+    sha alone, which names no setting (review pass 1)."""
+    return f"{REVISION} ({Path(path).name[:8]})"
 
 
 def read_limit(max_state_tokens, attention, two_way_max):
@@ -233,14 +268,13 @@ class Reader:
         self.system, self.prefill = p.get("system") or None, p.get("prefill", "Answer:")
         self.max_state_tokens = int(p.get("max_state_tokens", 32000))
         self.default_instructions = p.get("default_instructions", "Answer the question below.")
-        t = self.cfg["temperature"]
-        self.temperature = {k: float(t[k] if isinstance(t, dict) else t) for k in ("choice", "noul", "score")}
+        self.temperature = temperatures_of(self.cfg.get("temperature"), "temperature")
         # Two-way (SMD-4369): its own block's temperatures (shipped equal to the one-way ones), no shared prefix, and
         # a limit on a read's length below the model's own
         self.attention, self.two_way = attention, attention == "two-way"
         self.model_max_state_tokens = self.max_state_tokens
         if self.two_way:
-            self.probe_reference, self.probe_tolerance, self.temperature = two_way_config(self.cfg, self.path.name)
+            self.probe_reference, self.probe_tolerance, self.temperature = two_way_config(self.cfg, revision_label(self.path))
             self.share = False
             self.max_state_tokens = read_limit(self.max_state_tokens, attention, two_way_max)
         self.labels = [str(l) for l in self.cfg["labels"]][: int(self.cfg.get("max_options", len(self.cfg["labels"])))]
@@ -629,12 +663,27 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                     except Exception as e:
                         return 422, {"error": f"decision {i}: its context cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
                 if seen[ctx] is not None:
-                    if getattr(R, "two_way", False) and seen[ctx] <= R.model_max_state_tokens:
+                    # Under two-way the limit in force is the tier's own unless the model's is the one passed: a model
+                    # with no limit (0) has only the tier's (review pass 1: `<= 0` named the model's)
+                    if R.two_way and not (R.model_max_state_tokens and seen[ctx] > R.model_max_state_tokens):
                         return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
                                               f"tier reads two-way (H2O_TWO_WAY_MAX_TOKENS): a two-way read's memory grows with the "
                                               f"square of its length, so it is refused"}, {}
                     return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
                                           f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}
+                if R.two_way:
+                    # A two-way read's cost is the whole prompt's square, and the question and its options are part of
+                    # it: 24 options of 20,000 characters under a short record made a prompt of 100,000 tokens that
+                    # the context's count let through (review pass 1). So the prompt itself is counted.
+                    instr, names, descs = question_of(dd)[:3]
+                    try:
+                        n = len(R.encode(R.prompt(ctx, instr, names, descs)))
+                    except Exception as e:
+                        return 422, {"error": f"decision {i}: its question or options cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
+                    if n > R.max_state_tokens:
+                        return 422, {"error": f"decision {i}: its prompt (the record, the question and its options) is {n} tokens, over the "
+                                              f"{R.max_state_tokens} this tier reads two-way (H2O_TWO_WAY_MAX_TOKENS): a two-way read's memory "
+                                              f"grows with the square of its length, so it is refused"}, {}
             return None
         refused = await asyncio.to_thread(first_unreadable)
         if refused:
@@ -700,6 +749,11 @@ def main():
     # Read before the weights are hashed and loaded, so a mistyped setting stops the start at once
     attention, two_way_max = attention_of(os.environ.get("H2O_ATTENTION")), knob("H2O_TWO_WAY_MAX_TOKENS", DEFAULT_TWO_WAY_MAX_TOKENS)
     t0 = time.time()
+    if attention == "two-way":
+        # serve_config.json alone first: a revision not trained for two-way (the default pin is one) is refused on a
+        # file of a few kilobytes, not after its weights are downloaded and hashed (review pass 1)
+        from huggingface_hub import hf_hub_download
+        two_way_config(json.loads(Path(hf_hub_download(REPO, "serve_config.json", revision=REVISION)).read_text()), REVISION)
     path = snapshot()
     weights = Path(path) / "model.safetensors"
     h = hashlib.sha256()
@@ -710,7 +764,7 @@ def main():
     if R.two_way:
         ok, gap, sep, why = R.two_way_matches()
         if not ok: raise SystemExit(f"this is not H2O's two-way read: {why}")
-        reading = (f"two-way, every prompt read whole, at most {R.max_state_tokens} tokens of context (H2O's probes matched "
+        reading = (f"two-way, every prompt read whole, at most {R.max_state_tokens} tokens a prompt (H2O's probes matched "
                    f"within {gap:.4f}, {sep:.4f} from the one-way read)")
     elif SHARE:
         ok, worst = R.shared_read_matches()

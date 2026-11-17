@@ -169,12 +169,16 @@ H2O_REVISION=v1.4.2 H2O_ATTENTION=two-way JEV_PORT=8023 \
   asks one question a pair and pays nothing for that; a request asking eight
   of one pair reads it eight times.
 - **It has a length limit of its own.** A two-way read's attention grows with
-  the square of its length. A context over `H2O_TWO_WAY_MAX_TOKENS` (8000, the
-  longest read measured here: 7,821 tokens in 6.7 s) gets the 422 a record over
-  the model's limit gets, naming the setting, and `/info`'s `max_tokens` says
-  that limit.
+  the square of its length, and the question and its options are part of that
+  length. A prompt over `H2O_TWO_WAY_MAX_TOKENS` (8000, the longest read
+  measured here: 7,821 tokens in 6.7 s) gets the 422 a record over the model's
+  limit gets, naming the setting, and `/info`'s `max_tokens` says that limit.
+  One-way keeps counting the record alone, as before.
+- **A revision not trained for it is refused before its weights are fetched.**
+  The start reads `serve_config.json` alone first, so `H2O_ATTENTION=two-way`
+  on the default `v1.2.3` stops in under a second, naming the revision.
 - **`/info`'s `rules` says the mode.** It is `198e4c78db4c23dd` one-way, as it
-  always was, and `7a682316774558f0` two-way, so a judgement's lineage says how
+  always was, and `72fa9c992f907dc0` two-way, so a judgement's lineage says how
   it was read.
 
 Whether two-way judges this brain's pairs better than `v1.2.3` read one-way is
