@@ -229,7 +229,7 @@ export const TICKETS_FROM = "tickets_from";
  * release, a review. The hook before 1.8.1 learned a team from every ticket-shaped word of a branch or a directory, so
  * on `smd-610-bump-node-22` a prompt's `node-22` was a ticket to it; from 1.8.1 a place teaches its own ticket's team
  * alone (SMD-4291), but a place with no ticket teaches its first ticket-shaped word's (`node-22-pin`) and the session's
- * teams are every place it has been but a ticket-shaped folder of a checkout, so the guard stays for those
+ * teams are every place it has been but a folder entered from within its checkout, so the guard stays for those
  * summaries too: a header listing a ticket of another
  * team than the session's is the model's. The session's team is the first ticket of the header's own branch, else of
  * its project (the directory's last part, which the header shows; the hook reads the deepest part that names one), as

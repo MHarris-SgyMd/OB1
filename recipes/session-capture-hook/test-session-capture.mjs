@@ -25,7 +25,7 @@
 
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync, chmodSync, realpathSync, statSync, lstatSync, linkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -458,7 +458,7 @@ let episodesLines;
   assert(nestedWt.length === 2 && nestedWt[1].cwd === "/r/OB1/.claude/worktrees/smd-1246-y" && plainSub.length === 2 && plainSub[1].cwd === "/wt/smd-610-x/api"
       && movedSub.length === 2 && movedSub[1].cwd === "/wt/ob1" && headerTickets(movedSub[1]).tickets.join() === "SMD-700",
     `a known team's nested worktree and a plain subdirectory open where the shell is; a branch move in a ticket-shaped folder opens in the checkout (${JSON.stringify([nestedWt.at(-1).cwd, plainSub.at(-1).cwd, movedSub.at(-1).cwd])})`);
-  // Review pass 3 (cold read, run-it): one rule, `placeKind`, says which folder within the roots is a checkout of its
+  // Review pass 3 (cold read, run-it): one rule, `placeOf`, says which folder within the roots is a checkout of its
   // own, and both the team a cd teaches and the place an episode opens in read it.
   const pkgMain = segment([CWD("/wt/app"), BR("main"), P("start"), CWD("/wt/app/packages/node-22-compat"), BR("main"), P("the node-22 shim broke")]).episodes;
   const pkgUpper = segment([CWD("/wt/app"), BR("main"), P("start"), CWD("/wt/app/packages/node-22-compat"), BR("main"), P("now do SMD-700")]).episodes;
@@ -480,6 +480,23 @@ let episodesLines;
   const branchAnchored = segment([CWD("/wt/app"), BR("me/smd-610-x"), P("start"), CWD("/wt/app/node-22-compat"), BR("me/smd-610-x"), P("the node-22 shim")]).episodes;
   assert([...rootFirst.at(-1).named].join() === "" && [...branchAnchored.at(-1).named].join() === "",
     `…a folder is read from the checkout's top root, whichever root came first; a checkout its branch anchors keeps a folder directly in it (mutants: the nearest root, anchored by directory only; ${JSON.stringify([[...rootFirst.at(-1).named], [...branchAnchored.at(-1).named]])})`);
+  // Review pass 4 (cold read, run-it): a directory's place is decided once, when the session enters it, with the
+  // branch the line moves to; HOME holds checkouts; a folder's episode runs in the checkout it is in.
+  const pairLine = segment([CWD("/r/OB1"), BR("main"), P("SMD-12: start"), CWD("/r/OB1/node-22-compat"), BR("smd-12-x"), P("bump node-22 there")]).episodes;
+  const backToMain = segment([CWD("/wt/mono"), BR("smd-600-base"), P("a"), CWD("/wt/mono/node-22-compat"), BR("smd-600-base"), P("b"), BR("main"), P("now on main"), P("update the node-22 shim")]).episodes;
+  assert(headerTickets(pairLine.at(-1)).tickets.join() === "SMD-12" && backToMain.length === 2 && backToMain[1].cwd === "/wt/mono" && [...backToMain[1].named].join() === "",
+    `a folder entered on the line that moves to a ticket branch is that checkout's; one entered on a ticket branch stays a folder after a move to main (${JSON.stringify([headerTickets(pairLine.at(-1)), backToMain.length, backToMain.at(-1).cwd, [...backToMain.at(-1).named]])})`);
+  const H = homedir(), proj = join(H, "Projects", "smd-55-day1");
+  const fromHome = segment([CWD(H), P("hi"), CWD(proj), P("fix smd-55 now"), CWD(join(proj, "packages", "node-22-compat")), P("the node-22 shim"), CP, P("continue")]).episodes;
+  assert(fromHome.some((e) => e.named.has("SMD-55")) && !fromHome.some((e) => e.named.has("NODE-22")) && fromHome.at(-1).cwd === proj,
+    `a session begun in HOME takes a ticket's checkout under it as its own, and a folder of it runs in that checkout (${JSON.stringify(fromHome.map((e) => [e.cwd, [...e.named]]))})`);
+  const wtFolder = segment([CWD("/r/OB1"), BR("main"), P("fix SMD-12 bug"), CWD("/r/OB1/.claude/worktrees/smd-12-x"), BR("main"), P("a"), CWD("/r/OB1/.claude/worktrees/smd-12-x/packages/node-22-compat"), BR("main"), P("b"), CP, P("c")]).episodes;
+  assert(wtFolder.at(-1).cwd === "/r/OB1/.claude/worktrees/smd-12-x" && headerTickets(wtFolder.at(-1)).tickets.join() === "SMD-12",
+    `an episode opened in a nested worktree's folder runs in that worktree, not the outer checkout (${JSON.stringify([wtFolder.at(-1).cwd, headerTickets(wtFolder.at(-1))])})`);
+  const wtNames = ["wt", "worktree", ".Worktrees", "mono-worktrees"].map((f) => [...segment([CWD("/wt/mono"), BR("main"), P("a"), CWD(`/wt/mono/${f}/smd-610-x`), BR("main"), P("fix smd-610")]).episodes.at(-1).named].join());
+  const deepWt = [...segment([CWD("/wt"), P("a"), CWD("/wt/smd-55-x/.claude/worktrees/abc-12-y"), P("fix abc-12")]).episodes.at(-1).named].join();
+  assert(wtNames.every((n) => n === "SMD-610") && deepWt === "ABC-12",
+    `a worktree under wt, worktree, .Worktrees or a folder ending -worktrees is a checkout of its own, its case aside, and so is one nested in a checkout of its own (the deepest begins the place: ${JSON.stringify([wtNames, deepWt])})`);
   // Review pass 3 (mutants): the readers and gates no case held.
   assert(ticketsIn("IEEE-754 CWE-79 WCAG-21 GPL-30 LGPL-21 AGPL-30 FSL-11 BSD-30 MPL-20 CC-12 ES-2015 COVID-19 FY-2026").length === 0,
     "every prefix the brain denies that the hook's shape can match is no ticket to the hook (mutant: a list entry dropped)");

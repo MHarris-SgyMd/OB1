@@ -896,7 +896,7 @@ function apply(x, ev, teams) {
 const STAMPED = new Set(["prompt", "outcome", "file", "commit", "push", "pr", "ids"]); // the events that carry a line's time onto an episode: its span is that of its content, so an episode closed at an ask does not reach to that ask's line
 export function segment(events, s = emptySummary()) {
   // The team prefixes the session's branches and directories (not a folder
-  // of a checkout: `placeKind`) have named SO FAR: what a lower-case key in
+  // of a checkout: `placeOf`) have named SO FAR: what a lower-case key in
   // an ask may be a ticket of. Gathered as the
   // walk goes, never ahead of it — a branch made later would make an earlier
   // mention a key and move a boundary already captured (second review pass).
@@ -911,23 +911,37 @@ export function segment(events, s = emptySummary()) {
   /** Away: the session is not where the episode runs — another branch, or with no branch to go by, a directory inside none of its roots. */
   const away = () => branchMoved() || (!(loc.branch && cur.branch) && !inside());
   /**
-   * What a directory below the episode's roots is, by its deepest part below the top root that names a ticket:
-   * "checkout", a checkout of its own, when that part sits in a worktrees folder (`OB1/.claude/worktrees/smd-…`) or
-   * directly in a top root naming no ticket by its directory or the episode's branch (`~/Projects/smd-55-day1`);
-   * "folder", a ticket-shaped folder of the checkout it is in (`packages/node-22-compat`, `docs/smd-500-notes`); else
-   * "" (at a root, out of them, or no part below the root names a ticket: `api`). A cd teaches a team only into a
-   * checkout, and an episode opened in a folder runs in the checkout. The cost: a ticket-shaped folder directly in a
-   * ticketless checkout (`app/node-22-compat` on `main`) is read as a checkout of its own (SMD-4291's review pass 3,
-   * the one rule both readers use: pass 2's two rules read one folder two ways).
+   * What a directory below the episode's roots is, read from its parts below the top root (a root no other contains):
+   * a part naming a ticket begins a checkout of its own when it sits in a worktrees folder (`.claude/worktrees/smd-…`,
+   * `.worktrees`, `repo-worktrees`, `worktree`, `wt`), or is the first such part below HOME or directly in a top root
+   * naming no ticket by its directory or `branch` (`~/Projects/smd-55-day1`); any other is a ticket-shaped folder of the
+   * checkout it is in (`packages/node-22-compat`, `docs/smd-500-notes`). `kind` is "checkout" when the directory's
+   * deepest part naming a ticket begins one, "folder" when that part is a folder, "" when no part below the top root
+   * names a ticket (`api`) or the directory is in no root; `home` is the checkout the directory is in (the top root, or
+   * the deepest checkout of its own above it). A cd teaches a team only into a checkout, and an episode opened in a
+   * folder runs in its home. The cost: a ticket-shaped folder directly in a checkout naming no ticket
+   * (`app/node-22-compat` on `main`) reads as a checkout of its own (SMD-4291's review passes 3 and 4).
    */
-  const placeKind = (dir) => {
+  const placeOf = (dir, branch) => {
     const roots = [...cur.roots], top = roots.find((r) => dir !== r && below(dir, r) && !roots.some((o) => o !== r && below(r, o)));
-    if (!top) return "";
-    const rel = dir.slice(top.length + 1).split(/[\\/]/);
-    let k = rel.length - 1;
-    while (k >= 0 && !ownTickets(rel[k]).length) k--;
-    if (k < 0) return "";
-    return (k > 0 ? /worktrees$/i.test(rel[k - 1]) : !anchorOf(top, cur.branch).length) ? "checkout" : "folder";
+    if (!top) return { kind: "", home: "" };
+    const rel = dir.slice(top.length + 1).split(/[\\/]/), named = rel.map((part) => ownTickets(part).length > 0);
+    const first = named.indexOf(true), k = named.lastIndexOf(true);
+    if (k < 0) return { kind: "", home: top };
+    const begins = (j) => named[j] && ((j > 0 && /worktrees?$|^\.?wt$/i.test(rel[j - 1])) || (j === first && (top === HOME || (j === 0 && !anchorOf(top, branch).length))));
+    let end = -1;
+    for (let j = 0; j <= k; j++) if (begins(j)) end = j;
+    return { kind: end === k ? "checkout" : "folder", home: end < 0 ? top : dir.slice(0, top.length + 1 + rel.slice(0, end + 1).join("/").length) };
+  };
+  // A directory's place is decided when the session first enters it below the roots, with the branch it has then, and
+  // both readers (the team a cd teaches, the place an episode opens in) read that one answer: read again at a branch
+  // move, `node-22-compat` was a folder to the episode it closed and a checkout to the next line (review pass 4, run-it).
+  const places = new Map();
+  const placeAt = (dir, branch) => {
+    if (places.has(dir)) return places.get(dir);
+    const place = placeOf(dir, branch);
+    if (place.kind) places.set(dir, place);
+    return place;
   };
   /** The episode runs where the session is: its first directory names the project, a subdirectory does not. */
   const settle = () => {
@@ -955,13 +969,13 @@ export function segment(events, s = emptySummary()) {
     const next = emptySummary(episodes.length + 1);
     if (cur) cur.closed = boundary;
     next.opened = boundary;
-    // An episode opened with the shell in a ticket-shaped folder of the last one's checkout (`placeKind`) runs in that
-    // checkout: a compaction, a new ticket or a branch move in `packages/node-22-compat` named NODE-22 as the new
-    // episode's place (SMD-4291's review passes 2 and 3, cold read). Any other takes where the shell is, as before: a
+    // An episode opened with the shell in a ticket-shaped folder (`placeOf`) runs in the checkout the folder is in: a
+    // compaction, a new ticket or a branch move in `packages/node-22-compat` named NODE-22 as the new episode's place
+    // (SMD-4291's review passes 2 to 4, cold read). Any other takes where the shell is, as before: a
     // folder naming nothing (`api`), a checkout of its own (a nested worktree), a place out of the roots.
-    const keep = Boolean(boundary && cur?.cwd && loc.cwd && inside() && placeKind(loc.cwd) === "folder");
-    next.cwd = keep ? cur.cwd : loc.cwd; next.branch = loc.branch;
-    if (keep || loc.cwd) next.roots.add(keep ? cur.cwd : loc.cwd);
+    const place = boundary && cur?.cwd && loc.cwd && inside() ? placeAt(loc.cwd, loc.branch || cur.branch) : undefined;
+    next.cwd = place?.kind === "folder" ? place.home : loc.cwd; next.branch = loc.branch;
+    if (next.cwd) next.roots.add(next.cwd);
     if (boundary?.ticket) next.about.add(boundary.ticket); // the key it BEGAN with; its home is read live in `own` (second review pass)
     if (lineAt) next.first = next.last = lineAt;
     episodes.push(next); cur = next; compacted = false;
@@ -976,11 +990,13 @@ export function segment(events, s = emptySummary()) {
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
       loc[ev.t] = ev.v;
-      // A cd within the episode's roots teaches a team only into a checkout of its own (`placeKind`): a folder's
+      // A cd within the episode's roots teaches a team only into a checkout of its own (`placeOf`): a folder's
       // name is its checkout's, not a ticket's (review pass 1, run-it: `packages/node-22-compat` taught NODE), but this
       // repo's worktrees sit under its checkout, the branch still `main`, and a projects folder holds checkouts (review
       // pass 2; pass 3 made it the rule an episode's opening reads too).
-      if (ev.t === "branch" || !cur.cwd || !inside() || placeKind(loc.cwd) === "checkout") learnTeams(ev.t, ev.v);
+      // The branch is the one the line moves to when it records both, cwd first (review pass 4, cold read).
+      const lineBranch = ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD" ? events[i + 1].v : "";
+      if (ev.t === "branch" || !cur.cwd || !inside() || placeAt(loc.cwd, lineBranch || loc.branch || cur.branch).kind === "checkout") learnTeams(ev.t, ev.v);
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it
