@@ -1,9 +1,9 @@
 /**
  * The claim workers' loop (SMD-4308): one worker of a pass, from its first
- * claim to the return of its leases. consolidate.ts and extract-entities.ts
- * each held a copy of it around their own work on a thought; here it is once,
- * and each engine passes what is its own — how its rows are read, and what it
- * does with one.
+ * claim to the return of its leases. consolidate.ts, extract-entities.ts and
+ * reembed.ts each held a copy of it around their own work on a thought; here
+ * it is once, and each engine passes what is its own — how its rows are read,
+ * and what it does with one.
  *
  * What the loop holds: the worker's id and its heartbeat (db/lease.ts), the
  * admit gate before each claim, --limit's count of what is taken and being
@@ -13,7 +13,10 @@
  * failure the worker stops after (recordFailedAndStop), the set-back of a
  * call its caller aborted (setBackAborted) and the release of a finished
  * claim with what it finds (releaseFinished). The release statement itself,
- * and each engine's own exceptions, are still the engine's.
+ * and each engine's own exceptions, are still the engine's. Re-embed takes
+ * the loop and the set-back alone: its reading of an embedding call's error
+ * has no pauses and a probe its caller can abort, and its release says and
+ * counts three things the claim passes' does not.
  *
  * The engine's state is read where the loop needs it, not copied: a flag that
  * changes under a running worker — the stop, the hard stop, the pass's gate,
@@ -89,6 +92,19 @@ export type ClaimWorkerOptions<Row extends { id: string }> = {
   finallyFirst?: (workerId: string) => void;
   /** In the finally, before the worker's leases are returned. */
   beforeReturn?: (workerId: string) => Promise<void>;
+  /** After a wait at the admit gate, an engine's own reason to end this worker beside the loop's (re-embed: the record's model moved). */
+  afterGate?: () => boolean;
+  /** Before each claim, inside the claim's own error handling: true ends this worker with nothing claimed (re-embed's follower reads the record's model). */
+  beforeClaim?: () => Promise<boolean>;
+  /** Where an engine's return of its leases differs from the claim passes' (re-embed's). */
+  leaseReturn?: {
+    /** The line for a return the database refused, in place of the loop's. */
+    refusedLine?: (workerId: string, message: string) => string;
+    /** Whether a return that freed rows is said: the loop says it for a one-shot run alone. */
+    saysReturned?: boolean;
+    /** The worker leaves the pass's active set whatever the Writer does with the refusal's line. */
+    inactiveWhateverTheWriter?: boolean;
+  };
 };
 
 /** One worker of a pass: claims until a stop, an outage, --limit or an empty pool, and returns what it still holds. */
@@ -121,12 +137,13 @@ export async function claimWorker<Row extends { id: string }>(o: ClaimWorkerOpti
       // here holding no claim, and a stop while it waits ends it.
       if (o.admit) {
         if (!(await admitted(o.admit, o.gate()))) return;
-        if (o.stopping() || outage.reason !== null || limitReached()) return;
+        if (o.stopping() || outage.reason !== null || limitReached() || o.afterGate?.()) return;
       }
       let batch: Claimed[];
       let byId: Map<string, Row>;
       let readAt = 0;
       try {
+        if (o.beforeClaim && (await o.beforeClaim())) return;
         const room = LIMIT > 0 ? LIMIT - taken.size - claiming.n : o.batch;
         if (room <= 0) return;
         const want = Math.min(o.isolated() ? 1 : o.batch, room);
@@ -187,12 +204,15 @@ export async function claimWorker<Row extends { id: string }>(o: ClaimWorkerOpti
     } catch (e) {
       // A follower returns them once the database answers again (SMD-2599).
       if (o.follow) o.unreturned.add(workerId);
-      err(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s${o.follow ? ", or return when the database answers again" : ""}`);
+      const message = (e as Error).message;
+      err(o.leaseReturn?.refusedLine?.(workerId, message) ?? `  ${workerId}: could not return its leases (${message}); they expire within ${TTL} s${o.follow ? ", or return when the database answers again" : ""}`);
+    } finally {
+      if (o.leaseReturn?.inactiveWhateverTheWriter) o.activeWorkers.delete(workerId);
     }
     o.activeWorkers.delete(workerId);
     // Outside the release's try: a Writer's throw here is the Writer's, not a
     // lease left unreturned.
-    if (freed > 0 && !o.follow) err(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
+    if (freed > 0 && (o.leaseReturn?.saysReturned ?? !o.follow)) err(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
   }
 }
 
