@@ -1,0 +1,55 @@
+-- =============================================================================
+-- Migration 146: the twelfth release — ob1_config.schema_version = 2.1.0
+--                (the cut MAINTAINING.md's "Cutting a release" orders, SMD-1804/SMD-1860)
+-- =============================================================================
+--
+-- WHY
+--   121 wrote 2.0.0, the eleventh release, as the last file of the range it
+--   froze (104..121). Since then twenty-four additive migrations landed —
+--   122 (effective priority, SMD-3667), 123 (the agenda, SMD-3669), 124 (the
+--   agenda leaves started work out, SMD-4162), 125 (a note's open items reach
+--   its priority, SMD-4149), 126 (the agenda reads named tickets, SMD-2684),
+--   127 (effective priority orders by level first, SMD-4177), 128 (the
+--   priority defaults in one function, SMD-4194), 129 (the agenda takes an
+--   order, SMD-4192), 130 and 135 (a thought's subjects are a set, and it
+--   serves every ticket of that set, SMD-3306), 131 and 132 (a read's own
+--   priority weights and the operator's setting, SMD-4193), 133 (a ticket and
+--   its own rows are one item to the priority writers, SMD-4127), 134
+--   (deliverables, SMD-1715), 136 (a deleted item's priority statements close,
+--   SMD-3711), 137 (the agenda's tie goes to what unblocks most, SMD-4264),
+--   138 (a priority write names every statement it closed, SMD-4238), 139 and
+--   144 (forget_thought, and its definer wrapper, SMD-1723), 140, 143 and 145
+--   (the per-holder claim cap, the claims listing's cursor and
+--   release_holder_claims, SMD-3606), 141 (an entity's priority statements
+--   follow it, SMD-4241) and 142 (priority findings, SMD-3671) — and main
+--   carries no `bump: major` fragment, so the release rule makes this cut a
+--   minor: 2.1.0, the range 122..146 frozen by releases.json, and this file
+--   its last on purpose: a brain at 146 is exactly the release, preflight's
+--   schema-version row says so beside the ledger's highest migration, and a
+--   brain migrated past 146 is "past the range its version names" until the
+--   next cut.
+--
+--   The version is plain MAJOR.MINOR.PATCH (SMD-3317): the frozen upstream pin
+--   is kept as data (releases.json's `upstream` key), not as a suffix.
+--
+--   The literal below is held equal to db/version.mjs's BRAIN_VERSION by
+--   check-consistency's 17d (the highest schema_version writer is the current
+--   version), and scripts/assemble-release.ts refuses --write until both say
+--   the version it is about to record.
+--
+-- WHAT
+--   * Upsert ob1_config.schema_version, as 044, 048, 051, 057, 062, 072, 076,
+--     081, 083, 089, 103 and 121 do. A plain constant — not an OB1_* env value
+--     — so there is no shell-vs-record disagreement for --reapply to refuse;
+--     under --reapply every file re-runs in order and this later write wins.
+--
+-- SAFETY
+--   Idempotent (ON CONFLICT DO UPDATE). No schema change — one config row — so a
+--   brain at 145 applies it in milliseconds; the release job's stack proves the
+--   range on the published images before the release exists.
+-- =============================================================================
+
+INSERT INTO ob1_config (key, value) VALUES
+  ('schema_version', '2.1.0')
+ON CONFLICT (key) DO UPDATE
+  SET value = EXCLUDED.value, updated_at = now();
