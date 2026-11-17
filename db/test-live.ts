@@ -18283,12 +18283,56 @@ if (want("16")) {
       const refusedRun = await followOver([["The key table names the weekly lead.", "The key table names the daily lead now."]], 45_000, { workers: 1 });
       assert(refusedRun.code === 2 && refusedRun.claims[0]?.status === "pending" && aloneCounts(refusedRun.lines) === "" && refusedRun.lines.some((l) => /a one-token call was refused \(401 /.test(l)) && judgeProbeAtScriptLeft.size === 0,
         `a consolidate suspect alone whose blame probe is refused stops the follower, exit 2, nothing failed (exit ${refusedRun.code}; ${refusedRun.claims[0]?.status}; alone ${aloneCounts(refusedRun.lines)})`);
+
+      // SMD-4352: a suspect retried alone whose pair times out, the one-token call after the timeout unanswered
+      // (processRow's ProviderDown), is blamed on that probe and not probed again: an outage it was alone at. A
+      // second probe, made once the judge is back, would answer, and the thought would be failed as its own.
+      judgeCallScript.splice(0, judgeCallScript.length, 500, 500, 500, 500);
+      judgeHang = 1;
+      const hangingRun = followOver([["The hang table names the weekly lead.", "The hang table names the daily lead now."]], 60_000, { workers: 1 });
+      // The retry alone's call has arrived and hangs: the probe after its timeout finds the judge out, and no other probe does.
+      const hangArrived = await pollUntil(async () => judgeCallScript.length === 0 && judgeHang === 0, 30_000);
+      if (hangArrived) judgeProbeScript.push(503);
+      const hung = await hangingRun;
+      assert(hangArrived && hung.claims[0]?.status === "succeeded" && aloneCounts(hung.lines) === "1" && judgeProbeScript.length === 0 && hung.code === 0
+          && hung.lines.some((l) => /the provider is not answering \(the judge call timed out after 5 s, and a one-token call got no answer either\)/.test(l)),
+        `a consolidate suspect retried alone whose pair times out, the one-token call after it unanswered, is blamed on that probe and not probed twice: an outage it was alone at, judged once the judge is back, not failed on a second probe's answer (SMD-4352; ${hung.claims[0]?.status}: ${hung.claims[0]?.last_error?.slice(0, 90)}; alone ${aloneCounts(hung.lines)}; ${judgeProbeScript.length} scripted probe(s) left; exit ${hung.code})`);
+
+      // SMD-4352: the database cut at the record of a failure. A poison pair's thought, failed as its own at its third
+      // outage alone, is the one failure a follower records and stops after; the first time, the claim's write to
+      // `failed` ends its own session (a trigger of this row's, once: a sequence counts across the rolled-back
+      // write). Nothing is recorded, the thought returns to the pool, and the pass does not count it judged: the
+      // claim judges it again, and that pass counts it once. The count shows in the closing "per thought judged"
+      // ratio alone, so an innocent pair is judged beside it: one pair over four thoughts — the two older seeds,
+      // which have no older side, the innocent, and the poison once — not five.
+      judgeCallScript.length = 0;
+      judgeProbeScript.length = 0;
+      judgeCrashMarker = "crash-cut";
+      judgeCrashProbes = 1;
+      judgeCrashedBy.length = 0;
+      await sql.unsafe(`CREATE SEQUENCE smd4352_cut`);
+      await sql.unsafe(`CREATE FUNCTION smd4352_cut_once() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN IF nextval('smd4352_cut') = 1 THEN PERFORM pg_terminate_backend(pg_backend_pid()); END IF; RETURN NEW; END $f$`);
+      await sql.unsafe(`CREATE TRIGGER smd4352_cut_once BEFORE UPDATE ON thought_work_claims FOR EACH ROW WHEN (OLD.status = 'claimed' AND NEW.status = 'failed') EXECUTE FUNCTION smd4352_cut_once()`);
+      try {
+        const cut = await followOver([["The spare table names the weekly lead.", "The spare table names the daily lead now."], ["The cut table names the crash-free lead.", "The cut table names the crash-cut lead now."]], 120_000, { workers: 1 });
+        const cutSaid = cut.lines.some((l) => new RegExp(`the database is not answering \\(.*\\) — recording nothing for ${cut.ids[1]}; it returns to the pool when the database answers$`).test(l));
+        const ratio = cut.lines.map((l) => /(\d+) pair\(s\) judged — ([\d.]+) per thought judged, (\d+) calls per thousand thoughts/.exec(l)).find((m) => m !== null) ?? null;
+        const judgedSaid = cut.lines.map((l) => /(\d+) thought\(s\) judged/.exec(l)?.[1]).filter((n): n is string => n !== undefined);
+        const [{ fired }] = (await sql`SELECT last_value::int AS fired FROM smd4352_cut`) as { fired: number }[];
+        assert(cutSaid && fired === 2 && cut.claims[0]?.status === "succeeded" && cut.claims[1]?.status === "failed" && ratio !== null && ratio[1] === "1" && ratio[2] === "0.25" && ratio[3] === "250",
+          `a consolidate follower whose record of a failure meets a database cut records nothing, and does not count the thought judged: it is judged again, failed, and counted once — one pair over four thoughts judged (SMD-4352; ${cut.claims.map((c) => c?.status).join(", ")}; the cut said ${cutSaid}; the claim's write to failed tried ${fired} time(s); ${ratio ? ratio[0] : "no ratio said"}; thoughts judged said ${judgedSaid.join(",")}; exit ${cut.code}; ${cut.lines.filter((l) => /pair\(s\) judged|recording nothing|still failing/.test(l)).map((l) => l.trim().slice(0, 170)).join(" | ").slice(0, 700)})`);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS smd4352_cut_once ON thought_work_claims`);
+        await sql.unsafe(`DROP FUNCTION IF EXISTS smd4352_cut_once()`);
+        await sql.unsafe(`DROP SEQUENCE IF EXISTS smd4352_cut`);
+      }
     } finally {
       judgeCrashMarker = null;
       judgeCrashCycles = 0;
       judgeInFlightMs = 0;
       judgeCrashProbes = 1;
       judgeCallScript.length = 0;
+      judgeHang = 0;
       judgeProbeScript.length = 0;
       judgeProbeAtScriptLeft.clear();
       judgeDown = "503";
@@ -19493,6 +19537,54 @@ if (want("16")) {
          `abortInHand aborts consolidation's judge call in hand: the thought set back, and the worker goes on to judge it again in the same run (${judgeTooYoung} then ${judgeAborted} aborted; exit ${abortJudgeCode}: ${abortJudgeSummary.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
 
+  // SMD-4352: two lines consolidation says in its own words, and the second's path, which no row reached. Its own
+  // function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    // A thought deleted while its pair is judged: counted deleted, and said as judged, the pass's word.
+    const goneNewer = await seed("[16h] The lighthouse opens at four now.", 32, 0, ["lighthouse"]);
+    await seed("[16h] The lighthouse opened at nine once.", 32, 2, ["lighthouse"]);
+    const goneLines: string[] = [];
+    onJudge = async () => {
+      onJudge = null;
+      await sql`SELECT delete_thought(${goneNewer}::uuid, NULL::jsonb)`;
+    };
+    const goneCode = await runConsolidate({ url: URL_!, env, workers: 1, writer: { out: (l) => goneLines.push(l), err: (l) => goneLines.push(l) } });
+    onJudge = null;
+    const goneSummary = goneLines.find((l) => /thought\(s\) judged/.test(l)) ?? "";
+    assert(goneLines.includes(`  ${goneNewer}: deleted while it was being judged`) && goneCode <= 1,
+           `a thought deleted while consolidation judges its pair is said so in the pass's own word, judged (SMD-4352; exit ${goneCode}: ${goneSummary.trim().slice(0, 160)}; ${goneLines.filter((l) => l.includes(goneNewer)).join(" | ").slice(0, 300)})`);
+
+    // abortInHand, the set-back refused by the database: the worker stops, saying whose call was aborted — the judge
+    // call — and its finally returns the thought with its leases. The refusal is a trigger of this row's own, on the
+    // set-back's write alone: it moves enqueued_at, which the return of a worker's leases does not.
+    const refusedNewer = await seed("[16h] The ferry leaves at three now.", 33, 0, ["ferry"]);
+    await seed("[16h] The ferry left at nine once.", 33, 2, ["ferry"]);
+    let abortRefused: InHandAbort | undefined;
+    const refusedLines: string[] = [];
+    await sql.unsafe(`CREATE FUNCTION smd4352_refuse_set_back() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'the set-back is refused, for a test'; END $f$`);
+    slowMs = 3000;
+    try {
+      const refusedFrom = calls;
+      const refusedRun = runConsolidate({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortRefused = a; }, writer: { out: (l) => refusedLines.push(l), err: (l) => refusedLines.push(l) } });
+      const inFlight = await pollUntil(async () => calls > refusedFrom, 10_000);
+      await sql.unsafe(`CREATE TRIGGER smd4352_refuse_set_back BEFORE UPDATE ON thought_work_claims FOR EACH ROW
+                          WHEN (OLD.status = 'claimed' AND NEW.status = 'pending' AND NEW.enqueued_at IS DISTINCT FROM OLD.enqueued_at) EXECUTE FUNCTION smd4352_refuse_set_back()`);
+      const aborted = abortRefused?.() ?? -1;
+      slowMs = 0;
+      const refusedCode = await refusedRun;
+      const refusedClaim = await claimStatus(refusedNewer);
+      const said = refusedLines.find((l) => l.includes(`could not set ${refusedNewer} back in the queue`)) ?? "";
+      assert(inFlight && aborted === 1 && / after its judge call was aborted \(the set-back is refused, for a test\) — this worker stops, returning it with its leases$/.test(said)
+             && refusedLines.some((l) => /returned 1 unfinished row\(s\) to the pool$/.test(l)) && refusedClaim === "pending" && !refusedLines.some((l) => /set back in the queue, the judge call in hand aborted/.test(l)),
+             `abortInHand with the set-back refused by the database: the worker stops, naming the judge call, and returns the thought with its leases, nothing counted set back (SMD-4352; ${aborted} aborted; exit ${refusedCode}; the claim ${refusedClaim}: ${said.trim().slice(0, 220)})`);
+    } finally {
+      slowMs = 0;
+      await sql.unsafe(`DROP TRIGGER IF EXISTS smd4352_refuse_set_back ON thought_work_claims`);
+      await sql.unsafe(`DROP FUNCTION IF EXISTS smd4352_refuse_set_back()`);
+    }
+    await sql`DELETE FROM thoughts WHERE content LIKE '[16h]%'`;
+  })();
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
@@ -19521,6 +19613,7 @@ if (want("16")) {
       hostname: "127.0.0.1",
       async fetch(req) {
         const path = new URL(req.url).pathname;
+        if (tierIsGone) return new Response("not found", { status: 404 });
         const model = { name: tierServes, source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
         if (path === "/info") return Response.json({ contract: "ob1-jev/1", model, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 32000 });
         if (path !== "/decide") return new Response("not found", { status: 404 });
@@ -19544,6 +19637,9 @@ if (want("16")) {
       },
     });
     let writerCalls = 0, writerPartRule = 0, linkCalls = 0;
+    /** While set, the writer's next proposal call is refused 401, and the tier's address answers 404 from then on, as an address that is no tier (SMD-4352). */
+    let writerRefusesAsTierMoves = false;
+    let tierIsGone = false;
     const writerModels = new Set<string>();
     const writer = Bun.serve({
       port: 0,
@@ -19563,6 +19659,11 @@ if (want("16")) {
           return Response.json({ choices: [{ message: { content: JSON.stringify(link) } }] });
         }
         writerCalls++;
+        if (writerRefusesAsTierMoves) {
+          writerRefusesAsTierMoves = false;
+          tierIsGone = true;
+          return Response.json({ error: { message: "invalid api key" } }, { status: 401 });
+        }
         // The pass's writer (decide version 1's, kept by versions 3 and 4): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
         if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
         // The migration pair's proposal would stand if the writer were asked: under the floor it must not be, or the
@@ -19755,6 +19856,25 @@ if (want("16")) {
           && /Check OB1_CONSOLIDATE_DECIDER_URL: it must be an ob1-jev\/1 tier serving h2o-stub \(OB1_CONSOLIDATE_DECIDER\)/.test(oneShotElse.out)
           && !/Check the chat endpoint/.test(oneShotElse.out) && intakeClaim?.status !== "failed",
         `a one-shot run against a tier serving another model stops at the first call, marks nothing failed, and names the tier's knob and model (exit ${oneShotElse.code}, the claim ${intakeClaim?.status}: ${last(oneShotElse.out)})`);
+
+      // SMD-4352: a follower's mid-pass error the probe decides, where the probe finds the tier refusing. The call that
+      // erred is the writer's, a 401 no rule reads, so nothing in its own words names the tier: only the probe's
+      // refusal does, and the closing remedy must name the tier's knob, not the chat endpoint. The writer answers
+      // the probe's one-token call; the tier's address, answering 404 by then, refuses its half. (A tier serving
+      // another model mid-run is no refusal: its model is missing, an outage waited out.)
+      tierServes = DECIDER;
+      await seed("[16d] The tenancy deposit is one month's rent.", 60, 3, ["deposit"]);
+      const depositNew = await seed("[16d] The tenancy deposit is now two months' rent.", 60, 0, ["deposit"]);
+      writerRefusesAsTierMoves = true;
+      const movedUnder = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: denv as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      const stopMoved = setTimeout(() => movedUnder.kill(), 30_000);
+      const [mo, me] = await Promise.all([new Response(movedUnder.stdout).text(), new Response(movedUnder.stderr).text()]);
+      const mcode = await movedUnder.exited;
+      clearTimeout(stopMoved);
+      const [depositClaim] = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${depositNew}::uuid`) as { status: string }[];
+      assert(mcode === 2 && !writerRefusesAsTierMoves && /a one-token call was refused \(the tier at /.test(me)
+          && /Check OB1_JEV_BASE_URL: it must be an ob1-jev\/1 tier serving h2o-stub/.test(me) && !/Check the chat endpoint/.test(me) && depositClaim?.status !== "failed",
+        `a follower whose writer call is refused mid-pass, the probe after it finding the tier's address no tier, ends on the tier's refusal: the remedy names the tier's knob and model, not the chat endpoint, nothing failed (SMD-4352; exit ${mcode}, the claim ${depositClaim?.status}, the writer's refusal ${writerRefusesAsTierMoves ? "not asked for" : "given"}: ${(mo + me).split("\n").filter((l) => /refus|not answering|stopping|Check |provider|one-token/.test(l)).join(" | ").slice(0, 700)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
