@@ -32873,7 +32873,7 @@ if (want("50")) {
 }
 
 if (want("51")) {
-  console.log("\n[51] db/backfill-metadata.ts on a real Postgres: a dry run writes nothing; --apply writes a type the capture's rule names and a sensitivity tier the recipe's patterns set, through update_thought, one audit event a row, and the enhanced-thoughts columns where they exist; an unknown type, an importer's type, a higher or unknown tier and metadata that is not an object left; weekly-digest's read leaving the tagged rows out with or without the column; no thought's text printed; paging, a second run, --pass, --limit, a row edited or deleted mid-run, a failure, the statement bound and the refusals (SMD-3318)");
+  console.log("\n[51] db/backfill-metadata.ts on a real Postgres: a dry run writes nothing; --apply writes a type the capture's rule names and a sensitivity tier the sensitivity patterns set, through update_thought, one audit event a row, and the enhanced-thoughts columns where they exist; an unknown type, an importer's type, a higher or unknown tier and metadata that is not an object left; weekly-digest's read leaving the tagged rows out with or without the column; no thought's text printed; paging, a second run, --pass, --limit, a row edited or deleted mid-run, a failure, the statement bound and the refusals (SMD-3318)");
   // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
   await (async () => {
     // recipes/thought-enrichment's backfill-type and backfill-sensitivity as one db/ script (SMD-3318 PR 3a), driven as
@@ -32956,6 +32956,42 @@ if (want("51")) {
              && JSON.stringify(sensitivityOf("20 mg of metformin")) === JSON.stringify({ tier: "personal", labels: ["medication_dosage", "drug_name"] })
              && JSON.stringify(ranks) === "[0,0,0,1,2,null,null]" && quadMs < 500,
         `the patterns: each label on its sample (5 mg/dL not a dosage, an upper-case key prefix, the shapes review pass 3 got past the recipe's, a boarding pass standard), the first restricted match alone, every personal one; tiers ranked in any case and white space, anything else unranked; 100,000 digits read in ${quadMs} ms (${misread.map(([t]) => t).join("; ") || "none misread"}; ${JSON.stringify(ranks)})`);
+      // Review pass 5. The copied table is the hook's, rule for rule (name, source, flags), so a change to either
+      // fails here until both move; each copied rule restricts a sample of its own (its regex read alone, then
+      // sensitivityOf whole). Then the over-holding the pass measured: the near-misses below were restricted or
+      // personal before it, and stay standard now; the hook's URL blanking keeps a hex id in a URL's path or a
+      // base64 payload from reading as a key, but nothing else in the text; and two more hidden characters.
+      const { SECRET_SHAPES } = await import("./sensitivity.ts");
+      const hookPath = join(HERE, "..", "recipes", "session-capture-hook", "session-capture.mjs");
+      const { SECRET_PATTERNS } = (await import(hookPath)) as { SECRET_PATTERNS: [string, RegExp][] };
+      const shapeOf = (t: readonly (readonly [string, RegExp])[]) => JSON.stringify(t.map(([n, re]) => [n, re.source, re.flags]));
+      const hex = "3f9a".repeat(16);
+      const shapeSamples: Record<string, string> = {
+        "anthropic key": "sk-ant-" + "zq".repeat(12), "openai key": "sk-proj-" + "Zq9".repeat(12), "aws access key id": "ASIA" + "Z".repeat(16),
+        "github token": "ghp_" + "a1".repeat(18), "slack token": "xoxb-" + "1234567890-abc", "google api key": "AIza" + "B".repeat(35),
+        "stripe key": "rk_live_" + "a1".repeat(10), "sendgrid key": "SG." + "a".repeat(22) + "." + "b".repeat(43), "linear key": "lin_api_" + "a1".repeat(10),
+        "hugging face token": "hf_" + "a1".repeat(15), "npm token": "npm_" + "a1".repeat(18), "jwt": "eyJ" + "a".repeat(10) + "." + "b".repeat(10) + "." + "c".repeat(10),
+        "private key block": "-----BEGIN RSA PRIVATE KEY-----", "url with a password": "https://admin:zqpw1234@db.example.test/x",
+        "slack webhook url": "https://hooks.slack.com/services/" + "T0123456789/B0123456789/" + "abcdefghijklmnopqrstuvwx", // split, as the hook's test splits it
+        "access key in a URL": "http://127.0.0.1:8010/mcp?key=" + hex, "bearer token": "Authorization: Bearer " + "Ab9".repeat(12),
+        "credential assignment": "MY_API_KEY=abc/def/ghijklmnopqrstuvwxyz0123456789", "credential flag": "tool --client-secret Ab3dE5fG7hI9jK1lM3nO5p",
+        "password flag": "psql --password hunter2 -h db", "password assignment": "POSTGRES_PASSWORD=hunter2", "work-claim token": "wc_" + hex,
+        "64-hex token (a raw key, or a digest out of its context)": "use this key: " + hex,
+      };
+      const unsampled = SECRET_SHAPES.filter(([name, re]) => !(name in shapeSamples) || !re.test(shapeSamples[name]) || sensitivityOf(shapeSamples[name]).tier !== "restricted").map(([name]) => name);
+      const pass5: [string, string][] = [
+        ["review pass 2: the fixes", "standard"], ["All tests pass: 1432 passed", "standard"], ["Bun pin was 1.4.0", "standard"],
+        ["the password is derived from the key", "standard"], ["password: [redacted:password assignment]", "standard"], ["order 123456789 shipped", "standard"],
+        ["ZIP 12345-6789", "standard"], ["AB1234567 is the SKU", "standard"], ["ids 4111 1111-1111 1111", "standard"], ["token: <YOUR_TOKEN_123456>", "standard"],
+        ["the diagnosis of the bug", "standard"], [`https://github.com/o/r/commit/${hex}`, "standard"], [`data:text/plain;base64,${hex}`, "standard"],
+        ["password: none", "standard"], ["boarding pass: economy", "standard"], ["pin is 2024-11-17", "standard"], ["ids 9-1234-5678-9012-3456", "standard"],
+        ["ids 1234-5678-9012-3456-7", "standard"], ["pw: SMD-3318", "standard"], ["the password reset was SMD-3318", "standard"],
+        ["SSN 123 45 6789", "restricted"], ["pin is 4821", "restricted"], ["my pin: 0007", "restricted"], [`see https://example.test/a, then the key ${hex}`, "restricted"],
+        [`pass${String.fromCodePoint(0xe0041)}word: zq8abc`, "restricted"], [`pass${String.fromCharCode(0x61c)}word: zq8abc`, "restricted"],
+      ];
+      const pass5Misread = pass5.filter(([text, tier]) => sensitivityOf(text).tier !== tier).map(([text]) => text);
+      assert(shapeOf(SECRET_SHAPES) === shapeOf(SECRET_PATTERNS) && SECRET_SHAPES.length === Object.keys(shapeSamples).length && unsampled.length === 0 && pass5Misread.length === 0,
+        `the copied table is the hook's, rule for rule (${SECRET_SHAPES.length} rules), each restricting its own sample (${unsampled.join("; ") || "all do"}); review pass 5's near-misses standard, a hex id in a URL or base64 payload blanked as the hook blanks it and nothing else, the Arabic letter mark and a tag character dropped (${pass5Misread.join("; ") || "none misread"})`);
 
       await sql`DELETE FROM thoughts`;
       await sql`SELECT set_agent_kind('imp-3318', 'ingested')`;
@@ -33000,7 +33036,7 @@ if (want("51")) {
         const byPattern = [ids.apiKey, ids.dosage, ids.caps, ids.odd, ids.nullMeta, ids.jsonNull, ids.arr, ids.str, ids.both];
         assert(byPattern.every((id) => !pre.ids.includes(id)) && pre.patterns === byPattern.length && !pre.ids.includes(ids.caseKey) && !pre.ids.includes(ids.raise)
                && [ids.caseOnly, ids.alias, ids.unknown, ids.canonical, ids.ctor, imp].every((id) => pre.ids.includes(id)),
-          `weekly-digest's read before any backfill: nine untagged rows held back by the patterns over their text, a "Restricted" key and a personal one by the key, the plain rows read (${pre.ids.length} read, ${pre.patterns} by the patterns)`);
+          `weekly-digest's read before any backfill: nine rows no tier marks held back by the patterns over their text, a "Restricted" key and a personal one by the key, the plain rows read (${pre.ids.length} read, ${pre.patterns} by the patterns)`);
 
         // A dry run, and the same over pages of two. Type: Task, " todo " and Action Item; decision and constructor name none;
         // the importer's Note left. Sensitivity: the key and the raise restricted (personal raised), the dosage, the salary

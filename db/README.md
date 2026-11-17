@@ -5917,8 +5917,9 @@ capture's is left, and so is a row an importer owns (trust `ingested`), whose
 next sync would write its own value back. The `type` column takes the old rule
 on the type as the capture names it: `reference` becomes it when it is one of
 the old eight (so `Task` and `todo` now set it, an importer's row's included).
-The **sensitivity** pass reads a thought's text against the recipe's patterns
-(`db/sensitivity.ts`, which `db/weekly-digest.ts` reads too), and each place
+The **sensitivity** pass reads a thought's text against the sensitivity
+patterns (`db/sensitivity.ts`, which `db/weekly-digest.ts` reads too: the
+recipe's, reworked, and the session-capture hook's secret table), and each place
 takes the highest of their tier and the other place's when that is higher than
 what it says (absent, empty and `standard`, in any case, lowest), so the key
 and the column agree; a tier is never lowered, an unknown one left, and no text
@@ -5926,7 +5927,8 @@ is printed. Pages are read by the primary key, one statement each, so a run
 holds no snapshot or lock for its length; a page holds its rows' whole text, so
 a brain of long documents takes a smaller `--batch`. A role needs what `bun
 db/migrate.ts --grant <role>` gives (`update_thought` reads `ob1_agents` and
-`ob1_config`). test-live [51] holds the recipe's patterns label by label, a dry
+`ob1_config`). test-live [51] holds the patterns label by label (the copied
+secret table against the hook's own, rule for rule), a dry
 run writing nothing (and the same over pages of two), each pass's writes and
 audit events, the cases left, the digest's read with and without the column
 (its patterns before any backfill included), a row edited or deleted mid-run, a

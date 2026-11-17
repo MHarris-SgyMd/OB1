@@ -15,10 +15,20 @@
  * Amex number; GitLab and Telegram tokens; and the session-capture hook's own
  * table (SECRET_SHAPES, below). The text is read NFKC-folded (fullwidth digits
  * and colons as ASCII) with zero-width, bidirectional and filler characters
- * dropped, so none hides a word. A denylist still misses what it
- * does not name (a homoglyph, digits of another script, a secret in prose),
- * and it takes some harmless numbers for an SSN (a ZIP+4, a nine-digit order
- * number): it narrows what leaves the box, it does not prove nothing does.
+ * dropped, so none hides a word. Review pass 5 measured the other way, over
+ * 8,115 ordinary notes, and narrowed the rules that held too much, since a
+ * backfill never lowers a tier it wrote: an SSN is dashed, or named (`SSN`,
+ * `TIN`, `tax id`) when written bare or spaced; a passport number follows the
+ * word; a password's value is no placeholder (`[…]`, `<…>`, `${…}`, `***`,
+ * `xxx`), no stopword (`the`, `derived`, `required`) and no ticket id, and a
+ * bare `pass:` or `pw:` takes six characters with a digit or a symbol (so
+ * "review pass 2:" and "tests pass: 1432 passed" stay standard); a PIN is
+ * four to eight digits; a card number keeps one separator throughout; a
+ * `token:` is no placeholder; and a diagnosis is a verb ("was diagnosed",
+ * "diagnosed with"), not the word. A denylist still misses what it does not
+ * name (a homoglyph, digits of another script, a secret in prose without a
+ * digit or a symbol): it narrows what leaves the box, it does not prove
+ * nothing does.
  * Each entry is [source, flags, label]; none is global, so a test keeps no
  * state between thoughts.
  *
@@ -29,19 +39,21 @@
 
 export const PATTERNS: { readonly restricted: readonly (readonly [string, string, string])[]; readonly personal: readonly (readonly [string, string, string])[] } = {
   restricted: [
-    [String.raw`\b\d{3}[-\s.‐-―]?\d{2}[-\s.‐-―]?\d{4}\b`, "", "ssn_pattern"],
-    [String.raw`\b[A-Z]{1,2}\d{6,9}\b`, "", "passport_pattern"],
+    [String.raw`\b\d{3}[-‐-―]\d{2}[-‐-―]\d{4}\b`, "", "ssn_pattern"],
+    [String.raw`\b(?:ssn|ss#|social security(?: number| no\.?)?|i?tin|tax ?id)\b[^\n\d]{0,20}\b\d{3}[-\s.‐-―]?\d{2}[-\s.‐-―]?\d{4}\b`, "i", "ssn_pattern"],
+    [String.raw`\b(?:[Pp]assport|PASSPORT)\b[^\n]{0,30}?\b[A-Z]{1,2}\d{6,9}\b`, "", "passport_pattern"],
     [String.raw`\b\d{8,17}\b[^\n]{0,80}\b(account|routing|iban)\b`, "i", "bank_account"],
     [String.raw`\b(account|routing)\b[^\n]{0,80}\b\d{8,17}\b`, "i", "bank_account"],
     [String.raw`\b(sk-|pk_live_|sk_live_|ghp_|gho_|AKIA)[A-Za-z0-9]{10,}`, "i", "api_key"],
     [String.raw`\b(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}`, "i", "api_key"],
     [String.raw`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abposr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,})`, "", "api_key"],
-    [String.raw`\bpassword\s*[:=]\s*\S+`, "i", "password_value"],
-    [String.raw`(?:pass(?:word|wd|phrase)|pwd)[\"']?\s*(?:[:=]|\bis\b)\s*[\"']?[^\s\"']+`, "i", "password_value"],
-    [String.raw`\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b`, "", "credit_card"],
-    [String.raw`\b3[47]\d{2}[\s-]?\d{6}[\s-]?\d{5}\b`, "", "credit_card"],
-    [String.raw`\b(?:pass(?:word|wd|phrase|code)?|pw|pwd|pin|passwort|contrase[nñ]a|mot de passe|wachtwoord|senha)\b[^\n:=|]{0,30}?(?:[:=|]|\b(?:is|was)\b)[\s*"'\`|]*(?=[^\s"'\`*|]*[\d!@#$%^&*])[^\s"'\`*|]{4,}`, "i", "password_value"],
-    [String.raw`\b(?:token|secret|client[_ -]?secret|api[_ -]?key)\b["']?\s*[:=]\s*["']?(?=[^\s"']*\d)[^\s"']{12,}`, "i", "api_key"],
+    [String.raw`(?<![A-Za-z0-9])(?:pass(?:word|wd|phrase)|pwd)["']?\s*[:=]\s*["'\`]?(?![\[<$%{\`]|_{3,}|\*{3,}|\.{3}|x{3,}\b)(?!(?:the|a|an|see|none|n\/a|never|not|no|is|in|it|its|set|from|derived|required|optional|same|empty|blank|redacted|hidden|masked|unchanged|stored|kept|prompt|prompted|asked|given|use|unset|null|true|false|off|on|yes)\b)[^\s"'\`]{3,}`, "i", "password_value"],
+    [String.raw`\b(?:pass(?:word|wd|phrase|code)|pwd|passwort|contrase[nñ]a|mot de passe|wachtwoord|senha)\b[^\n:=|\`]{0,30}?(?:[:=|]|\b(?:is|was)\b)[\s*"'\`|]*(?![\[<$%{\`]|_{3,}|\*{3,}|\.{3}|x{3,}\b)(?![A-Z]{2,}-\d+\b)(?=[^\s"'\`*|]*[\d!@#$%^&*])[^\s"'\`*|]{4,}`, "i", "password_value"],
+    [String.raw`(?<![\d.,-])\b\d{4}([\s-]?)\d{4}\1\d{4}\1\d{4}\b(?![-.]\d)`, "", "credit_card"],
+    [String.raw`(?<![\d.,-])\b3[47]\d{2}([\s-]?)\d{6}\1\d{5}\b(?![-.]\d)`, "", "credit_card"],
+    [String.raw`(?<![A-Za-z0-9])(?:pass|pw)\**\s*[:=]\s*\**["'\`]?(?![\[<$%{\`]|_{3,}|\*{3,}|\.{3}|x{3,}\b)(?![A-Z]{2,}-\d+\b)(?=[^\s"'\`*|]*[\d!@#$%^&*])[^\s"'\`*|]{6,}`, "i", "password_value"],
+    [String.raw`(?<![A-Za-z0-9])pin\b[^\n:=|\d]{0,20}?(?:[:=]|\b(?:is|was)\b)[\s*"'\`]*\d{4,8}(?![\d.,:/-])`, "i", "password_value"],
+    [String.raw`\b(?:token|secret|client[_ -]?secret|api[_ -]?key)\b["']?\s*[:=]\s*["']?(?![\[<$%{\`]|_{3,}|\*{3,}|\.{3}|x{3,}\b)(?=[^\s"']*\d)[^\s"']{12,}`, "i", "api_key"],
     [String.raw`\bglpat-[A-Za-z0-9_-]{20,}`, "", "api_key"],
     [String.raw`\b\d{8,10}:[A-Za-z0-9_-]{35}\b`, "", "api_key"],
   ],
@@ -49,7 +61,7 @@ export const PATTERNS: { readonly restricted: readonly (readonly [string, string
     [String.raw`\b\d+\s*mg\b(?!\s*\/\s*(dL|kg|L|ml))`, "i", "medication_dosage"],
     [String.raw`\b(pregabalin|metoprolol|losartan|lisinopril|aspirin|atorvastatin|sertraline|metformin|gabapentin|prednisone|insulin|warfarin)\b`, "i", "drug_name"],
     [String.raw`\b(glucose|a1c|cholesterol|blood pressure|bp|hrv|bmi)\b[^\n]{0,80}\b\d+`, "i", "health_measurement"],
-    [String.raw`\b(diagnosed|diagnosis|prediabetic|diabetic|arrhythmia|ablation)\b`, "i", "medical_condition"],
+    [String.raw`\b(?:(?:was|been|got|am|is|were|being)\s+diagnosed|diagnosed\s+with|prediabetic|diabetic|arrhythmia|ablation)\b`, "i", "medical_condition"],
     [String.raw`\b(salary|income|net worth|401k|ira|portfolio)\b[^\n]{0,80}\b\$?\d`, "i", "financial_detail"],
     [String.raw`\$\d{3,}`, "i", "financial_amount"],
   ],
@@ -61,9 +73,15 @@ export const PATTERNS: { readonly restricted: readonly (readonly [string, string
  * tokens, private-key blocks, work-claim tokens and 64-hex keys the brain's
  * own session capture refuses. Copied, not imported: the hook is pasted into a
  * user's own settings, and `db/` code ships without it. Each is restricted,
- * its name the label. Keep the two in step when either changes.
+ * its name the label. Keep the two in step when either changes:
+ * `db/test-live.ts` [51] compares this table with the hook's text. The
+ * comments are the hook's and describe it there: here the `d` flag is dropped
+ * (a test needs no indices), the 64-hex rule reads the text with its URLs
+ * blanked as the hook's URL_BLIND does (below), and the hook's entropy rule is
+ * not copied (review pass 5: it reads any 32-character mixed run, ids and
+ * hashes included, and a backfill would make each hit permanent).
  */
-const SECRET_SHAPES: readonly (readonly [string, RegExp])[] = [
+export const SECRET_SHAPES: readonly (readonly [string, RegExp])[] = [
   ["anthropic key", /\bsk-ant-[A-Za-z0-9_-]{20,}/],
   ["openai key", /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}/], // not an anthropic key, which the rule above names — a marker naming both would say what was not there (SMD-2127)
   ["aws access key id", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
@@ -131,24 +149,30 @@ const SECRET_SHAPES: readonly (readonly [string, RegExp])[] = [
   ["work-claim token", /(?<![A-Za-z0-9])wc\\?_[0-9a-f]{64}(?![0-9a-f])/i], // `wc\_` as markdown escapes it (SMD-3602)
   ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})\s{2}\S)/i],
 ];
+/** The hook's URL_BLIND: the rules that read the text with its URLs and base64 payloads blanked, as the hook runs them (a hex id in a URL's path is an address). */
+const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
 const RESTRICTED = [
-  ...PATTERNS.restricted.map(([source, flags, label]) => [new RegExp(source, flags), label] as const),
-  ...SECRET_SHAPES.map(([name, re]) => [new RegExp(re.source, re.flags.replace("d", "")), name] as const),
+  ...PATTERNS.restricted.map(([source, flags, label]) => [new RegExp(source, flags), label, false] as const),
+  ...SECRET_SHAPES.map(([name, re]) => [new RegExp(re.source, re.flags.replace("d", "")), name, URL_BLIND.has(name)] as const),
 ];
+/** The hook's blanking: each URL and base64 payload spaced out, offsets kept. */
+const blankUrls = (text: string) =>
+  text.replace(/\bhttps?:\/\/[^\s)>\]"']+/gi, (u) => " ".repeat(u.length)).replace(/\bbase64,[A-Za-z0-9+/=]+/g, (b) => " ".repeat(b.length));
 const PERSONAL = PATTERNS.personal.map(([source, flags, label]) => [new RegExp(source, flags), label] as const);
 /**
  * Characters that show nothing and hide inside a word: the soft hyphen, the combining grapheme joiner, the Hangul
- * fillers, the Mongolian vowel separator, zero-width and bidirectional controls, variation selectors, the BOM.
+ * fillers, the Arabic letter mark, the Mongolian vowel separator, zero-width and bidirectional controls, variation
+ * selectors, the BOM, and the tag characters (U+E0000–E007F, outside the BMP: the class is read with the `u` flag).
  */
 const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
-  [0xad, 0xad], [0x34f, 0x34f], [0x115f, 0x1160], [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e],
-  [0x2060, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0],
+  [0xad, 0xad], [0x34f, 0x34f], [0x61c, 0x61c], [0x115f, 0x1160], [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e],
+  [0x2060, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xe0000, 0xe007f],
 ];
-const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([a, b]) => `${String.fromCharCode(a)}-${String.fromCharCode(b)}`).join("")}]`, "g");
+const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([a, b]) => `${String.fromCodePoint(a)}-${String.fromCodePoint(b)}`).join("")}]`, "gu");
 
 export type Tier = "restricted" | "personal" | "standard";
 
-/** Text as the patterns read it: NFKC-folded, zero-width characters and soft hyphens dropped. */
+/** Text as the patterns read it: NFKC-folded, the HIDDEN characters dropped. */
 export function sensitivityText(text: string): string {
   return text.normalize("NFKC").replace(HIDDEN, "");
 }
@@ -156,7 +180,10 @@ export function sensitivityText(text: string): string {
 /** A thought's tier by the patterns, with the labels that set it: the first restricted match alone, else every personal one. */
 export function sensitivityOf(raw: string): { tier: Tier; labels: string[] } {
   const text = sensitivityText(raw);
-  for (const [re, label] of RESTRICTED) if (re.test(text)) return { tier: "restricted", labels: [label] };
+  let blanked: string | undefined;
+  for (const [re, label, urlBlind] of RESTRICTED) {
+    if (re.test(urlBlind ? (blanked ??= blankUrls(text)) : text)) return { tier: "restricted", labels: [label] };
+  }
   const labels = PERSONAL.filter(([re]) => re.test(text)).map(([, label]) => label);
   return labels.length ? { tier: "personal", labels: [...new Set(labels)] } : { tier: "standard", labels: [] };
 }
@@ -169,7 +196,11 @@ export function tierRank(v: unknown): number | null {
   return t === "" || t === "standard" ? 0 : t === "personal" ? 1 : t === "restricted" ? 2 : null;
 }
 
-/** A tier in SQL as tierRank reads it: lower-cased, JavaScript's white space (its trim's: the no-break and Unicode spaces and the BOM too) stripped from both ends. */
+/**
+ * A tier in SQL as tierRank reads it: lower-cased, JavaScript's white space (its trim's: the no-break and Unicode
+ * spaces and the BOM too) stripped from both ends. The class carries those characters raw, so the database must be
+ * UTF8 (the stack's is): a LATIN1 database cannot hold them and refuses the statement.
+ */
 export const sqlTier = (expr: string) => `lower(regexp_replace(${expr}, '^[[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+|[[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+$', '', 'g'))`;
 
 export const RANK: Readonly<Record<Tier, number>> = { standard: 0, personal: 1, restricted: 2 };

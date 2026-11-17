@@ -42,8 +42,8 @@ patterns (`db/sensitivity.ts`, the ones `bun db/backfill-metadata.ts` tags
 with, the session-capture hook's secret table among them) read each row's
 whole text and the type, topics and tags the prompt sends, so an untagged
 capture is held back too; they narrow what leaves, they
-do not prove nothing does (a denylist misses what it does not name, and takes
-some harmless numbers for an SSN). And the gate: both the LLM synthesis and the Telegram send are decided by
+do not prove nothing does (a denylist misses what it does not name, and holds
+back a harmless line that looks like a secret). And the gate: both the LLM synthesis and the Telegram send are decided by
 the egress policy, so brain content leaves only when an operator opts the digest
 in (`OB1_EGRESS_ALLOW=type:digest`, or `source:weekly-digest`, or `actor:<key>`).
 It takes a share of each day and writer in the window, newest first within

@@ -63,9 +63,10 @@
  * (`db/sensitivity.ts`, the backfill's) over what the prompt sends — the text,
  * the type, the topics, the tags — and each row's whole text, so a thought
  * captured since the backfill last ran is held back too (the capture tags no
- * tier); a row that changed out of sight between the reads is held back. The
- * patterns are a denylist: they narrow what leaves the box, they do not prove
- * nothing does, and they hold back some harmless numbers. Other tiers are
+ * tier); a row the second read does not return (deleted, or out of sight) is
+ * held back. The patterns are a denylist: they narrow what leaves the box, they
+ * do not prove nothing does, and a harmless line that looks like a secret is
+ * held back with it. Other tiers are
  * kept. Until SMD-3318 a brain without the column refused to run.
  * --no-sensitivity-filter says, in as many words, to send everything.
  */
@@ -594,7 +595,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
 
   const read = await readThoughts(sql, args);
   if (read.patternExcluded > 0) {
-    console.error(`  left out ${read.patternExcluded} thought(s) whose text, type, topics or tags the sensitivity patterns rate ${args.includePersonal ? "restricted" : "restricted or personal"}, or that changed while read`);
+    console.error(`  left out ${read.patternExcluded} thought(s) whose text, type, topics or tags the sensitivity patterns rate ${args.includePersonal ? "restricted" : "restricted or personal"}, or that a second read did not return`);
   }
   if (args.noSensitivityFilter) {
     console.error(
