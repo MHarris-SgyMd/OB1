@@ -380,17 +380,22 @@ const ENVELOPE_REVISION = "io.modelcontextprotocol/protocolVersion";
 /**
  * The MCP revision a request names (SMD-4363), for its line:
  *  - its envelope's, the body being a 2026-07-28 request's word on itself, over
- *    a header that disagrees and over its method: the SDK takes a request with
- *    the envelope for 2026-07-28 whatever its method is, an `initialize` too;
+ *    a header that disagrees and over its method. The SDK sends a request that
+ *    claims an envelope to its 2026-07-28 handler, to answer or refuse; an
+ *    `initialize` too, where the envelope is whole and names 2026-07-28. One
+ *    whose envelope is not is answered as a 2025-era handshake, and its line
+ *    still says what the envelope claimed;
  *  - else an `initialize`'s offer (`params.protocolVersion`), which is what the
  *    SDK's 2025-era transport acts on, over a 2025-era header sent with it;
  *  - else its `MCP-Protocol-Version` header's. The 2025-06-18 and 2025-11-25
  *    revisions have a client send it on every request after `initialize`;
- *    2025-03-26 and earlier have no such header;
- *  - else `unnamed`: no revision named. That is every request but the
- *    `initialize` of a client on 2025-03-26 or earlier, a later client that
- *    leaves the header out, a batch (2025-03-26's alone), and a body that is no
- *    JSON-RPC request.
+ *    2025-03-26 and earlier define no such header, though the SDK's client
+ *    sends the revision it negotiated, whichever that is;
+ *  - else `unnamed`: no revision named. That is a request with no header that
+ *    is no `initialize`: a client on 2025-03-26 or earlier that sends what its
+ *    revision defines, a later one that leaves the header out, a batch (an
+ *    array is read by its header alone, an array of one message too), and a
+ *    body unread or no JSON-RPC request.
  * What it records is what the request said, not what the server then did: an
  * offer the transport negotiates down is the offer, and a request refused is
  * still the revision it named. The value is the caller's string, and

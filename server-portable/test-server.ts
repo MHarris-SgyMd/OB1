@@ -4907,10 +4907,24 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       `a worker mirror's and a worker action's store fault: an exception event on the request's span (${JSON.stringify(mirrorFaults)})`);
     // A tools/call refused at its key ran nothing: no gen_ai names on its span (review pass 6).
     exporter.reset();
-    await post(callOf("brain_info", {}), {}, "/mcp");
+    const keylessLines = await linesOf(() => post(callOf("brain_info", {}), { "mcp-protocol-version": "2025-06-18" }, "/mcp"));
     const refusedAtKey = requestSpan();
     assert(attrs(refusedAtKey)["ob1.code"] === "UNAUTHORIZED" && !("gen_ai.operation.name" in attrs(refusedAtKey)) && !("gen_ai.tool.name" in attrs(refusedAtKey)) && refusedAtKey?.name === "tools/call brain_info",
       `a tools/call refused at its key: no gen_ai names, so no execution is counted (${JSON.stringify(attrs(refusedAtKey))})`);
+    // Nor the revision it named, under either name (SMD-4363): the conventions' attribute is the version used, it used
+    // none, and a caller with no key would count under whichever it named. Its line keeps the word, beside its `refused`.
+    assert(!("mcp.protocol.version" in attrs(refusedAtKey)) && !("ob1.rev" in attrs(refusedAtKey)) && keylessLines.some((l) => l.rev === "2025-06-18" && l.outcome === "refused"),
+      `…nor a revision on its span, though its line says the one it named (${JSON.stringify(attrs(refusedAtKey))}; ${JSON.stringify(keylessLines)})`);
+    const revAt = (rev: string, atKey: boolean) => {
+      exporter.reset();
+      const t = beginRequest("mcp", new Request("http://mcp/x"), () => {});
+      Object.assign(t, { rpc: "tools/call", rev, outcome: "refused", code: "UNAUTHORIZED", refusedAtKey: atKey });
+      t.end();
+      return [attrs(requestSpan())["mcp.protocol.version"] ?? null, attrs(requestSpan())["ob1.rev"] ?? null];
+    };
+    const revsAt = JSON.stringify([revAt("2025-06-18", true), revAt("unnamed", true), revAt("other", true), revAt("2025-06-18", false), revAt("unnamed", false), revAt("other", false)]);
+    assert(revsAt === '[[null,null],[null,null],[null,null],["2025-06-18",null],[null,"unnamed"],[null,"other"]]',
+      `a revision, \`unnamed\` and \`other\` marked at the key: neither attribute; a tool's own refusal by the same code keeps each (${revsAt})`);
     // A tool's own refusal by the same codes ran, and is counted; an unrun call is not (review pass 7).
     const byTool = (code: string, atKey: boolean, outcome: "refused" | "unrun") => {
       exporter.reset();
@@ -5044,8 +5058,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const measured = (received["/v1/metrics"] ?? []).join("\n");
   const everything = JSON.stringify(received);
   assert(records.length === 1 && records[0].eventName === "ob1.request" && records[0].severityText === "WARN" && spanTrace !== undefined && records[0].traceId === spanTrace
-    && record.rpc === "tools/list" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
-    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields (${JSON.stringify(records)})`);
+    && record.rpc === "tools/list" && record.rev === "unnamed" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
+    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields, its \`rev\` among them (${JSON.stringify(records)})`);
   assert(measured.includes('"http.server.request.duration"') && measured.includes('"tools/list"') && measured.includes('"refused"') && !measured.includes('"MCP_ACCESS_KEY"'),
     `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
   assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);

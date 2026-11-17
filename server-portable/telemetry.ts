@@ -318,6 +318,9 @@ function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error:
   // not a code: a plugin may refuse with UNAUTHORIZED or BUSY of its own, and its call ran (review pass 7).
   const named = mcpMethod === "tools/call" && tool !== undefined;
   const toolCall = named && c.outcome !== "unrun" && !refusedAtKey;
+  // Nor does a request refused at its key say a revision here (SMD-4363): the conventions' attribute is the version
+  // used, it used none, and a caller with no key would count under whichever it named. Its line keeps the word, beside its `refused`.
+  const rev = refusedAtKey ? undefined : c.rev;
   const name = mcpMethod !== undefined ? (named ? `${mcpMethod} ${tool}` : mcpMethod)
     : `${method === "_OTHER" ? "HTTP" : method}${route !== undefined ? ` ${route}` : ""}`;
   return {
@@ -332,8 +335,8 @@ function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error:
       // The revision under the MCP conventions' name where it is one; the line's other two words under ob1.rev, as
       // ob1.rpc holds what mcp.method.name cannot say. Not a label of the duration histogram: the line counts
       // requests by revision, and a label would multiply every series by the revisions served.
-      "mcp.protocol.version": c.rev === "unnamed" || c.rev === "other" ? undefined : c.rev,
-      "ob1.rev": c.rev === "unnamed" || c.rev === "other" ? c.rev : undefined,
+      "mcp.protocol.version": rev === "unnamed" || rev === "other" ? undefined : rev,
+      "ob1.rev": rev === "unnamed" || rev === "other" ? rev : undefined,
       // A tool call's, under the MCP conventions' names too: the operation's
       // name here alone, not on the call's own span, so a backend counting
       // tool executions counts a single MCP call once (review pass 2); a REST
