@@ -497,6 +497,42 @@ let episodesLines;
   const deepWt = [...segment([CWD("/wt"), P("a"), CWD("/wt/smd-55-x/.claude/worktrees/abc-12-y"), P("fix abc-12")]).episodes.at(-1).named].join();
   assert(wtNames.every((n) => n === "SMD-610") && deepWt === "ABC-12",
     `a worktree under wt, worktree, .Worktrees or a folder ending -worktrees is a checkout of its own, its case aside, and so is one nested in a checkout of its own (the deepest begins the place: ${JSON.stringify([wtNames, deepWt])})`);
+  // Review pass 5 (cold read, run-it): a branch naming a part's ticket makes it a checkout; under HOME the first ticket
+  // part is a checkout only off a ticket branch; a top-root folder's home is the current top root; a folder teaches its
+  // home's team; a worktree named for no ticket is a checkout of its own.
+  const ob1 = join(H, "Projects", "ob1"), pkg5 = join(ob1, "packages", "node-22-compat");
+  const homePkg = segment([CWD(H), P("go to ob1"), CWD(ob1), BR("me/smd-610-x"), P("fix smd-610"), CWD(pkg5), BR("me/smd-610-x"), P("the node-22 shim broke")]).episodes;
+  const projBr = segment([CWD("/Users/me/Projects"), P("look"), CWD("/Users/me/Projects/smd-55-day1"), BR("smd-55-day1"), P("fix smd-55"), CP, P("continue")]).episodes;
+  const reRoot = segment([CWD("/Users/me/Projects"), P("go"), CWD("/Users/me/Projects/ob1"), BR("smd-610-x"), CWD("/Users/me/Projects/ob1/packages/node-22-compat"), BR("smd-610-x"), CWD("/Users/me/Projects/ob1"), BR("smd-610-x"), CP, P("continue"), CWD("/Users/me/Projects/ob1/packages/node-22-compat"), BR("smd-610-x"), CP, P("go on")]).episodes;
+  assert(!homePkg.some((e) => e.named.has("NODE-22")) && projBr.at(-1).cwd === "/Users/me/Projects/smd-55-day1" && reRoot.at(-1).cwd === "/Users/me/Projects/ob1",
+    `a package folder below HOME on a ticket branch teaches no team; a ticket's checkout on its own branch is a checkout; a folder's episode opens in the current checkout, not an earlier episode's top root (${JSON.stringify([homePkg.map((e) => [...e.named]), projBr.at(-1).cwd, reRoot.at(-1).cwd])})`);
+  const wtFolderTeam = segment([CWD("/r/OB1"), BR("main"), P("start"), CWD("/r/OB1/.claude/worktrees/smd-1246-y/packages/node-22-compat"), BR("main"), P("fix smd-1246 here")]).episodes;
+  const namelessWt = segment([CWD("/r/OB1"), BR("main"), P("start"), CWD("/r/OB1/.claude/worktrees/tranquil-jingling-emerson/packages/node-22-compat"), BR("main"), CP, P("a")]).episodes;
+  assert([...wtFolderTeam.at(-1).named].join() === "SMD-1246" && !wtFolderTeam.some((e) => e.named.has("NODE-22"))
+      && namelessWt.at(-1).cwd === "/r/OB1/.claude/worktrees/tranquil-jingling-emerson" && !namelessWt.some((e) => e.named.has("NODE-22")),
+    `a folder of a nested ticket worktree teaches the worktree's team; a worktree named for no ticket is a checkout of its own, its folder's episode run there (${JSON.stringify([[...wtFolderTeam.at(-1).named], namelessWt.at(-1).cwd])})`);
+  // Review pass 5 (mutants): the worktrees pattern's dot and anchors, HEAD as the line's branch, the order of branches,
+  // the keep rule's kind, HOME as the top root, the memo's kind guard, and the prefixes the hook listed before.
+  const wtIs = (f) => [...segment([CWD("/wt/mono"), BR("main"), P("a"), CWD(`/wt/mono/${f}/smd-610-x`), BR("main"), P("fix smd-610")]).episodes.at(-1).named].join();
+  assert(wtIs(".wt") === "SMD-610" && ["newt", "wtools", "worktrees-old"].every((f) => wtIs(f) === ""),
+    `…a worktree under .wt is a checkout of its own; one under newt, wtools or worktrees-old is a folder (mutants: the pattern's dot and its anchors; ${JSON.stringify([".wt", "newt", "wtools", "worktrees-old"].map(wtIs))})`);
+  const midRebase = segment([CWD("/wt/app"), BR("me/smd-610-x"), P("a"), CWD("/wt/app/node-22-compat"), BR("HEAD"), P("the node-22 shim")]).episodes;
+  const pendingMove = segment([CWD("/wt/app"), BR("main"), P("do SMD-700"), BR("me/smd-610-x"), CWD("/wt/app/node-22-compat"), P("the node-22 shim")]).episodes;
+  assert(midRebase.length === 1 && midRebase[0].named.size === 0 && pendingMove.at(-1).named.size === 0 && pendingMove.at(-1).cwd === "/wt/app",
+    `…a folder entered mid-rebase on a ticket branch, or after a move to one the episode has not taken, is a folder (mutants: HEAD as the line's branch, the episode's branch before the session's; ${JSON.stringify([[...midRebase[0].named], [...pendingMove.at(-1).named], pendingMove.at(-1).cwd])})`);
+  const wtSrc = segment([CWD("/r/OB1"), BR("me/smd-1245-x"), P("start"), CWD("/r/OB1/.claude/worktrees/smd-1246-y/src"), BR("me/smd-1245-x"), CP, P("continue")]).episodes;
+  assert(wtSrc.length === 2 && wtSrc[1].cwd === "/r/OB1/.claude/worktrees/smd-1246-y/src",
+    `…an episode opened in a nested worktree's plain subdirectory runs where the shell is (mutant: the keep rule for any kind; ${JSON.stringify(wtSrc.at(-1).cwd)})`);
+  const homeDirect = segment([CWD(H), P("hi"), CWD(join(proj, "packages", "node-22-compat")), P("the node-22 shim")]).episodes;
+  const F5 = "/wt/app/packages/node-22-compat", wasRoot = segment([CWD(F5), P("a"), CP, P("b"), CWD("/wt/app"), P("c"), CWD(F5), CP, P("d")]).episodes;
+  assert(homeDirect.every((e) => e.named.size === 0) && wasRoot.at(-1).cwd === "/wt/app",
+    `…a folder of a checkout under HOME teaches no team, and a folder the session began in is a folder once below the checkout (mutants: the first part's rule for any part, the memo keeping ""; ${JSON.stringify([homeDirect.map((e) => [...e.named]), wasRoot.at(-1).cwd])})`);
+  const outerWt = segment([CWD("/wt"), BR("main"), P("a"), CWD("/wt/smd-55-x/.claude/worktrees/foo/src"), BR("main"), P("fix smd-55"), CP, P("b")]).episodes;
+  const backAsRoot = segment([CWD("/wt/app"), P("a"), CWD(F5), P("b"), CWD("/tmp/x"), P("c"), CWD(F5), P("d"), CP, P("e")]).episodes;
+  assert(outerWt.some((e) => e.named.has("SMD-55")) && outerWt.at(-1).cwd === "/wt/smd-55-x/.claude/worktrees/foo/src" && backAsRoot.at(-1).cwd === F5,
+    `…a worktree named for no ticket in a ticket's checkout teaches that ticket's team and its plain subdirectory is where the shell is; a folder come back to as the episode's top root is its own place (mutants: the loop past the deepest ticket part, the home's fallback; ${JSON.stringify([outerWt.map((e) => [...e.named]), outerWt.at(-1).cwd, backAsRoot.map((e) => e.cwd)])})`);
+  assert(ticketsIn("SHA-256 UTF-16 ISO-8601 RFC-9110 CVE-2024 IPV-46 TLS-13 SSL-30 HTTP-11 PR-12 MD-12 AES-256 RSA-2048 GPT-40 ED-25519 HTML-50").length === 0,
+    "…and so is every prefix the hook listed before (mutant: an old entry dropped from both lists)");
   // Review pass 3 (mutants): the readers and gates no case held.
   assert(ticketsIn("IEEE-754 CWE-79 WCAG-21 GPL-30 LGPL-21 AGPL-30 FSL-11 BSD-30 MPL-20 CC-12 ES-2015 COVID-19 FY-2026").length === 0,
     "every prefix the brain denies that the hook's shape can match is no ticket to the hook (mutant: a list entry dropped)");
