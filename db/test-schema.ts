@@ -4904,12 +4904,13 @@ console.log("\n[40] Every schemas/*.sql applies to a migrated brain with no Supa
   const listedOids = new Set(await fnOids(listedFns));
   const definersWithoutPublic = (await cdb.query<{ sig: string; oid: number }>(
     `SELECT p.oid::regprocedure::text AS sig, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND NOT has_function_privilege('ob1_community', p.oid, 'EXECUTE') ORDER BY 1`)).rows;
-  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600).
+  // Every group's: since 118 one core function is held from PUBLIC too, granted by closedclaims (SMD-3600); since 144
+  // forget_thought and ob1_forget_leftovers, granted by the server group (SMD-1723).
   const lockedFns = grantedFunctions([...ROLE_GRANT_GROUPS]);
   const lockedOids = new Set(await fnOids(lockedFns));
   const unlistedFns = definersWithoutPublic.filter((f) => !lockedOids.has(f.oid)).map((f) => f.sig);
-  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 1,
-    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, and 118's release in closedclaims — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
+  assert(definersWithoutPublic.length === lockedFns.length && unlistedFns.length === 0 && lockedFns.length === listedFns.length + 3,
+    `every function the files REVOKEd FROM PUBLIC is in a grant group — the community group's, 118's release in closedclaims and 144's forget_thought and ob1_forget_leftovers in server — and nothing else is (${definersWithoutPublic.length}: ${definersWithoutPublic.map((f) => f.sig.split("(")[0]).join(", ")}; unlisted: ${unlistedFns.join(", ") || "none"})`);
 
   // Tables alone, first: the bigserial tables are still refused — on the
   // sequence, not the table — and the identity table is not. That is the
@@ -7718,7 +7719,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 10 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm) and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 11 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && restored[9].startsWith("139") && restored[10].startsWith("144") && /ob1:audit-amend-redacts-forgotten-only/.test(await src("thought_audit_refuse_mutation()")) && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 139's refusal trigger (carrying 055, whose gate it holds with the redact arm), 144's forget_thought and ob1_forgetting over 139's, and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -10527,7 +10528,9 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure) AS "lifeBody",
            (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS "stateBody",
            (SELECT prorows::int FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure) AS rows`);
-  const secdef = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'ob1\\_%' AND prosecdef`))[0].n;
+  // 144's ob1_forget_leftovers is the one ob1_* definer by design (SMD-1723 PR 2: preflight reads every store a forget
+  // reaches as its owner); 068's projection is none.
+  const secdef = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'ob1\\_%' AND proname <> 'ob1_forget_leftovers' AND prosecdef`))[0].n;
   assert(await cols("ob1_ticket_head") === "issue_key uuid, issue text, head_id uuid, status text, status_type text, synced_at text"
       && await cols("ob1_superseded_by") === "old_id uuid, new_id uuid" && cat.fks === 0
       && /md5\(\(metadata ->> 'issue'::text\)\)\)::uuid\)+ WHERE \(metadata \? 'issue'::text\)/.test(cat.idx ?? "")
@@ -21992,6 +21995,318 @@ console.log("\n[130] Migration 143: the work-claims listing pages — list_work_
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label = 'cur-h'`);
+}
+
+console.log("\n[131] Migration 144: forget_thought runs as its owner — a SECURITY DEFINER wrapper over 139's body, its search_path pinned with pg_temp last, every ob1.* setting the migrations read but ob1.actor emptied for the call, EXECUTE not PUBLIC's but carried from 139's function's grantees, not a mere deleter's; a role holding EXECUTE alone forgets, one without is refused; a caller's temporary table shadows nothing, and its settings come back after the call; ob1_text_forgotten_at answers as the refusal trigger does; ob1_forget_leftovers names what a raced write left, until a second forget; a re-apply a no-op (SMD-1723)");
+{
+  const file = files.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f)) ?? "no NNN_forget_thought_definer.sql";
+  type J = Record<string, unknown>;
+  const q = async <T = J>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T = J>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const code = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return "taken"; } catch (e) { return String((e as { code?: string }).code ?? "?"); } };
+  // Roles made before the file is applied: one granted EXECUTE on 139's function (as the server group grants it),
+  // which the apply carries to the wrapper; one that may delete a thought, which it does not (a delete can be undone
+  // from the log, a forget cannot: review pass 1); one that may only read; one given EXECUTE by hand after.
+  await db.exec(`CREATE ROLE ob1_fg130_granted NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_granted;
+                 CREATE ROLE ob1_fg130_deleter NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_deleter; GRANT SELECT, DELETE ON thoughts TO ob1_fg130_deleter;
+                 CREATE ROLE ob1_fg130_reader NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_reader; GRANT SELECT ON thoughts TO ob1_fg130_reader;
+                 CREATE ROLE ob1_fg130_exec NOLOGIN; GRANT USAGE ON SCHEMA public TO ob1_fg130_exec`);
+  // [129] re-applied 139, which put back a function running as its caller, the wrapper's grants on it: 144 now, as
+  // the shipped tree has it, taking that function as the body and carrying its grantees to the wrapper.
+  await db.exec(`GRANT EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) TO ob1_fg130_granted`);
+  await reapply(file.slice(0, 4));
+  await db.exec(`GRANT EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) TO ob1_fg130_exec`);
+  const SIG = "forget_thought(uuid, jsonb, boolean)";
+
+  // The shape: a definer; its search_path ends with pg_temp; each runtime ob1.* setting a migration reads is pinned
+  // empty but ob1.actor (who forgot) — the acl_* settings are read at migration time alone. A setting a later file
+  // reads and this list lacks fails here.
+  const fn = await one<{ def: boolean; cfg: string[] | null; acl: string | null; c: string | null; src: string; body: string | null; bodyDef: boolean | null }>(
+    `SELECT p.prosecdef AS def, p.proconfig AS cfg, p.proacl::text AS acl, obj_description(p.oid, 'pg_proc') AS c, p.prosrc AS src,
+            to_regprocedure('ob1_forget_thought_body(uuid, jsonb, boolean)')::text AS body,
+            (SELECT b.prosecdef FROM pg_proc b WHERE b.oid = to_regprocedure('ob1_forget_thought_body(uuid, jsonb, boolean)')) AS "bodyDef"
+       FROM pg_proc p WHERE p.oid = $1::regprocedure`, [SIG]);
+  const cfg = fn.cfg ?? [];
+  const read = new Set<string>();
+  for (const f of files) for (const m of readFileSync(join(MIGRATIONS, f), "utf8").matchAll(/current_setting\('(ob1\.[a-z_]+)'/g)) read.add(m[1]);
+  const wanted = [...read].filter((s) => s !== "ob1.actor" && !s.startsWith("ob1.acl_")).sort();
+  // The wrapper's list, as its source spells it.
+  const emptied = [...(fn.src.match(/c_emptied CONSTANT text\[\] := ARRAY\[([^\]]*)\]/)?.[1] ?? "").matchAll(/'(ob1\.[a-z_]+)'/g)].map((m) => m[1]);
+  const unpinned = wanted.filter((s) => !emptied.includes(s));
+  const path = cfg.find((c) => c.startsWith("search_path=")) ?? "";
+  assert(fn.def === true && unpinned.length === 0 && wanted.length >= 13 && !emptied.includes("ob1.actor") && /ob1_forget_thought_body\(p_id, p_actor, p_detach\)/.test(fn.src)
+      && fn.body !== null && fn.bodyDef === false && /^search_path=.*\bpublic\b.*, pg_temp$/.test(path) && /migration 144/i.test(fn.c ?? ""),
+    `forget_thought a SECURITY DEFINER wrapper over 139's body, its search_path ending in pg_temp, each of the ${wanted.length} runtime ob1.* settings emptied for the call but ob1.actor, its comment naming 144 (${path}; not emptied: ${unpinned.join(", ") || "none"})`);
+  const may = async (role: string) => (await one<{ y: boolean }>(`SELECT has_function_privilege($1, $2, 'EXECUTE') AS y`, [role, SIG])).y;
+  const leftoversFn = await one<{ def: boolean; granted: boolean; pub: boolean }>(`SELECT p.prosecdef AS def,
+      has_function_privilege('ob1_fg130_granted', p.oid, 'EXECUTE') AS granted,
+      EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0) AS pub
+    FROM pg_proc p WHERE p.oid = to_regprocedure('ob1_forget_leftovers()')`);
+  assert(!/(^|[{,])=X/.test(fn.acl ?? "") && await may("ob1_fg130_granted") && !(await may("ob1_fg130_deleter")) && !(await may("ob1_fg130_reader")) && !(await may("public"))
+      && leftoversFn.def === true && leftoversFn.granted === true && leftoversFn.pub === false,
+    `EXECUTE is not PUBLIC's; the apply carried 139's function's grantee to the wrapper, and not a role that may only delete or read; ob1_forget_leftovers its owner's, granted alike (${fn.acl}; ${JSON.stringify(leftoversFn)})`);
+
+  const ACT = JSON.stringify({ name: "fg130-op", scope: "write" });
+  const thought = async (content: string) => (await one<{ id: string }>(
+    `INSERT INTO thoughts (content, content_fingerprint) VALUES ($1, content_fingerprint_of($1)) RETURNING id`, [content])).id;
+  /** forget_thought as `role`, in a transaction that first runs `before` (as that role). */
+  const forgetAs = async (role: string, id: string, before: string[] = []) => {
+    let r: J | null = null;
+    let err: string | null = null;
+    let after: Record<string, string> = {};
+    try {
+      await db.transaction(async (tx) => {
+        await tx.query(`SET LOCAL ROLE ${role}`);
+        for (const s of before) await tx.query(s);
+        r = (await tx.query<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [id, ACT])).rows[0].r;
+        after = (await tx.query<{ a: string; f: string }>(`SELECT current_setting('ob1.audit_amend', true) AS a, current_setting('ob1.forgetting', true) AS f`)).rows[0];
+      });
+    } catch (e) { err = String((e as { code?: string }).code ?? (e as Error).message); }
+    return { r: r as J | null, err, after };
+  };
+
+  // A role holding EXECUTE and nothing on the stores forgets: the row gone, its events redacted, the ledger written —
+  // as the owner, since the role could do none of it. One without EXECUTE is refused before anything moves.
+  const A = await thought("fg130: the thought a role with EXECUTE alone forgets");
+  const denied = await forgetAs("ob1_fg130_reader", A);
+  const stillThere = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thoughts WHERE id = $1::uuid`, [A])).n;
+  const byExec = await forgetAs("ob1_fg130_exec", A);
+  const aLeft = await one<{ row: number; open: number; led: number }>(`SELECT
+    (SELECT count(*)::int FROM thoughts WHERE id = $1::uuid) AS row,
+    (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid AND redacted_at IS NULL) AS open,
+    (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = $1::uuid AND actor_name = 'fg130-op') AS led`, [A]);
+  assert(denied.err === "42501" && stillThere === 1 && byExec.err === null && byExec.r?.ok === true && aLeft.row === 0 && aLeft.open === 0 && aLeft.led === 1,
+    `a role without EXECUTE is refused (${denied.err}), the thought standing; one holding EXECUTE alone forgets it, the events redacted and the ledger naming the actor (${byExec.err}; ${JSON.stringify(aLeft)})`);
+
+  // A caller's temporary ledger, first on its search_path, takes nothing: the pinned path reads public first. Its
+  // settings, set before the call, are its own again after it: the call's ended with it.
+  const B = await thought("fg130: the thought forgotten past a caller's temporary ledger");
+  const shadowed = await forgetAs("ob1_fg130_exec", B, [
+    `SET LOCAL search_path = pg_temp, public`,
+    `CREATE TEMP TABLE thought_forgotten (id uuid DEFAULT gen_random_uuid(), thought_id uuid, forgotten_at timestamptz DEFAULT now(), actor_name text,
+       actor_agent_id uuid, fingerprints text[] DEFAULT '{}', evidence jsonb) ON COMMIT DROP`,
+    `SELECT set_config('ob1.audit_amend', 'backfill', true), set_config('ob1.forgetting', '00000000-0000-4000-8000-000000000130', true)`,
+  ]);
+  const bLed = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM public.thought_forgotten WHERE thought_id = $1::uuid`, [B])).n;
+  assert(shadowed.err === null && shadowed.r?.ok === true && bLed === 1
+      && shadowed.after.a === "backfill" && shadowed.after.f === "00000000-0000-4000-8000-000000000130",
+    `a caller's temporary thought_forgotten first on its path takes no row (the brain's ledger has it); its ob1.audit_amend and ob1.forgetting are its own after the call (${shadowed.err}; ${bLed}; ${JSON.stringify(shadowed.after)})`);
+
+  // Every emptied setting, set by the caller first: none is seen inside the call (a probe on the ledger's insert, the
+  // body's last write, reads them; the forget's own setting is its id there), and each is the caller's after. The body
+  // restores two of them itself, so only a probe of all of them tells the wrapper's work (review pass 1).
+  await db.exec(`CREATE TABLE zz_fg130_seen (name text, value text);
+    CREATE FUNCTION zz_fg130_probe() RETURNS trigger LANGUAGE plpgsql AS $p$
+    BEGIN
+      INSERT INTO zz_fg130_seen SELECT n, current_setting(n, true) FROM unnest(${"$"}${"$"}{${wanted.map((w) => `"${w}"`).join(",")}}${"$"}${"$"}::text[]) n;
+      RETURN NULL;
+    END $p$;
+    CREATE TRIGGER zz_fg130_probe AFTER INSERT ON thought_forgotten FOR EACH ROW EXECUTE FUNCTION zz_fg130_probe()`);
+  const S = await thought("fg130: the thought forgotten by a caller who set every setting first");
+  let afterAll: Record<string, string> = {};
+  let settingsErr: string | null = null;
+  try {
+    await db.transaction(async (tx) => {
+      await tx.query(`SET LOCAL ROLE ob1_fg130_exec`);
+      for (const w of wanted) await tx.query(`SELECT set_config($1, 'carried', true)`, [w]);
+      await tx.query(`SELECT forget_thought($1::uuid, $2::jsonb)`, [S, ACT]);
+      afterAll = Object.fromEntries((await tx.query<{ n: string; v: string }>(`SELECT n, current_setting(n, true) AS v FROM unnest($1::text[]) n`, [wanted])).rows.map((r) => [r.n, r.v]));
+    });
+  } catch (e) { settingsErr = String((e as { code?: string }).code ?? (e as Error).message); }
+  const seen = await q<{ name: string; value: string }>(`SELECT name, value FROM zz_fg130_seen`);
+  const carriedIn = seen.filter((r) => r.value === "carried").map((r) => r.name);
+  const notBack = wanted.filter((w) => afterAll[w] !== "carried");
+  await db.exec(`DROP TRIGGER zz_fg130_probe ON thought_forgotten; DROP FUNCTION zz_fg130_probe(); DROP TABLE zz_fg130_seen`);
+  assert(settingsErr === null && seen.length === wanted.length && carriedIn.length === 0 && notBack.length === 0,
+    `each of the ${wanted.length} settings the caller set is unseen inside the call and its own again after (${settingsErr ?? "ok"}; carried in: ${carriedIn.join(", ") || "none"}; not given back: ${notBack.join(", ") || "none"})`);
+
+  // ob1_forgetting reads a setting that is no uuid as none, never raising: '' (what a forget's own set_config leaves
+  // in a session, and the wrapper's) and a word; 139's raised 22P02 in every guard asking it.
+  const reads: string[] = [];
+  for (const v of ["", "not-a-uuid"]) {
+    try {
+      await db.transaction(async (tx) => {
+        await tx.query(`SELECT set_config('ob1.forgetting', $1, true)`, [v]);
+        reads.push(String((await tx.query<{ f: string | null }>(`SELECT ob1_forgetting()::text AS f`)).rows[0].f));
+      });
+    } catch (e) { reads.push(String((e as { code?: string }).code)); }
+  }
+  assert(reads.join(",") === "null,null", `ob1_forgetting reads '' and a word as none, raising nothing (${reads.join(",")})`);
+
+  // ob1_text_forgotten_at answers as 139's refusal trigger decides, case by case: a forgotten text; one never
+  // forgotten; a forgotten text under ob1.reinstate_forgotten; a forgotten text reinstated since, a thought standing
+  // with it (the trigger lets it by, and the fingerprint index refuses the copy: 23505, not OB005).
+  const CT = "fg130: a text forgotten, then asked after";
+  const RT = "fg130: a text forgotten, then reinstated";
+  const C = await thought(CT);
+  const R = await thought(RT);
+  for (const id of [C, R]) await one(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [id, ACT]);
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
+    await tx.query(`INSERT INTO thoughts (content, content_fingerprint) VALUES ($1, content_fingerprint_of($1))`, [RT]);
+  });
+  const cases: { label: string; text: string; reinstate?: boolean; at: boolean; trig: string }[] = [
+    { label: "forgotten", text: CT, at: true, trig: "OB005" },
+    { label: "never", text: "fg130: a text never forgotten", at: false, trig: "taken" },
+    { label: "reinstating", text: CT, reinstate: true, at: false, trig: "taken" },
+    { label: "reinstated", text: RT, at: false, trig: "23505" },
+  ];
+  const rows: string[] = [];
+  let agree = true;
+  for (const c of cases) {
+    let at: string | null = null;
+    let trig = "";
+    await db.transaction(async (tx) => {
+      if (c.reinstate) await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
+      at = (await tx.query<{ at: string | null }>(`SELECT ob1_text_forgotten_at($1)::text AS at`, [c.text])).rows[0].at;
+      await tx.query(`SAVEPOINT s`);
+      try { await tx.query(`INSERT INTO thoughts (content, content_fingerprint) VALUES ($1, content_fingerprint_of($1))`, [c.text]); trig = "taken"; }
+      catch (e) { trig = String((e as { code?: string }).code); }
+      await tx.query(`ROLLBACK TO SAVEPOINT s`);
+    });
+    rows.push(`${c.label}: ${at === null ? "null" : "at"}/${trig}`);
+    if ((at !== null) !== c.at || trig !== c.trig || (at !== null) !== (trig === "OB005")) agree = false;
+  }
+  const ledgered = (await one<{ at: string | null }>(`SELECT ob1_text_forgotten_at($1)::text AS at`, [CT])).at;
+  const ledgerAt = (await one<{ at: string }>(`SELECT max(forgotten_at)::text AS at FROM thought_forgotten WHERE thought_id = $1::uuid`, [C])).at;
+  assert(agree && ledgered === ledgerAt,
+    `ob1_text_forgotten_at agrees with the refusal trigger on each case (${rows.join("; ")}), and answers the ledger's time for a forgotten text (${ledgered})`);
+
+  // ob1_forget_leftovers: nothing for a thought forgotten whole; then a search logged with a stale result list and an
+  // action on it (a write that raced the forget) are named, store by store, until a second forget sweeps them.
+  const left = async (id: string) => (await q<{ store: string; n: number }>(`SELECT store, n::int AS n FROM ob1_forget_leftovers() WHERE thought_id = $1::uuid`, [id]))
+    .map((r) => `${r.store}:${r.n}`).join(",");
+  const before = await left(C);
+  await db.query(`INSERT INTO query_log (kind, tool, query, result_ids) VALUES ('search', 'search_thoughts', 'fg130', ARRAY[$1::uuid, gen_random_uuid()])`, [C]);
+  await db.query(`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', $1::uuid)`, [C]);
+  // …and an event of it not redacted, and a vector at its text's fingerprint (review pass 1: one store alone was raced).
+  await db.query(`INSERT INTO thought_audit (thought_id, action, diff) VALUES ($1::uuid, 'update', '{}'::jsonb)`, [C]);
+  const cFp = (await one<{ f: string }>(`SELECT fingerprints[1] AS f FROM thought_forgotten WHERE thought_id = $1::uuid`, [C])).f;
+  await db.query(`INSERT INTO ob1_embedding_snapshot (content_fingerprint, embedding_model, embedding, dims) VALUES ($1, 'fg130', $2::vector, $3)`,
+    [cFp, `[${new Array(EMBEDDING_DIM).fill(0).join(",")}]`, EMBEDDING_DIM]);
+  const raced = await left(C);
+  const again = (await one<{ r: J }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [C, ACT])).r;
+  const after = await left(C);
+  assert(before === "" && raced === "query_log:2,snapshot_vectors:1,thought_audit:1" && again.ok === true && after === "",
+    `ob1_forget_leftovers names nothing for a thought forgotten whole, the query log's two rows, the event and the vector once raced writes left them, and nothing once a second forget swept them (${before}; ${raced}; ${again.ok}; ${after})`);
+  // A thought standing again under its id (reinstated) is the operator's: skipped whole.
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.reinstate_forgotten', 'on', true)`);
+    await tx.query(`INSERT INTO thoughts (id, content, content_fingerprint) VALUES ($1::uuid, $2, content_fingerprint_of($2))`, [C, CT]);
+  });
+  await db.query(`INSERT INTO query_log (kind, tool, target_id) VALUES ('action', 'fetch', $1::uuid)`, [C]);
+  assert(await left(C) === "", `a thought standing again under its id is skipped (${await left(C)})`);
+
+  // A re-apply is a no-op: still a definer, the grant kept, PUBLIC still without EXECUTE — and a grant revoked from the
+  // wrapper by hand stays revoked, the body holding none to carry back (review pass 2).
+  await db.exec(`REVOKE EXECUTE ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM ob1_fg130_granted`);
+  await reapply(file.slice(0, 4));
+  const handRevoke = await may("ob1_fg130_granted");
+  const re = await one<{ def: boolean; acl: string | null }>(`SELECT prosecdef AS def, proacl::text AS acl FROM pg_proc WHERE oid = $1::regprocedure`, [SIG]);
+  assert(re.def === true && !/(^|[{,])=X/.test(re.acl ?? "") && await may("ob1_fg130_exec") && !handRevoke && await code(`SELECT 1`) === "taken",
+    `a re-apply keeps the definer and the grants, and restores none revoked by hand (${re.acl})`);
+  await db.exec(`REVOKE ALL ON FUNCTION forget_thought(uuid, jsonb, boolean) FROM ob1_fg130_exec, ob1_fg130_granted;
+                 REVOKE ALL ON FUNCTION ob1_forget_thought_body(uuid, jsonb, boolean) FROM ob1_fg130_granted;
+                 REVOKE ALL ON FUNCTION ob1_forget_leftovers() FROM ob1_fg130_exec, ob1_fg130_granted;
+                 REVOKE ALL ON thoughts FROM ob1_fg130_deleter, ob1_fg130_reader;
+                 REVOKE ALL ON SCHEMA public FROM ob1_fg130_deleter, ob1_fg130_reader, ob1_fg130_exec, ob1_fg130_granted;
+                 DROP ROLE ob1_fg130_deleter; DROP ROLE ob1_fg130_reader; DROP ROLE ob1_fg130_granted`);
+}
+
+console.log("\n[132] Migration 145: release every live claim one holder holds — release_holder_claims an operator key's alone, by its agent id (an agent key, a name alone, an unclassified key refused NOT_OPERATOR; no envelope raises); a blank holder NO_HOLDER, a blank reason NO_REASON; it ends the holder's live claims (unreleased and unexpired) with the operator and reason on each, in issue order with the piece, leaving its lapsed and self-released claims and every other holder's; an unknown holder releases 0, a second call 0; SECURITY INVOKER not DEFINER, VOLATILE, 145 its last definer; a re-apply a no-op (SMD-3606)");
+{
+  const file = files.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f)) ?? "no NNN_release_holder_claims.sql";
+  // [103] re-applies 115's claim_work; [126] restored 140's. Re-affirm it here: this section makes claims with claim_work and ends them with 145's release_holder_claims.
+  await restoreShipped("claim_work");
+  type ClaimAns = { outcome: string; claim: { id: string } | null; token: string | null };
+  type HolderOut = { ok: boolean; error?: string; kind?: string | null; message?: string; holder?: string; released?: number; claims?: { id: string; issue: string; piece: string | null }[] };
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows[0];
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const ansClaim = async (sql: string, params: unknown[]): Promise<ClaimAns> => {
+    try { return (await db.query<{ r: ClaimAns }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, claim: null, token: null }; }
+  };
+  const claim = (issue: string, piece: string | null, actor: object) =>
+    ansClaim(`SELECT claim_work($1, $2, NULL, 14500, NULL, $3::jsonb) AS r`, [issue, piece, JSON.stringify(actor)]);
+  const selfRelease = (id: string, token: string, actor: object) =>
+    db.query(`SELECT release_work_claim($1::uuid, $2, 'self-done', false, $3::jsonb)`, [id, token, JSON.stringify(actor)]);
+  const age = (id: string) =>
+    db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [id]);
+  const releaseHolder = async (holder: string | null, reason: string | null, actor: unknown): Promise<HolderOut> =>
+    (await one<{ r: HolderOut }>(`SELECT release_holder_claims($1, $2, $3::jsonb) AS r`, [holder, reason, actor === null ? null : JSON.stringify(actor)])).r;
+  const rowOf = (id: string) =>
+    one<{ released_at: string | null; released_by: string | null; agent: string | null; kind: string | null; reason: string | null }>(
+      `SELECT released_at::text, released_by, released_by_agent_id::text AS agent, released_by_kind AS kind, release_reason AS reason FROM work_claims WHERE id = $1::uuid`, [id]);
+  const liveFor = async (name: string) => Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = $1 AND released_at IS NULL AND expires_at > now()`, [name])).n);
+
+  await db.exec(`SELECT set_agent_kind('[132] op', 'operator'); SELECT set_agent_kind('[132] h', 'agent'); SELECT set_agent_kind('[132] h2', 'agent'); INSERT INTO ob1_agents (label) VALUES ('[132] plain') ON CONFLICT DO NOTHING`);
+  const idOf = async (label: string) => (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).id;
+  const OP = { name: "[132] op", agent_id: await idOf("[132] op") };
+  const H = { name: "[132] h", agent_id: await idOf("[132] h") };
+  const H2 = { name: "[132] h2", agent_id: await idOf("[132] h2") };
+  const PLAIN = { name: "[132] plain", agent_id: await idOf("[132] plain") };
+  // Clear any cap a prior section (140's [126]) left standing — even a stored bad one, which set_work_claim_cap ends without reading — so claim_work takes every claim here.
+  await db.query(`SELECT set_work_claim_cap(NULL, $1::jsonb)`, [JSON.stringify(OP)]);
+
+  // H holds five: three live, one aged to lapsed, one it released itself. H2 holds one. (piece "PR 2" rides one, so the reply carries it.)
+  const live1 = await claim("SMD-5101", null, H);
+  const live2 = await claim("SMD-5102", "PR 2", H);
+  const live3 = await claim("SMD-5103", null, H);
+  const lapsed = await claim("SMD-5104", null, H);
+  const selfGone = await claim("SMD-5105", null, H);
+  const otherLive = await claim("SMD-5200", null, H2);
+  await age(lapsed.claim!.id);
+  await selfRelease(selfGone.claim!.id, selfGone.token!, H);
+
+  // The function: one of the name, SECURITY INVOKER (not DEFINER), VOLATILE, 145's comment, 145 the last definer.
+  const meta = await one<{ d: boolean; v: string; c: string | null }>(
+    `SELECT p.prosecdef AS d, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = 'release_holder_claims(text, text, jsonb)'::regprocedure`);
+  assert(meta.d === false && meta.v === "v" && /[Mm]igration 145 \/ SMD-3606/.test(meta.c ?? "") && lastDefinerOf("release_holder_claims") === file && (await functionsNamed("release_holder_claims")) === 1,
+    `release_holder_claims: SECURITY INVOKER, VOLATILE, 145's comment, 145 its last definer and the only one of the name (${meta.d}/${meta.v}/${lastDefinerOf("release_holder_claims")}/${await functionsNamed("release_holder_claims")})`);
+
+  // Who may: an operator key by its agent id; an agent's key, a name alone, an unclassified key refused NOT_OPERATOR saying what it is; no envelope raises; a blank holder NO_HOLDER, a blank reason NO_REASON. Nothing released.
+  const byAgent = await releaseHolder("[132] h2", "nope", H);
+  const byName = await releaseHolder("[132] h2", "nope", { name: "[132] op" });
+  const byPlain = await releaseHolder("[132] h2", "nope", PLAIN);
+  const noEnvelope = await failure(`SELECT release_holder_claims('[132] h2', 'x', NULL)`);
+  const noHolder = await releaseHolder("   ", "a reason", OP);
+  const noReason = await releaseHolder("[132] h2", "   ", OP);
+  assert(byAgent.ok === false && byAgent.error === "NOT_OPERATOR" && byAgent.kind === "agent"
+         && byName.ok === false && byName.error === "NOT_OPERATOR" && byName.kind === null && /named by its name alone$/.test(String(byName.message))
+         && byPlain.ok === false && byPlain.error === "NOT_OPERATOR" && byPlain.kind === null && /is unclassified$/.test(String(byPlain.message))
+         && /needs a holder: no actor envelope names one/.test(noEnvelope)
+         && noHolder.ok === false && noHolder.error === "NO_HOLDER" && noReason.ok === false && noReason.error === "NO_REASON"
+         && (await liveFor("[132] h")) === 3 && (await liveFor("[132] h2")) === 1,
+    `an agent key, a name alone and an unclassified key answer NOT_OPERATOR, no envelope raises, a blank holder NO_HOLDER and a blank reason NO_REASON, nothing released (${byAgent.error}:${byAgent.kind}, ${byName.kind}, ${byPlain.kind}, ${noHolder.error}, ${noReason.error}, ${noEnvelope.slice(0, 40)})`);
+
+  // The operator ends H's three live claims, each with the reason and the operator on it, in issue order with the piece; its lapsed and self-released claims and H2's stand.
+  const out = await releaseHolder("[132] h", "SMD-3606 cleanup", OP);
+  const cl = out.claims ?? [];
+  const [r1, r2, r3, rLapsed, rSelf, rOther] = await Promise.all([live1, live2, live3, lapsed, selfGone, otherLive].map((c) => rowOf(c.claim!.id)));
+  assert(out.ok === true && out.holder === "[132] h" && out.released === 3 && cl.length === 3
+         && cl[0].issue === "SMD-5101" && cl[0].piece === null && cl[1].issue === "SMD-5102" && cl[1].piece === "PR 2" && cl[2].issue === "SMD-5103" && cl[2].piece === null
+         && [r1, r2, r3].every((r) => r.released_at !== null && r.released_by === "[132] op" && r.agent === OP.agent_id && r.kind === "operator" && r.reason === "SMD-3606 cleanup")
+         && rLapsed.released_at === null
+         && rSelf.released_by === "[132] h" && rSelf.reason === "self-done"
+         && rOther.released_at === null && (await liveFor("[132] h")) === 0 && (await liveFor("[132] h2")) === 1,
+    `the operator ends H's three live claims with the reason, in issue order with the piece, leaving its lapsed, its self-released and H2's (released ${out.released}: ${cl.map((c) => `${c.issue}/${c.piece ?? "-"}`).join(", ")})`);
+
+  // An unknown holder releases 0; H2's one claim releases, a second call 0 (idempotent — nothing left live).
+  const unknown = await releaseHolder("nobody-holds-this", "a reason", OP);
+  const h2out = await releaseHolder("[132] h2", "clear h2", OP);
+  const h2again = await releaseHolder("[132] h2", "clear h2", OP);
+  assert(unknown.ok === true && unknown.released === 0 && (unknown.claims ?? []).length === 0 && h2out.released === 1 && h2again.released === 0 && (await liveFor("[132] h2")) === 0,
+    `an unknown holder releases 0; H2's one claim releases, a second call 0 (${unknown.released}, ${h2out.released}, ${h2again.released})`);
+
+  // A re-apply is a no-op: one release_holder_claims, 145 still its last definer.
+  await reapply(file);
+  assert(lastDefinerOf("release_holder_claims") === file && (await functionsNamed("release_holder_claims")) === 1,
+    `145 applied again is a no-op: one release_holder_claims, 145 its last definer (${await functionsNamed("release_holder_claims")})`);
+
+  await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL AND holder_name IN ('[132] h', '[132] h2')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('[132] op', '[132] h', '[132] h2', '[132] plain')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

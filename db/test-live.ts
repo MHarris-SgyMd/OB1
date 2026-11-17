@@ -157,7 +157,7 @@ const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["5d", "10g", "37b", "38"],
   long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
   extract: ["10f", "10h"],
-  sweep: ["38s", "50"],
+  sweep: ["38s", "50", "51"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -19990,8 +19990,8 @@ if (want("18")) {
       const seqGrants: string[] = notSkipped.match(/ON SEQUENCE [^\s]+/g) ?? [];
       assert(!/openbrain_agents/.test(notSkipped) && !grantedSequences(["community"]).some((s) => seqGrants.includes(`ON SEQUENCE ${s}`))
              && JSON.stringify(seqGrants) === JSON.stringify(["ON SEQUENCE deliverable_events_seq_seq"])
-             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
-             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
+             && JSON.stringify(fnGrants) === JSON.stringify(["ON FUNCTION forget_thought", "ON FUNCTION ob1_forget_leftovers", "ON FUNCTION release_closed_ticket_claims"]) && /GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO "ob1_live_community";/.test(dry.out),
+             `…grants nothing of the community group, and grants the migrations' tables, 134's sequence, 144's forget_thought and ob1_forget_leftovers, and 118's release (${[...seqGrants, ...fnGrants].join(", ") || "no sequence or function"})`);
 
       const failed: string[] = [];
       // A file that opens a transaction (BEGIN … COMMIT — per-agent-identity, typed-reasoning-edges)
@@ -20839,7 +20839,7 @@ if (want("19b")) {
     await side`ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS sensitivity_tier text DEFAULT 'standard'`;
     const digestRows = async (includePersonal: boolean) => {
       const r = await readThoughts(side!, { windowDays: 100000, includePersonal, noSensitivityFilter: false });
-      return r.failClosed ? null : r.rows.map((t) => String((t.metadata as Record<string, unknown>)?.source));
+      return r.rows.map((t) => String((t.metadata as Record<string, unknown>)?.source));
     };
     const filtered = await digestRows(false);
     const withPersonal = await digestRows(true);
@@ -22765,9 +22765,10 @@ if (want("27")) {
 }
 
 if (want("29")) {
-  console.log("\n[29] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL, a Supabase URL or a refused connection is one line naming no value (SMD-2139)");
-  // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
-  // class's first writers — driven as deployed: `bun <file>` in a directory
+  console.log("\n[29] recipes/thought-enrichment's enrich-thoughts on the SQL shim: the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL or a Supabase URL is one line naming no value (SMD-2139; the type and sensitivity backfills are db/backfill-metadata.ts, [51], SMD-3318)");
+  // The enrichment script SMD-2126 sent to compat/supabase-sql — the class's
+  // first writers, its two backfills since db/backfill-metadata.ts ([51],
+  // SMD-3318 PR 3a) — driven as deployed: `bun <file>` in a directory
   // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
   // this database carrying enhanced-thoughts ([18] left the columns;
   // the file is idempotent). The planted table is the truth every printed
@@ -22822,21 +22823,11 @@ if (want("29")) {
   try {
     await sql`DELETE FROM thoughts`;
     await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
-    // Thirteen rows, every type 'reference': four with a valid different type in
-    // their metadata, one with a type no allowlist has, one with none, one
-    // already 'reference'; one restricted by pattern (a made-up SSN), one
-    // matching a restricted and a personal pattern (the restricted match must
-    // win alone), two personal (a dosage, a blood-pressure reading), one already
-    // personal — not scanned — and one of whitespace alone, the enrichment's no-model path, at
-    // the lowest id so it is the first row every enrichment run meets. The four
-    // candidates of the type backfill sit at known ids — the decision second
-    // from the bottom, the other three at the top — with the seven non-candidates
-    // at random ids between, so a run stopped by `--limit 1` on pages of one
-    // has read exactly two rows, and a run that scans on to the next candidate
-    // has read ten (review pass 2, mutant: a bound alone let it through).
-    // Tiers NULL, '' and 'standard' among them, the three the sensitivity filter
-    // names. Fingerprint and model label set so the writes can be held away
-    // from them (a raw insert leaves both NULL otherwise).
+    // Thirteen rows, every type 'reference': one of whitespace alone, the
+    // enrichment's no-model path, at the lowest id so it is the first row every
+    // enrichment run meets. Fingerprint and model label set
+    // so the writes can be held away from them (a raw insert leaves both NULL
+    // otherwise).
     await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
       SELECT COALESCE(i::uuid, gen_random_uuid()), c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
         ('00000000-0000-0000-0000-000000000002', 'a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
@@ -22857,24 +22848,11 @@ if (want("29")) {
     type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
     const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
     const planted = await snapshot();
-    const typesNow = async () => (await sql`SELECT id::text AS id, type, metadata->>'type' AS mt FROM thoughts ORDER BY id`) as { id: string; type: string; mt: string | null }[];
-    const tiers = async () => Object.fromEntries(((await sql`SELECT coalesce(sensitivity_tier, '<null>') AS t, count(*)::int AS n FROM thoughts GROUP BY 1`) as { t: string; n: number }[]).map((r) => [r.t, r.n]));
     const [truth] = (await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'reference')::int AS refs,
-      count(*) FILTER (WHERE metadata->>'type' IN ('decision','lesson','meeting','journal'))::int AS valid,
-      count(*) FILTER (WHERE sensitivity_tier IS NULL OR sensitivity_tier IN ('', 'standard'))::int AS scannable,
-      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; valid: number; scannable: number; bare: number }[];
-    assert(truth.total === N && truth.refs === N && truth.valid === 4 && truth.scannable === 12 && truth.bare === 0 && planted.length === N,
-      `the planted table: ${N} rows of type 'reference', four with a valid different metadata type, twelve the sensitivity scan reads, every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
+      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; bare: number }[];
+    assert(truth.total === N && truth.refs === N && truth.bare === 0 && planted.length === N,
+      `the planted table: ${N} rows of type 'reference', every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
 
-    // backfill-type: a dry run reads every page (three rows a page, five pages — one progress line each — the cursor
-    // past each) and writes nothing; a dry run with the limit on one page of thirteen examines the rows up to the
-    // candidate that trips it, ten, and counts those (the row that tripped it counted eleven — review pass 4, mutant).
-    const dry = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--batch-size", "3");
-    const afterDry = await typesNow();
-    const pages = (dry.out.match(/Progress: /g) ?? []).length;
-    const dryLimit = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "1", "--batch-size", "13");
-    assert(dry.code === 0 && dry.out.includes(`Total rows with type='reference': ${N}`) && dry.out.includes(`Rows processed:              ${N}`) && dry.out.includes("Rows updated:                4 (dry run, not written)") && dry.out.includes("Skipped (already reference): 1") && dry.out.includes("Skipped (null/empty type):   7") && dry.out.includes("Skipped (invalid type):      1") && /\n  bogus: 1\n/.test(dry.out) && pages === 5 && afterDry.every((r) => r.type === "reference") && dryLimit.code === 0 && dryLimit.out.includes("Rows processed:              10\n") && dryLimit.out.includes("=== BACKFILL STOPPED AT --limit 1 ==="),
-      `backfill-type.mjs --dry-run --batch-size 3 on the shim: the exact count, thirteen rows over five pages, four to update and the three skip counts, the bogus type named, every row still 'reference'; --limit 1 on one page of thirteen examines ten rows (exit ${dry.code}: ${pages} pages; ${dryLimit.code}: ${/Rows processed:\s+\d+/.exec(dryLimit.out)?.[0]})`);
 
     // A refused write ends the run on its first row: a LOGIN role with SELECT on thoughts alone reads the page and is
     // refused the update — 42501, exit 1, no row changed — where the REST form counted a 403 and went on (the type
@@ -22886,17 +22864,12 @@ if (want("29")) {
     /** The probe role, gone: before each guarded block and in its finally (used twice — the denied cases here, the grant ladder at the end). */
     const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
     if (probeUrl === URL_ || !mayCreateProbe) {
-      skip("…a role with SELECT alone: both backfills refused on their first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+      skip("…a role with SELECT alone: the enrichment refused on its first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
     } else {
       await dropProbe();
       try {
         await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
-        const deniedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
-        const deniedTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: probeUrl }, "--apply");
-        const afterDenied = await typesNow();
-        assert(oneLine(deniedType, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/Done\./.test(deniedType.out) && oneLine(deniedTier, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== Results ===/.test(deniedTier.out) && afterDenied.every((r) => r.type === "reference") && (await tiers())["personal"] === 1,
-          `…a role with SELECT alone: both backfills read their page and end on the first write with 42501, exit 1, no summary, no row changed (${deniedType.code}: ${errorLine(deniedType.out)}; ${deniedTier.code}: ${errorLine(deniedTier.out)})`);
-        // The enrichment too: past the blank row (--skip 1, the .range() path), one row is classified — one paid call
+        // The enrichment, past the blank row (--skip 1, the .range() path), one row is classified — one paid call
         // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no row enriched, and a
         // checkpoint that records nothing (written before the refusal ends the run, so the rows a chunk handled before
         // it are not lost). Under Promise.allSettled it was a FAIL line per row while every later row still paid its
@@ -22914,33 +22887,7 @@ if (want("29")) {
       }
     }
 
-    // --limit 1 writes one row — the ticket's Verify — and stops: with a page of one, the rows processed are the
-    // blank row and the decision at the second id, exactly two, never a page more (it had scanned on to the next
-    // candidate, every page between read for nothing — review pass 2, run-it; here that would be ten rows).
-    const one = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--limit", "1", "--batch-size", "1");
-    const afterOne = await typesNow();
-    const changed = afterOne.filter((r) => r.type !== "reference");
-    const processedOne = Number(/Rows processed:\s+(\d+)/.exec(one.out)?.[1] ?? -1);
-    assert(one.code === 0 && one.out.includes("=== BACKFILL STOPPED AT --limit 1 ===") && one.out.includes("Rows updated:                1\n") && changed.length === 1 && changed[0].type === "decision" && changed[0].mt === "decision" && processedOne === 2,
-      `backfill-type.mjs --limit 1 --batch-size 1: the decision at the second id is written, the run says it stopped at the limit and processed exactly two rows — no page past the write (exit ${one.code}: ${changed.map((r) => r.type).join(",") || "none"} changed, ${processedOne} processed)`);
-    const rest = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--batch-size", "3");
-    const afterRest = await typesNow();
-    assert(rest.code === 0 && rest.out.includes(`Total rows with type='reference': ${N - 1}`) && rest.out.includes("Rows updated:                3\n") && rest.out.includes("=== BACKFILL COMPLETE ===") && afterRest.filter((r) => r.type !== "reference").length === 4 && afterRest.every((r) => r.type === (["decision", "lesson", "meeting", "journal"].includes(r.mt ?? "") ? r.mt : "reference")),
-      `…and the full run writes the other three, the bogus type and the typeless rows left 'reference' (exit ${rest.code}: ${afterRest.filter((r) => r.type !== "reference").map((r) => r.type).sort().join(",")})`);
 
-    // backfill-sensitivity: no flag is the usage and no query; the dry run scans the twelve rows at NULL, '' or
-    // 'standard' — the pre-set personal row is not among them — and names the two restricted (the row matching a
-    // dosage too by its SSN alone: the restricted match returns first) and the two personal.
-    const usage = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ });
-    const scan = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run");
-    const tiersAfterScan = await tiers();
-    assert(usage.code === 0 && /^Usage:\n  bun backfill-sensitivity\.mjs --dry-run/.test(usage.out) && scan.code === 0 && scan.out.includes("Scanned:              12") && scan.out.includes("Upgraded to personal: 2") && scan.out.includes("Upgraded to restricted: 2") && (scan.out.match(/RESTRICTED #[0-9a-f-]{36}: ssn_pattern — /g) ?? []).length === 2 && !/RESTRICTED #[0-9a-f-]{36}: ssn_pattern, /.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: medication_dosage, drug_name/.test(scan.out) && /PERSONAL #[0-9a-f-]{36}: health_measurement/.test(scan.out) && tiersAfterScan["personal"] === 1 && !("restricted" in tiersAfterScan),
-      `backfill-sensitivity.mjs: no flag prints the usage; --dry-run scans the twelve rows the filter names, finds two restricted (each by the SSN alone) and two personal by pattern, and writes nothing (${usage.code}/${scan.code}: ${JSON.stringify(tiersAfterScan)})`);
-    const applyTier = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--apply");
-    const tiersAfterApply = await tiers();
-    const [{ ssn }] = (await sql`SELECT sensitivity_tier AS ssn FROM thoughts WHERE content LIKE 'SSN 123%'`) as { ssn: string }[];
-    assert(applyTier.code === 0 && applyTier.out.includes("Mode:                 APPLIED") && tiersAfterApply["restricted"] === 2 && tiersAfterApply["personal"] === 3 && tiersAfterApply["standard"] === 5 && tiersAfterApply["<null>"] === 1 && tiersAfterApply[""] === 2 && ssn === "restricted",
-      `…--apply writes the four rows' tiers and leaves the other eight as they were — NULL and '' included (exit ${applyTier.code}: ${JSON.stringify(tiersAfterApply)})`);
 
     // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
     // neither a row nor the checkpoint.
@@ -23006,47 +22953,40 @@ if (want("29")) {
 
     // Refused before any query, one line each, no stack.
     if (recipeEnvFile) {
-      skip("…no URL: each of the three ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
+      skip("…no URL: the enrichment ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
     } else {
-      const noUrl = await Promise.all([script("backfill-type.mjs", {}, "--dry-run"), script("backfill-sensitivity.mjs", {}, "--dry-run"), script("enrich-thoughts.mjs", {}, "--status")]);
+      const noUrl = [await script("enrich-thoughts.mjs", {}, "--status")];
       const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string, in the environment or in \.env\.local beside the scripts\.$/m;
       assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
-        `…no URL: each of the three ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
+        `…no URL: the enrichment ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
     }
     // A value that is not postgres:// is refused by the recipe's own line, which names the scheme and never the value:
     // the shim's refusal quotes the first forty characters, which since this port carry the password (review pass 1,
     // run-it). The mistyped scheme below carries a token that must appear nowhere in the output.
-    const httpsType = await script("backfill-type.mjs", { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--dry-run");
-    const mistyped = await script("backfill-sensitivity.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x" }, "--dry-run");
+    const mistyped = await script("enrich-thoughts.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x", ...stateEnv }, "--status");
     const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co", ...stateEnv }, "--status");
-    const refused = await script("backfill-type.mjs", { SUPABASE_URL: "postgres://nobody:nothing@127.0.0.1:1/nowhere" }, "--dry-run");
     const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
-    const typo = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dryrun");
-    const both = await script("backfill-sensitivity.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--apply");
     // The = form and a trailing value flag passed the refusal and were then ignored — `--limit=2` ran the whole table
     // (review pass 2, both readers).
     const eqForm = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit=1", ...ENRICH_FLAGS);
-    const trailing = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit");
-    const fraction = await script("backfill-type.mjs", { SUPABASE_URL: URL_ }, "--dry-run", "--limit", "1.5");
+    const trailing = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit");
+    const fraction = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "1.5");
     const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
-    assert(oneLine(httpsType, scheme) && !/Starting type backfill|example\.supabase/.test(httpsType.out) && oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(refused, /^ERROR: read thoughts after id 0{8}-0{4}-0{4}-0{4}-0{12} → ERR_POSTGRES_CONNECTION_REFUSED /m) && !/\[retry\]/.test(refused.out) && oneLine(fraction, /^ERROR: --limit must be an integer of at least 1; got "1\.5"$/m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(typo, /^ERROR: unknown flag "--dryrun" \(flags: --dry-run, --apply\)$/m) && (await tiers())["restricted"] === 2 && oneLine(both, /^ERROR: --dry-run and --apply are exclusive/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/Starting type backfill/.test(trailing.out),
-      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); a refused connection is one line naming the driver's code with no retry ladder before it; --limit 0 and --limit 1.5, an unknown flag (--dryrun, which wrote a row) and --dry-run beside --apply (which wrote under a DRY RUN banner), --limit=1 and a trailing --limit (both ran unbounded) are one line each (${httpsType.code}: ${errorLine(httpsType.out).slice(0, 80)}; ${mistyped.code}; ${httpsEnrich.code}; ${refused.code}: ${errorLine(refused.out).slice(0, 90)}; ${zero.code}; ${fraction.code}; ${typo.code}: ${errorLine(typo.out)}; ${both.code}; ${eqForm.code}; ${trailing.code})`);
+    assert(oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(fraction, /^ERROR: --limit must be an integer of at least 1; got "1\.5"$/m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/\[DRY\]/.test(trailing.out),
+      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); --limit 0 and --limit 1.5, --limit=1 and a trailing --limit (both ran unbounded) are one line each (${mistyped.code}; ${httpsEnrich.code}; ${zero.code}; ${fraction.code}; ${eqForm.code}; ${trailing.code})`);
 
-    // The README's grants, proved: SELECT and UPDATE on thoughts write `type` (the audit trigger records no event for it);
-    // a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
+    // The README's grants, proved: a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
     // names that table, the README's entry for it, and the grant cures it (review pass 1, cold read: the README had
     // promised SELECT, UPDATE on thoughts alone; probed, then held here). A fourteenth row, planted after the snapshot
     // above. The same two guards as the denied block.
     if (probeUrl === URL_ || !mayCreateProbe) {
-      skip("…a role with the README's grants writes type alone, is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+      skip("…a role with the README's grants is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
     } else {
       await dropProbe();
       try {
         await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT, UPDATE ON thoughts TO ${PROBE_ROLE}`);
         await sql`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES ('granted row: a decision', '{"type":"decision"}', 'reference', 'standard', content_fingerprint_of('granted row: a decision'), 'planted-model')`;
         const enrichedCount = async () => ((await sql`SELECT count(*) FILTER (WHERE enriched)::int AS n FROM thoughts`) as { n: number }[])[0].n;
-        const grantedType = await script("backfill-type.mjs", { SUPABASE_URL: probeUrl }, "--limit", "1");
-        const [{ granted }] = (await sql`SELECT type AS granted FROM thoughts WHERE content LIKE 'granted row%'`) as { granted: string }[];
         const state2 = { ...model, ENRICH_STATE_DIR: join(scratch, "state2") };
         const markAudit = stubCalls;
         const before = await enrichedCount();
@@ -23055,8 +22995,8 @@ if (want("29")) {
         await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${PROBE_ROLE}`);
         const auditOk = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
         const after = await enrichedCount();
-        assert(grantedType.code === 0 && granted === "decision" && oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
-          `…a role with SELECT, UPDATE on thoughts writes a type; its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${grantedType.code}: ${granted}; ${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
+        assert(oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
+          `…a role with SELECT, UPDATE on thoughts: its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
       } finally {
         await dropProbe();
       }
@@ -24621,18 +24561,14 @@ if (want("36")) {
     assert(noCreds.code === 2 && chatReqs === 0 && tgReqs === 0 && /TELEGRAM_BOT_TOKEN/.test(noCreds.err),
       `--output telegram with the send allowed but no credentials fails before the synthesis, not after it (exit ${noCreds.code}; ${chatReqs} synthesis, ${tgReqs} send(s))`);
 
-    // The sensitivity fail-closed guard: default (filtered), an install without
-    // the sensitivity_tier column refuses before any read leaves; with the
-    // column it proceeds.
+    // The sensitivity filter: the default (filtered) run proceeds with the sensitivity_tier column or without it — without
+    // it the row's metadata.sensitivity_tier is the tier, where until SMD-3318 the run refused ([51] holds the key's
+    // exclusion on a brain without the column).
     const [{ has }] = await wsql`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has`;
     tgReqs = 0; chatReqs = 0;
     const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
-    if (has) {
-      assert(filtered.code === 0 && tgReqs >= 1, `with a sensitivity_tier column the default filtered run proceeds and posts (exit ${filtered.code}; ${tgReqs} send(s))`);
-    } else {
-      assert(filtered.code === 1 && tgReqs === 0 && chatReqs === 0 && /sensitivity_tier column/.test(filtered.err),
-        `without the sensitivity_tier column the default run fails closed before any read leaves (exit ${filtered.code}; ${tgReqs} send(s), ${chatReqs} synthesis)`);
-    }
+    assert(filtered.code === 0 && tgReqs >= 1 && !/sensitivity_tier column/.test(filtered.err),
+      `the default filtered run proceeds and posts, ${has ? "with" : "without"} a sensitivity_tier column (exit ${filtered.code}; ${tgReqs} send(s))`);
   } finally {
     stub.stop(true);
     // The statements cleared before their thoughts go, so no later section reads them open (review pass 1).
@@ -32931,6 +32867,464 @@ if (want("50")) {
       if (madeEdgesView) await sql`DROP VIEW IF EXISTS edges`;
       if (madeJobs) await sql`DROP TABLE IF EXISTS ingestion_jobs`;
       await dropProbe();
+      await sql.close();
+    }
+  })();
+}
+
+if (want("51")) {
+  console.log("\n[51] db/backfill-metadata.ts on a real Postgres: a dry run writes nothing; --apply writes a type the capture's rule names and a sensitivity tier the sensitivity patterns set, through update_thought, one audit event a row, and the enhanced-thoughts columns where they exist; an unknown type, an importer's type, a higher or unknown tier and metadata that is not an object left; weekly-digest's read leaving the tagged rows out with or without the column; no thought's text printed; paging, a second run, --pass, --limit, a row edited or deleted mid-run, a failure, the statement bound and the refusals (SMD-3318)");
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    // recipes/thought-enrichment's backfill-type and backfill-sensitivity as one db/ script (SMD-3318 PR 3a), driven as
+    // deployed: `bun db/backfill-metadata.ts` with DATABASE_URL alone. Raw inserts plant every case; the importer's row goes
+    // through upsert_thought under a key classified ingested, so its trust is the database's own stamp. The first phase
+    // reads a brain without schemas/enhanced-thoughts' columns, the second adds them (this shard's last section: they
+    // stay, as [29] leaves them in the rest).
+    const sql = new SQL({ url: URL_, max: 2 });
+    const scratch = mkdtempSync(join(tmpdir(), "ob1-live-3318-backfill-"));
+    const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
+    const backfill = (extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(HERE, "backfill-metadata.ts"), ...flags], { cwd: scratch, env: env(extra) });
+    const { run: runBackfill } = await import("./backfill-metadata.ts");
+    const { sensitivityOf, tierRank } = await import("./sensitivity.ts");
+    const SECRET = "sk-live3318abcdefghijk";
+    // Metadata as JSON text cast in SQL: Bun binds a JS string to a jsonb parameter as a JSON string. undefined is SQL NULL.
+    const plant = async (content: string, metadata: unknown) =>
+      ((await sql.unsafe("INSERT INTO thoughts (content, metadata) VALUES ($1, $2::text::jsonb) RETURNING id::text AS id", [content, metadata === undefined ? null : JSON.stringify(metadata)])) as { id: string }[])[0].id;
+    const metaOf = async (id: string) => ((await sql`SELECT metadata, jsonb_typeof(metadata) AS kind FROM thoughts WHERE id = ${id}::uuid`) as { metadata: Record<string, unknown> | null; kind: string | null }[])[0];
+    const audits = async () => Number(((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE actor_name = 'backfill-metadata'`) as { c: number }[])[0].c);
+    const columns = async () => ((await sql`SELECT column_name AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name IN ('type', 'sensitivity_tier')`) as { c: string }[]).map((r) => r.c);
+    /** The script's client with a hook on each update_thought call (the call's id): the hook acts first, or answers for it. */
+    const hooked = (hook: (id: string) => Promise<unknown[] | void>): SQL => {
+      const wrap = (base: SQL): SQL => Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        if (strings.join("").includes("update_thought(")) {
+          const answer = await hook(String(values[0]));
+          if (answer) return answer;
+        }
+        return base(strings, ...values);
+      }, { unsafe: base.unsafe.bind(base), begin: (fn: (tx: SQL) => Promise<unknown>) => base.begin((tx) => fn(wrap(tx as unknown as SQL))) }) as unknown as SQL;
+      return wrap(sql);
+    };
+    const inProcess = async (client: SQL, passes: ("type" | "sensitivity")[]) => {
+      const lines: string[] = [];
+      const code = await runBackfill({ sql: client, passes, apply: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+      return { code, lines };
+    };
+    try {
+      // The recipe's patterns, one thought each, read as the recipe read them: every label, the lookahead that keeps a
+      // lab value standard, the case-blind key prefix, and the first restricted match alone.
+      const table: [string, string, string][] = [
+        ["SSN 123-45-6789", "restricted", "ssn_pattern"], ["passport X1234567", "restricted", "passport_pattern"],
+        ["12345678 is the account", "restricted", "bank_account"], ["routing number 1234567890", "restricted", "bank_account"],
+        ["key SK-ABCDEFGHIJKL", "restricted", "api_key"], ["password: hunter2", "restricted", "password_value"],
+        ["card 4111 1111 1111 1111", "restricted", "credit_card"], ["took 20 mg today", "personal", "medication_dosage"],
+        ["on metformin now", "personal", "drug_name"], ["glucose was 110", "personal", "health_measurement"],
+        ["was diagnosed last year", "personal", "medical_condition"], ["my salary is 9", "personal", "financial_detail"],
+        ["cost US$5000", "personal", "financial_amount"], ["glucose 5 mg/dL", "personal", "health_measurement"], ["a plain line", "standard", ""],
+        // Widened after review pass 3: each of these went past the recipe's patterns.
+        ["DB_PASSWORD=zq1abc", "restricted", "password_value"], ['{"password": "zq2abc"}', "restricted", "password_value"], ["pwd=zq3abc", "restricted", "password_value"],
+        [`pass${String.fromCharCode(0x200b)}word: zq4abc`, "restricted", "password_value"], [`password${String.fromCharCode(0xff1a)} zq5abc`, "restricted", "password_value"],
+        ["OPENAI_API_KEY=sk-proj-zqabcdefghijklmnop", "restricted", "api_key"], ["sk-ant-api03-zqabcdefghijklmnop", "restricted", "api_key"],
+        ["ghp_zqabcdefghijklmnopqrstuvwx", "restricted", "api_key"], ["ssn is 219 09 9999", "restricted", "ssn_pattern"], ["ssn 219.09.9999", "restricted", "ssn_pattern"],
+        ["cost $5000 now", "personal", "financial_amount"], ["boarding pass: gate 4", "standard", ""],
+        // Widened after review pass 4: a password named in prose, generic credentials, the session-capture hook's table.
+        ["password for gmail: zq1abcde", "restricted", "password_value"], ["**Password**: zq2abcde", "restricted", "password_value"],
+        ["| user | bob | password | zq3abcde |", "restricted", "password_value"], ["wifi pass: zq4abcde", "restricted", "password_value"],
+        ["pw: zq5abcde", "restricted", "password_value"], ["my password was zq6abcde", "restricted", "password_value"], ["my password is hunter2", "restricted", "password_value"],
+        ["passwd: hunter2", "restricted", "password_value"], ["passphrase: hunter2", "restricted", "password_value"], ["Passwort: zq7abcde", "restricted", "password_value"],
+        [`pass${String.fromCharCode(0xad)}word: zq8abc`, "restricted", "password_value"], [`pass${String.fromCharCode(0x202e)}word: zq8abc`, "restricted", "password_value"],
+        ["token: zq9abcdefgh12", "restricted", "api_key"], ["API_KEY=zqABabcdefgh1234", "restricted", ""], ["glpat-zqabcdefghijklmnopqrst", "restricted", "api_key"],
+        ["sk_test_abcdefghijklmnopqrst", "restricted", "api_key"], ["SK-PROJ-ABCDEFGHIJKLMNOPQR", "restricted", "api_key"],
+        ["xoxb-1234567890-abcdefghij", "restricted", "api_key"], [`AIza${"B".repeat(35)}`, "restricted", "api_key"], [`github_pat_${"a".repeat(22)}`, "restricted", "api_key"],
+        [`ghs_${"a".repeat(24)}`, "restricted", "api_key"], ["7123456789:AAHzqabcdefghijklmnopqrstuvwxyz0123", "restricted", "api_key"],
+        ["lin_api_zqabcdefghijklmnopqrst", "restricted", "linear key"], [`https://brain.example.test/mcp?key=${"a1".repeat(32)}`, "restricted", ""],
+        [`wc_${"a1".repeat(32)}`, "restricted", "work-claim token"], ["postgres://admin:zqpw1234@db.example.test/x", "restricted", "url with a password"],
+        ["-----BEGIN OPENSSH PRIVATE KEY-----", "restricted", "private key block"], ["Authorization: Bearer zqabcdefghijklmnopqrst", "restricted", ""],
+        ["3782 822463 10005", "restricted", "credit_card"], ["ssn 123456789", "restricted", "ssn_pattern"], [`ssn 123${String.fromCharCode(0x2011)}45${String.fromCharCode(0x2011)}6789`, "restricted", "ssn_pattern"],
+        ["passport X123456", "restricted", "passport_pattern"], ["passport AB1234567", "restricted", "passport_pattern"], ["12345678 iban", "restricted", "bank_account"],
+        ["ACCOUNT 12345678", "restricted", "bank_account"], ["dose 5 mg/kg", "standard", ""], ["on insulin now", "personal", "drug_name"],
+        ["bp 120 over 80", "personal", "health_measurement"], ["paid $500", "personal", "financial_amount"],
+        ["meet in room 404", "standard", ""], ["the token of appreciation", "standard", ""], ["the api key rotates monthly", "standard", ""], ["see SMD-3318 and PR 792", "standard", ""],
+      ];
+      const misread = table.filter(([text, tier, label]) => { const r = sensitivityOf(text); return r.tier !== tier || (label !== "" && r.labels[0] !== label); });
+      const ranks = [tierRank(undefined), tierRank(""), tierRank(" Standard "), tierRank("PERSONAL"), tierRank("restricted\n"), tierRank("secret"), tierRank(3)];
+      // financial_amount backtracked quadratically over a long run of digits (6 s at 100k): linear now.
+      const t100k = performance.now();
+      sensitivityOf(`a$${"1".repeat(100_000)}x`);
+      const quadMs = Math.round(performance.now() - t100k);
+      assert(misread.length === 0 && JSON.stringify(sensitivityOf("SSN 123-45-6789 and 20 mg")) === JSON.stringify({ tier: "restricted", labels: ["ssn_pattern"] })
+             && JSON.stringify(sensitivityOf("20 mg of metformin")) === JSON.stringify({ tier: "personal", labels: ["medication_dosage", "drug_name"] })
+             && JSON.stringify(ranks) === "[0,0,0,1,2,null,null]" && quadMs < 500,
+        `the patterns: each label on its sample (5 mg/dL not a dosage, an upper-case key prefix, the shapes review pass 3 got past the recipe's, a boarding pass standard), the first restricted match alone, every personal one; tiers ranked in any case and white space, anything else unranked; 100,000 digits read in ${quadMs} ms (${misread.map(([t]) => t).join("; ") || "none misread"}; ${JSON.stringify(ranks)})`);
+      // Review pass 5. The copied table is the hook's, rule for rule (name, source, flags), so a change to either
+      // fails here until both move; each copied rule restricts a sample of its own (its regex read alone, then
+      // sensitivityOf whole). Then the over-holding the pass measured: the near-misses below were restricted or
+      // personal before it, and stay standard now; the hook's URL blanking keeps a hex id in a URL's path or a
+      // base64 payload from reading as a key, but nothing else in the text; and two more hidden characters.
+      const { SECRET_SHAPES } = await import("./sensitivity.ts");
+      const hookPath = join(HERE, "..", "recipes", "session-capture-hook", "session-capture.mjs");
+      const { SECRET_PATTERNS } = (await import(hookPath)) as { SECRET_PATTERNS: [string, RegExp][] };
+      const shapeOf = (t: readonly (readonly [string, RegExp])[]) => JSON.stringify(t.map(([n, re]) => [n, re.source, re.flags]));
+      const hex = "3f9a".repeat(16);
+      const shapeSamples: Record<string, string> = {
+        "anthropic key": "sk-ant-" + "zq".repeat(12), "openai key": "sk-proj-" + "Zq9".repeat(12), "aws access key id": "ASIA" + "Z".repeat(16),
+        "github token": "ghp_" + "a1".repeat(18), "slack token": "xoxb-" + "1234567890-abc", "google api key": "AIza" + "B".repeat(35),
+        "stripe key": "rk_live_" + "a1".repeat(10), "sendgrid key": "SG." + "a".repeat(22) + "." + "b".repeat(43), "linear key": "lin_api_" + "a1".repeat(10),
+        "hugging face token": "hf_" + "a1".repeat(15), "npm token": "npm_" + "a1".repeat(18), "jwt": "eyJ" + "a".repeat(10) + "." + "b".repeat(10) + "." + "c".repeat(10),
+        "private key block": "-----BEGIN RSA PRIVATE KEY-----", "url with a password": "https://admin:zqpw1234@db.example.test/x",
+        "slack webhook url": "https://hooks.slack.com/services/" + "T0123456789/B0123456789/" + "abcdefghijklmnopqrstuvwx", // split, as the hook's test splits it
+        "access key in a URL": "http://127.0.0.1:8010/mcp?key=" + hex, "bearer token": "Authorization: Bearer " + "Ab9".repeat(12),
+        "credential assignment": "MY_API_KEY=abc/def/ghijklmnopqrstuvwxyz0123456789", "credential flag": "tool --client-secret Ab3dE5fG7hI9jK1lM3nO5p",
+        "password flag": "psql --password hunter2 -h db", "password assignment": "POSTGRES_PASSWORD=hunter2", "work-claim token": "wc_" + hex,
+        "64-hex token (a raw key, or a digest out of its context)": "use this key: " + hex,
+      };
+      const unsampled = SECRET_SHAPES.filter(([name, re]) => !(name in shapeSamples) || !re.test(shapeSamples[name]) || sensitivityOf(shapeSamples[name]).tier !== "restricted").map(([name]) => name);
+      const pass5: [string, string][] = [
+        ["review pass 2: the fixes", "standard"], ["All tests pass: 1432 passed", "standard"], ["Bun pin was 1.4.0", "standard"],
+        ["the password is derived from the key", "standard"], ["password: [redacted:password assignment]", "standard"], ["order 123456789 shipped", "standard"],
+        ["ZIP 12345-6789", "standard"], ["AB1234567 is the SKU", "standard"], ["ids 4111 1111-1111 1111", "standard"], ["token: <YOUR_TOKEN_123456>", "standard"],
+        ["the diagnosis of the bug", "standard"], [`https://github.com/o/r/commit/${hex}`, "standard"], [`data:text/plain;base64,${hex}`, "standard"],
+        ["password: none", "standard"], ["boarding pass: economy", "standard"], ["pin is 2024-11-17", "standard"], ["ids 9-1234-5678-9012-3456", "standard"],
+        ["ids 1234-5678-9012-3456-7", "standard"], ["pw: SMD-3318", "standard"], ["the password reset was SMD-3318", "standard"],
+        ["SSN 123 45 6789", "restricted"], ["pin is 4821", "restricted"], ["my pin: 0007", "restricted"], [`see https://example.test/a, then the key ${hex}`, "restricted"],
+        [`pass${String.fromCodePoint(0xe0041)}word: zq8abc`, "restricted"], [`pass${String.fromCharCode(0x61c)}word: zq8abc`, "restricted"],
+      ];
+      const pass5Misread = pass5.filter(([text, tier]) => sensitivityOf(text).tier !== tier).map(([text]) => text);
+      assert(shapeOf(SECRET_SHAPES) === shapeOf(SECRET_PATTERNS) && SECRET_SHAPES.length === Object.keys(shapeSamples).length && unsampled.length === 0 && pass5Misread.length === 0,
+        `the copied table is the hook's, rule for rule (${SECRET_SHAPES.length} rules), each restricting its own sample (${unsampled.join("; ") || "all do"}); review pass 5's near-misses standard, a hex id in a URL or base64 payload blanked as the hook blanks it and nothing else, the Arabic letter mark and a tag character dropped (${pass5Misread.join("; ") || "none misread"})`);
+
+      await sql`DELETE FROM thoughts`;
+      await sql`SELECT set_agent_kind('imp-3318', 'ingested')`;
+      const hadColumns = (await columns()).length > 0;
+      if (hadColumns) {
+        skip("…the first phase, a brain without the enhanced-thoughts columns", "an earlier section of this run added them (only an unsharded run reaches [51] after [29])");
+      } else {
+        const ids = {
+          caseOnly: await plant("[51] plain words one", { type: "Task" }),
+          alias: await plant("[51] plain words two", { type: " todo " }),
+          unknown: await plant("[51] plain words three", { type: "decision" }),
+          canonical: await plant("[51] plain words four", { type: "observation" }),
+          ctor: await plant("[51] plain words ctor", { type: "constructor" }),
+          apiKey: await plant(`[51] my key is ${SECRET} keep it`, { type: "idea" }),
+          dosage: await plant("[51] took 20 mg of sertraline today", {}),
+          setTier: await plant("[51] took 20 mg again", { sensitivity_tier: "restricted" }),
+          raise: await plant("[51] SSN 123-45-6789 on the raise row", { sensitivity_tier: "personal" }),
+          caps: await plant("[51] my salary is $120000 a year", { sensitivity_tier: "Standard" }),
+          odd: await plant("[51] SSN 222-33-4444 on the odd row", { sensitivity_tier: "secret" }),
+          nullMeta: await plant("[51] password: hunter2live", undefined),
+          jsonNull: await plant("[51] SSN 333-44-5555 under a JSON null", null),
+          arr: await plant("[51] SSN 444-55-6666 under an array", ["x"]),
+          str: await plant("[51] SSN 555-66-7777 under a string", "{\"type\":\"todo\"}"),
+          both: await plant("[51] my income is $90000 now", { type: "Action Item", sensitivity_tier: "standard" }),
+          caseKey: await plant("[51] plain words under a capital tier", { sensitivity_tier: "Restricted" }),
+        };
+        const [{ imp }] = (await sql`SELECT (upsert_thought('[51] plain words of an importer', ${{ metadata: { source: "live", type: "Note" }, actor: { name: "imp-3318", via: "test-live" } }}::jsonb, NULL::vector) ->> 'id') AS imp`) as { imp: string }[];
+        const all = [...Object.values(ids), imp];
+        const snapshot = async () => JSON.stringify((await sql`SELECT id::text AS id, metadata FROM thoughts WHERE id = ANY(${sql.array(all, "TEXT")}::uuid[]) ORDER BY id`) as unknown[]);
+        const before = await snapshot();
+        const [{ impTrust }] = (await sql`SELECT metadata->>'trust' AS "impTrust" FROM thoughts WHERE id = ${imp}::uuid`) as { impTrust: string }[];
+        assert(all.length === 18 && impTrust === "ingested" && (await columns()).length === 0,
+          `the planted brain: eighteen thoughts, the importer's trust ingested, no enhanced-thoughts column (${all.length}; ${impTrust})`);
+
+        // weekly-digest's read before any backfill, on this brain without the column: the patterns over each row's whole
+        // text hold back what no tier marks (an untagged capture), the key holds back its own in any case.
+        const digest = async (includePersonal: boolean, noSensitivityFilter = false) => {
+          const r = await readThoughts(sql, { windowDays: 100000, includePersonal, noSensitivityFilter });
+          return { ids: r.rows.map((t) => String(t.id)), patterns: r.patternExcluded };
+        };
+        const pre = await digest(false);
+        const byPattern = [ids.apiKey, ids.dosage, ids.caps, ids.odd, ids.nullMeta, ids.jsonNull, ids.arr, ids.str, ids.both];
+        assert(byPattern.every((id) => !pre.ids.includes(id)) && pre.patterns === byPattern.length && !pre.ids.includes(ids.caseKey) && !pre.ids.includes(ids.raise)
+               && [ids.caseOnly, ids.alias, ids.unknown, ids.canonical, ids.ctor, imp].every((id) => pre.ids.includes(id)),
+          `weekly-digest's read before any backfill: nine rows no tier marks held back by the patterns over their text, a "Restricted" key and a personal one by the key, the plain rows read (${pre.ids.length} read, ${pre.patterns} by the patterns)`);
+
+        // A dry run, and the same over pages of two. Type: Task, " todo " and Action Item; decision and constructor name none;
+        // the importer's Note left. Sensitivity: the key and the raise restricted (personal raised), the dosage, the salary
+        // ("Standard") and the income personal; six read as standard; the restricted tier not read, the "secret" one left; four
+        // rows whose metadata is no object (SQL NULL, a JSON null, an array, a string) counted, their keys dropped.
+        const dry = await backfill({ DATABASE_URL: URL_ });
+        const paged = await backfill({ DATABASE_URL: URL_ }, "--batch", "2");
+        const dryOut = dry.stdout + dry.stderr;
+        const linesOf = (out: string) => out.split("\n").filter((l) => /^\[(type|sensitivity|backfill-metadata)\] (\d|not)/.test(l)).join("\n").replace(/; \d+ pages? of \d+$/m, "");
+        assert(dry.code === 0 && /a dry run \(--apply writes\)$/m.test(dry.stdout)
+               && dry.stdout.includes("[type] 3 would be written as the capture's type; 2 naming no type, left; 1 an importer's key, left")
+               && dry.stdout.includes(`"constructor" ×1`) && dry.stdout.includes(`"decision" ×1`)
+               && dry.stdout.includes("[sensitivity] 2 restricted and 3 personal would be written (5 keys); 6 read as standard, left")
+               && dry.stdout.includes("not written: 4 whose metadata is not a JSON object") && dry.stdout.includes("18 thoughts read, 7 would be written")
+               && dry.stdout.includes(`  - ${ids.apiKey}: restricted (api_key)`) && dry.stdout.includes(`  - ${ids.dosage}: personal (medication_dosage, drug_name)`)
+               && dry.stdout.includes(`  - ${ids.alias}: " todo " → task`) && dry.stdout.includes(`  - ${ids.raise}: restricted (ssn_pattern)`)
+               && paged.code === 0 && linesOf(paged.stdout) === linesOf(dry.stdout) && /; 1 page of 500$/m.test(dry.stdout) && /; 9 pages of 2$/m.test(paged.stdout)
+               && (await snapshot()) === before && (await audits()) === 0 && !dryOut.includes(SECRET) && !dryOut.includes("hunter2"),
+          `a dry run: exit 0, three types and five tiers that would be written, each listed with its labels, the unknown types named, four non-object metadata counted, nothing written, no text printed; the same over nine pages of two (exit ${dry.code}, ${paged.code}: ${linesOf(dry.stdout).replace(/\n/g, " | ")})`);
+
+        const applied = await backfill({ DATABASE_URL: URL_ }, "--apply");
+        const m = async (id: string) => (await metaOf(id)).metadata ?? {};
+        const kinds = await Promise.all([ids.nullMeta, ids.jsonNull, ids.arr, ids.str].map(async (id) => (await metaOf(id)).kind));
+        const alias = await m(ids.alias), both = await m(ids.both);
+        assert(applied.code === 0 && applied.stdout.includes("18 thoughts read, 7 written")
+               && (await m(ids.caseOnly)).type === "task" && !("type_raw" in (await m(ids.caseOnly)))
+               && alias.type === "task" && alias.type_raw === "todo" && both.type === "task" && both.type_raw === "Action Item" && both.sensitivity_tier === "personal"
+               && (await m(ids.unknown)).type === "decision" && (await m(ids.ctor)).type === "constructor" && (await m(imp)).type === "Note"
+               && (await m(ids.apiKey)).sensitivity_tier === "restricted" && (await m(ids.dosage)).sensitivity_tier === "personal"
+               && (await m(ids.raise)).sensitivity_tier === "restricted" && (await m(ids.caps)).sensitivity_tier === "personal"
+               && (await m(ids.odd)).sensitivity_tier === "secret" && (await m(ids.setTier)).sensitivity_tier === "restricted" && (await m(ids.caseKey)).sensitivity_tier === "Restricted"
+               && JSON.stringify(kinds) === JSON.stringify([null, "null", "array", "string"])
+               && !("sensitivity_tier" in (await m(ids.caseOnly))) && !("sensitivity_tier" in (await m(imp)))
+               && (await audits()) === 7 && !(applied.stdout + applied.stderr).includes(SECRET),
+          `--apply: Task → task, " todo " → task with "todo" in type_raw, Action Item → task and personal in one write; decision, constructor and the importer's Note left; personal raised to restricted, "Standard" written personal, "secret" and a restricted tier left; the four non-object metadata untouched; standard never written; seven audit events (exit ${applied.code}; ${JSON.stringify({ alias, kinds })})`);
+
+        // weekly-digest's read after it, without the column (it refused to run here until SMD-3318): the rows the backfill
+        // tagged left out by the key, the "secret" one by the patterns; the personal ones kept with --include-personal;
+        // every row with the filter waived.
+        const after = await digest(false), withPersonal = await digest(true), unfiltered = await digest(false, true);
+        const tagged = [ids.apiKey, ids.raise, ids.setTier, ids.caseKey], personal = [ids.dosage, ids.caps, ids.both];
+        assert([...tagged, ...personal, ids.odd].every((id) => !after.ids.includes(id)) && after.ids.includes(ids.caseOnly)
+               && personal.every((id) => withPersonal.ids.includes(id)) && tagged.every((id) => !withPersonal.ids.includes(id)) && tagged.every((id) => unfiltered.ids.includes(id)) && unfiltered.patterns === 0,
+          `weekly-digest's read after the backfill: the restricted and personal rows left out by the key and the "secret" one by the patterns, the personal ones kept with --include-personal, every row with the filter waived (${after.ids.length} / ${withPersonal.ids.length} / ${unfiltered.ids.length} read)`);
+
+        const again = await backfill({ DATABASE_URL: URL_ }, "--apply");
+        assert(again.code === 0 && again.stdout.includes("18 thoughts read, 0 written") && (await audits()) === 7,
+          `a second --apply writes nothing (exit ${again.code}: ${again.stdout.split("\n").at(-2) ?? ""})`);
+      }
+
+      // --pass type alone leaves a matching text's tier; --limit 1 stops after one row written.
+      await sql`DELETE FROM thoughts`;
+      const fact = await plant("[51] SSN 123-45-6789 on file", { type: "Fact" });
+      const typeOnly = await backfill({ DATABASE_URL: URL_ }, "--pass", "type", "--apply");
+      const factMeta = (await metaOf(fact)).metadata ?? {};
+      await sql`DELETE FROM thoughts WHERE id = ${fact}::uuid`;
+      const twins = [await plant("[51] plain words five", { type: "TASK" }), await plant("[51] plain words six", { type: "TASK" })];
+      const limited = await backfill({ DATABASE_URL: URL_ }, "--pass", "type", "--apply", "--limit", "1");
+      const [{ left }] = (await sql`SELECT count(*) FILTER (WHERE metadata->>'type' = 'TASK')::int AS left FROM thoughts WHERE id = ANY(${sql.array(twins, "TEXT")}::uuid[])`) as { left: number }[];
+      assert(typeOnly.code === 0 && factMeta.type === "reference" && factMeta.type_raw === "Fact" && !("sensitivity_tier" in factMeta) && !/\[sensitivity\]/.test(typeOnly.stdout)
+             && limited.code === 0 && /1 written — stopped at --limit 1/.test(limited.stdout) && /\] 1 thoughts read, 1 written/.test(limited.stdout) && left === 1,
+        `--pass type: Fact → reference, the SSN's tier not written; --limit 1: one of two rows written, the row after the limit not read (exit ${typeOnly.code}, ${limited.code}; ${left} left; ${limited.stdout.split("\n").at(-2) ?? ""})`);
+
+      // A thought at the nil uuid is read: the first page has no cursor.
+      await sql`DELETE FROM thoughts`;
+      await sql`INSERT INTO thoughts (id, content, metadata) VALUES ('00000000-0000-0000-0000-000000000000', '[51] plain words at nil', '{"type": "TODO"}'::jsonb)`;
+      const nil = await backfill({ DATABASE_URL: URL_ }, "--pass", "type", "--apply");
+      const nilMeta = (await metaOf("00000000-0000-0000-0000-000000000000")).metadata ?? {};
+      // A type that is no string is named as JSON; one the patterns rate (a key stored as a type) is withheld.
+      await plant("[51] plain words odd type", { type: 5 });
+      await plant("[51] plain words secret type", { type: "sk-zqTYPEabcdefghijklmnopqrst" });
+      const oddTypes = await backfill({ DATABASE_URL: URL_ }, "--pass", "type");
+
+      // weekly-digest's patterns read what the prompt sends — the type, topics and tags as well as the text — and the
+      // whole text; a tier with white space around it is held by the key; a row the second read does not return (here
+      // deleted between the reads) is held. In process, the client hooked at the second read.
+      await sql`DELETE FROM thoughts WHERE id <> '00000000-0000-0000-0000-000000000000'`;
+      const d = {
+        topic: await plant("[51] plain words d1", { topics: ["password: zqTOPICpw1"] }),
+        tag: await plant("[51] plain words d2", { tags: ["SSN 078-05-1120"] }),
+        typed: await plant("[51] plain words d3", { type: "sk-zqTYPEabcdefghijklmnop" }),
+        env: await plant("[51] DB_PASSWORD=zqENVpw4 in a note", {}),
+        spaced: await plant("[51] plain words d5", { sensitivity_tier: "restricted\n" }),
+        lead: await plant("[51] plain words d5b", { sensitivity_tier: " restricted" }),
+        tabbed: await plant("[51] plain words d5c", { sensitivity_tier: "\tRestricted\n" }),
+        nbsp: await plant("[51] plain words d5d", { sensitivity_tier: `restricted${String.fromCharCode(0xa0)}` }),
+        topic2: await plant("[51] plain words d8", { topics: ["ok", "password: zqT2abcde"] }),
+        tag3: await plant("[51] plain words d9", { tags: ["a", "b", "SSN 078-05-1120"] }),
+        late: await plant(`[51] ${"x".repeat(300)} password: zqLATE12`, {}),
+        url: await plant(`[51] my connector is https://brain.example.test/mcp?key=${"b2".repeat(32)}`, {}),
+        plain: await plant("[51] plain words d6", {}),
+        gone: await plant("[51] plain words d7", {}),
+      };
+      let removed = false;
+      const racingRead = Object.assign((strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {
+        unsafe: async (query: string, params?: unknown[]) => {
+          if (!removed && /id = ANY/.test(query)) {
+            removed = true;
+            await sql`DELETE FROM thoughts WHERE id = ${d.gone}::uuid`;
+          }
+          return sql.unsafe(query, params);
+        },
+        array: sql.array.bind(sql),
+      }) as unknown as SQL;
+      const hardened = await readThoughts(racingRead, { windowDays: 100000, includePersonal: false, noSensitivityFilter: false });
+      const kept = hardened.rows.map((t) => String(t.id));
+      assert(nil.code === 0 && nilMeta.type === "task" && /\] 1 thoughts read, 1 written/.test(nil.stdout)
+             && oddTypes.code === 0 && oddTypes.stdout.includes(`"5" ×1`) && /"<withheld: api_key>" ×1/.test(oddTypes.stdout) && !oddTypes.stdout.includes("zqTYPE")
+             && removed && kept.includes(d.plain) && [d.topic, d.tag, d.typed, d.env, d.spaced, d.lead, d.tabbed, d.nbsp, d.topic2, d.tag3, d.late, d.url, d.gone].every((id) => !kept.includes(id)) && hardened.patternExcluded === 9,
+        `a thought at the nil uuid read and written; a type 5 named, a key stored as a type withheld; weekly-digest holds back a secret in the topics, the tags, the type (the second topic and the third tag too), an env line, a connector URL with its key and a password past 280 characters, a tier padded with a newline, a leading space, a tab or a no-break space, and a row deleted between its reads, and reads the plain one (${nil.stdout.split("\n").at(-2) ?? ""}; ${kept.length} read, ${hardened.patternExcluded} by the patterns or the second read)`);
+
+      // A row edited between its page's read and its write is left (STALE_READ) and counted; one deleted, counted as gone;
+      // an update_thought refusal the run does not expect ends it, exit 1, saying how many rows it wrote before. In process,
+      // the client hooked at each update_thought call. The first row's updated_at NULL: its stamp is its created_at.
+      await sql`DELETE FROM thoughts`;
+      const [{ raced }] = (await sql`INSERT INTO thoughts (content, metadata, updated_at) VALUES ('[51] plain words seven', '{"type": "TODO"}'::jsonb, NULL) RETURNING id::text AS raced`) as { raced: string }[];
+      const [{ unstamped }] = (await sql`SELECT updated_at IS NULL AS unstamped FROM thoughts WHERE id = ${raced}::uuid`) as { unstamped: boolean }[];
+      let edited = false;
+      const race = await inProcess(hooked(async (id) => {
+        if (!edited && id === raced) {
+          edited = true;
+          await sql`SELECT update_thought(${raced}::uuid, NULL::text, '{"type": "idea"}'::jsonb)`;
+        }
+      }), ["type"]);
+      const racedMeta = (await metaOf(raced)).metadata ?? {};
+      const doomed = await plant("[51] plain words eight", { type: "TODO" });
+      const gone = await inProcess(hooked(async (id) => { if (id === doomed) await sql`DELETE FROM thoughts WHERE id = ${doomed}::uuid`; }), ["type"]);
+      const refused = await plant("[51] plain words nine", { type: "TODO" });
+      const failed = await inProcess(hooked(async (id) => (id === refused ? [{ r: { ok: false, error: "WOULD_CYCLE" } }] : undefined)), ["type"]);
+      assert(unstamped && race.code === 0 && edited && racedMeta.type === "idea" && !("type_raw" in racedMeta) && race.lines.some((l) => l.includes("not written: 1 written since the page read them"))
+             && race.lines.some((l) => /\] \d+ thoughts read, 0 written/.test(l))
+             && gone.code === 0 && gone.lines.some((l) => l.includes("not written: 1 deleted since")) && gone.lines.some((l) => /\] \d+ thoughts read, 0 written/.test(l))
+             && failed.code === 1 && failed.lines.some((l) => new RegExp(`^backfill-metadata FAILED — update_thought ${refused}: WOULD_CYCLE\\. 0 rows were written before it; they stay\\.$`).test(l)),
+        `a row edited mid-run (its updated_at NULL) is left and counted, a row deleted mid-run is counted as gone, an unexpected refusal ends the run with exit 1 (${race.code}/${gone.code}/${failed.code}; ${JSON.stringify(racedMeta)}; ${failed.lines.filter((l) => /FAILED/.test(l)).join(" ") || "no FAILED line"})`);
+
+      // Past fifteen rows of a pass, the list says how many more.
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`INSERT INTO thoughts (content, metadata) SELECT '[51] SSN ' || (100 + i) || '-22-3333 row', '{"type": "FACT"}'::jsonb FROM generate_series(1, 16) i`);
+      const many = await backfill({ DATABASE_URL: URL_ }, "--apply");
+      // weekly-digest's patterns past one batch of their read (100 rows): 110 untagged rows, every one held back.
+      await sql.unsafe(`INSERT INTO thoughts (content, metadata) SELECT '[51] SSN ' || (200 + i) || '-33-4444 untagged', '{}'::jsonb FROM generate_series(1, 110) i`);
+      const wide = await readThoughts(sql, { windowDays: 100000, includePersonal: false, noSensitivityFilter: false });
+      assert(many.code === 0 && many.stdout.includes("[type] 16 written") && many.stdout.includes("[sensitivity] 16 restricted and 0 personal written")
+             && (many.stdout.match(/^  - …and 1 more$/gm) ?? []).length === 2 && wide.patternExcluded === 110 && wide.rows.length === 0,
+        `sixteen rows of each pass: fifteen listed, and a line for the one more, each; 110 untagged rows, past one batch of the digest's pattern read, all held back (exit ${many.code}; ${wide.patternExcluded} by the patterns, ${wide.rows.length} read)`);
+
+      // A statement past --statement-timeout: thoughts held by another session, the page read fails 57014 in about a second.
+      const holder = new SQL({ url: URL_, max: 1 });
+      let release = () => {};
+      const held = new Promise<void>((r) => (release = r));
+      let locked = () => {};
+      const taken = new Promise<void>((r) => (locked = r));
+      const safety = setTimeout(() => release(), 15_000);
+      const holding = holder.begin(async (tx) => { await tx`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`; locked(); await held; });
+      await taken;
+      const t0 = performance.now();
+      const bounded = await backfill({ DATABASE_URL: URL_ }, "--statement-timeout", "1").finally(() => { clearTimeout(safety); release(); });
+      const boundMs = Math.round(performance.now() - t0);
+      await holding;
+      await holder.close();
+      assert(bounded.code === 1 && /backfill-metadata FAILED — 57014 canceling statement due to statement timeout\. Nothing was written \(a dry run\)\./.test(bounded.stderr) && boundMs < 5_000,
+        `--statement-timeout 1 with thoughts held by another session: exit 1, 57014 in ${boundMs} ms`);
+
+      // The refusals, exit 2: a bad --pass, the recipe's --dry-run and --batch-size (each saying what replaced it), another database.
+      const badPass = await backfill({ DATABASE_URL: URL_ }, "--pass", "importance");
+      const dryFlag = await backfill({ DATABASE_URL: URL_ }, "--dry-run");
+      const batchSize = await backfill({ DATABASE_URL: URL_ }, "--batch-size", "200");
+      const other = await backfill({ DATABASE_URL: URL_, PGDATABASE: "template1" }, "--apply");
+      const noBatch = await backfill({ DATABASE_URL: URL_ }, "--batch", "0");
+      const negLimit = await backfill({ DATABASE_URL: URL_ }, "--limit", "-1");
+      assert(badPass.code === 2 && /--pass must be type or sensitivity/.test(badPass.stderr)
+             && dryFlag.code === 2 && /^--dry-run is removed: a run without --apply is the dry run/m.test(dryFlag.stderr)
+             && batchSize.code === 2 && /^--batch-size is removed: --batch names a page's rows/m.test(batchSize.stderr)
+             && other.code === 2 && /backfill-metadata refused — the connection reached database "template1"/.test(other.stderr)
+             && noBatch.code === 2 && negLimit.code === 2,
+        `a bad --pass, --dry-run, --batch-size, --batch 0, --limit -1 and another database each refused, exit 2 (${[badPass, dryFlag, batchSize, noBatch, negLimit, other].map((x) => x.code).join(" ")})`);
+
+      // The enhanced-thoughts columns: where they exist the passes write them too, by the recipe's rules, beside the
+      // metadata key; metadata that is not an object still takes its column. The digest leaves the rows out.
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS type TEXT; ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS sensitivity_tier TEXT DEFAULT 'standard'`);
+      const plantCols = async (content: string, metadata: unknown, type: string | null, tier: string | null, unstamped = false) =>
+        ((await sql.unsafe(`INSERT INTO thoughts (content, metadata, type, sensitivity_tier${unstamped ? ", updated_at" : ""}) VALUES ($1, $2::text::jsonb, $3, $4${unstamped ? ", NULL" : ""}) RETURNING id::text AS id`, [content, metadata === undefined ? null : JSON.stringify(metadata), type, tier])) as { id: string }[])[0].id;
+      const b = {
+        decision: await plantCols("[51] plain words b1", { type: "decision" }, "reference", "standard"),
+        task: await plantCols("[51] plain words b2", { type: "Task" }, "reference", "standard"),
+        idea: await plantCols("[51] plain words b3", { type: "lesson" }, "idea", "standard"),
+        synthesis: await plantCols("[51] plain words b8", { type: "synthesis" }, "reference", "standard"),
+        both: await plantCols("[51] SSN 123-45-6789 b4", {}, null, "standard"),
+        colSet: await plantCols("[51] SSN 123-45-6789 b5", {}, null, "restricted"),
+        nullMeta: await plantCols("[51] password: hunter2b6", undefined, null, "standard"),
+        fact: await plantCols("[51] plain words b10", { type: "Fact" }, "reference", "standard"),
+        nullType: await plantCols("[51] plain words b11", { type: "Task" }, null, "standard"),
+        keyHigh: await plantCols("[51] plain words b12", { sensitivity_tier: "restricted" }, null, "standard", true),
+        nullTier: await plantCols("[51] plain words b13", {}, null, null),
+        colHigh: await plantCols("[51] plain words b14", {}, null, "restricted"),
+        colOnly: await plantCols("[51] plain words b15", { sensitivity_tier: "secret" }, null, "restricted"),
+      };
+      const [{ bImp }] = (await sql`SELECT (upsert_thought('[51] SSN 987-65-4321 of an importer', ${{ metadata: { source: "live", type: "Note" }, actor: { name: "imp-3318", via: "test-live" } }}::jsonb, NULL::vector) ->> 'id') AS "bImp"`) as { bImp: string }[];
+      // A second importer's row, its type column stamped reference: its key is the importer's, its column the old rule's.
+      const [{ bImp2 }] = (await sql`SELECT (upsert_thought('[51] plain words of a second importer', ${{ metadata: { source: "live", type: "Task" }, actor: { name: "imp-3318", via: "test-live" } }}::jsonb, NULL::vector) ->> 'id') AS "bImp2"`) as { bImp2: string }[];
+      await sql`UPDATE thoughts SET type = 'reference' WHERE id = ${bImp2}::uuid`;
+      const withCols = await backfill({ DATABASE_URL: URL_ }, "--apply");
+      type Cols = { metadata: Record<string, unknown> | null; type: string | null; tier: string | null };
+      const row = async (id: string) => ((await sql`SELECT metadata, type, sensitivity_tier AS tier FROM thoughts WHERE id = ${id}::uuid`) as Cols[])[0];
+      const r = Object.fromEntries(await Promise.all(Object.entries({ ...b, imp: bImp, imp2: bImp2 }).map(async ([k, id]) => [k, await row(id)] as const))) as Record<string, Cols>;
+      const colDigest = (await readThoughts(sql, { windowDays: 100000, includePersonal: false, noSensitivityFilter: false })).rows.map((t) => String(t.id));
+      const colsAgain = await backfill({ DATABASE_URL: URL_ }, "--apply");
+      // A write to the columns alone (no key to write) takes the same guard: the row edited between its page's read and that
+      // write is left and counted. In process, the transaction's column UPDATE hooked.
+      const colRaced = await plantCols("[51] plain words b9", { type: "decision" }, "reference", "standard");
+      let colEdited = false;
+      const colHooked = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {
+        unsafe: sql.unsafe.bind(sql),
+        begin: (fn: (tx: SQL) => Promise<unknown>) => sql.begin((tx) => fn(Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => tx(strings, ...values), {
+          unsafe: async (query: string, params?: unknown[]) => {
+            if (!colEdited && query.startsWith("UPDATE thoughts SET")) {
+              colEdited = true;
+              await sql`SELECT update_thought(${colRaced}::uuid, NULL::text, '{"edited": true}'::jsonb)`;
+            }
+            return tx.unsafe(query, params);
+          },
+        }) as unknown as SQL)),
+      }) as unknown as SQL;
+      const colRace = await inProcess(colHooked, ["type"]);
+      const [{ colLeft }] = (await sql`SELECT type AS "colLeft" FROM thoughts WHERE id = ${colRaced}::uuid`) as { colLeft: string }[];
+      // The column's tier in another case or with white space round it, the text plain: the digest holds it back.
+      const colCase = [await plantCols("[51] plain words b16", {}, null, "Restricted"), await plantCols("[51] plain words b17", {}, null, " restricted\t")];
+      const caseDigest = (await readThoughts(sql, { windowDays: 100000, includePersonal: false, noSensitivityFilter: false })).rows.map((t) => String(t.id));
+      // A write to the columns alone, its row deleted mid-run: counted as deleted, not as moved.
+      const colGone = await plantCols("[51] plain words b18", { type: "lesson" }, "reference", "standard");
+      let colDeleted = false;
+      const colGoneHook = Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => sql(strings, ...values), {
+        unsafe: sql.unsafe.bind(sql),
+        begin: (fn: (tx: SQL) => Promise<unknown>) => sql.begin((tx) => fn(Object.assign(async (strings: TemplateStringsArray, ...values: unknown[]) => tx(strings, ...values), {
+          unsafe: async (query: string, params?: unknown[]) => {
+            if (!colDeleted && query.startsWith("UPDATE thoughts SET") && params?.[0] === colGone) {
+              colDeleted = true;
+              await sql`DELETE FROM thoughts WHERE id = ${colGone}::uuid`;
+            }
+            return tx.unsafe(query, params);
+          },
+        }) as unknown as SQL)),
+      }) as unknown as SQL;
+      const colGoneRun = await inProcess(colGoneHook, ["type"]);
+      // weekly-digest under a role that may not read the sensitivity_tier column refuses, where information_schema hid the
+      // column and the run went on without it. A role needs CREATE ROLE and credentials to swap, as in [26].
+      const DIGEST_ROLE = "ob1_live_digest_probe";
+      const digestUrl = URL_.replace(/\/\/[^@]*@/, `//${DIGEST_ROLE}:ob1probe@`);
+      const [{ mayCreate }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+      const dropDigestRole = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DIGEST_ROLE}') THEN EXECUTE 'DROP OWNED BY ${DIGEST_ROLE}'; EXECUTE 'DROP ROLE ${DIGEST_ROLE}'; END IF; END $$`);
+      let colRefusal = "skipped";
+      if (digestUrl === URL_ || !mayCreate) {
+        skip("…weekly-digest under a role that may not read the sensitivity_tier column refuses", digestUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+      } else {
+        await dropDigestRole();
+        await sql.unsafe(`CREATE ROLE ${DIGEST_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${DIGEST_ROLE}; GRANT SELECT (id, content, created_at, metadata) ON thoughts TO ${DIGEST_ROLE}`);
+        const limited = new SQL({ url: digestUrl, max: 1 });
+        try {
+          await readThoughts(limited, { windowDays: 100000, includePersonal: false, noSensitivityFilter: false });
+          colRefusal = "read";
+        } catch (e) {
+          colRefusal = String((e as Error).message);
+        } finally {
+          await limited.close();
+          await dropDigestRole();
+        }
+      }
+      assert(withCols.code === 0 && /; the type and sensitivity_tier columns too$/m.test(withCols.stdout)
+             && withCols.stdout.includes("[type] 3 written as the capture's type (and 3 type columns from a type the recipe names); 3 naming no type, left; 2 an importer's key, left")
+             && withCols.stdout.includes("[sensitivity] 6 restricted and 0 personal written (4 keys, 4 columns); 9 read as standard, left")
+             && withCols.stdout.includes(`  - ${b.colHigh}: restricted (the column's tier)`)
+             && withCols.stdout.includes(`  - ${b.keyHigh}: restricted (the key's tier)`)
+             && withCols.stdout.includes("not written: 1 whose metadata is not a JSON object") && withCols.stdout.includes("15 thoughts read, 11 written")
+             && r.decision.type === "decision" && r.decision.metadata?.type === "decision" && r.task.type === "task" && r.task.metadata?.type === "task" && r.idea.type === "idea" && r.synthesis.type === "reference"
+             && r.fact.type === "reference" && r.fact.metadata?.type === "reference" && r.nullType.type === null && r.nullType.metadata?.type === "task"
+             && r.keyHigh.tier === "restricted" && r.nullTier.tier === null && r.colHigh.metadata?.sensitivity_tier === "restricted" && r.imp2.type === "task" && r.imp2.metadata?.type === "Task"
+             && r.both.tier === "restricted" && r.both.metadata?.sensitivity_tier === "restricted" && r.colSet.tier === "restricted" && r.colSet.metadata?.sensitivity_tier === "restricted"
+             && r.nullMeta.tier === "restricted" && r.nullMeta.metadata === null && r.imp.tier === "restricted" && r.imp.metadata?.sensitivity_tier === "restricted" && r.imp.metadata?.type === "Note"
+             && [b.both, b.colSet, b.nullMeta, bImp, b.keyHigh, b.colHigh, b.colOnly].every((id) => !colDigest.includes(id)) && r.colOnly.metadata?.sensitivity_tier === "secret" && colDigest.includes(b.decision) && colDigest.includes(b.nullTier)
+             && colsAgain.code === 0 && colsAgain.stdout.includes("15 thoughts read, 0 written")
+             && colRace.code === 0 && colEdited && colLeft === "reference" && colRace.lines.some((l) => l.includes("not written: 1 written since the page read them"))
+             && (colRefusal === "skipped" || /a sensitivity_tier column this role may not read: refusing/.test(colRefusal))
+             && colCase.every((id) => !caseDigest.includes(id)) && colDeleted && colGoneRun.lines.some((l) => l.includes("not written: 1 deleted since")),
+        `with the enhanced-thoughts columns: the type column from reference to decision and task (an importer's too, its key left), idea, a NULL column, Fact's reference and a synthesis (none of the recipe's eight) left; the column raised to the key's tier on a row whose updated_at is NULL, the key to the column's; a NULL tier column read by the digest and a row only its column holds back (its key "secret") left out; the tier column and key raised where lower, the NULL metadata's column alone, the importer's tier in both; the digest leaving them out; a second run writing nothing; a column-only write to a row edited mid-run left; weekly-digest refusing under a role that may not read the column, and holding back a column's "Restricted" or " restricted\\t"; a column-only write to a row deleted mid-run counted as deleted (exit ${withCols.code}, ${colsAgain.code}, ${colRace.code}; ${colLeft}; ${colRefusal.slice(0, 60)}; ${JSON.stringify({ decision: r.decision.type, task: r.task.type, nullMeta: r.nullMeta.tier, colSet: r.colSet.metadata })})`);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+      await sql`DELETE FROM thoughts`;
       await sql.close();
     }
   })();

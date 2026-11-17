@@ -39,12 +39,26 @@ export const TYPE_ALIASES: Record<string, (typeof THOUGHT_TYPES)[number]> = {
   contact: "person_note",
 };
 
+/**
+ * The capture's type `raw` names by its rule — case, spaces and hyphens
+ * folded, then an alias resolved — or null when it names none (not a string,
+ * blank, or no type or alias). `aliased` says the name was an alias, whose
+ * words the capture keeps in `type_raw`. One rule for the capture
+ * (normaliseType) and db/backfill-metadata.ts.
+ */
+export function canonicalType(raw: unknown): { type: (typeof THOUGHT_TYPES)[number]; aliased: boolean } | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const exact = THOUGHT_TYPES.find((t) => t === key);
+  if (exact) return { type: exact, aliased: false };
+  // Own keys alone: `constructor` or `__proto__` is not an alias.
+  return Object.hasOwn(TYPE_ALIASES, key) ? { type: TYPE_ALIASES[key], aliased: true } : null;
+}
+
 export function normaliseType(raw: unknown): { type: string; raw?: string } {
   if (typeof raw !== "string" || raw.trim() === "") return { type: "observation" };
-  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if ((THOUGHT_TYPES as readonly string[]).includes(key)) return { type: key };
-  const aliased = TYPE_ALIASES[key];
-  if (aliased) return { type: aliased, raw: raw.trim() };
+  const named = canonicalType(raw);
+  if (named) return named.aliased ? { type: named.type, raw: raw.trim() } : { type: named.type };
   console.warn(`extractMetadata: model returned type "${raw}", which is not one of ${THOUGHT_TYPES.join(", ")}; recorded as observation`);
   return { type: "observation", raw: raw.trim() };
 }

@@ -72,12 +72,15 @@ export const TOOLS = [
   { name: "decide_item_close", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
+  // SMD-1723 PR 2 (migrations 139 and 144): forgetting, which the audit trail cannot undo; the id is echoed in `confirm`.
+  { name: "forget_thought", scope: "write" },
   { name: "reset_capture_stamp", scope: "write" },
   { name: "append_thought_evidence", scope: "write" },
   // SMD-4193 PR 2 (migration 132): the operator's weights; past the scope, the database admits an operator key alone.
   { name: "set_priority_weights", scope: "write" },
   // SMD-3606 PR 1b (migration 140): the operator's per-holder claim cap; past the scope, the database admits an operator key alone.
   { name: "set_work_claim_cap", scope: "write" },
+  { name: "release_holder_claims", scope: "write" },
   { name: "capture_deliverable", scope: "write" },
   { name: "verify_deliverable", scope: "write" },
   { name: "review_supersession_proposal", scope: "write" },

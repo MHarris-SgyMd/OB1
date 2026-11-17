@@ -1074,6 +1074,34 @@ Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed`,
 gated by a **write** key (stricter than the read routes; a read/capture/no key gets the
 bodiless `ok`).
 
+## Forgetting a thought (SMD-1723)
+
+**`forget_thought(id, confirm, detach_citations?)`** is a **write-scoped** tool
+(`POST /v1/thoughts/{id}/forget`) that removes a thought and every copy of its text
+or id the brain holds, where `delete_thought` keeps the removed text in the audit
+trail. It calls migration 139's `forget_thought`, which since 144 runs as its owner:
+the server's role needs `EXECUTE` on it (the **server** grant group) and nothing on
+the stores it reaches. Forgetting cannot be undone, so `confirm` must be the `id`
+again, exactly as sent (an id or a `client_key`), or the call is refused
+`REFUSED_CONFIRM` before anything is read. A thought another cites is refused
+`REFUSED_CITED` unless `detach_citations` is true, which deletes the citations with
+it. The answer is the evidence: what each store gave up (`removed`), the thoughts
+derived from it and the pages for a person to review (prose that absorbed the text
+can't be removed mechanically), the twins that keep the same text, the hashed
+record it was ingested as, and the copies outside the brain. Forgotten already,
+it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log
+row: the query log is one of the stores it clears.
+
+A capture or an edit of a forgotten text is refused `FORGOTTEN` before the
+embedding call (144's `ob1_text_forgotten_at`), so the model provider never sees
+it again; the refusal trigger's `OB005`, raised if a forget lands between that
+check and the write, is the same refusal. A capture-only key is told the text was
+forgotten, not when. Writing it again is the operator's, in SQL, under
+`ob1.reinstate_forgotten`. Preflight's `forget definer` row warns when a re-applied
+139 has reset the definer or the server's role lacks `EXECUTE`, and its
+`forgotten` row names any forgotten thought a store still holds, a write that
+raced the forget, which a second `forget_thought` sweeps.
+
 ## The operator's label reset (SMD-2744)
 
 **`reset_capture_stamp(id)`** is a **write-scoped** tool for the operator alone: the key
@@ -1182,8 +1210,9 @@ repeats a write on a second brain (the canary, SMD-2872) passes **`client_key`**
 `capture_thought`: a UUID, by convention the thought's id on the brain where it was
 first written. The copy keeps it as `metadata.client_key`, one thought per key
 (migration 112's unique index), and every name a write takes resolves to **the thought
-with that id, else the one keeping it as its key**: `update_thought`'s and
-`delete_thought`'s `id` (and the REST paths `PATCH`/`DELETE /v1/thoughts/{id}`), and
+with that id, else the one keeping it as its key**: `update_thought`'s,
+`delete_thought`'s and `forget_thought`'s `id` (and the REST paths
+`PATCH`/`DELETE /v1/thoughts/{id}` and `POST /v1/thoughts/{id}/forget`), and
 the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
 second brain the same ids it sent the first. A thought a refresh copied has the same id
 on both brains, and a key equal to it names that thought.
@@ -1239,7 +1268,8 @@ and MCP alike:
 - **`renew_claim`** (`POST /v1/claims/{id}/renew`) and **`release_claim`**
   (`POST /v1/claims/{id}/release`), write scope: the caller's own claim, by its key
   and its token. `release_claim` takes `force` with a `reason` for an operator key,
-  classified `operator` by its agent id.
+  classified `operator` by its agent id; to end every live claim one holder holds in one
+  call, an operator uses `release_holder_claims` (below).
 - **`list_claims`** (`GET /v1/claims`, read scope): the live claims, of one ticket or
   one holder's key, or every claim with `include_ended`, by ticket then piece then
   claim time. `truncated` is true when more follow this page; page to the end with
@@ -1274,6 +1304,7 @@ calls does.
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
 | `CLAIM_CAP_UNATTRIBUTED` | 503 | `set_work_claim_cap` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `PRIORITY_UNATTRIBUTED`, for the cap setter (SMD-3606 PR 1b). |
+| `RELEASE_HOLDER_UNATTRIBUTED` | 503 | `release_holder_claims` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `CLAIM_CAP_UNATTRIBUTED`, for the holder-release (SMD-3606 PR 3). |
 | `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), the claim unreleased; or a `claim_work` with that token on exactly that claim's work while it is unreleased, live or lapsed, which 115 would otherwise read as another's: refused WORK_CLAIMED while live, taken over once lapsed (SMD-3705). On a renew and on that `claim_work`, `lapsedAt` when the claim's lease had run out (a release carries none): another claim may cover its work by now, so list the ticket's claims before carrying on. `forced: true`: a forced release, which needs the id to classify an operator. |
 
 A whole ticket and any of its pieces are the same work; two different pieces are not.
@@ -1362,6 +1393,19 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   was the one standing, and nothing was written; a replaced setting stays as history.
   `brain_info`'s `database.workClaimCap` shows the standing cap — built in, the
   operator's, or the operator's refused.
+- **`release_holder_claims`** (`POST /v1/claims/release-holder`, write scope; SMD-3606 PR 3,
+  migration 145): the operator ends every live claim one holder holds in one call — the undo
+  of a claim hog, where `release_claim` ends one claim by id. `holder` is a key's name (as
+  `list_claims` shows it, surrounding white space ignored) and `reason` is kept on each
+  released claim as history; only the holder's live claims (unreleased and unexpired) end,
+  its lapsed and released claims and every other holder's standing, and a holder with none
+  ends 0. Past the scope, the database admits a key the operator classified `operator`, by
+  its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR` (403); while the registry
+  cannot give the key's agent id the call is refused `RELEASE_HOLDER_UNATTRIBUTED` (503,
+  retryable), as `set_work_claim_cap` answers `CLAIM_CAP_UNATTRIBUTED`. The answer is
+  `{holder, released, claims}`: `released` the count ended, `claims` each ended claim's id,
+  ticket and piece (bounded by the per-holder cap, since the cap holds how many live claims
+  a holder may have).
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while
@@ -1542,7 +1586,7 @@ MCP tools do rather than a copy of it:
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
   `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought`,
-  `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
+  `forget_thought`, `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
   trimmed provenance and owned pointers, the egress gate, the model calls, the write and
   its cites. `core/workers.ts` holds the worker actions (`retry_failed`,
   `release_stale_leases`, `run_worker`'s dry run), which the keyed REST POSTs
@@ -1690,7 +1734,7 @@ stripped (`X-Forwarded-Prefix`).
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
-  /v1/thoughts/{id}/reset-capture-stamp` and `/evidence`, `POST /v1/search` (and
+  /v1/thoughts/{id}/reset-capture-stamp`, `/evidence` and `/forget`, `POST /v1/search` (and
   `/keyword`, `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET

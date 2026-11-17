@@ -58,7 +58,11 @@ export const HEALTH_ALLOWED_METHODS = ["GET", "HEAD", ...MCP_METHODS, "OPTIONS"]
 // into a network error instead.
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
+  // mcp-method and mcp-name: the 2026-07-28 revision requires the first on every POST and the second on one that
+  // names what it acts on (a tool call here; a resource's or a prompt's read, which this server has none of), so a
+  // browser-hosted client's preflight names them (SMD-4345). No tool here declares an `x-mcp-header`, so no
+  // `mcp-param-*` header is listed; one that does needs its header listed by name, a prefix being no wildcard.
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id, mcp-method, mcp-name",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
   // Retry-After is not a CORS-safelisted response header, so a browser-hosted
   // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch

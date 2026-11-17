@@ -138,6 +138,10 @@
       "scope": "write"
     },
     {
+      "name": "forget_thought",
+      "scope": "write"
+    },
+    {
       "name": "reset_capture_stamp",
       "scope": "write"
     },
@@ -151,6 +155,10 @@
     },
     {
       "name": "set_work_claim_cap",
+      "scope": "write"
+    },
+    {
+      "name": "release_holder_claims",
       "scope": "write"
     },
     {

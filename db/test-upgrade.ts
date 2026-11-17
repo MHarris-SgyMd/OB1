@@ -31,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey } from "./config.mjs";
 import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
@@ -786,12 +786,18 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // without 046, 068, 116, 117, 122 or 133 ([20cf]); 143 redefines 115's
   // list_work_claims with a keyset after-cursor on (issue, piece_key,
   // claimed_at, id) and the page_key and remaining columns, refusing by name
-  // without 115 ([20ch]) — all recorded by the
+  // without 115 ([20ch]); 144 renames 139's forget_thought to its body and
+  // makes forget_thought a SECURITY DEFINER wrapper over it, EXECUTE not
+  // PUBLIC's, and adds ob1_text_forgotten_at and ob1_forget_leftovers,
+  // refusing by name without 139 or 142 ([20ci]); 145 adds release_holder_claims,
+  // an operator's one-call release of every live claim a holder holds, refusing
+  // by name without 046 or 115 ([20cj]); 146 upserts ob1_config.schema_version
+  // for the 2.1.0 cut, needing only 006's table — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 114, `030 is among the last one hundred and fourteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 117, `030 is among the last one hundred and seventeen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7031,6 +7037,134 @@ console.log("\n[20ch] Migration 143: onto a populated brain at the file before i
   const reapplied = await page(null);
   assert(reapplied.length === 2 && Number(reapplied[0].remaining) === 5,
     `a re-apply is a no-op: the listing still pages, remaining counts the five (${reapplied.length}, ${reapplied[0]?.remaining})`);
+
+  await sql.close();
+}
+
+console.log("\n[20ci] Migration 144: onto a populated brain at the file before it — refused by name without 139's forget_thought, nothing changed; then applied: forget_thought its owner's, EXECUTE no longer PUBLIC's but carried to the role 139's function was granted to; a role holding a plain --grant, refused at 142 for want of the stores' privileges, forgets a thought at 144; a replay's setting the role set first is not carried in, and is its own again after; a re-apply a no-op (SMD-1723)");
+{
+  const the144 = MIGRATIONS.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the144 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-144-op', 'operator')`;
+  const ACT = JSON.stringify({ name: "upgrade-144-op", scope: "write" });
+  const thought = async (content: string) => {
+    let id = "";
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+      id = String((await tx`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+    });
+    return id;
+  };
+  // Roles made at 142: one granted every group a plain migrate.ts --grant issues (the objects there), one that may
+  // delete a thought, one that may only read.
+  const ROLE = "ob1_upgrade_144_granted";
+  await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE};
+                    CREATE ROLE ob1_upgrade_144_deleter NOLOGIN; GRANT SELECT, DELETE ON thoughts TO ob1_upgrade_144_deleter;
+                    CREATE ROLE ob1_upgrade_144_reader NOLOGIN; GRANT SELECT ON thoughts TO ob1_upgrade_144_reader`);
+  const present142 = new Set(((await sql.unsafe(grantPresenceSql(grantedObjects([...ROLE_GRANT_GROUPS])))) as { name: string; present: boolean }[])
+    .filter((r) => r.present).map((r) => r.name));
+  for (const st of grantStatements(ROLE, { groups: [...ROLE_GRANT_GROUPS], present: present142 })) await sql.unsafe(st);
+  /** forget_thought as the granted role, `before` run first as it; the answer, or the error's SQLSTATE, and the role's settings after. */
+  const forgetAs = async (id: string, before: string[] = []) => {
+    let out = "";
+    let after = "";
+    try {
+      await sql.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${ROLE}`);
+        for (const st of before) await tx.unsafe(st);
+        const r = (await tx`SELECT forget_thought(${id}::uuid, (${ACT}::text)::jsonb) AS r`)[0].r as { ok: boolean; error?: string };
+        out = r.ok ? "ok" : String(r.error);
+        after = String((await tx`SELECT current_setting('ob1.projecting_replay', true) AS v`)[0].v);
+      });
+    } catch (e) { out = String((e as { errno?: string }).errno ?? (e as Error).message); }
+    return { out, after };
+  };
+  const A = await thought("upgrade 144: the door code is 8642");
+  const at142 = await forgetAs(A);
+  // to_regprocedure, read as the statement runs: a ::regprocedure literal is resolved when the statement is planned,
+  // and the cached plan kept the OID 144 renames to ob1_forget_thought_body.
+  const definer = async () => Boolean((await sql`SELECT prosecdef AS d FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].d);
+
+  // Without 139's forget_thought: refused by name, nothing changed.
+  await sql`ALTER FUNCTION forget_thought(uuid, jsonb, boolean) RENAME TO forget_thought_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION forget_thought_away(uuid, jsonb, boolean) RENAME TO forget_thought`;
+  assert(at142.out === "42501" && /^migration 144 needs 139 and 142 /.test(without) && !(await definer()),
+    `at 142 a role holding a plain --grant may not forget (${at142.out}); without forget_thought the file is refused by name, the function its caller's still (${without.slice(0, 60)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 });
+  const may = async (role: string) => Boolean((await sql`SELECT has_function_privilege(${role}, 'forget_thought(uuid, jsonb, boolean)', 'EXECUTE') AS y`)[0].y);
+  const publicMay = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)') AND a.grantee = 0) AS y`)[0].y);
+  const shape144 = async () => JSON.stringify({ definer: await definer(), deleter: await may("ob1_upgrade_144_deleter"), reader: await may("ob1_upgrade_144_reader"), granted: await may(ROLE),
+    acl: (await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].a });
+  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_144_deleter")) && !(await may("ob1_upgrade_144_reader")) && !publicMay,
+    `applied: forget_thought its owner's; EXECUTE PUBLIC's no more, carried from 139's function to the --grant role, not given to a role that may only delete or read (${await shape144()})`);
+
+  // The same role forgets now: the row gone, its events redacted, the ledger written, as the owner.
+  const at144 = await forgetAs(A);
+  const left = (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE id = ${A}::uuid) AS row,
+      (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${A}::uuid AND (redacted_at IS NULL OR diff::text LIKE '%8642%')) AS open,
+      (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = ${A}::uuid AND actor_name = 'upgrade-144-op') AS led`)[0] as { row: number; open: number; led: number };
+  assert(at144.out === "ok" && left.row === 0 && left.open === 0 && left.led === 1,
+    `at 144 the same role forgets the thought: the row gone, its events redacted, the ledger naming the actor (${at144.out}; ${JSON.stringify(left)})`);
+
+  // A replay's setting, set by the role first: not carried in — the forget runs as a live write, no REPLAYING — and
+  // the role's own again after the call.
+  const B = await thought("upgrade 144: forgotten by a caller claiming a replay");
+  const replayed = await forgetAs(B, [`SELECT set_config('ob1.projecting_replay', 'on', true)`]);
+  const bLed = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten WHERE thought_id = ${B}::uuid`)[0].c);
+  assert(replayed.out === "ok" && replayed.after === "on" && bLed === 1,
+    `a caller's ob1.projecting_replay is not carried in: forgotten as a live write, and the setting is the caller's again after (${replayed.out}, ${replayed.after})`);
+
+  // A re-apply is a no-op: still the owner's, the grants kept.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 });
+  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_144_deleter")) && !(await may("ob1_upgrade_144_reader")),
+    `a re-apply is a no-op: the definer and the grants kept (${await shape144()})`);
+  await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ob1_upgrade_144_deleter; DROP ROLE ob1_upgrade_144_deleter;
+                    DROP OWNED BY ob1_upgrade_144_reader; DROP ROLE ob1_upgrade_144_reader`);
+  await sql.close();
+}
+console.log("\n[20cj] Migration 145: onto a populated brain at the file before it — refused by name without 115's ob1_work_claim_actor, release_holder_claims not made; then applied: an operator ends every live claim one holder holds with the reason, counted and named; an agent key refused NOT_OPERATOR, nothing more released; a re-apply a no-op (SMD-3606)");
+{
+  const the145 = MIGRATIONS.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the145 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('up-op', 'operator')`;
+  await sql`SELECT set_agent_kind('up-h', 'agent')`;
+  const opid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'up-op'`)[0].id);
+  const hid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'up-h'`)[0].id);
+  const OP = JSON.stringify({ name: "up-op", agent_id: opid });
+  const H = JSON.stringify({ name: "up-h", agent_id: hid });
+  const live = async (name: string) => Number((await sql`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = ${name} AND released_at IS NULL AND expires_at > now()`)[0].n);
+
+  // Without 115's ob1_work_claim_actor (the body calls it): refused by name, the function not made.
+  await sql`ALTER FUNCTION ob1_work_claim_actor(jsonb, text) RENAME TO ob1_work_claim_actor_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_actor_away(jsonb, text) RENAME TO ob1_work_claim_actor`;
+  const made = async () => (await sql`SELECT to_regprocedure('release_holder_claims(text,text,jsonb)') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 145 needs 115 \(ob1_work_claim_actor\); this schema lacks it/.test(without) && !(await made()),
+    `without 115's ob1_work_claim_actor the file is refused by name; release_holder_claims not made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 });
+
+  // Three live claims by one holder (the built-in cap 50 allows); an operator ends them all.
+  for (const n of [1, 2, 3]) await sql`SELECT claim_work(${`SMD-720${n}`}, NULL, NULL, 14500, NULL, (${H}::text)::jsonb)`;
+  const out = (await sql`SELECT release_holder_claims(${"up-h"}, ${"upgrade cleanup"}, (${OP}::text)::jsonb) AS r`)[0].r as { ok: boolean; holder: string; released: number; claims: { issue: string }[] };
+  // Two more claims, then an agent key is refused — nothing more released.
+  for (const n of [4, 5]) await sql`SELECT claim_work(${`SMD-720${n}`}, NULL, NULL, 14500, NULL, (${H}::text)::jsonb)`;
+  const byAgent = (await sql`SELECT release_holder_claims(${"up-h"}, ${"nope"}, (${H}::text)::jsonb) AS r`)[0].r as { ok: boolean; error: string; kind: string | null };
+  assert(out.ok === true && out.holder === "up-h" && out.released === 3 && out.claims.length === 3
+         && byAgent.ok === false && byAgent.error === "NOT_OPERATOR" && byAgent.kind === "agent" && (await live("up-h")) === 2,
+    `an operator ends the holder's three live claims (released ${out.released}, ${out.claims.length} named); an agent key refused NOT_OPERATOR, the two later claims left (${byAgent.error}:${byAgent.kind}, ${await live("up-h")} live)`);
+
+  // A re-apply is a no-op: the operator still releases the two left.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 });
+  const after = (await sql`SELECT release_holder_claims(${"up-h"}, ${"after re-apply"}, (${OP}::text)::jsonb) AS r`)[0].r as { released: number };
+  assert(after.released === 2 && (await live("up-h")) === 0,
+    `a re-apply is a no-op: the operator still releases the two left (${after.released})`);
 
   await sql.close();
 }

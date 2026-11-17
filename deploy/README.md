@@ -1313,7 +1313,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `door` | `mcp` (the MCP server) or `api` (the REST core) |
 | `method` | the HTTP method |
 | `route` | the route as a template, never the path it was given: the REST core's (`/v1/thoughts/:id`), or an MCP server mirror's (`/health`, `/worker-status`, `/worker-run`, `/jobs/:id/stream` — under whatever prefix it came); the MCP endpoint, the MCP server's preflights, `/.well-known/` answers and 405s, the REST core's 404s and 405s, and an unmatched path have none |
-| `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods is `other` — so a newer client's (2025-11-25's `tasks/*`) is too |
+| `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods and the 2026-07-28 revision's `server/discover` and `subscriptions/listen` is `other` — so another newer method (2025-11-25's `tasks/*`) is too |
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
@@ -1502,7 +1502,7 @@ request), `http.response.body.size`, `mcp.method.name` (with
 tool that ran — not one refused at its key, nor one that never ran), and
 `ob1.door`, `ob1.tool`, `ob1.agent`, `ob1.outcome` and `ob1.code` as the line
 has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
-method outside the schema's). No `url.*`: the path is a key's or an id's, and
+method the `rpc` field writes `other`). No `url.*`: the path is a key's or an id's, and
 behind the proxy the scheme is not the server's to know. A tool call's span is
 `execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
 operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none). A
