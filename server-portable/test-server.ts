@@ -7035,8 +7035,13 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
   const longSel = { ticket: "T".repeat(200), holder: "H".repeat(200), includeEnded: true };
   const longCur = claimCursor(longSel, "I".repeat(200), "p".repeat(200), "2026-11-15 01:49:48.466123+00", UC);
   const longParsed = parseClaimCursor(longCur);
-  assert(longCur.length > 512 && longCur.length <= 2048 && longParsed?.issue === "I".repeat(200) && longParsed.pieceKey === "p".repeat(200) && JSON.stringify(longParsed.selection) === JSON.stringify(longSel),
-    `a max-length claims cursor exceeds 512 and still round-trips under the raised 2048 bound (${longCur.length} chars)`);
+  // Past 2048 it is refused: the same cursor padded with JSON's white space to 2048 characters reads, and one more byte does not.
+  const longJson = Buffer.from(longCur, "base64url").toString("utf8");
+  const padClaim = (n: number) => Buffer.from(longJson.replace(`["claims",`, `["claims",${" ".repeat(n)}`)).toString("base64url");
+  const fill = 1536 - Buffer.byteLength(longJson);
+  assert(longCur.length > 512 && longCur.length <= 2048 && longParsed?.issue === "I".repeat(200) && longParsed.pieceKey === "p".repeat(200) && JSON.stringify(longParsed.selection) === JSON.stringify(longSel)
+      && padClaim(fill).length === 2048 && parseClaimCursor(padClaim(fill)) !== null && padClaim(fill + 1).length > 2048 && parseClaimCursor(padClaim(fill + 1)) === null,
+    `a max-length claims cursor exceeds 512 and still round-trips under the raised 2048 bound, and one past 2048 is refused (${longCur.length} chars)`);
 }
 
 console.log("\n[33c] The claimed label in the core and the words (SMD-3599): one claims read per page, the keys a row is filed under first, then the first 50 others its text names; live and lapsed-unreleased claims, a released one never; the caller's own said so; ten named and the rest counted; nothing read when no row names a ticket; a failed read is null and said; a cut read over-counts rather than misses");
@@ -8105,9 +8110,12 @@ console.log("\n[36g] The priority review's findings in the core and the words (S
   const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
   const { findingsCursor, parseFindingsCursor, listCursor, parseListCursor } = await import("./core/list-cursor.ts");
   // Every cursor's text is read one way (list-cursor.ts decodeCursor): trimmed; base64url alone, so a character outside
-  // it refuses the cursor even where Buffer would skip it; an array of the cursor's own length.
+  // it refuses the cursor even where Buffer would skip it; an array of the cursor's own length; at most 512 characters
+  // (a cursor padded with JSON's white space reads at 512 and is refused past it).
   const listed1 = listCursor("newest", null, F);
+  const padded = (n: number) => Buffer.from(`["newest",${" ".repeat(n)}null,"${F}"]`).toString("base64url");
   const decoded = [parseListCursor(` ${listed1}\n`) !== null, parseListCursor(`${listed1}.`) === null,
+    padded(330).length === 512 && parseListCursor(padded(330)) !== null, padded(333).length > 512 && parseListCursor(padded(333)) === null,
     parseListCursor(Buffer.from(JSON.stringify(["newest", null, F, "x"])).toString("base64url")) === null,
     parseFindingsCursor(` ${findingsCursor({ list: "findings", status: "all", kind: null }, { grp: 1, sk: "-5", id: F })} `) !== null,
     parseFindingsCursor(Buffer.from(JSON.stringify(["findings", "all", null, 1, "-5"])).toString("base64url")) === null];

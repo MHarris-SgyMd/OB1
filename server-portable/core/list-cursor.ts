@@ -11,12 +11,12 @@ import { FINDING_KINDS, FINDING_STATUSES, type FindingKind, type FindingStatus }
 
 /**
  * A cursor's text read back to its JSON array of `length` values, or null for anything that is not one: trimmed, at most
- * 512 base64url characters, JSON, an array of that length. Each listing's parser below holds the values to its own shape
- * (SMD-3671 PR 2: the preamble was written five times).
+ * `max` base64url characters (512 but for the claims cursor's), JSON, an array of that length. Each listing's parser
+ * below holds the values to its own shape (SMD-3671 PR 2: the preamble was written six times).
  */
-function decodeCursor(raw: string, length: number): unknown[] | null {
+function decodeCursor(raw: string, length: number, max = 512): unknown[] | null {
   const text = raw.trim();
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
+  if (text.length > max || !/^[A-Za-z0-9_-]+$/.test(text)) return null;
   let v: unknown;
   try {
     v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
@@ -184,17 +184,10 @@ export function claimCursor(sel: ClaimSelection, issue: string, pieceKey: string
 
 /** A list_work_claims cursor read back, or null for anything that is not one. */
 export function parseClaimCursor(raw: string): { selection: ClaimSelection; issue: string; pieceKey: string; claimedAt: string; id: string } | null {
-  const text = raw.trim();
   // 2048, not the other cursors' 512: this one carries ticket, holder, issue and piece_key (each up to 200), so a max-length cursor reaches ~1200 (SMD-3606 PR 2); the schema's `after` admits 2048 too.
-  if (!/^[A-Za-z0-9_-]{1,2048}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 8) return null;
-  const [tag, ticket, holder, includeEnded, issue, pieceKey, claimedAt, id] = v as unknown[];
+  const v = decodeCursor(raw, 8, 2048);
+  if (!v) return null;
+  const [tag, ticket, holder, includeEnded, issue, pieceKey, claimedAt, id] = v;
   if (tag !== "claims") return null;
   // The selection: the tool's inputs, each null or a bounded string, include_ended a boolean.
   if (ticket !== null && (typeof ticket !== "string" || ticket.length > 200)) return null;
@@ -202,7 +195,7 @@ export function parseClaimCursor(raw: string): { selection: ClaimSelection; issu
   if (typeof includeEnded !== "boolean") return null;
   // The position: issue the key 115 stores (non-empty, bounded), piece_key the piece folded ('' for a whole-ticket claim), id a uuid.
   if (typeof issue !== "string" || issue.length < 1 || issue.length > 200) return null;
-  // piece is at most 100 (115's CHECK), but piece_key is lower(piece), and lower() can lengthen a few code points, so 200 gives margin; the whole cursor is bounded to 512 above regardless.
+  // piece is at most 100 (115's CHECK), but piece_key is lower(piece), and lower() can lengthen a few code points, so 200 gives margin; the whole cursor is bounded to 2048 above regardless.
   if (typeof pieceKey !== "string" || pieceKey.length > 200) return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
   const selection: ClaimSelection = { ticket, holder, includeEnded };

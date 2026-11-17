@@ -61,15 +61,17 @@ export function unattributedAs(code: UnattributedCode, principal: Principal, fac
 
 /**
  * The gate an operator-only write asks before its store call (set_priority_weights, set_work_claim_cap,
- * review_priority_finding): who may is the database's to say, by the key's registry kind under its agent id, which the
+ * release_holder_claims, review_priority_finding): who may is the database's to say, by the key's registry kind under its agent id, which the
  * server does not hold. Without the agent id the database can tell no operator (a name lends no kind): the registry's
  * absence is said as `code` (unattributedAs), and a principal that has none by design is named so, never told to
  * classify a key that may be the operator's already (132's rule). Null: the store is asked.
  */
 export function operatorGate(code: "PRIORITY_UNATTRIBUTED", principal: Principal): Outcome<never, "PRIORITY_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
 export function operatorGate(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
-export function operatorGate(code: "PRIORITY_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, RefusalCode> | null {
-  const away = code === "PRIORITY_UNATTRIBUTED" ? unattributedAs(code, principal) : unattributedAs(code, principal);
+export function operatorGate(code: "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, "RELEASE_HOLDER_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
+export function operatorGate(code: "PRIORITY_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, RefusalCode> | null {
+  const away = code === "PRIORITY_UNATTRIBUTED" ? unattributedAs(code, principal)
+    : code === "CLAIM_CAP_UNATTRIBUTED" ? unattributedAs(code, principal) : unattributedAs(code, principal);
   if (away) return away;
   return principal.agentId === undefined ? refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true }) : null;
 }
