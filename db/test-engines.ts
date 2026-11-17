@@ -1073,7 +1073,7 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const { ProviderOutage, SUSPECT_WINDOW_MS, Unreturned } = await import("./worker-bootstrap.ts");
   type Row = { id: string };
   /** A database of claim batches: what each claim_thoughts call asked for, how many leases the worker's return freed, and the lost row's status. */
-  const database = (batches: string[][], o: { lostStatus?: string | null; claimThrows?: Error } = {}) => {
+  const database = (batches: string[][], o: { lostStatus?: string | null; claimThrows?: Error; returnThrows?: Error } = {}) => {
     const wants: number[] = [];
     const statements: string[] = [];
     const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -1086,6 +1086,7 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
       }
       if (text.includes("release_claims_for_worker(")) {
         statements.push("return");
+        if (o.returnThrows) return Promise.reject(o.returnThrows);
         return Promise.resolve([{ n: 2 }]);
       }
       // reportLost's read of the row: none for a deleted thought.
@@ -1094,20 +1095,25 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
     }) as unknown as import("bun").SQL;
     return { sql, wants, statements };
   };
-  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; admit?: import("./lease.ts").Admit; gate?: AbortSignal; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next" } = {}) => {
+  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; admit?: import("./lease.ts").Admit; gate?: AbortSignal; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next"; extra?: Pick<import("./claim-loop.ts").ClaimWorkerOptions<Row>, "afterGate" | "beforeClaim" | "leaseReturn">; active?: Set<string>; errThrows?: RegExp } = {}) => {
     const seen: string[] = [];
     const errs: string[] = [];
     const counts = { lost: 0, vanished: 0, beats: -1 };
     const taken = new Set<string>();
     const claiming = { n: 0 };
     const limit = o.limit ?? 0;
-    const activeWorkers = new Set<string>();
+    const activeWorkers = o.active ?? new Set<string>();
+    /** The Writer's err: it throws on a line a test names, as a caller's may. */
+    const err = (l: string): void => {
+      errs.push(l);
+      if (o.errThrows?.test(l)) throw new Error("the Writer threw");
+    };
     let polled = false;
     let workerId = "";
     let activeInRow = false;
     await claimWorker<Row>({
       sql: db.sql, job: "test:job", prefix: "probe", n: 3, ttlS: 900, heartbeatS: 60, batch: o.batch ?? 2, limit, follow: o.follow ?? false, admit: o.admit,
-      gate: () => o.gate ?? new AbortController().signal, err: (l) => errs.push(l), errAside: (l) => errs.push(l),
+      gate: () => o.gate ?? new AbortController().signal, err, errAside: (l) => errs.push(l), ...o.extra,
       outage: o.outage ?? new ProviderOutage(), taken, claiming, limitReached: () => limit > 0 && taken.size + claiming.n >= limit, activeWorkers, unreturned: new Unreturned(async () => null), inCall: { end: () => {} },
       stopping: () => false, hardStopped: () => false, isolated: () => o.isolated ?? false, pollNow: () => { polled = true; },
       count: { lost: () => { counts.lost++; }, vanished: () => { counts.vanished++; }, beats: (k) => { counts.beats = k; } },
@@ -1163,6 +1169,37 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const whole = database([["a"]]);
   await drive(whole, { batch: 5, follow: true });
   ok(whole.wants[0] === 5, `…and any other pass claims its whole batch (asked for ${whole.wants[0]})`);
+
+  // What re-embed passes beside the claim passes (SMD-4308 PR 3): a check before each claim, a reason of its own after the gate, and its own return of its leases.
+  const checked = database([["a"]]);
+  let asks = 0;
+  const c1 = await drive(checked, { follow: true, extra: { beforeClaim: async () => ++asks > 1 } });
+  ok(c1.seen.join(" ") === "a:a" && asks === 2 && checked.statements.join(" ") === "claim return", `an engine's check before each claim lets the claim through while it says no, and ends the worker with nothing claimed once it says yes (${asks} check(s); ${checked.statements.join(" ")})`);
+  const checkFails = database([["a"]]);
+  const c2 = await drive(checkFails, { follow: false, extra: { beforeClaim: () => Promise.reject(Object.assign(new Error("could not serialize access"), { name: "PostgresError", errno: "40001" })) } });
+  ok(c2.seen.length === 0 && checkFails.statements.join(" ") === "return" && c2.errs.some((e) => /could not serialize access — this worker stops$/.test(e)), `…and a check the database refuses is the claim's own refusal: this worker stops with it said (${c2.errs.join(" | ")})`);
+  const { liveGate: openGate } = await import("./lease.ts");
+  const moved = database([["a"]]);
+  const c3 = await drive(moved, { follow: true, admit: openGate().admit, extra: { afterGate: () => true } });
+  const ungated = database([["a"]]);
+  const c4 = await drive(ungated, { follow: true, extra: { afterGate: () => true } });
+  ok(c3.seen.length === 0 && moved.statements.join(" ") === "return" && c4.seen.join(" ") === "a:a", `an engine's own reason after the admit gate ends the worker before its claim, and is not asked where there is no gate (${moved.statements.join(" ")}; ${c4.seen.join(" ")})`);
+  const cut = () => Object.assign(new Error("connection closed"), { name: "PostgresError", errno: "08006" });
+  const plainRefused = await drive(database([["a"]], { returnThrows: cut() }), { follow: true });
+  const oneShotRefused = await drive(database([["a"]], { returnThrows: cut() }), { follow: false });
+  const ownWords = await drive(database([["a"]], { returnThrows: cut() }), { follow: true, extra: { leaseReturn: { refusedLine: (w, m) => `  ${w}: its own words (${m})` } } });
+  ok(plainRefused.errs.join() === `  ${plainRefused.workerId}: could not return its leases (connection closed); they expire within 900 s, or return when the database answers again`
+     && oneShotRefused.errs.join() === `  ${oneShotRefused.workerId}: could not return its leases (connection closed); they expire within 900 s`
+     && ownWords.errs.join() === `  ${ownWords.workerId}: its own words (connection closed)`,
+     `a return of the leases the database refuses is said in the loop's words, a follower's naming the database's answer, or in the engine's own (${plainRefused.errs.join()} | ${ownWords.errs.join()})`);
+  const loud = await drive(database([["a"]]), { follow: true, extra: { leaseReturn: { saysReturned: true } } });
+  ok(loud.errs.join() === `  ${loud.workerId}: returned 2 unfinished row(s) to the pool`, `an engine that says every return says a follower's too (${loud.errs.join()})`);
+  const kept = new Set<string>();
+  const keptThrow = await drive(database([["a"]], { returnThrows: cut() }), { follow: true, active: kept, errThrows: /could not return its leases/ }).then(() => "none", (e: Error) => e.message);
+  const left = new Set<string>();
+  const leftThrow = await drive(database([["a"]], { returnThrows: cut() }), { follow: true, active: left, errThrows: /could not return its leases/, extra: { leaseReturn: { inactiveWhateverTheWriter: true } } }).then(() => "none", (e: Error) => e.message);
+  ok(keptThrow === "the Writer threw" && kept.size === 1 && leftThrow === "the Writer threw" && left.size === 0,
+     `a Writer that throws on the refusal's line is the caller's error either way; the worker stays in the pass's active set as the claim passes have it, and leaves it where the engine asks (${kept.size} kept, ${left.size} left)`);
 
   // The admit gate before each claim (SMD-3379 PR 1b): closed, a worker waits holding no claim, and a stop ends it there.
   const { liveGate } = await import("./lease.ts");
