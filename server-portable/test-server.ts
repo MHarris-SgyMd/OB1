@@ -4950,6 +4950,13 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     // Its calls' spans; through the MCP server, the REST core's whoami for the request is its child too, a request of its own.
     const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId && s.kind !== SpanKind.SERVER);
     assert(attrs(batch)["ob1.rev"] === "unnamed" && !("mcp.protocol.version" in attrs(batch)), `a request that names no revision: ob1.rev's word, and no mcp.protocol.version (SMD-4363: ${attrs(batch)["ob1.rev"]} / ${attrs(batch)["mcp.protocol.version"]})`);
+    // A header that is no revision: `other` is ob1.rev's word too, never the convention's attribute.
+    exporter.reset();
+    await post(callOf("brain_info", {}, 123), { "mcp-protocol-version": "no revision at all" });
+    await Bun.sleep(50);
+    const strange = attrs(requestSpan(exporter.getFinishedSpans()));
+    assert(strange["ob1.rev"] === "other" && !("mcp.protocol.version" in strange) && !JSON.stringify(strange).includes("no revision at all"),
+      `a request naming a string that is no revision: ob1.rev \`other\`, no mcp.protocol.version, and none of its text (SMD-4363: ${strange["ob1.rev"]} / ${strange["mcp.protocol.version"]})`);
     assert(batch?.name === "POST" && attrs(batch)["ob1.rpc"] === "batch" && !("mcp.method.name" in attrs(batch)) && children.length === 2,
       `a batch's span names no MCP method and has a child per call (${batch?.name} ${children.map((c) => c.name).join(", ")})`);
     exporter.reset();

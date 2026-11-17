@@ -379,10 +379,11 @@ const ENVELOPE_REVISION = "io.modelcontextprotocol/protocolVersion";
 
 /**
  * The MCP revision a request names (SMD-4363), for its line:
- *  - an `initialize`'s offer (`params.protocolVersion`), which is what the SDK's
- *    transport acts on, whatever header came with it;
- *  - else its envelope's, the body being a 2026-07-28 request's word on itself,
- *    over a header that disagrees;
+ *  - its envelope's, the body being a 2026-07-28 request's word on itself, over
+ *    a header that disagrees and over its method: the SDK takes a request with
+ *    the envelope for 2026-07-28 whatever its method is, an `initialize` too;
+ *  - else an `initialize`'s offer (`params.protocolVersion`), which is what the
+ *    SDK's 2025-era transport acts on, over a 2025-era header sent with it;
  *  - else its `MCP-Protocol-Version` header's. The 2025-06-18 and 2025-11-25
  *    revisions have a client send it on every request after `initialize`;
  *    2025-03-26 and earlier have no such header;
@@ -403,8 +404,8 @@ export function revisionOf(headers: Headers, body: ParsedBody): string {
   const params = typeof message?.params === "object" ? message.params : null;
   const meta = typeof params?._meta === "object" && params._meta !== null ? params._meta as Record<string, unknown> : null;
   const enveloped = meta?.[ENVELOPE_REVISION];
-  const named = message?.method === "initialize" && typeof params?.protocolVersion === "string" ? params.protocolVersion
-    : typeof enveloped === "string" ? enveloped
+  const named = typeof enveloped === "string" ? enveloped
+    : message?.method === "initialize" && typeof params?.protocolVersion === "string" ? params.protocolVersion
     : header;
   return named === null ? UNNAMED_REVISION : named === UNNAMED_REVISION ? "" : named;
 }

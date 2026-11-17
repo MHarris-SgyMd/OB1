@@ -1077,18 +1077,20 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
       crossed: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2025-06-18" } }),
       // An initialize under a header: the offer, which is what the transport acts on.
       initializeUnderHeader: await revOf("initialize", { ...offered, protocolVersion: "2025-11-25" }, "read-raw", { headers: { "mcp-protocol-version": "2025-03-26" } }),
+      // An initialize that carries the envelope is a 2026-07-28 request to the SDK, whatever it offers: the envelope's.
+      initializeEnveloped: await revOf("initialize", { ...offered }, "read-raw", { modern: true }),
       // A caller's own `unnamed` is not the route's word.
       saysUnnamed: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "unnamed" } }),
-      // An envelope whose revision is no string names none.
+      // An envelope whose revision is no string is no envelope: the header's stands.
       oddEnvelope: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2026-07-28" }, envelope: { "io.modelcontextprotocol/protocolVersion": 7 } }),
     };
     // A batch, which only 2025-03-26 has and which carries no header: none named.
     await (await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", id: 2, method: "tools/list" }]) }))).text();
     const batchLine = last();
     assert(batchLine.rpc === "batch" && batchLine.rev === "unnamed", `a batch with no header: \`unnamed\` (${JSON.stringify(batchLine)})`);
-    assert(got.initializeUnderHeader === "2025-11-25" && got.saysUnnamed === "other" && got.oddEnvelope === MODERN,
-      `an initialize under a header is its offer; a header that says \`unnamed\` is \`other\`; an envelope whose revision is no string leaves the header's (${got.initializeUnderHeader}, ${got.saysUnnamed}, ${got.oddEnvelope})`);
-    assert(same({ ...got, initializeUnderHeader: undefined, saysUnnamed: undefined, oddEnvelope: undefined }, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
+    assert(got.initializeUnderHeader === "2025-11-25" && got.initializeEnveloped === MODERN && got.saysUnnamed === "other" && got.oddEnvelope === MODERN,
+      `an initialize under a 2025-era header is its offer, and one carrying the envelope is the envelope's; a header that says \`unnamed\` is \`other\`; an envelope whose revision is no string leaves the header's (${got.initializeUnderHeader}, ${got.initializeEnveloped}, ${got.saysUnnamed}, ${got.oddEnvelope})`);
+    assert(same({ ...got, initializeUnderHeader: undefined, initializeEnveloped: undefined, saysUnnamed: undefined, oddEnvelope: undefined }, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
       `each line's \`rev\`: the envelope's, a keyless request's too, and over a header that disagrees; a 2025-era header's, an initialize's offer, \`unnamed\` with none, \`other\` for a revision not served and for a made-up string (${JSON.stringify(got)})`);
     // Every field but the clock's: `ts` holds the year, and this row must not start failing on a date.
     const said = lines.map(({ ts: _ts, ...rest }) => JSON.stringify(rest));
