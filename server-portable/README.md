@@ -1268,7 +1268,8 @@ and MCP alike:
 - **`renew_claim`** (`POST /v1/claims/{id}/renew`) and **`release_claim`**
   (`POST /v1/claims/{id}/release`), write scope: the caller's own claim, by its key
   and its token. `release_claim` takes `force` with a `reason` for an operator key,
-  classified `operator` by its agent id.
+  classified `operator` by its agent id; to end every live claim one holder holds in one
+  call, an operator uses `release_holder_claims` (below).
 - **`list_claims`** (`GET /v1/claims`, read scope): the live claims, of one ticket or
   one holder's key, or every claim with `include_ended`, by ticket then piece then
   claim time. `truncated` is true when more follow this page; page to the end with
@@ -1303,6 +1304,7 @@ calls does.
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
 | `CLAIM_CAP_UNATTRIBUTED` | 503 | `set_work_claim_cap` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `PRIORITY_UNATTRIBUTED`, for the cap setter (SMD-3606 PR 1b). |
+| `RELEASE_HOLDER_UNATTRIBUTED` | 503 | `release_holder_claims` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `CLAIM_CAP_UNATTRIBUTED`, for the holder-release (SMD-3606 PR 3). |
 | `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), the claim unreleased; or a `claim_work` with that token on exactly that claim's work while it is unreleased, live or lapsed, which 115 would otherwise read as another's: refused WORK_CLAIMED while live, taken over once lapsed (SMD-3705). On a renew and on that `claim_work`, `lapsedAt` when the claim's lease had run out (a release carries none): another claim may cover its work by now, so list the ticket's claims before carrying on. `forced: true`: a forced release, which needs the id to classify an operator. |
 
 A whole ticket and any of its pieces are the same work; two different pieces are not.
@@ -1391,6 +1393,19 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   was the one standing, and nothing was written; a replaced setting stays as history.
   `brain_info`'s `database.workClaimCap` shows the standing cap — built in, the
   operator's, or the operator's refused.
+- **`release_holder_claims`** (`POST /v1/claims/release-holder`, write scope; SMD-3606 PR 3,
+  migration 145): the operator ends every live claim one holder holds in one call — the undo
+  of a claim hog, where `release_claim` ends one claim by id. `holder` is a key's name (as
+  `list_claims` shows it, surrounding white space ignored) and `reason` is kept on each
+  released claim as history; only the holder's live claims (unreleased and unexpired) end,
+  its lapsed and released claims and every other holder's standing, and a holder with none
+  ends 0. Past the scope, the database admits a key the operator classified `operator`, by
+  its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR` (403); while the registry
+  cannot give the key's agent id the call is refused `RELEASE_HOLDER_UNATTRIBUTED` (503,
+  retryable), as `set_work_claim_cap` answers `CLAIM_CAP_UNATTRIBUTED`. The answer is
+  `{holder, released, claims}`: `released` the count ended, `claims` each ended claim's id,
+  ticket and piece (bounded by the per-holder cap, since the cap holds how many live claims
+  a holder may have).
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while

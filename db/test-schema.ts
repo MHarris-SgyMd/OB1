@@ -22213,6 +22213,102 @@ console.log("\n[131] Migration 144: forget_thought runs as its owner — a SECUR
                  DROP ROLE ob1_fg130_deleter; DROP ROLE ob1_fg130_reader; DROP ROLE ob1_fg130_granted`);
 }
 
+console.log("\n[132] Migration 145: release every live claim one holder holds — release_holder_claims an operator key's alone, by its agent id (an agent key, a name alone, an unclassified key refused NOT_OPERATOR; no envelope raises); a blank holder NO_HOLDER, a blank reason NO_REASON; it ends the holder's live claims (unreleased and unexpired) with the operator and reason on each, in issue order with the piece, leaving its lapsed and self-released claims and every other holder's; an unknown holder releases 0, a second call 0; SECURITY INVOKER not DEFINER, VOLATILE, 145 its last definer; a re-apply a no-op (SMD-3606)");
+{
+  const file = files.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f)) ?? "no NNN_release_holder_claims.sql";
+  // [103] re-applies 115's claim_work; [126] restored 140's. Re-affirm it here: this section makes claims with claim_work and ends them with 145's release_holder_claims.
+  await restoreShipped("claim_work");
+  type ClaimAns = { outcome: string; claim: { id: string } | null; token: string | null };
+  type HolderOut = { ok: boolean; error?: string; kind?: string | null; message?: string; holder?: string; released?: number; claims?: { id: string; issue: string; piece: string | null }[] };
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows[0];
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return "taken"; } catch (e) { return `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`; }
+  };
+  const ansClaim = async (sql: string, params: unknown[]): Promise<ClaimAns> => {
+    try { return (await db.query<{ r: ClaimAns }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, claim: null, token: null }; }
+  };
+  const claim = (issue: string, piece: string | null, actor: object) =>
+    ansClaim(`SELECT claim_work($1, $2, NULL, 14500, NULL, $3::jsonb) AS r`, [issue, piece, JSON.stringify(actor)]);
+  const selfRelease = (id: string, token: string, actor: object) =>
+    db.query(`SELECT release_work_claim($1::uuid, $2, 'self-done', false, $3::jsonb)`, [id, token, JSON.stringify(actor)]);
+  const age = (id: string) =>
+    db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [id]);
+  const releaseHolder = async (holder: string | null, reason: string | null, actor: unknown): Promise<HolderOut> =>
+    (await one<{ r: HolderOut }>(`SELECT release_holder_claims($1, $2, $3::jsonb) AS r`, [holder, reason, actor === null ? null : JSON.stringify(actor)])).r;
+  const rowOf = (id: string) =>
+    one<{ released_at: string | null; released_by: string | null; agent: string | null; kind: string | null; reason: string | null }>(
+      `SELECT released_at::text, released_by, released_by_agent_id::text AS agent, released_by_kind AS kind, release_reason AS reason FROM work_claims WHERE id = $1::uuid`, [id]);
+  const liveFor = async (name: string) => Number((await one<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = $1 AND released_at IS NULL AND expires_at > now()`, [name])).n);
+
+  await db.exec(`SELECT set_agent_kind('[132] op', 'operator'); SELECT set_agent_kind('[132] h', 'agent'); SELECT set_agent_kind('[132] h2', 'agent'); INSERT INTO ob1_agents (label) VALUES ('[132] plain') ON CONFLICT DO NOTHING`);
+  const idOf = async (label: string) => (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).id;
+  const OP = { name: "[132] op", agent_id: await idOf("[132] op") };
+  const H = { name: "[132] h", agent_id: await idOf("[132] h") };
+  const H2 = { name: "[132] h2", agent_id: await idOf("[132] h2") };
+  const PLAIN = { name: "[132] plain", agent_id: await idOf("[132] plain") };
+  // Clear any cap a prior section (140's [126]) left standing — even a stored bad one, which set_work_claim_cap ends without reading — so claim_work takes every claim here.
+  await db.query(`SELECT set_work_claim_cap(NULL, $1::jsonb)`, [JSON.stringify(OP)]);
+
+  // H holds five: three live, one aged to lapsed, one it released itself. H2 holds one. (piece "PR 2" rides one, so the reply carries it.)
+  const live1 = await claim("SMD-5101", null, H);
+  const live2 = await claim("SMD-5102", "PR 2", H);
+  const live3 = await claim("SMD-5103", null, H);
+  const lapsed = await claim("SMD-5104", null, H);
+  const selfGone = await claim("SMD-5105", null, H);
+  const otherLive = await claim("SMD-5200", null, H2);
+  await age(lapsed.claim!.id);
+  await selfRelease(selfGone.claim!.id, selfGone.token!, H);
+
+  // The function: one of the name, SECURITY INVOKER (not DEFINER), VOLATILE, 145's comment, 145 the last definer.
+  const meta = await one<{ d: boolean; v: string; c: string | null }>(
+    `SELECT p.prosecdef AS d, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = 'release_holder_claims(text, text, jsonb)'::regprocedure`);
+  assert(meta.d === false && meta.v === "v" && /[Mm]igration 145 \/ SMD-3606/.test(meta.c ?? "") && lastDefinerOf("release_holder_claims") === file && (await functionsNamed("release_holder_claims")) === 1,
+    `release_holder_claims: SECURITY INVOKER, VOLATILE, 145's comment, 145 its last definer and the only one of the name (${meta.d}/${meta.v}/${lastDefinerOf("release_holder_claims")}/${await functionsNamed("release_holder_claims")})`);
+
+  // Who may: an operator key by its agent id; an agent's key, a name alone, an unclassified key refused NOT_OPERATOR saying what it is; no envelope raises; a blank holder NO_HOLDER, a blank reason NO_REASON. Nothing released.
+  const byAgent = await releaseHolder("[132] h2", "nope", H);
+  const byName = await releaseHolder("[132] h2", "nope", { name: "[132] op" });
+  const byPlain = await releaseHolder("[132] h2", "nope", PLAIN);
+  const noEnvelope = await failure(`SELECT release_holder_claims('[132] h2', 'x', NULL)`);
+  const noHolder = await releaseHolder("   ", "a reason", OP);
+  const noReason = await releaseHolder("[132] h2", "   ", OP);
+  assert(byAgent.ok === false && byAgent.error === "NOT_OPERATOR" && byAgent.kind === "agent"
+         && byName.ok === false && byName.error === "NOT_OPERATOR" && byName.kind === null && /named by its name alone$/.test(String(byName.message))
+         && byPlain.ok === false && byPlain.error === "NOT_OPERATOR" && byPlain.kind === null && /is unclassified$/.test(String(byPlain.message))
+         && /needs a holder: no actor envelope names one/.test(noEnvelope)
+         && noHolder.ok === false && noHolder.error === "NO_HOLDER" && noReason.ok === false && noReason.error === "NO_REASON"
+         && (await liveFor("[132] h")) === 3 && (await liveFor("[132] h2")) === 1,
+    `an agent key, a name alone and an unclassified key answer NOT_OPERATOR, no envelope raises, a blank holder NO_HOLDER and a blank reason NO_REASON, nothing released (${byAgent.error}:${byAgent.kind}, ${byName.kind}, ${byPlain.kind}, ${noHolder.error}, ${noReason.error}, ${noEnvelope.slice(0, 40)})`);
+
+  // The operator ends H's three live claims, each with the reason and the operator on it, in issue order with the piece; its lapsed and self-released claims and H2's stand.
+  const out = await releaseHolder("[132] h", "SMD-3606 cleanup", OP);
+  const cl = out.claims ?? [];
+  const [r1, r2, r3, rLapsed, rSelf, rOther] = await Promise.all([live1, live2, live3, lapsed, selfGone, otherLive].map((c) => rowOf(c.claim!.id)));
+  assert(out.ok === true && out.holder === "[132] h" && out.released === 3 && cl.length === 3
+         && cl[0].issue === "SMD-5101" && cl[0].piece === null && cl[1].issue === "SMD-5102" && cl[1].piece === "PR 2" && cl[2].issue === "SMD-5103" && cl[2].piece === null
+         && [r1, r2, r3].every((r) => r.released_at !== null && r.released_by === "[132] op" && r.agent === OP.agent_id && r.kind === "operator" && r.reason === "SMD-3606 cleanup")
+         && rLapsed.released_at === null
+         && rSelf.released_by === "[132] h" && rSelf.reason === "self-done"
+         && rOther.released_at === null && (await liveFor("[132] h")) === 0 && (await liveFor("[132] h2")) === 1,
+    `the operator ends H's three live claims with the reason, in issue order with the piece, leaving its lapsed, its self-released and H2's (released ${out.released}: ${cl.map((c) => `${c.issue}/${c.piece ?? "-"}`).join(", ")})`);
+
+  // An unknown holder releases 0; H2's one claim releases, a second call 0 (idempotent — nothing left live).
+  const unknown = await releaseHolder("nobody-holds-this", "a reason", OP);
+  const h2out = await releaseHolder("[132] h2", "clear h2", OP);
+  const h2again = await releaseHolder("[132] h2", "clear h2", OP);
+  assert(unknown.ok === true && unknown.released === 0 && (unknown.claims ?? []).length === 0 && h2out.released === 1 && h2again.released === 0 && (await liveFor("[132] h2")) === 0,
+    `an unknown holder releases 0; H2's one claim releases, a second call 0 (${unknown.released}, ${h2out.released}, ${h2again.released})`);
+
+  // A re-apply is a no-op: one release_holder_claims, 145 still its last definer.
+  await reapply(file);
+  assert(lastDefinerOf("release_holder_claims") === file && (await functionsNamed("release_holder_claims")) === 1,
+    `145 applied again is a no-op: one release_holder_claims, 145 its last definer (${await functionsNamed("release_holder_claims")})`);
+
+  await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL AND holder_name IN ('[132] h', '[132] h2')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('[132] op', '[132] h', '[132] h2', '[132] plain')`);
+}
+
 // The suite's total is published to the wiki's Test-counts page on a push to
 // main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
 // the run's (SMD-1805).
