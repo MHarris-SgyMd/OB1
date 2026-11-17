@@ -373,7 +373,7 @@ export function parsedBody(bodyText: string | null): ParsedBody {
 }
 
 /** The line's word for a request that named no MCP revision (telemetry.ts's MCP_REVISIONS holds it). */
-export const UNNAMED_REVISION = "unnamed";
+const UNNAMED_REVISION = "unnamed";
 /** Where a 2026-07-28 request carries its revision: this key of `params._meta`, the request's envelope. */
 const ENVELOPE_REVISION = "io.modelcontextprotocol/protocolVersion";
 

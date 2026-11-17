@@ -1059,9 +1059,9 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   const nearModern = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw", { modern: true });
   assert(nearLegacy.status === 200 && nearLegacy.body?.result !== undefined && same(replyOf(nearModern), replyOf(nearLegacy)) && nearModern.status === 200, `a 3 MiB call, either revision: answered by its tool (${nearLegacy.status}, ${nearModern.status})`);
 
-  // The line says which revision each request named (SMD-4363): a 2026-07-28 request's envelope; a 2025-era request's
-  // header once it has one; what an initialize offers; `unnamed` with none; `other` for a string that is no revision
-  // this server serves. Read for a request refused at the key too. Never the caller's own text.
+  // The line says which revision each request named (SMD-4363), read in revisionOf's order: a 2026-07-28 request's
+  // envelope; what an initialize offers; a 2025-era request's header once it has one; `unnamed` with none; `other` for
+  // a string that is no revision this server serves. Read for a request refused at the key too. Never the caller's own text.
   {
     const revOf = async (method: string, params: unknown, key: string | undefined, opts: RpcOpts = {}) => { await rpc(method, params, key, opts); return last().rev; };
     const offered = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } };
@@ -1088,9 +1088,10 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
     await (await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", id: 2, method: "tools/list" }]) }))).text();
     const batchLine = last();
     assert(batchLine.rpc === "batch" && batchLine.rev === "unnamed", `a batch with no header: \`unnamed\` (${JSON.stringify(batchLine)})`);
-    assert(got.initializeUnderHeader === "2025-11-25" && got.initializeEnveloped === MODERN && got.saysUnnamed === "other" && got.oddEnvelope === MODERN,
-      `an initialize under a 2025-era header is its offer, and one carrying the envelope is the envelope's; a header that says \`unnamed\` is \`other\`; an envelope whose revision is no string leaves the header's (${got.initializeUnderHeader}, ${got.initializeEnveloped}, ${got.saysUnnamed}, ${got.oddEnvelope})`);
-    assert(same({ ...got, initializeUnderHeader: undefined, initializeEnveloped: undefined, saysUnnamed: undefined, oddEnvelope: undefined }, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
+    const { initializeUnderHeader, initializeEnveloped, saysUnnamed, oddEnvelope, ...plain } = got;
+    assert(initializeUnderHeader === "2025-11-25" && initializeEnveloped === MODERN && saysUnnamed === "other" && oddEnvelope === MODERN,
+      `an initialize under a 2025-era header is its offer, and one carrying the envelope is the envelope's; a header that says \`unnamed\` is \`other\`; an envelope whose revision is no string leaves the header's (${initializeUnderHeader}, ${initializeEnveloped}, ${saysUnnamed}, ${oddEnvelope})`);
+    assert(same(plain, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
       `each line's \`rev\`: the envelope's, a keyless request's too, and over a header that disagrees; a 2025-era header's, an initialize's offer, \`unnamed\` with none, \`other\` for a revision not served and for a made-up string (${JSON.stringify(got)})`);
     // Every field but the clock's: `ts` holds the year, and this row must not start failing on a date.
     const said = lines.map(({ ts: _ts, ...rest }) => JSON.stringify(rest));

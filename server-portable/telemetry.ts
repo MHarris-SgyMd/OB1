@@ -103,7 +103,7 @@ export interface RequestRecord {
   route?: string;
   /** The MCP server's JSON-RPC method (`tools/call`), or `batch` for a body of several messages. */
   rpc?: string;
-  /** The MCP revision the request named (`2026-07-28`), or `unnamed` for one that named none: a 2025-era request with no version header (SMD-4363). The MCP endpoint's alone. */
+  /** The MCP revision the request named (`2026-07-28`), or `unnamed` for one that named none, as mcp-edge.ts's revisionOf reads it (SMD-4363). The MCP endpoint's alone. */
   rev?: string;
   /** The tool: an MCP tool call's, the operation a REST route runs, or the tool a mirror mirrors. */
   tool?: string;
