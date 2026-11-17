@@ -186,7 +186,7 @@ const HOOK_TICKETS = /\b([A-Za-z]{2,5})-([0-9]{2,6})\b/g;
  * The prefixes the capture hook takes for no ticket (its NOT_TICKETS), beside this module's NOT_TICKET_PREFIXES: since
  * hook 1.8.1 its list holds this module's too, those its shape can match, and IPV, MD, ED and HTML besides.
  */
-const HOOK_NOT_TICKETS: ReadonlySet<string> = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML",
+export const HOOK_NOT_TICKETS: ReadonlySet<string> = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML",
   "IEEE", "CWE", "WCAG", "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "COVID", "FY"]);
 /** The header's branch part, `(branch)` before the day: renderSummary writes `… project (branch) — day`. */
 const HEADER_BRANCH = /\(([^()]*)\)\s+—\s+[^—]*$/;
@@ -229,7 +229,7 @@ export const TICKETS_FROM = "tickets_from";
  * release, a review. The hook before 1.8.1 learned a team from every ticket-shaped word of a branch or a directory, so
  * on `smd-610-bump-node-22` a prompt's `node-22` was a ticket to it; from 1.8.1 a place teaches its own ticket's team
  * alone (SMD-4291), but a place with no ticket teaches its first ticket-shaped word's (`node-22-pin`) and the session's
- * teams are every place it has been but a subdirectory of a checkout naming a ticket, so the guard stays for those
+ * teams are every place it has been but a ticket-shaped folder of a checkout, so the guard stays for those
  * summaries too: a header listing a ticket of another
  * team than the session's is the model's. The session's team is the first ticket of the header's own branch, else of
  * its project (the directory's last part, which the header shows; the hook reads the deepest part that names one), as
