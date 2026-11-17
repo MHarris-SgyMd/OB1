@@ -4816,7 +4816,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   };
   try {
     // A failed search, its key in ?key= and its text planted, under a client's traceparent.
-    const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}` }));
+    const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}`, "mcp-protocol-version": "2025-06-18" }));
     const spans = exporter.getFinishedSpans();
     const server = requestSpan(spans);
     const restSide = new Set(spans.filter((s) => attrs(s)["ob1.door"] === "api").map((s) => s.spanContext().spanId));
@@ -4825,9 +4825,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     assert(server?.name === "tools/call search_thoughts" && server.spanContext().traceId !== TID && parentOf(server) === undefined && server.links.length === 1 && link?.traceId === TID && link.spanId === PARENT,
       `the request's span is named for its call and starts its own trace, the caller's linked, not continued (${server?.name} ${server?.spanContext().traceId} ${parentOf(server)} ${JSON.stringify(link)})`);
     const sa = attrs(server);
-    assert((typeof sa["mcp.protocol.version"] === "string" && /^20\d\d-\d\d-\d\d$/.test(sa["mcp.protocol.version"] as string)) !== (sa["ob1.rev"] === "unnamed" || sa["ob1.rev"] === "other")
-      && (sa["mcp.protocol.version"] === undefined || /^20\d\d-\d\d-\d\d$/.test(String(sa["mcp.protocol.version"]))),
-      `the request's span says the revision it named: mcp.protocol.version where it is one, ob1.rev's word where it is not, never both (SMD-4363: ${sa["mcp.protocol.version"]} / ${sa["ob1.rev"]})`);
+    assert(sa["mcp.protocol.version"] === "2025-06-18" && !("ob1.rev" in sa),
+      `the request's span says the revision it named, under the MCP conventions' name, and no ob1.rev beside it (SMD-4363: ${sa["mcp.protocol.version"]} / ${sa["ob1.rev"]})`);
     assert(sa["http.request.method"] === "POST" && sa["mcp.method.name"] === "tools/call" && sa["ob1.tool"] === "search_thoughts" && sa["ob1.agent"] === "MCP_ACCESS_KEY"
       && sa["http.response.status_code"] === 200 && sa["ob1.outcome"] === "error" && sa["ob1.code"] === "FAILED" && sa["error.type"] === "FAILED" && server?.status.code === SpanStatusCode.ERROR && !("http.route" in sa),
       `its attributes are the line's: method, MCP method, tool, the key's name, the 200, \`error\` FAILED, an ERROR status, and no route at the MCP endpoint (${JSON.stringify(sa)})`);
@@ -4950,6 +4949,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const batch = requestSpan(batchSpans);
     // Its calls' spans; through the MCP server, the REST core's whoami for the request is its child too, a request of its own.
     const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId && s.kind !== SpanKind.SERVER);
+    assert(attrs(batch)["ob1.rev"] === "unnamed" && !("mcp.protocol.version" in attrs(batch)), `a request that names no revision: ob1.rev's word, and no mcp.protocol.version (SMD-4363: ${attrs(batch)["ob1.rev"]} / ${attrs(batch)["mcp.protocol.version"]})`);
     assert(batch?.name === "POST" && attrs(batch)["ob1.rpc"] === "batch" && !("mcp.method.name" in attrs(batch)) && children.length === 2,
       `a batch's span names no MCP method and has a child per call (${batch?.name} ${children.map((c) => c.name).join(", ")})`);
     exporter.reset();

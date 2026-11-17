@@ -1075,15 +1075,32 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
       madeUp: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "the private thought" } }),
       // The envelope against a header that disagrees (the handler refuses the request): the body is the request's word on itself.
       crossed: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2025-06-18" } }),
+      // An initialize under a header: the offer, which is what the transport acts on.
+      initializeUnderHeader: await revOf("initialize", { ...offered, protocolVersion: "2025-11-25" }, "read-raw", { headers: { "mcp-protocol-version": "2025-03-26" } }),
+      // A caller's own `unnamed` is not the route's word.
+      saysUnnamed: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "unnamed" } }),
+      // An envelope whose revision is no string names none.
+      oddEnvelope: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2026-07-28" }, envelope: { "io.modelcontextprotocol/protocolVersion": 7 } }),
     };
-    assert(same(got, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
+    // A batch, which only 2025-03-26 has and which carries no header: none named.
+    await (await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", id: 2, method: "tools/list" }]) }))).text();
+    const batchLine = last();
+    assert(batchLine.rpc === "batch" && batchLine.rev === "unnamed", `a batch with no header: \`unnamed\` (${JSON.stringify(batchLine)})`);
+    assert(got.initializeUnderHeader === "2025-11-25" && got.saysUnnamed === "other" && got.oddEnvelope === MODERN,
+      `an initialize under a header is its offer; a header that says \`unnamed\` is \`other\`; an envelope whose revision is no string leaves the header's (${got.initializeUnderHeader}, ${got.saysUnnamed}, ${got.oddEnvelope})`);
+    assert(same({ ...got, initializeUnderHeader: undefined, saysUnnamed: undefined, oddEnvelope: undefined }, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
       `each line's \`rev\`: the envelope's, a keyless request's too, and over a header that disagrees; a 2025-era header's, an initialize's offer, \`unnamed\` with none, \`other\` for a revision not served and for a made-up string (${JSON.stringify(got)})`);
-    assert(!lines.some((l) => JSON.stringify(l).includes("private") || JSON.stringify(l).includes("2027")), "…and nothing of a caller's own text on any line");
-    // The list telemetry.ts holds is the installed SDK's: a bump that serves another revision fails here, not in a dashboard.
+    // Every field but the clock's: `ts` holds the year, and this row must not start failing on a date.
+    const said = lines.map(({ ts: _ts, ...rest }) => JSON.stringify(rest));
+    assert(!said.some((l) => l.includes("private") || l.includes("2027-01-01")), "…and nothing of a caller's own text on any line");
+    // The list telemetry.ts holds is what this server serves, read from the installed SDK both ways: its 2025-era
+    // list by its export, and its 2026-07-28 family by what server/discover answers here (the SDK keeps that list
+    // apart and exports none of it). A bump that serves another revision of either family fails this row.
     const { MCP_REVISIONS } = await import("../server-portable/telemetry.ts");
     const { SUPPORTED_PROTOCOL_VERSIONS } = await import("@modelcontextprotocol/server");
-    const served = [MODERN, ...SUPPORTED_PROTOCOL_VERSIONS, "unnamed"].sort();
-    assert(same([...MCP_REVISIONS].sort(), served), `the revisions a line may name are the SDK's 2025-era list, 2026-07-28 and \`unnamed\` (${[...MCP_REVISIONS].sort().join(", ")} against ${served.join(", ")})`);
+    const discovered = (resultOf(await rpc("server/discover", {}, "read-raw", { modern: true })).supportedVersions ?? []) as string[];
+    const served = [...discovered, ...SUPPORTED_PROTOCOL_VERSIONS, "unnamed"].sort();
+    assert(discovered.length > 0 && same([...MCP_REVISIONS].sort(), served), `the revisions a line may name are what server/discover answers, the SDK's 2025-era list and \`unnamed\` (${[...MCP_REVISIONS].sort().join(", ")} against ${served.join(", ")})`);
   }
 
   // A request the SDK's rule cannot place goes to the handler, which refuses it in its own words: a 2025-era

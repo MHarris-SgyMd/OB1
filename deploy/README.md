@@ -1301,7 +1301,7 @@ health path that presents no key, on the REST core a GET or HEAD of `/health`
 — known as it arrives, and not written whatever it answers.
 
 ```
-{"ts":"2026-10-08T16:36:17.603Z","door":"mcp","method":"POST","rpc":"tools/call","tool":"capture_thought","agent":"laptop","status":200,"outcome":"ok","ms":7480,"bytes":612}
+{"ts":"2026-10-08T16:36:17.603Z","door":"mcp","method":"POST","rpc":"tools/call","rev":"2026-07-28","tool":"capture_thought","agent":"laptop","status":200,"outcome":"ok","ms":7480,"bytes":612}
 ```
 
 These keys, and no other, each held to its rule as the line is written — a
@@ -1314,7 +1314,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `method` | the HTTP method |
 | `route` | the route as a template, never the path it was given: the REST core's (`/v1/thoughts/:id`), or an MCP server mirror's (`/health`, `/worker-status`, `/worker-run`, `/jobs/:id/stream` — under whatever prefix it came); the MCP endpoint, the MCP server's preflights, `/.well-known/` answers and 405s, the REST core's 404s and 405s, and an unmatched path have none |
 | `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods and the 2026-07-28 revision's `server/discover` and `subscriptions/listen` is `other` — so another newer method (2025-11-25's `tasks/*`) is too |
-| `rev` | the MCP revision a request to the MCP endpoint named: its 2026-07-28 envelope's, else its `MCP-Protocol-Version` header's, else what an `initialize` offers; `unnamed` for a 2025-era request with no header; `other` for a string that is no revision this server serves. Absent on every other route (SMD-4363) |
+| `rev` | the MCP revision a request to the MCP endpoint named: what an `initialize` offers, else its 2026-07-28 envelope's, else its `MCP-Protocol-Version` header's; `unnamed` where it named none (every request but the `initialize` of a client on 2025-03-26 or earlier, which has no such header; a later client that omits it; a batch); `other` for a string that is no revision this server serves. What the request said, not what the server did: a refused request has it too, and an offer negotiated down is the offer. Absent on every other route (SMD-4363) |
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
@@ -1667,8 +1667,8 @@ Where the signals go is the operator's decision: the brain is personal data,
 and a collector off this machine is a place it then goes; the `observability`
 profile below keeps them on it. What leaves is usage metadata:
 per request `http.request.method`, `http.route`, `http.response.status_code`,
-`http.response.body.size`, `mcp.method.name`, `gen_ai.operation.name`,
-`gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.tool`, `ob1.agent`,
+`http.response.body.size`, `mcp.method.name`, `mcp.protocol.version`,
+`gen_ai.operation.name`, `gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.rev`, `ob1.tool`, `ob1.agent`,
 `ob1.outcome`, `ob1.code` and `error.type`, a fault's `exception.type` and
 `ob1.fault.code`, and the line's fields again in its log record; per tool call
 `gen_ai.tool.name`, `ob1.outcome`, `ob1.code` and `error.type`; per provider
