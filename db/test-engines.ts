@@ -1376,6 +1376,93 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
      `…the hard stop's release beating it says nothing; the database gone keeps the row this worker's, the engine's count taken back; any other refusal is said and the row counted lost (${cut.s.errs.join(" | ")}; ${refusedRecord.s.errs[0]})`);
 }
 
+// ---------------------------------------------------------------------------
+// db/claim-loop.ts's setBackAborted and releaseFinished (SMD-4308): a call
+// its caller aborted, and a finished claim's release, over a stand-in engine.
+// ---------------------------------------------------------------------------
+{
+  const { setBackAborted, releaseFinished } = await import("./claim-loop.ts");
+  const { ProviderOutage, SUSPECT_WINDOW_MS } = await import("./worker-bootstrap.ts");
+  const pg = (errno: string, message = `database error ${errno}`) => Object.assign(new Error(message), { name: "PostgresError", errno });
+  /** A stand-in engine and database: `setBack` is what the set-back's UPDATE returns, `row` the claim's row a lost read finds, `exists` whether the thought is still there. */
+  const engine = (o: { follow?: boolean; limit?: number; setBack?: boolean | Error; row?: string | null; exists?: boolean } = {}) => {
+    const s = { errs: [] as string[], hardStopped: false, failed: 0, lost: 0, vanished: 0, progress: 0, statements: [] as string[], outage: new ProviderOutage(() => 0, SUSPECT_WINDOW_MS, true), taken: new Set(["t1", "t2"]) };
+    const sql = ((strings: TemplateStringsArray) => {
+      const text = strings.join("?");
+      if (text.includes("UPDATE thought_work_claims")) {
+        s.statements.push("set-back");
+        return o.setBack instanceof Error ? Promise.reject(o.setBack) : Promise.resolve(o.setBack === false ? [] : [{ ok: 1 }]);
+      }
+      if (text.includes("SELECT EXISTS")) {
+        s.statements.push("exists");
+        return Promise.resolve([{ exists: o.exists ?? true }]);
+      }
+      s.statements.push("lost-read");
+      return Promise.resolve(o.row == null ? [] : [{ status: o.row, worker_id: null }]);
+    }) as unknown as import("bun").SQL;
+    const host: import("./claim-loop.ts").ReleaseHost = {
+      sql, job: "test:job", follow: o.follow ?? true, err: (l) => s.errs.push(l), hardStopped: () => s.hardStopped, outage: s.outage, limit: o.limit ?? 0, taken: s.taken,
+      count: { failed: () => { s.failed++; }, lost: () => { s.lost++; }, vanished: () => { s.vanished++; } }, progress: () => { s.progress++; },
+    };
+    const hb = { held: new Set(["t1"]), lost: new Set<string>(), beats: 0, consecutiveErrors: 0, claimed: () => {}, stop: () => {} };
+    return { s, host, hb, t: { id: "t1", workerId: "w1", hb } };
+  };
+
+  // A call the pass's caller aborted: the thought to the back of the queue.
+  const back = engine({ limit: 5 });
+  const b1 = await setBackAborted(back.host, back.t, "judge call");
+  const noLimit = engine();
+  await setBackAborted(noLimit.host, noLimit.t, "call");
+  ok(JSON.stringify(b1) === "{}" && !back.hb.held.has("t1") && !back.s.taken.has("t1") && back.s.taken.has("t2") && back.s.statements.join() === "set-back" && back.s.errs.length === 0 && noLimit.s.taken.has("t1"),
+     `setBackAborted sets the thought back, out of the heartbeat's set, and out of --limit's count where there is a limit (${JSON.stringify(b1)}; taken ${[...back.s.taken].join()}, without a limit ${[...noLimit.s.taken].join()})`);
+  const reaped = engine({ limit: 5, setBack: false, row: "pending" });
+  const b2 = await setBackAborted(reaped.host, reaped.t, "call");
+  const deleted = engine({ setBack: false, row: null });
+  const b3 = await setBackAborted(deleted.host, deleted.t, "call");
+  ok(b2 !== "stop" && b2.gone === "lost" && reaped.s.taken.has("t1") && reaped.s.statements.join() === "set-back,lost-read" && reaped.s.errs.length === 1 && /^  t1: back in the pool/.test(reaped.s.errs[0]) && b3 !== "stop" && b3.gone === "deleted",
+     `…a claim no longer this worker's is not set back: its row is read and said, and it is lost or deleted by what the row says, still in --limit's count (${JSON.stringify(b2)}, ${JSON.stringify(b3)}; ${reaped.s.errs[0]})`);
+  const refusedBack = engine({ setBack: pg("57P01") });
+  const b4 = await setBackAborted(refusedBack.host, refusedBack.t, "judge call");
+  ok(b4 === "stop" && refusedBack.hb.held.has("t1") && refusedBack.s.errs.join() === "  w1: could not set t1 back in the queue after its judge call was aborted (database error 57P01) — this worker stops, returning it with its leases",
+     `…and a set-back the database refuses stops the worker, the thought this worker's again, the engine's word for the call in the line (${refusedBack.s.errs.join()})`);
+
+  // The release of a finished claim.
+  const finish = async (o: Parameters<typeof engine>[0] & { release?: boolean | Error; failed?: string | null; hardStopped?: boolean }) => {
+    const e = engine(o);
+    e.s.hardStopped = o.hardStopped ?? false;
+    e.hb.held.delete("t1");
+    e.s.outage.begin("an outage", "t1");
+    e.s.outage.end();
+    let succeeded = 0;
+    const answer = await releaseFinished(e.host, e.t, {
+      release: () => (o.release instanceof Error ? Promise.reject(o.release) : Promise.resolve(o.release ?? true)),
+      failed: o.failed ?? null, doing: "judged", lapsedWhy: "its lease lapsed", succeeded: () => { succeeded++; },
+    });
+    return { answer, succeeded, s: e.s, hb: e.hb };
+  };
+  const good = await finish({});
+  const bad = await finish({ failed: "the judge refused it" });
+  ok(good.answer === "next" && good.succeeded === 1 && good.s.failed === 0 && good.s.errs.length === 0 && good.s.progress === 1 && !good.s.outage.blames("t1") && good.s.statements.length === 0
+     && bad.answer === "next" && bad.succeeded === 0 && bad.s.failed === 1 && bad.s.errs.join() === "  t1: the judge refused it" && bad.s.progress === 1 && !bad.s.outage.blames("t1"),
+     `releaseFinished: a release that went through counts the thought the engine's way when it succeeded, failed and said when it failed, a suspect no longer either way, and the progress line told (${bad.s.errs.join()})`);
+  const lapsed = await finish({ release: false, failed: "the judge refused it" });
+  const lapsedGood = await finish({ release: false });
+  ok(lapsed.answer === "next" && lapsed.s.lost === 1 && lapsed.s.failed === 0 && lapsed.s.progress === 1 && lapsed.s.outage.blames("t1") && lapsed.s.statements.join() === "exists"
+     && lapsed.s.errs.join(" | ") === "  t1: the claim was no longer this worker's at release — its lease lapsed; the row is the pool's or another worker's now |   t1: the judge refused it (not recorded — the row was not this worker's)"
+     && lapsedGood.s.errs.length === 1 && lapsedGood.succeeded === 0 && lapsedGood.s.lost === 1,
+     `…a claim no longer this worker's at release is counted lost, with the engine's reasons, a failure said as not recorded, and the suspect kept (${lapsed.s.errs.join(" | ")})`);
+  const goneNow = await finish({ release: false, exists: false });
+  const beaten = await finish({ release: false, hardStopped: true });
+  ok(goneNow.answer === "next" && goneNow.s.vanished === 1 && goneNow.s.lost === 0 && goneNow.s.progress === 0 && goneNow.s.errs.join() === "  t1: deleted while it was being judged" && beaten.answer === "stop" && beaten.s.errs.length === 0 && beaten.s.lost === 0,
+     `…a thought deleted meanwhile is counted so and said in the engine's word; the hard stop's release beating this one stops the worker with nothing said (${goneNow.s.errs.join()}; ${beaten.answer})`);
+  const cut = await finish({ release: pg("57P01") });
+  const cutOneShot = await finish({ release: pg("57P01"), follow: false });
+  const refusedRelease = await finish({ release: pg("42501", "permission denied for function release_thought") });
+  ok(cut.answer === "stop" && cut.hb.held.has("t1") && cut.s.errs.join() === "  t1: could not release the claim (database error 57P01) — this worker stops" && cut.s.progress === 0
+     && cutOneShot.answer === "stop" && !cutOneShot.hb.held.has("t1") && refusedRelease.answer === "stop" && !refusedRelease.hb.held.has("t1") && /could not release the claim \(permission denied for function release_thought\)/.test(refusedRelease.s.errs[0]),
+     `…and a release the database refuses stops the worker with it said; under --follow with the database gone the thought is this worker's again, for the finally to return (${cut.s.errs.join()})`);
+}
+
 listener.stop(true);
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

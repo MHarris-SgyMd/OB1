@@ -192,10 +192,10 @@ import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
-import { claimWorker, recordFailedAndStop, thoughtFault, type FaultHost } from "./claim-loop.ts";
+import { claimWorker, recordFailedAndStop, releaseFinished, setBackAborted, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 /**
@@ -2112,8 +2112,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   async function worker(n: number): Promise<void> {
     // What this engine gives claim-loop.ts's thoughtFault to read an error with (SMD-4308).
-    const faults: FaultHost = {
-      sql, job: JOB, follow: !!FOLLOW, err, outage, inCall, halt: () => halt,
+    const faults: FaultHost & ReleaseHost = {
+      sql, job: JOB, follow: !!FOLLOW, err, outage, inCall, halt: () => halt, limit: LIMIT, taken, progress,
       stopping: () => stopping, hardStopped: () => hardStopped,
       // Under --follow, what to do is worker-bootstrap.ts's `fault`, as extract-entities.ts reads it
       // (SMD-2636 PR 3a): paused for, then an outage; an outage at once — the model missing, a pair's
@@ -2141,7 +2141,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         stopping = true;
         passEnds.abort();
       },
-      count: { providerStop: () => { providerStops++; }, failed: () => { failed++; }, lost: () => { lost++; } },
+      count: { providerStop: () => { providerStops++; }, failed: () => { failed++; }, lost: () => { lost++; }, vanished: () => { vanished++; } },
     };
     // The loop is db/claim-loop.ts's (SMD-4308): the gate, the claim, the heartbeat and the leases' return. What a
     // thought's processing does with an error, and its release, are below.
@@ -2183,18 +2183,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               // the worker goes on with its next claim; a set-back the database
               // refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2).
               if (e instanceof AbortedInHand) {
-                hb.held.delete(b.thought_id);
-                let back: boolean;
-                try {
-                  back = await setBack(sql, JOB, workerId, b.thought_id);
-                } catch (re) {
-                  hb.held.add(b.thought_id);
-                  err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its judge call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
-                  return "stop";
-                }
-                // Not ours to set back: deleted, or edited or reaped meanwhile, and said so (review pass 1).
-                if (back && LIMIT > 0) taken.delete(b.thought_id);
-                outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
+                const back = await setBackAborted(faults, { id: b.thought_id, workerId, hb }, "judge call");
+                if (back === "stop") return "stop";
+                outcome = { outcome: "setBack", ...back };
                 continue;
               }
               // The database's and the provider's errors are read by claim-loop.ts's thoughtFault, for both engines (SMD-4308).
@@ -2260,52 +2251,26 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           err(`  ${b.thought_id}: edited while its worker waited at the admit gate — nothing more of it was judged; it is pending again, to be judged at its new text`);
           return "next";
         }
-        let ok: boolean;
-        let gone = false;
-        try {
-          [{ ok }] = await sql`
-            SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
-                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : null}) AS ok`;
-          if (!ok) {
-            const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
-            gone = !exists;
-          }
-        } catch (e) {
-          // The database went away under the release: the row is this
-          // worker's again, for the finally to return and --limit to give
-          // back (review pass 4).
-          if (FOLLOW && databaseUnavailable(e)) hb.held.add(b.thought_id);
-          err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
-          return "stop";
-        }
-        if (gone) {
-          vanished++;
-          err(`  ${b.thought_id}: deleted while it was being judged`);
-          return "next";
-        }
-        if (!ok) {
-          // The hard stop's release beat this one to the row: not a lapse to
-          // report, the caller's own stop; a release that went through first
-          // is counted below as any is — as reembed's (SMD-2425).
-          if (hardStopped) return "stop";
-          // Not ours to finish: counted with the rows this worker lost, not
-          // the ones it finished, so the workers' summaries add up.
-          err(`  ${b.thought_id}: the claim was no longer this worker's at release — its lease lapsed (no beat reached the database for ${TTL} s) or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
-          if (outcome.outcome === "failed") err(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
-          lost++;
-          progress();
-          return "next";
-        }
-        if (outcome.outcome === "failed") {
-          failed++;
-          err(`  ${b.thought_id}: ${outcome.error}`);
-        } else {
-          done++;
-          if (outcome.called) doneAsked++;
-        }
-        outage.settled(b.thought_id);
-        progress();
-        return "next";
+        // The release's outcome is read by claim-loop.ts's releaseFinished, for both engines (SMD-4308): the statement is this engine's.
+        const finished = outcome;
+        return releaseFinished(faults, { id: b.thought_id, workerId, hb }, {
+          release: async () => {
+            let ok: boolean;
+            [{ ok }] = await sql`
+              SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
+                                     ${finished.outcome}, ${finished.outcome === "failed" ? finished.error : null}) AS ok`;
+            return ok;
+          },
+          failed: finished.outcome === "failed" ? finished.error : null,
+          doing: "judged",
+          lapsedWhy: `its lease lapsed (no beat reached the database for ${TTL} s) or it was returned by hand with release_claims_for_worker`,
+          succeeded: () => {
+            // Never true here (a failure is `failed` above); it narrows `finished` for the counts below.
+            if (finished.outcome !== "succeeded") return;
+            done++;
+            if (finished.called) doneAsked++;
+          },
+        });
       },
     });
   }
