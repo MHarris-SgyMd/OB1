@@ -795,8 +795,6 @@ export function ticketsIn(text, teams) {
   }
   return out;
 }
-/** Whether one directory is the other or lies inside it. */
-const nested = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 /**
  * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
  * its team are tickets beside it (`smd-610-and-smd-611`); a word of another team is the place's description, no ticket
@@ -978,7 +976,7 @@ export function segment(events, s = emptySummary()) {
     // compaction, a new ticket or a branch move in `packages/node-22-compat` named NODE-22 as the new episode's place
     // (SMD-4291's review passes 2 to 4, cold read). Any other takes where the shell is, as before: a
     // folder naming nothing (`api`), a checkout of its own (a nested worktree), a place out of the roots.
-    const place = boundary && cur?.cwd && loc.cwd && inside() ? placeAt(loc.cwd, loc.branch || cur.branch) : undefined;
+    const place = boundary && cur?.cwd && loc.cwd && inside() ? placeAt(loc.cwd, loc.branch) : undefined; // the parser writes no empty branch: loc.branch is set whenever cur.branch is
     next.cwd = place?.kind === "folder" ? place.home : loc.cwd; next.branch = loc.branch;
     if (next.cwd) next.roots.add(next.cwd);
     if (boundary?.ticket) next.about.add(boundary.ticket); // the key it BEGAN with; its home is read live in `own` (second review pass)
@@ -999,16 +997,17 @@ export function segment(events, s = emptySummary()) {
       // name is its checkout's, not a ticket's (review pass 1, run-it: `packages/node-22-compat` taught NODE), but this
       // repo's worktrees sit under its checkout, the branch still `main`, and a projects folder holds checkouts (review
       // pass 2; pass 3 made it the rule an episode's opening reads too).
-      // The branch is the one the line moves to when it records both, cwd first (review pass 4, cold read).
-      const lineBranch = ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD" ? events[i + 1].v : "";
+      // The branch the line moves to when it records both, cwd first: the place is read with it (review pass 4, cold
+      // read), and the pair is one move (below).
+      const pairBranch = ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD" ? events[i + 1].v : "";
       // A folder teaches its home's team: a nested worktree's `packages/node-22-compat` is that worktree's (review pass 5).
-      const entered = ev.t === "branch" || !cur.cwd || !inside() ? undefined : placeAt(loc.cwd, lineBranch || loc.branch || cur.branch);
+      const entered = ev.t === "branch" || !cur.cwd || !inside() ? undefined : placeAt(loc.cwd, pairBranch || loc.branch);
       if (entered?.kind === "folder") learnTeams("cwd", entered.home); else learnTeams(ev.t, ev.v);
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it
       // ends before its branch arrives (second review pass).
-      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); learnTeams("branch", nb.v); loc.branch = nb.v; }
+      if (pairBranch) { const nb = events[++i]; apply(s, nb); learnTeams("branch", nb.v); loc.branch = nb.v; }
       if (!cur.prompts.length) { settle(); continue; } // before the first ask, the episode is wherever the session is
       if (!branchMoved()) {
         if (inside()) settle(); // a cd within the checkout
