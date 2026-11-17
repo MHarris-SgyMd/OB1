@@ -2708,6 +2708,10 @@ export async function postWrite(cfg, op) {
     catch (e) { return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(String(e?.message ?? e)).slice(0, 200)}` }; }
     const text = textOfResult(result);
     const note = dropped.length ? ` (dropped: ${dropped.join(", ")})` : "";
+    // A forget that left some of the thought there (a replay, a fault, on a copy after the first): kept, to be sent
+    // again, so its text does not stay there for a copy logged done (SMD-1723 PR 3, review pass 2).
+    const missedThere = op.tool === "forget_thought" && !result.isError && Array.isArray(result.structuredContent?.notForgotten) && result.structuredContent.notForgotten.length;
+    if (missedThere) return { keep: true, line: `kept: ${opLabel(op)} — forgotten in part there, ${missedThere} cop${missedThere === 1 ? "y" : "ies"} of it not yet: sent again` };
     if (!result.isError) {
       const id = new RegExp(`\\b(${UUID})\\b`, "i").exec(text.split("\n")[0])?.[1];
       const keyed = typeof result.structuredContent?.keyed === "string" ? `, ${result.structuredContent.keyed}` : "";

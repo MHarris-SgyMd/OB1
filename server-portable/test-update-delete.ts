@@ -650,6 +650,16 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
       && !byId.isError && byId.sc.clientKey === KC && new RegExp(`^Forgot ${c1}, its client_key ${KC} at `).test(byId.text) && opens.every((n) => n === 0),
     `every thought here a name is goes with one forget — a re-capture and its deleted copy, two deleted copies, a deleted id and the thought keeping it as its key — and a keyed thought's reply names its key (${JSON.stringify({ a: byA.sc.alsoForgottenIds, b: byB.sc.alsoForgottenIds, s: byS.sc.alsoForgottenIds, key: byId.sc.clientKey, opens })})`);
 
+  // A thought standing under the name as its id (an import or a refresh keeps ids) beside one keeping that name as its
+  // key: both go (review pass 2: the keyed one was left).
+  const KD = "55555555-5555-4555-8555-555555555555";
+  const keyedD = idOf(await writer.call("capture_thought", { content: "[12] a copy keeping a name another thought has as its id", client_key: KD }));
+  await sql`INSERT INTO thoughts (id, content, content_fingerprint) VALUES (${KD}::uuid, ${"[12] a thought written under that id"}, content_fingerprint_of(${"[12] a thought written under that id"}))`;
+  const byD = await full("forget_thought", { id: KD, confirm: KD });
+  const standingD = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${KD}::uuid, ${keyedD}::uuid)`)[0].c);
+  assert(!byD.isError && byD.sc.id === KD && JSON.stringify(byD.sc.alsoForgottenIds) === JSON.stringify([keyedD]) && standingD === 0,
+    `a name that is one thought's id and another's key takes both (${JSON.stringify(byD.sc.alsoForgottenIds)}; ${standingD} standing)`);
+
   // An edit resending a row's own text is the database's to take, as its trigger does, though the text was forgotten:
   // a row holding it with no fingerprint (an operator's reinstating write) (review pass 3).
   const keyless = String((await sql.begin(async (tx) => {

@@ -5285,6 +5285,29 @@ console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids
   const fnHint = forgetHint("permission denied for function forget_thought");
   assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
     `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  // A forget whose name is three thoughts: the first forgotten, the second refused REPLAYING, the third a fault — each
+  // its own transaction, so the first stays forgotten and the other two are named, not lost (review pass 2).
+  const { createCore } = await import("./core/index.ts");
+  const N = "00000000-0000-4000-8000-0000000017d1", D2 = "00000000-0000-4000-8000-0000000017d2", D3 = "00000000-0000-4000-8000-0000000017d3";
+  const tried: string[] = [];
+  const store = {
+    thoughtsNamed: async () => new Map([[N, N]]),
+    thoughtsKeyed: async () => [D2, D3],
+    clientKeyOf: async () => null,
+    forgetThought: async ({ id }: { id: string }) => {
+      tried.push(id);
+      if (id === N) return { ok: true, ...evidence, id: N, itemIds: [], proposalIds: [] };
+      if (id === D2) return { ok: false, error: "REPLAYING" };
+      throw Object.assign(new Error("the store went away"), { errno: "57P01" });
+    },
+  };
+  const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+  const partial = await core.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
+  const partialReply = renderForget(partial as never);
+  assert(partial.ok && JSON.stringify(partial.value.notForgotten) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "57P01" }]) && tried.join() === [N, D2, D3].join()
+      && /Not forgotten — the same thought under that name, still holding its text here: .*REPLAYING/.test(partialReply.content[0].text)
+      && Array.isArray((partialReply.structuredContent as Record<string, unknown>).notForgotten),
+    `a refusal or a fault after the first thought is named, not lost, the first staying forgotten (${JSON.stringify(partial.ok ? partial.value.notForgotten : partial)})`);
   const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
   const noWord = thrown({ ok: false });
   const noTime = thrown({ ok: true, id: T, removed: {} });

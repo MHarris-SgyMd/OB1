@@ -956,7 +956,7 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
  * client_key, read before the forget redacted it, so a copy of the call can name the thought on a brain that knows it
  * by that key alone; and the other thoughts here the same name was, forgotten with it.
  */
-export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[] };
+export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[]; notForgotten?: { id: string; code: string }[] };
 export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
 
 export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, confirm, detach_citations }: Input<"forget_thought">): Promise<Outcome<Forgotten, ForgetCode>> {
@@ -971,10 +971,12 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   // not undone, so none of its copies here is left with the text. First the
   // thought with that id, else the one keeping it as its key, standing
   // (SMD-3314's rule); then, for a key that can read, the thought the log
-  // holds under that id (deleted before), and every deleted thought whose
-  // tombstone kept it as its key — a forget copied from another brain names
+  // holds under that id (deleted before), and every thought that kept it as
+  // its key, standing or deleted — a forget copied from another brain names
   // the copy so, and a delete copied before may have taken the row. The first
-  // forgotten is the reply's; a refusal of that one (CITED) stops the rest.
+  // forgotten is the reply's; a CITED before it stops the rest. One not
+  // forgotten after it — refused, or a fault, each its own transaction — is
+  // named in the reply (notForgotten), never dropped (review pass 2).
   const store = await ctx.store();
   const actor = actorOf(ctx, principal);
   const detach = detach_citations === true;
@@ -983,23 +985,31 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   const order = [named.id.toLowerCase()];
   if (canRead(principal)) {
     if (named.byClientKey) order.push(lower);
-    order.push(...(await store.deletedThoughtsKeyed(lower)));
+    order.push(...(await store.thoughtsKeyed(lower)));
   }
   const ids = [...new Set(order)];
   let first: { id: string; key: string | null; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: true }> } | undefined;
   let refused: { id: string; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: false }> } | undefined;
   const also: string[] = [];
+  const missed: { id: string; code: string }[] = [];
   for (const id of ids) {
-    // The thought's own key before its forget redacts it: the reply names it.
-    const key = first || !canRead(principal) ? null : await store.clientKeyOf(id);
-    const r = await store.forgetThought({ id, actor, detach });
-    if (r.ok) {
-      if (!first) first = { id, key, result: r }; else also.push(id);
-    } else if (!first && !refused) {
-      refused = { id, result: r };
+    if (!first) {
+      // The thought's own key before its forget redacts it: the reply names it.
+      const key = canRead(principal) ? await store.clientKeyOf(id) : null;
+      const r = await store.forgetThought({ id, actor, detach });
+      if (r.ok) { first = { id, key, result: r }; continue; }
+      if (!refused || (refused.result.error === "NOT_FOUND" && r.error !== "NOT_FOUND")) refused = { id, result: r };
       if (r.error === "CITED") break;
-    } else if (!first && refused?.result.error === "NOT_FOUND" && r.error !== "NOT_FOUND") {
-      refused = { id, result: r };
+      continue;
+    }
+    // After the first: each its own transaction, so a refusal or a fault here leaves what came before forgotten, and
+    // is said rather than lost; one forgotten already, or no longer there, is nothing left.
+    try {
+      const r = await store.forgetThought({ id, actor, detach });
+      if (r.ok) also.push(id);
+      else if (r.error !== "NOT_FOUND" && r.error !== "FORGOTTEN") missed.push({ id, code: r.error });
+    } catch (e) {
+      missed.push({ id, code: String((e as { errno?: unknown }).errno ?? "FAILED") });
     }
   }
   if (!first) {
@@ -1021,6 +1031,7 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
     ...(first.id !== lower ? { byClientKey: lower } : {}),
     ...(first.key && first.key !== lower ? { clientKey: first.key } : {}),
     ...(also.length ? { alsoForgotten: also } : {}),
+    ...(missed.length ? { notForgotten: missed } : {}),
   });
 }
 

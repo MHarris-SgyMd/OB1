@@ -1950,6 +1950,7 @@ export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
       `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : v.clientKey ? `, its client_key ${v.clientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
       `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
     ];
+    if (v.notForgotten?.length) lines.push(`Not forgotten — the same thought under that name, still holding its text here: ${v.notForgotten.map((m) => `${m.id} (${m.code})`).join(", ")}. Call forget_thought with the same id again: what is forgotten is not repeated.`);
     if (v.alsoForgotten?.length) lines.push(`Also forgotten here, the same thought under that name (a copy deleted before, or one keeping it as its client_key): ${v.alsoForgotten.join(", ")}.`);
     if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync, until an operator reinstates it.`);
     if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
@@ -1960,6 +1961,7 @@ export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
   }, forgetRefusal, (v) => ({
     id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), ...(v.clientKey ? { clientKey: v.clientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
     ...(v.alsoForgotten?.length ? { alsoForgottenIds: v.alsoForgotten } : {}),
+    ...(v.notForgotten?.length ? { notForgotten: v.notForgotten.map((m) => ({ id: m.id, code: m.code })) } : {}),
     // REST's arrays renamed, the guard holding a key ending in Ids to uuids.
     removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins, itemIds: v.itemIds, proposalIds: v.proposalIds,
     ...(v.source ? { source: { system: v.source.system, identitySha256: v.source.identitySha256 } } : {}),

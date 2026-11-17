@@ -1021,16 +1021,23 @@ export class SqlStore implements ThoughtStore {
     }
   }
 
-  async deletedThoughtsKeyed(key: string): Promise<string[]> {
+  async thoughtsKeyed(key: string): Promise<string[]> {
     if (!UUID_RE.test(key)) return [];
-    // Every thought a delete event's previous metadata kept the key for, not standing again, newest first. A scan of
-    // the delete events (no index on the path): only a forget asks, and only by a name (review pass 1 measured 0.5 s
-    // at a million deletes).
+    const k = key.toLowerCase();
+    // The standing thought keeping the key (112's unique index), then every thought a delete event's previous metadata
+    // kept it for, not standing again, newest first — never the thought whose id it is. The deleted arm scans the
+    // delete events (no index on the path): only a forget asks, and only by a name (review pass 1 measured 0.5 s at a
+    // million deletes).
     const rows = await this.sql`
-      SELECT a.thought_id::text AS id, max(a.created_at) AS at FROM thought_audit a
-       WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${key.toLowerCase()}::text
-         AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
-       GROUP BY a.thought_id ORDER BY at DESC`;
+      SELECT id FROM (
+        SELECT t.id::text AS id, 0 AS arm, now() AS at FROM thoughts t
+         WHERE t.metadata->>'client_key' = ${k}::text AND t.id::text <> ${k}::text
+        UNION ALL
+        SELECT a.thought_id::text, 1, max(a.created_at) FROM thought_audit a
+         WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${k}::text AND a.thought_id::text <> ${k}::text
+           AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
+         GROUP BY a.thought_id) x
+      ORDER BY arm, at DESC`;
     return (rows as { id: string }[]).map((r) => String(r.id).toLowerCase());
   }
 

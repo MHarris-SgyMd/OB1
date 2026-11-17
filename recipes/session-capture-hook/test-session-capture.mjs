@@ -2837,7 +2837,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   // server from before 144, with no forget_thought.
   const gone = new Map(); // id → key
   const forgottenIds = new Set();
-  let nextId = 7000, away = false, canaryOld = false, busy = false, slowMs = 0, canaryNoForget = false;
+  let nextId = 7000, away = false, canaryOld = false, busy = false, slowMs = 0, canaryNoForget = false, canaryPartial = false;
   // A call held until a line reaches the canary's log, so two drains provably overlap (review pass 2: timing alone let them run apart).
   let gate = null;
   /** A gate on a log line written after it is set: an earlier case's line of the same words does not open it. */
@@ -2888,6 +2888,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
       if (!id) return err(`No thought with id ${args.id} was ever in the brain's log, nor deleted keeping it as its client_key, so there is nothing to forget.`, { code: "NOT_FOUND" });
       if (forgottenIds.has(id)) return err(`Refused: ${id} was forgotten already, and nothing of it is left to remove.`, { code: "FORGOTTEN" });
       thoughts.delete(id); gone.delete(id); forgottenIds.add(id);
+      if (canaryPartial) return ok(`Forgot ${id} at 2026-11-16T00:00:00.000Z.\nNot forgotten — the same thought under that name, still holding its text here: ${uuid(7999)} (REPLAYING).`, { id, notForgotten: [{ id: uuid(7999), code: "REPLAYING" }] });
       return ok(`Forgot ${id}${id !== n ? `, named by its client_key ${n}` : ""} at 2026-11-16T00:00:00.000Z.`, { id });
     }
     const target = byName(args.id);
@@ -2998,13 +2999,35 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   away = true;
   const c40 = await post("capture_thought", { content: "a secret captured while the canary is away, then forgotten" }, captured(S(40)));
   const queuedCapture = queueIn().length;
-  const f6 = await post("forget_thought", { id: S(40), confirm: S(40) }, forgot(S(40)));
-  const afterForget = queueIn().map((f) => JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", f), "utf8")).tool);
+  // Beside it (review pass 2): an edit of it and an earlier forget of it, queued; a capture keyed by its own client_key
+  // (ALT, where it began), given up; and another thought's copy. The forget drops the edit and both captures, and
+  // leaves the earlier forget and the other thought's copy.
+  const ALT = uuid(7200);
+  const seed = (dir, name, op) => { mkdirSync(join(CANARY_ROOT, "writes", dir), { recursive: true }); writeFileSync(join(CANARY_ROOT, "writes", dir, name), JSON.stringify({ from: "stable", at: new Date().toISOString(), ...op })); };
+  seed("pending", "000000000000001-000000000000001-1.json", { tool: "update_thought", args: { id: S(40), content: "the secret, edited" } });
+  seed("pending", "000000000000002-000000000000002-1.json", { tool: "forget_thought", args: { id: S(40), confirm: S(40) } });
+  seed("pending", "000000000000003-000000000000003-1.json", { tool: "capture_thought", args: { content: "another thought", client_key: S(49) } });
+  seed("dead", "000000000000004-000000000000004-1.json", { tool: "capture_thought", args: { content: "the secret, given up", client_key: ALT } });
+  const f6 = await post("forget_thought", { id: S(40), confirm: S(40) }, [{ type: "text", text: `Forgot ${S(40)}, its client_key ${ALT} at 2026-11-16T00:00:00.000Z.` }]);
+  const afterForget = queueIn().map((f) => { const o = JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", f), "utf8")); return `${o.tool}:${o.args.client_key ?? o.args.id}`; });
+  const deadLeft = readdirSync(join(CANARY_ROOT, "writes", "dead")).filter((f) => f.startsWith("000000000000004"));
   away = false;
   const drained40 = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
-  assert(c40.code === 1 && queuedCapture === 1 && f6.code === 1 && JSON.stringify(afterForget) === '["forget_thought"]' && drained40.code === 0 && !queueIn().length
-      && !calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(40)) && new RegExp(`dropped 1 queued or given-up copy of ${S(40)}`).test(logOf(CANARY_ROOT)),
-    `a forget drops its thought's queued capture, the text never reaching the canary; the forget alone drains (${JSON.stringify(afterForget)})`);
+  assert(c40.code === 1 && queuedCapture === 1 && f6.code === 1
+      && JSON.stringify([...afterForget].sort()) === JSON.stringify([`capture_thought:${S(49)}`, `forget_thought:${S(40)}`, `forget_thought:${S(40)}`]) && deadLeft.length === 0
+      && drained40.code === 0 && !queueIn().length && !calls.some((c) => c.args.client_key === S(40) || c.args.client_key === ALT || (c.name === "update_thought" && c.args.id === S(40)))
+      && new RegExp(`dropped 3 queued or given-up copies of ${S(40)}`).test(logOf(CANARY_ROOT)),
+    `a forget drops its thought's queued and given-up copies — a capture by its id, one by its own key, an edit — and keeps an earlier forget and another thought's copy (${JSON.stringify(afterForget)}; dead: ${deadLeft.length})`);
+
+  // A forget the canary answers in part (some copy of it there not forgotten: a replay, a fault): kept, sent again.
+  canaryPartial = true;
+  await post("capture_thought", { content: "a secret the canary forgets in part" }, captured(S(42)));
+  const f8 = await post("forget_thought", { id: S(42), confirm: S(42) }, forgot(S(42)));
+  const heldPartial = queueIn().length;
+  canaryPartial = false;
+  const drained42 = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(f8.code === 1 && heldPartial === 1 && /kept: forget_thought of [^ ]+ — forgotten in part there, 1 copy of it not yet: sent again/.test(f8.err) && drained42.code === 0 && !queueIn().length,
+    `a forget answered in part is kept and sent again (${f8.err.trim().slice(0, 120)})`);
 
   // A thought that began on the canary, copied to stable under the canary's id as its key: stable's reply names that key,
   // and the copy, which the canary does not know by stable's id, is sent again by it (review pass 1).
