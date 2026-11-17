@@ -6031,15 +6031,15 @@ brains backlogged, neither brain's live captures wait for a slot and their
 background work splits the background slots; and that, with one backlogged, it
 uses its share alone under fixed shares, or every free slot under the host's slot
 broker (`deploy/federated/`). This makes the backlog, reads what each brain's
-background calls held, and cleans up after. `bench-live.ts` times the live calls
-beside it.
+sleep held of the slots, and deletes its notes after. `bench-live.ts` times the
+live calls beside it.
 
 ```bash
 bun bench-brains.ts load    --brains brains.json --brain canary --arm B --ids ids-canary.txt   # the arm's 150 notes
 bun bench-brains.ts sample  --brains brains.json --arm B --minutes 20 --out samples.jsonl --ollama http://127.0.0.1:11434
 bun bench-brains.ts clean   --brains brains.json --brain canary --ids ids-canary.txt [--arm B]
 bun bench-brains.ts summary --out samples.jsonl --split 12 --live live-B-canary.jsonl --live live-B-scratch.jsonl
-bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic, clean against a brain in memory; what CI runs
+bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic, the summary's table, clean against a brain in memory; what CI runs
 ```
 
 `--brains` is a JSON file naming each brain: `{"canary": {"connector":
@@ -6054,43 +6054,76 @@ it does not read.
   `SMD-3379 measure note (arm <arm> #<i>). ` and is captured with source
   `smd3379-measure`, two at a time; each id is appended to `--ids` as it lands. As
   with `bench-live.ts`, only a brain whose `brain_info` says tier `canary` or
-  `working` takes them.
+  `working` takes them. A capture that answers no id is counted apart: it was not
+  saved, or the brain already held the note (an arm loaded twice), or it was cut
+  off and may land yet. `load` exits 1 on any of those, or on a note saved
+  without a vector or tags.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
   seconds (15), and, with `--ollama`, the model server's loaded models from
   Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
-  if a brain never answered.
-- **clean** deletes the listed ids, then searches for measure notes whose ids never
-  came back and deletes those whose text starts as one does: the arm's alone with
-  `--arm`, else every measure note on the brain, of any arm or run. A delete counts
-  only when the brain deletes the thought or says it has no thought of that id. A
-  last search finds any note still there. It exits 1 if one is left, or if a
-  delete, a read or a search failed.
+  if a brain never answered, and 128 plus the signal's number if a signal cut it
+  short, as `bench-live.ts` does.
+- **clean** reads back each listed id, then searches for measure notes whose ids
+  never came back and reads those back too. It deletes the ones whose text starts
+  as a measure note does: the arm's alone with `--arm`, else every measure note on
+  the brain, of any arm or run. A listed id is trusted no more than a search hit:
+  - one whose text is no measure note's is left, said, and exits 1;
+  - one that is another arm's note, under `--arm`, is left and counted;
+  - one the brain no longer holds is counted as already gone, not as deleted.
+
+  A last search finds any note still there. It exits 1 if one is left, or if a
+  delete, a read or that search failed. Run it after `load` has ended: a capture
+  still on its way lands afterwards, and a second run finds it. It deletes the
+  notes alone. The entities extraction drew from them stay until an operator
+  prunes the orphans (`prune_orphan_entities()`), and the audit log keeps each
+  note's text.
 - **summary** prints, for each arm and brain, its sleep's background calls in two
   windows: before `--split` minutes, with no live load from the harness, and after
   it, with `bench-live.ts` running. For each window it gives:
   - the calls, and their time;
-  - the mean number in flight: their time over the window's. That is the slots the
-    brain's background held on average, near enough: it counts failed calls too,
-    and any call that ran without a slot;
+  - the mean number in flight: their time over the window's;
   - the slot waits, of every model server the sleep asks, its decide tier's
-    included.
+    included, in all and by pass.
 
-  It also gives the brain's extraction backlog (first, last, most, and when it ran
-  dry), how often the model server's loaded models changed, and each `--live`
-  file's latencies by label.
+  It also gives the brain's extraction rows pending or claimed (first, last, most,
+  and when they ran dry), how many of its samples failed, how often the model
+  server's loaded models differed from one sample to the next, and each `--live`
+  file's latencies by label. A brain that never answered in an arm is said so.
+  Two runs of one arm name appended to one `--out` read as one arm.
 
-A heartbeat's tallies count since the sleep's process began. It stamps them about
-once a minute, and a call counts when it ends. So a window's figures are the sum
-of the increases from stamp to stamp, over the time between its first and last
-stamps. A call running across a stamp counts in the next one, so a long call (a
-27B model's, minutes) counts whole in the window it ends in. A pair of stamps in
-which any pass's tally falls, or a pass drops out, marks the process begun again:
-every pass's value then is the increase since, and the summary counts the
-restarts. Two restarts between one pair of stamps lose the calls before the
-second. Each sample keeps the coordinator's children and the time of its stamp,
-whose `for_s` says when one began. A build
-before SMD-3379 PR 2b-2a stamps no tallies: for it, the summary gives the share of
-samples in which its sleep was working.
+**Reading "in flight".** It is near the slots the sleep held on average, with
+these limits:
+
+- It is the sleep's alone. Board-sync's calls, the api's vector mender's and a
+  detached job's hold slots too and are not in it.
+- A call's time runs from its slot to its answer, failed or not. Its wait inside
+  the model server (a model loading, a call ahead of it) is in that time; its
+  wait for a slot is not. A model server that stalls a call makes it read as held.
+- A tally is a pass's, over every model and server the pass calls. A brain's
+  figure adds its passes, so it can pass any one server's room.
+- A call counts whole in the window it ends in. A window gains the earlier part
+  of the calls ending in it and loses the calls still running at its end, so a
+  long call (a 27B model's, minutes) can put the figure above the workers.
+
+**The windows.** A heartbeat's tallies count since the sleep's process began. It
+stamps them about once a minute, by the database's clock, and a call counts when
+it ends. So a window's figures are the sum of the increases from stamp to stamp,
+over the time between its first and last stamps. That is up to a stamp short of
+its minutes at each end, and the pair of stamps across the split is in neither
+window. A pair of stamps in which any pass's tally falls, or a pass drops out,
+marks the process begun again: every pass's value then is the increase since, and
+the summary counts the restarts. The calls the old process made after its last
+stamp are lost. A restart whose first stamp already passes the old one's on every
+tally is not seen. Each sample keeps the coordinator's children and the time of
+its stamp, whose `for_s` says when one began. A sleep that has made no model call
+stamps no tallies, nor does a build before SMD-3379 PR 2b-2a: for those, the
+summary gives the share of samples in which the sleep was working.
+
+**The extraction rows** are `worker_status`'s pending and claimed rows under
+every `extract:` key. They are thoughts, so `bench-live.ts`'s probes and any
+older backlog are among them. Failed rows are not counted, so "ran dry" does not
+say every note was extracted. A brain whose extraction has never run has no pool
+yet, and its loaded notes show only once its sleep's first pass pools them.
 
 ### bench-querylog.ts
 

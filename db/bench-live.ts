@@ -63,7 +63,8 @@
  * else 128 + the signal's number if a signal cut the run short. The key, and
  * the url unless --mcp names one, are read from one ~/.claude.json entry, the
  * canary's connector by default (since SMD-2874 the canary takes its own key
- * alone, on its own port); the key is never printed.
+ * alone, on its own port), or the key from --key-file's file beside --mcp; the
+ * key is never printed.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -324,7 +325,11 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const keyFile = cli.value("key-file");
-  const { mcp, key } = keyFile ? { mcp: cli.value("mcp")!, key: keyFromFile(readFileSync(keyFile, "utf8")) } : connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
+  // A key file that is not there, or holds no one key, is said in a line (review pass 2: it was a stack trace), never its content.
+  const fromFile = (path: string): string => {
+    try { return keyFromFile(readFileSync(path, "utf8")); } catch (e) { console.error(`bench-live.ts: --key-file: ${(e as Error).message}`); process.exit(2); }
+  };
+  const { mcp, key } = keyFile ? { mcp: cli.value("mcp")!, key: fromFile(keyFile) } : connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
   // Fail before the first call, not after a capture has landed, if either file cannot be written.
   appendFileSync(out, "");
   appendFileSync(ids, "");
@@ -686,6 +691,8 @@ export function selfCheck(): number {
   ok(keySourceProblem(undefined, undefined, undefined) === null && keySourceProblem("u", "c", undefined) === null && keySourceProblem("u", undefined, "f") === null, "the canary's connector, --mcp with --key-from, and --mcp with --key-file are each one key");
   ok(/give --key-from with the connector/.test(keySourceProblem("u", undefined, undefined) ?? "") && /give --mcp too/.test(keySourceProblem(undefined, undefined, "f") ?? "") && /not both/.test(keySourceProblem("u", "c", "f") ?? ""), "--mcp with no key, --key-file with no --mcp, and both key flags are refused");
   ok(keyFromFile("abc123\n") === "abc123" && (() => { try { keyFromFile("two words\n"); return false; } catch (e) { return !/two words/.test((e as Error).message); } })(), "a key file's one line is its key; anything else is refused without naming it");
+  const noKey = (text: string) => { try { keyFromFile(text); return false; } catch { return true; } };
+  ok(noKey("") && noKey("\n") && noKey("kéy\n") && !noKey("  abc123\n") && keyFromFile("  abc123\n") === "abc123", "an empty key file, or one whose line is not printable ASCII, is no key; spaces around the line are trimmed");
   ok(typeof conn(undefined) === "string", "no such entry is refused");
   ok(shownUrl("http://user:SECRET@host:8000/mcp") === "http://host:8000/mcp", "the banner never prints a URL's userinfo");
   ok(shownUrl("not a url") === "(an endpoint that does not parse)", "an endpoint that does not parse is not echoed");
