@@ -3974,6 +3974,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   } as never, at)) as Record<string, unknown>;
   assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
     `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  const modernRpc = ["server/discover", "subscriptions/listen"].map((rpc) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rpc, status: 200, outcome: "ok", ms: 1 }, at)) as { rpc?: unknown }).rpc);
+  assert(JSON.stringify(modernRpc) === '["server/discover","subscriptions/listen"]', `the two methods the 2026-07-28 revision adds are named, not \`other\` (SMD-4345: ${JSON.stringify(modernRpc)})`);
   assert(odd.agent === "laptop?{\"forged\":1}" && !JSON.stringify(odd).includes("the-key") && !JSON.stringify(odd).includes("private") && !("url" in odd) && !("query" in odd),
     "…the agent's name held to printable ASCII (a line break is `?`); a field the record does not declare is not written");
 
@@ -5266,6 +5268,30 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
     `a retried hundredth entry found, not full; a null entry passed over; each answer's stamp; deleted under the read NOT_FOUND; a longer list at its count; busy 503 and the list's refusals 409 over REST (${JSON.stringify([retried, pastNull.ok, appendedStamp, goneUnder.ok ? "ok" : goneUnder.refusal.code])})`);
 }
 
+console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids among the values, the twins' wording, the hint for a brain without 144, and a malformed answer a fault (SMD-1723 PR 2)");
+{
+  const { renderForget, forgetHint } = await import("./render.ts");
+  const { normaliseForget } = await import("./store.ts");
+  const T = "00000000-0000-4000-8000-000000001723", I = "00000000-0000-4000-8000-0000000017a1", P = "00000000-0000-4000-8000-0000000017b1", TW = "00000000-0000-4000-8000-0000000017c1";
+  const evidence = { id: T, forgottenAt: "2026-11-16T00:00:00.000Z", gone: false, orphanEntities: 0, removed: { audit_events: 2 }, irreproducible: [], pages: [], twins: [] as string[], source: null, itemIds: [I], proposalIds: [P], outside: [] };
+  const plain = renderForget({ ok: true, value: evidence } as never);
+  const twinned = renderForget({ ok: true, value: { ...evidence, twins: [TW] } } as never);
+  const sc = plain.structuredContent as Record<string, unknown>;
+  assert(JSON.stringify(sc.itemIds) === JSON.stringify([I]) && JSON.stringify(sc.proposalIds) === JSON.stringify([P])
+      && /the same text is refused if captured again/.test(plain.content[0].text) && !/refused if captured again/.test(twinned.content[0].text)
+      && new RegExp(`lands on them rather than being refused: ${TW}`).test(twinned.content[0].text),
+    `the values carry the item and proposal ids; the text promises a refusal only when no twin keeps the text (${JSON.stringify({ itemIds: sc.itemIds, proposalIds: sc.proposalIds })})`);
+  const tableHint = forgetHint("permission denied for table thought_audit");
+  const fnHint = forgetHint("permission denied for function forget_thought");
+  assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
+    `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
+  const noWord = thrown({ ok: false });
+  const noTime = thrown({ ok: true, id: T, removed: {} });
+  assert(noWord !== "answered" && noTime !== "answered" && thrown({ ok: false, error: "NOT_FOUND", id: T }) === "answered",
+    `a refusal with no error word and an answer with no forgotten_at are faults, not NOT_FOUND or "at ." (${noWord} | ${noTime})`);
+}
+
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
 {
   const { keptStampKeys } = await import("./core/writes.ts");
@@ -5282,7 +5308,7 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
       && JSON.stringify(planted) === '[{"key":"actor_name","value":null,"present":true},{"key":"trust","value":null,"present":false}]',
     `the patch against the write's stamp: nothing for a patch naming no stamp key or a database that answered no stamp; the kept keys, an echo not among them; a non-string present, a null absent (${JSON.stringify({ none, kept, pre088, planted })})`);
   // Through the operation, on a store answering as 088 does — and as a database before it does.
-  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
+  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ textForgottenAt: async () => null, updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
   const principal = { name: "laptop", scope: "write", keyHash: "x" } as never;
   const lowered = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
   const echoed = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "x", metadata_patch: { trust: "agent" } } as never);
@@ -6956,7 +6982,7 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && curShape.isError === true && /not a list_claims cursor/.test(text(curShape)) && curFilters.isError === true && /made with other filters/.test(text(curFilters)),
     `release_claim's two answers in words, and list_claims' JSON with 143's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
 
-  // release_holder_claims' render (SMD-3606 PR 3, migration 144): the count and holder in words, the claims in the value; the refusals name the key's kind or the registry away; the fault names a brain before 144.
+  // release_holder_claims' render (SMD-3606 PR 3, migration 145): the count and holder in words, the claims in the value; the refusals name the key's kind or the registry away; the fault names a brain before 145.
   const relMany = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 3, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }, { id: "c", issue: "SMD-2", piece: "PR 2" }] } } as never);
   const relOne = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 1, claims: [{ id: "a", issue: "SMD-1", piece: null }] } } as never);
   const relZero = say.renderReleaseHolderClaims({ ok: true, value: { holder: "ghost", released: 0, claims: [] } } as never);
@@ -6974,8 +7000,8 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && relStuck.isError === true && /the agent registry cannot give this server until an operator acts/.test(text(relStuck))
       && relSv.holder === "codex" && relSv.released === 3 && (relSv.claims as unknown[]).length === 3 && !/wc_/i.test(JSON.stringify(relSv)),
     `release_holder_claims' render: the count and holder, the claims in the value, the refusals and the registry away (${text(relMany)} | ${text(relAgent).slice(0, 60)})`);
-  assert(/migration 144/.test(say.releaseHolderHint("function release_holder_claims(text, text, jsonb) does not exist")) && say.releaseHolderHint("connection refused") === "",
-    `release_holder_claims' hint names a brain before 144 (${say.releaseHolderHint("function release_holder_claims does not exist").slice(0, 60)})`);
+  assert(/migration 145/.test(say.releaseHolderHint("function release_holder_claims(text, text, jsonb) does not exist")) && say.releaseHolderHint("connection refused") === "",
+    `release_holder_claims' hint names a brain before 145 (${say.releaseHolderHint("function release_holder_claims does not exist").slice(0, 60)})`);
 
   // The list_work_claims cursor codec (SMD-3606 PR 2): this listing's own round-trips with its selection; another tag, a
   // wrong length, a non-boolean include_ended, an over-long or non-string ticket/holder, an empty issue, an over-long
@@ -8003,7 +8029,7 @@ console.log("\n[36e] The operator's work-claim cap in the core and the words (SM
     `brain_info's Work-claim cap row: before 140, unread, built in, the operator's, the operator's refused; a read answering no cap throws (${lines.join(" | ")} | ${badRead.join(",")})`);
 }
 
-console.log("\n[36f] The operator's holder-release in the core and the words (SMD-3606 PR 3, migration 144): releaseHolderClaims passing the holder, reason and the caller's key to the store; its answer and its NOT_OPERATOR refusal said; the no-agent-id paths (the registry away RELEASE_HOLDER_UNATTRIBUTED, a principal with none REFUSED_NOT_OPERATOR, neither reaching the store); an envelope the store cannot read a fault");
+console.log("\n[36f] The operator's holder-release in the core and the words (SMD-3606 PR 3, migration 145): releaseHolderClaims passing the holder, reason and the caller's key to the store; its answer and its NOT_OPERATOR refusal said; the no-agent-id paths (the registry away RELEASE_HOLDER_UNATTRIBUTED, a principal with none REFUSED_NOT_OPERATOR, neither reaching the store); an envelope the store cannot read a fault");
 {
   const { releaseHolderClaims } = await import("./core/claims.ts");
   const { normaliseReleaseHolder } = await import("./store.ts");

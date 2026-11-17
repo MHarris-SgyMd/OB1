@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 144: release every live claim one holder holds — release_holder_claims,
+-- Migration 145: release every live claim one holder holds — release_holder_claims,
 --                an operator key's one-call undo of a claim hog (SMD-3606 PR 3)
 -- =============================================================================
 --
@@ -36,7 +36,7 @@
 --   writes work_claims under the claims group's UPDATE it already holds (115), so
 --   this adds no grant. Nothing runs at apply time but the DDL; no row moves; no
 --   table is touched. PATCH under FORK.md's version rules: a new function, nothing
---   existing changed. test-schema [131], test-upgrade [20ci], test-rest-sql [25],
+--   existing changed. test-schema [132], test-upgrade [20cj], test-rest-sql [25],
 --   the store and server suites.
 --
 -- Prerequisites
@@ -51,20 +51,20 @@ DO $qc$
 BEGIN
   IF to_regclass('work_claims') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 144 needs 115 (work_claims); this schema lacks it',
+      MESSAGE = 'migration 145 needs 115 (work_claims); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_work_claim_actor(jsonb, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 144 needs 115 (ob1_work_claim_actor); this schema lacks it',
+      MESSAGE = 'migration 145 needs 115 (ob1_work_claim_actor); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_registry_kind(uuid, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 144 needs 046 (ob1_registry_kind); this schema lacks it',
+      MESSAGE = 'migration 145 needs 046 (ob1_registry_kind); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -129,4 +129,4 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION release_holder_claims(text, text, jsonb) IS
-  'An operator key ends every live claim (unreleased and unexpired) one holder holds — p_holder, a key''s name as list_work_claims shows it — in one call, each with p_reason: the one-call undo of a claim hog (SMD-3606 Work item 3; 140 caps new claims, this ends the ones made). Only a key the registry classifies operator by its agent id in p_actor (a name alone lends no kind, SMD-2608); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}, nothing ended. A blank holder answers NO_HOLDER, a blank reason NO_REASON. Otherwise {ok: true, holder, released: N, claims: [{id, issue, piece}, …]}, ordered as list_work_claims lists; the rows stay as history with the operator and reason on each. One atomic UPDATE, READ COMMITTED, no lock. The holder''s lapsed and released claims, and every other holder''s, stand. Migration 144 / SMD-3606.';
+  'An operator key ends every live claim (unreleased and unexpired) one holder holds — p_holder, a key''s name as list_work_claims shows it — in one call, each with p_reason: the one-call undo of a claim hog (SMD-3606 Work item 3; 140 caps new claims, this ends the ones made). Only a key the registry classifies operator by its agent id in p_actor (a name alone lends no kind, SMD-2608); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}, nothing ended. A blank holder answers NO_HOLDER, a blank reason NO_REASON. Otherwise {ok: true, holder, released: N, claims: [{id, issue, piece}, …]}, ordered as list_work_claims lists; the rows stay as history with the operator and reason on each. One atomic UPDATE, READ COMMITTED, no lock. The holder''s lapsed and released claims, and every other holder''s, stand. Migration 145 / SMD-3606.';

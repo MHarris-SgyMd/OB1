@@ -83,17 +83,40 @@ const app = createMcpApp({ rest, edge: () => ({ configured: false, origin: null 
 
 let rpcId = 1;
 type Rpc = { status: number; headers: Headers; body: Record<string, unknown> | null };
-async function rpc(method: string, params: unknown, key?: string, opts: { notification?: boolean; via?: "header" | "query" | "bearer"; path?: string } = {}): Promise<Rpc> {
+const MODERN = "2026-07-28";
+/** The 2026-07-28 revision's per-request envelope, which takes the place of `initialize`: the revision, who the client is, what it can do. */
+const ENVELOPE = { "io.modelcontextprotocol/protocolVersion": MODERN, "io.modelcontextprotocol/clientInfo": { name: "test-mcp", version: "0" }, "io.modelcontextprotocol/clientCapabilities": {} };
+type RpcOpts = { notification?: boolean; via?: "header" | "query" | "bearer"; path?: string; modern?: boolean; headers?: Record<string, string>; envelope?: Record<string, unknown>; signal?: AbortSignal };
+/**
+ * One JSON-RPC request to the endpoint. `modern`: as a 2026-07-28 client sends it — the envelope in `params._meta`, and
+ * the revision, the method and a called tool's name as headers. `headers` and `envelope` replace values of those, for
+ * a request the SDK's handler must refuse.
+ */
+function requestFor(method: string, params: unknown, key?: string, opts: RpcOpts = {}): Request {
   const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+  if (opts.modern) {
+    headers["mcp-protocol-version"] = MODERN;
+    headers["mcp-method"] = method;
+    const named = (params as { name?: unknown } | null)?.name;
+    if (typeof named === "string") headers["mcp-name"] = named;
+    params = { ...(params as object), _meta: { ...ENVELOPE, ...opts.envelope } };
+  }
+  Object.assign(headers, opts.headers);
   const via = opts.via ?? "header";
   if (key && via === "header") headers["x-brain-key"] = key;
   if (key && via === "bearer") headers.authorization = `Bearer ${key}`;
   const url = `http://mcp${opts.path ?? "/mcp"}${key && via === "query" ? `?key=${key}` : ""}`;
   const message = opts.notification ? { jsonrpc: "2.0", method, params } : { jsonrpc: "2.0", id: rpcId++, method, params };
-  const r = await app.fetch(new Request(url, { method: "POST", headers, body: JSON.stringify(message) }));
-  const text = await r.text();
+  return new Request(url, { method: "POST", headers, body: JSON.stringify(message), signal: opts.signal });
+}
+/** The first JSON-RPC message of an answer, a JSON body or an event stream's first `data:` line. */
+const firstMessage = (text: string): Record<string, unknown> | null => {
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
-  return { status: r.status, headers: r.headers, body: line ? JSON.parse(line) : null };
+  return line ? JSON.parse(line) : null;
+};
+async function rpc(method: string, params: unknown, key?: string, opts: RpcOpts & { app?: { fetch(req: Request): Response | Promise<Response> } } = {}): Promise<Rpc> {
+  const r = await (opts.app ?? app).fetch(requestFor(method, params, key, opts));
+  return { status: r.status, headers: r.headers, body: firstMessage(await r.text()) };
 }
 const toolsOf = async (key: string, via?: "header" | "query" | "bearer") =>
   (((await rpc("tools/list", {}, key, { via })).body?.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map((t) => t.name).sort();
@@ -325,7 +348,7 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
   assert(unsayable.isError && unsayable.sc.code === "FAILED" && unsayable.text.startsWith("Error: "), `a value that does not render: FAILED, coded (${JSON.stringify(unsayable.sc).slice(0, 80)})`);
   answer = () => ok({});
   // tools/list in index.ts's registration order.
-  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "thread", "relations", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "task_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "reset_capture_stamp", "append_thought_evidence", "review_supersession_proposal", "retry_failed", "release_stale_leases", "run_worker", "claim_work", "renew_claim", "release_claim", "list_claims", "set_work_claim_cap", "release_holder_claims", "set_priority", "clear_priority", "set_priority_weights", "priority_history", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "item_history", "list_items", "capture_deliverable", "verify_deliverable", "deliverable_history", "agenda", "plan_context", "job_status", "scan_thoughts"];
+  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "thread", "relations", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "task_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "forget_thought", "reset_capture_stamp", "append_thought_evidence", "review_supersession_proposal", "retry_failed", "release_stale_leases", "run_worker", "claim_work", "renew_claim", "release_claim", "list_claims", "set_work_claim_cap", "release_holder_claims", "set_priority", "clear_priority", "set_priority_weights", "priority_history", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "item_history", "list_items", "capture_deliverable", "verify_deliverable", "deliverable_history", "agenda", "plan_context", "job_status", "scan_thoughts"];
   const listed = (((await rpc("tools/list", {}, "write-raw")).body?.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map((t) => t.name);
   assert(same(listed, order), `tools/list in index.ts's order (${listed.slice(0, 4).join(",")}…)`);
   // /health decided by the first key the REST core knows, as index.ts authenticates the first.
@@ -621,6 +644,15 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   assert(expectReply(got, await inProcess("pin", { text: "hello" }, "write")) && sentPaths.includes("POST /v1/plugins/probe-kit/pins"), `a write: its body sent, its value said (${got.text})`);
   const refusedCall = await ask("tools/call", { name: "probe_kit_pin", arguments: { text: "x" } }, "read-raw");
   assert(JSON.stringify(refusedCall).includes("probe_kit_pin") && (refusedCall.error !== undefined || (refusedCall.result as { isError?: boolean })?.isError === true), "a read key calling a write operation: not its tool, refused before any call");
+  {
+    // The same plugin tool for a 2026-07-28 client (SMD-4345): its list and its reply, as a 2025-era client's.
+    const listed = ((await rpc("tools/list", {}, "read-raw", { modern: true, app: withPlugins })).body?.result as { tools?: Listed[] } | undefined)?.tools ?? [];
+    assert(same(listed, read), `a 2026-07-28 client's list holds the plugin's operations as a 2025-era client's does, each definition the same (${listed.filter((t) => t.name.startsWith("probe_kit_")).length} of the plugin's)`);
+    const legacyItem = await callTool("probe_kit_item", { item_id: "a b", verbose: true });
+    const modernItem = ((await rpc("tools/call", { name: "probe_kit_item", arguments: { item_id: "a b", verbose: true } }, "read-raw", { modern: true, app: withPlugins })).body?.result ?? {}) as { content?: { text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean; resultType?: unknown };
+    assert(modernItem.content?.[0]?.text === legacyItem.text && same(modernItem.structuredContent, legacyItem.sc) && modernItem.isError !== true && modernItem.resultType === "complete" && legacyItem.text !== "",
+      `…and a call of one answers a 2026-07-28 client as a 2025-era one, its raw arguments read by the call's id (${modernItem.content?.[0]?.text?.slice(0, 60)})`);
+  }
   const bad = await ask("tools/call", { name: "probe_kit_item", arguments: { item_id: 7 } }, "read-raw");
   assert(JSON.stringify(bad).includes("item_id") && (bad.error !== undefined || (bad.result as { isError?: boolean })?.isError === true), "an argument its schema refuses: refused by the SDK, before any call");
   // The entry: the plugins OB1_PLUGINS names are its tools, over a REST core that runs them (PR 4a).
@@ -928,8 +960,151 @@ console.log("\n[9] The method guard, the preflight and discovery, as index.ts an
   assert(r.status === 405 && r.headers.get("allow") === "GET, HEAD, POST, OPTIONS", "PUT at a health path: 405 naming its GET and HEAD");
   r = await app.fetch(new Request("http://mcp/mcp", { method: "OPTIONS" }));
   assert(r.status === 200 && r.headers.get("access-control-allow-origin") === "*", "OPTIONS: the CORS preflight");
+  const allowed = (r.headers.get("access-control-allow-headers") ?? "").split(", ");
+  assert(["mcp-protocol-version", "mcp-method", "mcp-name"].every((h) => allowed.includes(h)), `…its allow-headers name what a 2026-07-28 POST must carry, so a browser-hosted client's preflight passes (SMD-4345: ${allowed.filter((h) => h.startsWith("mcp-")).join(", ")})`);
   r = await app.fetch(new Request("http://mcp/.well-known/oauth-protected-resource/mcp"));
   assert(r.status === 404, "an unconfigured stack's protected-resource path: 404");
+}
+
+console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 PR 2): the same caller, tools, replies, refusals and lines, with no initialize and no stream held open");
+{
+  const { useRequestLog } = await import("../server-portable/telemetry.ts");
+  const lines: Record<string, unknown>[] = [];
+  const before = useRequestLog((l) => lines.push(JSON.parse(l) as Record<string, unknown>));
+  const last = () => lines.at(-1) ?? {};
+  type Result = Record<string, unknown> & { _meta?: Record<string, unknown> };
+  const resultOf = (r: Rpc) => (r.body?.result ?? {}) as Result;
+  const errorOf = (r: Rpc) => (r.body?.error ?? {}) as { code?: number; message?: string; data?: { supported?: unknown } };
+  const replyOf = (r: Rpc): Reply => {
+    const result = resultOf(r) as { content?: { text: string }[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+    return { text: (result.content ?? []).map((c) => c.text).join("\n"), sc: result.structuredContent ?? {}, isError: result.isError === true };
+  };
+
+  // server/discover, a 2026-07-28 client's first request: this server's revisions and what it can do, in place of initialize.
+  const found = await rpc("server/discover", {}, "read-raw", { modern: true });
+  const d = resultOf(found);
+  assert(found.status === 200 && same(d.supportedVersions, [MODERN]) && (d._meta?.["io.modelcontextprotocol/serverInfo"] as { name?: unknown } | undefined)?.name === "open-brain",
+    `server/discover with a key: 200, the 2026-07-28 revision, this server by name (${found.status} ${JSON.stringify(d).slice(0, 160)})`);
+  assert((d.capabilities as { tools?: { listChanged?: unknown } } | undefined)?.tools?.listChanged === false, `…and it says it sends no list-changed notification, so a client opens no stream for one (${JSON.stringify(d.capabilities)})`);
+  assert(last().rpc === "server/discover" && last().status === 200 && last().outcome === "ok" && last().agent === "chatgpt", `…its line: the method, the key's name, ok (${JSON.stringify(last())})`);
+  assert(found.headers.get("access-control-allow-origin") === "*" && !found.headers.has("mcp-session-id") && /^text\/event-stream/.test(found.headers.get("content-type") ?? ""), "…answered as an event stream with the CORS headers, as a 2025-era request is, and no session id");
+  const keyless = await rpc("server/discover", {}, undefined, { modern: true });
+  assert(keyless.status === 200 && errorOf(keyless).code === -32001 && last().rpc === "server/discover" && last().outcome === "refused" && last().code === "UNAUTHORIZED",
+    `…and with no key it is refused at the key as a 2025-era request is, the -32001 envelope, before its revision is read (${keyless.status} ${JSON.stringify(keyless.body)}; ${JSON.stringify(last())})`);
+
+  // tools/list: the caller's tools, each definition as a 2025-era client reads it, with the revision's cache fields.
+  for (const key of ["write-raw", "read-raw", "cap-raw"]) {
+    const legacyTools = resultOf(await rpc("tools/list", {}, key)).tools as unknown[];
+    const listed = resultOf(await rpc("tools/list", {}, key, { modern: true }));
+    assert(same(listed.tools, legacyTools) && legacyTools.length > 0 && listed.ttlMs === 0 && listed.cacheScope === "private" && listed.resultType === "complete",
+      `tools/list for ${key}: the ${legacyTools.length} definitions a 2025-era client is given, ttlMs 0 and private (ttlMs ${listed.ttlMs}, ${listed.cacheScope})`);
+  }
+
+  // tools/call with no initialize before it: a reply and a refusal, each as a 2025-era client is given it.
+  const counted = { total: 3, oldest: "2026-10-01T00:00:00Z", newest: "2026-10-02T00:00:00Z", types: { idea: 3 }, topics: { rest: 2 }, people: {}, aggregated: 3 };
+  const absent = { code: "NOT_FOUND", retryable: false, id: "00000000-0000-4000-8000-000000000009" };
+  answer = (n) => (n === "thoughtStats" ? ok(counted) : n === "fetch" ? refuse(absent as never) : ok({}));
+  const stats = await rpc("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern: true });
+  const legacyStats = await tool("thought_stats", {});
+  assert(same(replyOf(stats), legacyStats) && expectReply(legacyStats, say.renderThoughtStats(ok(counted) as never)) && resultOf(stats).resultType === "complete", `a core tool called with no initialize: the 2025-era reply, render.ts's (${replyOf(stats).text.slice(0, 50)})`);
+  const gone = { name: "fetch", arguments: { id: absent.id } };
+  const refusedCall = await rpc("tools/call", gone, "write-raw", { modern: true });
+  const refusedLine = last();
+  const legacyRefused = await tool("fetch", gone.arguments);
+  assert(same(replyOf(refusedCall), legacyRefused) && legacyRefused.isError && refusedLine.rpc === "tools/call" && refusedLine.tool === "fetch" && refusedLine.outcome === "refused" && refusedLine.code === "NOT_FOUND"
+    && last().outcome === "refused" && last().code === "NOT_FOUND" && typeof refusedLine.bytes === "number",
+    `a refusal: the 2025-era reply, and its line \`refused\` NOT_FOUND as that one's is (${JSON.stringify(refusedLine)})`);
+  answer = () => ok({});
+
+  // The key's refusals: the edge's, before the revision is read, so one answer for both.
+  const refusals: [string, AgentOutcome | null, string][] = [["a wrong key", null, "wrong"], ["a revoked key", { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null }, "write-raw"], ["a busy registry", { status: "busy" } as AgentOutcome, "write-raw"]];
+  for (const [what, as, key] of refusals) {
+    if (as) identity = as;
+    const legacy = await rpc("tools/list", {}, key);
+    const modern = await rpc("tools/list", {}, key, { modern: true });
+    assert(modern.status === legacy.status && same(errorOf(modern), errorOf(legacy)) && errorOf(modern).code !== undefined && modern.headers.get("retry-after") === legacy.headers.get("retry-after"),
+      `${what}: the 2025-era refusal, status, code, words and Retry-After (${modern.status} ${errorOf(modern).code})`);
+    identity = { status: "ok", agentId: "agent-1" };
+  }
+  const note = await rpc("notifications/cancelled", { requestId: 1 }, "write-raw", { modern: true, notification: true });
+  assert(note.status === 202 && note.body === null && last().rpc === "notifications/cancelled", `a notification: 202 and no body (${note.status})`);
+
+  // subscriptions/listen: acknowledged honouring nothing, then ended. No stream is held open (SMD-4347 decides whether one ever is).
+  // Read with a deadline: a server that honoured the subscription would hold this stream open for good, and the row must fail then, not wait.
+  const listening = await app.fetch(requestFor("subscriptions/listen", { notifications: { toolsListChanged: true } }, "read-raw", { modern: true }));
+  const listened = await Promise.race([listening.text(), Bun.sleep(3_000).then(() => { void listening.body?.cancel().catch(() => {}); return "(still open after 3 s)"; })]);
+  const frames = listened.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)) as { method?: string; params?: { notifications?: unknown }; result?: { resultType?: unknown } });
+  assert(frames.length === 2 && frames[0].method === "notifications/subscriptions/acknowledged" && same(frames[0].params?.notifications, {}) && frames[1].result?.resultType === "complete",
+    `subscriptions/listen: acknowledged with nothing honoured, then its result, and the stream ends (${frames.length} frames; ${JSON.stringify(frames[0]?.params?.notifications)}${frames.length === 0 ? `; ${listened}` : ""})`);
+  assert(last().rpc === "subscriptions/listen" && last().outcome === "ok", `…its line written at once, not when a client leaves (${JSON.stringify(last())})`);
+
+  // What the SDK's handler refuses, it refuses in its own words; the line says so by its status.
+  const crossed = await rpc("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-method": "tools/call" } });
+  assert(crossed.status === 400 && errorOf(crossed).code === -32020 && crossed.headers.get("access-control-allow-origin") === "*" && last().status === 400 && last().outcome === "refused",
+    `a header that disagrees with the body: 400, -32020, with the CORS headers (${crossed.status} ${errorOf(crossed).code}; ${JSON.stringify(last())})`);
+  const future = await rpc("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2027-01-01" }, envelope: { "io.modelcontextprotocol/protocolVersion": "2027-01-01" } });
+  assert(future.status === 400 && errorOf(future).code === -32022 && same(errorOf(future).data?.supported, [MODERN]), `a revision this server does not serve: 400, -32022, naming the one it does (${future.status} ${JSON.stringify(errorOf(future).data)})`);
+  const stale = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } }, "read-raw");
+  assert(stale.status === 200 && resultOf(stale).protocolVersion === "2025-06-18" && (resultOf(stale).capabilities as { tools?: { listChanged?: unknown } } | undefined)?.tools?.listChanged === true,
+    `and initialize is still answered: a 2025-era client is served as it was, its server declaring what the SDK declares (${stale.status} ${resultOf(stale).protocolVersion} ${JSON.stringify(resultOf(stale).capabilities)})`);
+
+  // A body past the SDK's 4 MiB bound: refused 413 in the same words whichever revision it speaks, as the
+  // 2025-era transport always refused one. Just under it, each is answered by its tool.
+  const calling = (bytes: number) => ({ name: "capture_thought", arguments: { content: "x".repeat(bytes) } });
+  const longLegacy = await rpc("tools/call", calling(5 * 1024 * 1024), "write-raw");
+  const longModern = await rpc("tools/call", calling(5 * 1024 * 1024), "write-raw", { modern: true });
+  assert(longLegacy.status === 413 && /must not exceed 4194304 bytes/.test(errorOf(longLegacy).message ?? ""), `a 5 MiB 2025-era call: 413 by the SDK's bound (${longLegacy.status} ${errorOf(longLegacy).message})`);
+  assert(longModern.status === 413 && same(longModern.body, longLegacy.body), `…and a 5 MiB 2026-07-28 call the same, word for word: one bound for both (${longModern.status})`);
+  const nearLegacy = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw");
+  const nearModern = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw", { modern: true });
+  assert(nearLegacy.status === 200 && nearLegacy.body?.result !== undefined && same(replyOf(nearModern), replyOf(nearLegacy)) && nearModern.status === 200, `a 3 MiB call, either revision: answered by its tool (${nearLegacy.status}, ${nearModern.status})`);
+
+  // A request the SDK's rule cannot place goes to the handler, which refuses it in its own words: a 2025-era
+  // `initialize` under a 2026-07-28 header was served before this, and is a 400 now.
+  const mixed = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } }, "read-raw", { headers: { "mcp-protocol-version": MODERN } });
+  assert(mixed.status === 400 && errorOf(mixed).code === -32020 && last().status === 400, `a 2025-era initialize under a 2026-07-28 header: the handler's 400, -32020, not served (${mixed.status} ${errorOf(mixed).code})`);
+
+  // Two callers at once through the one handler: each its own server, by the function its own request handed over.
+  // Each key's own count, asked one at a time of the 2025-era path first: three different numbers, so a crossed list shows.
+  const own = new Map<string, number>();
+  for (const key of ["write-raw", "read-raw", "cap-raw"]) own.set(key, ((resultOf(await rpc("tools/list", {}, key)).tools as unknown[] | undefined) ?? []).length);
+  const together = await Promise.all(["write-raw", "read-raw", "cap-raw", "write-raw", "read-raw", "cap-raw"].map(async (key) => [key, ((resultOf(await rpc("tools/list", {}, key, { modern: true })).tools as unknown[] | undefined) ?? []).length] as const));
+  assert(new Set(own.values()).size === 3 && together.every(([key, n]) => n === own.get(key) && n > 0), `six 2026-07-28 requests at once under three keys: each its own key's list (${together.map(([k, n]) => `${k} ${n}`).join(", ")})`);
+
+  // A fault building the server (here a plugin's tool named as a core tool is): this server's 500, said once in
+  // the log as a route's throw, for both. The SDK's handler catches it and would say it nowhere.
+  const clash = definePlugin({ name: "clash-kit", title: "C", description: "A plugin whose one operation is given a core tool's name below.", operations: { look: operation({ title: "L", description: "d", scope: "read", method: "GET", path: "/look", input: {}, output: {}, async handler() { return pluginOk({}); } }) } });
+  // Loaded as a manifest must be, then its operation renamed past the manifest's own check, which refuses the name.
+  const clashed = loadPlugins("clash-kit", [clash]).map((pl) => ({ ...pl, operations: pl.operations.map((o) => ({ ...o, tool: "thought_stats" })) }));
+  for (const modern of [false, true]) {
+    const era = modern ? "2026-07-28" : "2025-era";
+    const said: string[] = [];
+    const clashing = createMcpApp({ rest, plugins: () => clashed, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l) });
+    const failed = await clashing.fetch(requestFor("tools/list", {}, "write-raw", { modern }));
+    const text = await failed.text();
+    assert(failed.status === 500 && text === "Internal Server Error" && said.length === 1 && /POST a route failed/.test(said[0]) && /thought_stats is already registered/.test(said[0]) && last().status === 500 && last().outcome === "error",
+      `a ${era} request whose server cannot be built: 500 in this server's words, one line naming the fault, its line \`error\` (${failed.status} ${text.slice(0, 60)}; ${said.join(" | ").slice(0, 110)})`);
+  }
+
+  // A slow call: comment frames keep its stream open, and a client that lets go of the answer mid-call is `abandoned`, for both.
+  const slowWarned: string[] = [];
+  const slow = createMcpApp({
+    rest: createRestClient({ baseUrl: "http://api.ob1.internal", forwarderKey: "fwd-raw", fetch: async (req) => { if (!new URL(req.url).pathname.endsWith("/whoami")) await Bun.sleep(400); return restApp.fetch(req); } }),
+    edge: () => ({ configured: false, origin: null }), warn: (l) => slowWarned.push(l), keepalive: { intervalMs: 25, maxMs: 60_000 },
+  });
+  for (const modern of [false, true]) {
+    const era = modern ? "2026-07-28" : "2025-era";
+    const text = await (await slow.fetch(requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }))).text();
+    const comments = text.split("\n").filter((l) => l.startsWith(":"));
+    assert(comments.length >= 1 && firstMessage(text)?.result !== undefined, `a slow ${era} call: kept open by comment frames, then answered (${comments.length} frames)`);
+    // The answer let go of at once, as a runtime does when its client leaves: the stream's cancel, not the request's signal.
+    const linesBefore = lines.length;
+    const answer = await slow.fetch(requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }));
+    await answer.body?.cancel();
+    for (let waited = 0; lines.length === linesBefore && waited < 5_000; waited += 20) await Bun.sleep(20);
+    assert(lines.length === linesBefore + 1 && last().rpc === "tools/call" && last().tool === "thought_stats" && last().outcome === "abandoned", `a ${era} call whose client lets go of the answer: its line \`abandoned\` (${JSON.stringify(last())})`);
+  }
+  useRequestLog(before);
 }
 
 console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth token traded for the REST core's, cached by its digest, never sent as a key; its refusals RFC 6750's");

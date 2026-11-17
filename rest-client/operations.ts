@@ -13,6 +13,7 @@ export const OPERATIONS = {
   delete_thought: { method: "DELETE", path: "/v1/thoughts/{id}" },
   deliverable_history: { method: "GET", path: "/v1/deliverables/{id}" },
   fetch: { method: "GET", path: "/v1/thoughts/{id}" },
+  forget_thought: { method: "POST", path: "/v1/thoughts/{id}/forget" },
   health: { method: "GET", path: "/health" },
   item_history: { method: "GET", path: "/v1/items/{id}" },
   job_status: { method: "GET", path: "/v1/jobs/{job_id}" },

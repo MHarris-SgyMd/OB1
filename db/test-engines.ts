@@ -1196,6 +1196,273 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
      `a follower's claim refused for good throws the refusal for its caller, its leases returned first; a one-shot run's worker stops with it said (${thrown}; ${oneShot})`);
 }
 
+// ---------------------------------------------------------------------------
+// db/claim-loop.ts's thoughtFault and recordFailedAndStop (SMD-4308): what a
+// thought's streak does with an error, over a stand-in engine.
+// ---------------------------------------------------------------------------
+{
+  const { thoughtFault, recordFailedAndStop } = await import("./claim-loop.ts");
+  const { ProviderOutage, SUSPECT_WINDOW_MS, ALONE_OUTAGES } = await import("./worker-bootstrap.ts");
+  type Host = import("./claim-loop.ts").FaultHost;
+  type Probe = import("./worker-bootstrap.ts").Probe;
+  type Act = import("./worker-bootstrap.ts").FollowerFault["act"];
+  const pg = (errno: string, message = `database error ${errno}`) => Object.assign(new Error(message), { name: "PostgresError", errno });
+  /** A stand-in engine: what it was told, and the state a test turns. */
+  const engine = (o: { follow?: boolean; act?: Act; suspect?: boolean; probes?: Probe[]; probedOut?: boolean; released?: boolean | Error } = {}) => {
+    const s = {
+      errs: [] as string[], stopping: false, hardStopped: false, halt: new AbortController(), outage: new ProviderOutage(() => 0, SUSPECT_WINDOW_MS, true),
+      reads: 0, probed: 0, providerStops: 0, failed: 0, lost: 0, fatal: null as string | null, refusedProbes: 0, outages: [] as boolean[], paused: 0, back: [] as string[], unrecorded: 0, statements: 0,
+      onRead: () => {}, duringPause: () => {},
+    };
+    const probes = [...(o.probes ?? [])];
+    const sql = (() => {
+      s.statements++;
+      return o.released instanceof Error ? Promise.reject(o.released) : Promise.resolve([{ ok: o.released ?? true }]);
+    }) as unknown as import("bun").SQL;
+    const host: Host = {
+      sql, job: "test:job", follow: o.follow ?? true, err: (l) => s.errs.push(l), outage: s.outage, halt: () => s.halt,
+      stopping: () => s.stopping, hardStopped: () => s.hardStopped, inCall: { get: () => undefined },
+      read: () => { s.reads++; s.onRead(); return { act: o.act ?? "thought", suspect: o.suspect ?? false }; },
+      probe: async () => { s.probed++; return probes.shift() ?? { state: "up" }; },
+      ...(o.probedOut === undefined ? {} : { probedOut: () => o.probedOut as boolean }),
+      onProbeRefused: () => { s.refusedProbes++; },
+      onOutage: (_e, begins) => { s.outages.push(begins); },
+      fatal: (_e, why) => { s.fatal = why; s.stopping = true; },
+      onPaused: () => { s.paused++; s.duringPause(); },
+      count: { providerStop: () => { s.providerStops++; }, failed: () => { s.failed++; }, lost: () => { s.lost++; } },
+      pausesMs: [1, 1],
+    };
+    const fault = (e: unknown, attempt = 0, streak = { suspect: false }) =>
+      thoughtFault(host, { id: "t1", workerId: "w1", attempt, streak, backFirst: async (id) => { s.back.push(id); } }, e).then((turn) => ({ turn, streak }));
+    return { s, host, fault };
+  };
+  const said = (s: { errs: string[] }, re: RegExp) => s.errs.some((l) => re.test(l));
+
+  // The database's errors come first, under --follow: gone, the worker stops; its end is thrown; its moment sends the thought back.
+  const gone = engine();
+  const g = await gone.fault(pg("57P01"));
+  ok(g.turn.then === "stop" && gone.s.reads === 0 && said(gone.s, /^  w1: the database is not answering \(database error 57P01\) — this worker stops, recording nothing for t1$/),
+     `thoughtFault: the database gone under a follower's thought stops the worker with nothing recorded, the provider's rules unread (${gone.s.errs.join(" | ")})`);
+  const end = engine();
+  const ended = await end.fault(pg("42501", "permission denied for table entities")).then(() => "none", (e: Error) => e.message);
+  const moment = engine();
+  const m = await moment.fault(pg("40P01", "deadlock detected\nDETAIL: more"));
+  ok(ended === "permission denied for table entities" && end.s.reads === 0 && m.turn.then === "stop" && moment.s.reads === 0 && said(moment.s, /the write met the database's moment \(deadlock detected\) — t1 goes back to the pool unrecorded$/),
+     `…the database's end is thrown for the follower to end on, and its moment sends the thought back unrecorded, its first line said (${ended}; ${moment.s.errs.join(" | ")})`);
+  const oneShot = engine({ follow: false, act: "thought" });
+  const os = await oneShot.fault(pg("57P01"));
+  const hard = engine({ act: "thought" });
+  hard.s.hardStopped = true;
+  const hd = await hard.fault(pg("57014", "canceling statement due to user request")).then((r) => r.turn.then, () => "threw");
+  ok(os.turn.then === "failed" && oneShot.s.reads === 1 && hd === "failed" && hard.s.reads === 1,
+     `…a run without --follow reads no database error apart, and past the hard stop a cancelled statement is no end (${os.turn.then}, ${hd})`);
+
+  // The thought's own, the request's, and the probe's three answers.
+  const own = engine({ act: "thought" });
+  const o1 = await own.fault(new Error("x".repeat(600)));
+  ok(o1.turn.then === "failed" && o1.turn.error.length === 500 && !o1.turn.stopAfter && own.s.probed === 0 && own.s.errs.length === 0,
+     `an error that is the thought's fails it with the error's first 500 characters, the worker going on (${o1.turn.then}, ${o1.turn.then === "failed" ? o1.turn.error.length : ""})`);
+  const shape = engine({ act: "fatal" });
+  const f1 = await shape.fault(new Error("400 response_format"));
+  ok(f1.turn.then === "stop" && shape.s.fatal === "400 response_format" && said(shape.s, /^  w1: the provider refuses the request itself \(400 response_format\) — stopping every worker; nothing is marked failed$/),
+     `a request the provider refuses stops every worker through the engine, what to fix kept, nothing failed (${shape.s.fatal})`);
+  const answered = engine({ act: "probe", probes: [{ state: "up" }] });
+  const a1 = await answered.fault(new Error("401"));
+  ok(a1.turn.then === "failed" && a1.turn.error === "401 (a one-token call right after answered, so this thought's; --retry-failed revisits it)" && answered.s.probed === 1 && !a1.turn.stopAfter,
+     `an error the probe decides, the probe answering: the thought's, and said so (${a1.turn.then === "failed" ? a1.turn.error : a1.turn.then})`);
+  const refused = engine({ act: "probe", probes: [{ state: "refused", why: "no such key" }] });
+  const r1 = await refused.fault(new Error("401"));
+  ok(r1.turn.then === "stop" && refused.s.fatal === "a one-token call was refused (no such key), right after 401" && refused.s.refusedProbes === 1,
+     `…the probe refused: the request's, the probe's refusal said beside the call's and the engine told whose it was (${refused.s.fatal})`);
+  const unanswered = engine({ act: "probe", suspect: true, probes: [{ state: "out", why: "no answer" }] });
+  const u1 = await unanswered.fault(new Error("deadline"));
+  ok(u1.turn.then === "stop" && unanswered.s.outage.reason === "deadline" && unanswered.s.providerStops === 1 && unanswered.s.halt.signal.aborted && unanswered.s.outages.join() === "true" && unanswered.s.back.join() === "t1" && u1.streak.suspect
+     && said(unanswered.s, /^  w1: the provider is not answering \(deadline\) — t1 goes back to the pool unrecorded, and the follower waits for the provider$/),
+     `…the probe unanswered: an outage begins, counted, the pass halted, the engine told, and the suspect back at the pool's front (${unanswered.s.errs.join(" | ")})`);
+  const notSuspect = engine({ act: "outage", suspect: false });
+  const n1 = await notSuspect.fault(new Error("model not found"));
+  ok(n1.turn.then === "stop" && notSuspect.s.providerStops === 1 && notSuspect.s.back.length === 0 && notSuspect.s.probed === 0, `an outage at once, on an error that says nothing of the thought, begins one with no suspect set forward and no probe (${notSuspect.s.back.length} set forward)`);
+  const stoppingProbe = engine({ act: "probe" });
+  stoppingProbe.s.stopping = true;
+  const sp = await stoppingProbe.fault(new Error("401"));
+  const joined = engine({ act: "probe", suspect: true });
+  joined.s.outage.begin("another worker's");
+  const j1 = await joined.fault(new Error("401"));
+  ok(sp.turn.then === "stop" && stoppingProbe.s.probed === 0 && j1.turn.then === "stop" && joined.s.probed === 0 && joined.s.outages.join() === "false" && joined.s.providerStops === 1,
+     `a stopping pass hands the thought back unprobed, and another worker's outage is joined unprobed, the engine told it began none (${joined.s.outages.join()})`);
+
+  // The pauses: called again after each, an outage past them under --follow, the thought's failure without.
+  const pausing = engine({ act: "pause", suspect: true });
+  const p0 = await pausing.fault(new Error("503"), 0);
+  ok(p0.turn.then === "again" && pausing.s.paused === 1 && p0.streak.suspect && said(pausing.s, /^  w1: provider unavailable \(503\); pausing 0\.001 s$/), `a failing provider is paused for and called again, the engine told the pause ended (${pausing.s.errs.join(" | ")})`);
+  const past = await pausing.fault(new Error("503"), 2, p0.streak);
+  const pastOneShot = engine({ follow: false, act: "pause" });
+  const po = await pastOneShot.fault(new Error("503"), 2);
+  ok(past.turn.then === "stop" && pausing.s.outage.reason === "503" && pausing.s.back.join() === "t1" && po.turn.then === "failed" && po.turn.error === "provider error after 2 retries: 503" && po.turn.stopAfter,
+     `…past the pauses a follower begins an outage, and a one-shot run fails the thought and stops after it (${past.turn.then}; ${po.turn.then === "failed" ? po.turn.error : po.turn.then})`);
+  const woken = engine({ act: "pause", suspect: true });
+  woken.s.duringPause = () => { woken.s.stopping = true; };
+  const w1 = await woken.fault(new Error("503"), 0);
+  const halted = engine({ act: "pause", suspect: true });
+  halted.s.duringPause = () => { halted.s.outage.begin("another worker's"); };
+  const h1 = await halted.fault(new Error("503"), 0);
+  const haltedNoSuspect = engine({ act: "pause", suspect: false });
+  haltedNoSuspect.s.duringPause = () => { haltedNoSuspect.s.outage.begin("another worker's"); };
+  const h2 = await haltedNoSuspect.fault(new Error("429"), 0);
+  ok(w1.turn.then === "stop" && woken.s.back.length === 0 && h1.turn.then === "stop" && halted.s.back.join() === "t1" && said(halted.s, /t1 was pausing on the provider when it stopped answering — a suspect of the outage too, back in the pool unrecorded$/) && h2.turn.then === "stop" && haltedNoSuspect.s.back.length === 0,
+     `a stop during a pause hands the thought back; another worker's outage during it makes a thought whose streak could be its own a suspect of that outage, set forward and said, and no other (${halted.s.errs.at(-1)})`);
+
+  const stoppingPause = engine({ act: "pause", suspect: true });
+  stoppingPause.s.stopping = true;
+  stoppingPause.s.outage.begin("another worker's");
+  const s1 = await stoppingPause.fault(new Error("503"), 0);
+  const standing = engine({ act: "pause", suspect: true });
+  standing.s.outage.begin("another worker's");
+  const s2 = await standing.fault(new Error("503"), 0);
+  ok(s1.turn.then === "stop" && stoppingPause.s.paused === 0 && stoppingPause.s.errs.length === 0 && stoppingPause.s.back.length === 0 && s2.turn.then === "stop" && standing.s.paused === 0 && standing.s.back.join() === "t1" && !said(standing.s, /; pausing /),
+     `a transient error on a stopping pass is not paused for, and joins no outage; one met while another worker's outage stands is not paused for either, and joins it as its suspect (${stoppingPause.s.errs.length} line(s); ${standing.s.errs.join(" | ")})`);
+
+  // A suspect retried alone that errs again (SMD-2641): blamed on a probe made at once.
+  const alone = (o: Parameters<typeof engine>[0], before = 0) => {
+    const e = engine({ act: "outage", suspect: true, ...o });
+    e.s.outage.begin("the first outage", "t1");
+    e.s.outage.end();
+    for (let k = 0; k < before; k++) {
+      e.s.outage.blame("t1", "alone again", false);
+      e.s.outage.end();
+    }
+    return e;
+  };
+  const aloneUp = alone({ probes: [{ state: "up" }] });
+  const au = await aloneUp.fault(new Error("500"));
+  ok(au.turn.then === "failed" && au.turn.error === "provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: 500 (--retry-failed revisits it)" && !au.turn.stopAfter && aloneUp.s.outage.reason === null && aloneUp.s.providerStops === 0,
+     `a suspect alone that errs again, the probe made at once answering: its own, no outage (${au.turn.then === "failed" ? au.turn.error : au.turn.then})`);
+  const aloneOut = alone({ probes: [{ state: "out", why: "no answer" }] });
+  const ao = await aloneOut.fault(new Error("500"));
+  ok(ao.turn.then === "stop" && aloneOut.s.outage.reason === "500" && aloneOut.s.back.join() === "t1" && said(aloneOut.s, new RegExp(`t1 goes back to the pool unrecorded — alone in flight, the one-token call after it unanswered \\(1 of ${ALONE_OUTAGES} before it is recorded failed\\), and the follower waits for the provider$`)),
+     `…the probe unanswered: an outage it was alone at, counted against it and said (${aloneOut.s.errs.join(" | ")})`);
+  const aloneLast = alone({ probes: [{ state: "out", why: "no answer" }] }, ALONE_OUTAGES - 1);
+  const al = await aloneLast.fault(new Error("500"));
+  ok(al.turn.then === "failed" && al.turn.stopAfter && al.turn.error === `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: 500 (--retry-failed revisits it)` && aloneLast.s.outage.reason === "500" && aloneLast.s.providerStops === 1 && aloneLast.s.halt.signal.aborted && aloneLast.s.back.length === 0,
+     `…and at the ${ALONE_OUTAGES}rd such outage its own: failed, the outage begun with no suspect set forward, the worker stopping after it (${al.turn.then === "failed" ? al.turn.error : al.turn.then})`);
+  const aloneRefused = alone({ probes: [{ state: "refused", why: "bad key" }] });
+  const ar = await aloneRefused.fault(new Error("500"));
+  const aloneProbed = alone({ probedOut: true });
+  const ap = await aloneProbed.fault(new Error("500"));
+  ok(ar.turn.then === "stop" && aloneRefused.s.fatal === "a one-token call was refused (bad key), right after 500" && aloneRefused.s.refusedProbes === 1 && aloneRefused.s.outage.reason === null && ap.turn.then === "stop" && aloneProbed.s.probed === 0 && aloneProbed.s.outage.reason === "500",
+     `…the probe refused: the request's, no outage; and an engine whose own probe already found no answer is not probed twice (${aloneRefused.s.fatal}; ${aloneProbed.s.probed} probe(s))`);
+
+  // The record of a failure the worker stops after.
+  const record = async (o: Parameters<typeof engine>[0], turn: (s: ReturnType<typeof engine>["s"]) => void = () => {}) => {
+    const e = engine(o);
+    turn(e.s);
+    e.s.outage.begin("an outage", "t1");
+    e.s.outage.end();
+    const hb = { held: new Set(["t1"]), lost: new Set<string>(), beats: 0, consecutiveErrors: 0, claimed: () => {}, stop: () => {} };
+    await recordFailedAndStop(e.host, { id: "t1", workerId: "w1", hb, error: "provider error after 3 retries: 503", unrecorded: () => { e.s.unrecorded++; } });
+    return { s: e.s, hb };
+  };
+  const rec = await record({ released: true });
+  ok(rec.s.failed === 1 && rec.s.lost === 0 && !rec.hb.held.has("t1") && !rec.s.outage.blames("t1") && rec.s.errs.join(" | ") === "  w1: provider still failing — this worker stops after this thought; the next poll goes on |   t1: provider error after 3 retries: 503",
+     `recordFailedAndStop records the failure, counts it, settles the suspect and says both lines (${rec.s.errs.join(" | ")})`);
+  const notOurs = await record({ released: false, follow: false });
+  ok(notOurs.s.failed === 0 && notOurs.s.lost === 1 && notOurs.s.outage.blames("t1") && notOurs.s.errs.length === 3 && /the claim was no longer this worker's at release; the failure below was not recorded$/.test(notOurs.s.errs[0]) && /re-run when it is back$/.test(notOurs.s.errs[1]),
+     `…a claim no longer this worker's is counted lost, said, and the suspect kept; a one-shot run says to re-run (${notOurs.s.errs.join(" | ")})`);
+  const beaten = await record({ released: false }, (s) => { s.hardStopped = true; });
+  const cut = await record({ released: pg("57P01") });
+  const refusedRecord = await record({ released: pg("23514", "check constraint") });
+  ok(beaten.s.errs.length === 0 && beaten.s.lost === 0 && cut.hb.held.has("t1") && cut.s.unrecorded === 1 && cut.s.lost === 0 && cut.s.errs.length === 1 && /recording nothing for t1; it returns to the pool when the database answers$/.test(cut.s.errs[0])
+     && refusedRecord.s.lost === 1 && /^  t1: could not record the failure \(check constraint\)$/.test(refusedRecord.s.errs[0]) && refusedRecord.s.unrecorded === 0,
+     `…the hard stop's release beating it says nothing; the database gone keeps the row this worker's, the engine's count taken back; any other refusal is said and the row counted lost (${cut.s.errs.join(" | ")}; ${refusedRecord.s.errs[0]})`);
+}
+
+// ---------------------------------------------------------------------------
+// db/claim-loop.ts's setBackAborted and releaseFinished (SMD-4308): a call
+// its caller aborted, and a finished claim's release, over a stand-in engine.
+// ---------------------------------------------------------------------------
+{
+  const { setBackAborted, releaseFinished } = await import("./claim-loop.ts");
+  const { ProviderOutage, SUSPECT_WINDOW_MS } = await import("./worker-bootstrap.ts");
+  const pg = (errno: string, message = `database error ${errno}`) => Object.assign(new Error(message), { name: "PostgresError", errno });
+  /** A stand-in engine and database: `setBack` is what the set-back's UPDATE returns, `row` the claim's row a lost read finds, `exists` whether the thought is still there. */
+  const engine = (o: { follow?: boolean; limit?: number; setBack?: boolean | Error; row?: string | null; exists?: boolean } = {}) => {
+    const s = { errs: [] as string[], hardStopped: false, failed: 0, lost: 0, vanished: 0, progress: 0, statements: [] as string[], outage: new ProviderOutage(() => 0, SUSPECT_WINDOW_MS, true), taken: new Set(["t1", "t2"]) };
+    const sql = ((strings: TemplateStringsArray) => {
+      const text = strings.join("?");
+      if (text.includes("UPDATE thought_work_claims")) {
+        s.statements.push("set-back");
+        return o.setBack instanceof Error ? Promise.reject(o.setBack) : Promise.resolve(o.setBack === false ? [] : [{ ok: 1 }]);
+      }
+      if (text.includes("SELECT EXISTS")) {
+        s.statements.push("exists");
+        return Promise.resolve([{ exists: o.exists ?? true }]);
+      }
+      s.statements.push("lost-read");
+      return Promise.resolve(o.row == null ? [] : [{ status: o.row, worker_id: null }]);
+    }) as unknown as import("bun").SQL;
+    const host: import("./claim-loop.ts").ReleaseHost = {
+      sql, job: "test:job", follow: o.follow ?? true, err: (l) => s.errs.push(l), hardStopped: () => s.hardStopped, outage: s.outage, limit: o.limit ?? 0, taken: s.taken,
+      count: { failed: () => { s.failed++; }, lost: () => { s.lost++; }, vanished: () => { s.vanished++; } }, progress: () => { s.progress++; },
+    };
+    const hb = { held: new Set(["t1"]), lost: new Set<string>(), beats: 0, consecutiveErrors: 0, claimed: () => {}, stop: () => {} };
+    return { s, host, hb, t: { id: "t1", workerId: "w1", hb } };
+  };
+
+  // A call the pass's caller aborted: the thought to the back of the queue.
+  const back = engine({ limit: 5 });
+  const b1 = await setBackAborted(back.host, back.t, "judge call");
+  const noLimit = engine();
+  await setBackAborted(noLimit.host, noLimit.t, "call");
+  ok(JSON.stringify(b1) === "{}" && !back.hb.held.has("t1") && !back.s.taken.has("t1") && back.s.taken.has("t2") && back.s.statements.join() === "set-back" && back.s.errs.length === 0 && noLimit.s.taken.has("t1"),
+     `setBackAborted sets the thought back, out of the heartbeat's set, and out of --limit's count where there is a limit (${JSON.stringify(b1)}; taken ${[...back.s.taken].join()}, without a limit ${[...noLimit.s.taken].join()})`);
+  const reaped = engine({ limit: 5, setBack: false, row: "pending" });
+  const b2 = await setBackAborted(reaped.host, reaped.t, "call");
+  const deleted = engine({ setBack: false, row: null });
+  const b3 = await setBackAborted(deleted.host, deleted.t, "call");
+  ok(b2 !== "stop" && b2.gone === "lost" && reaped.s.taken.has("t1") && reaped.s.statements.join() === "set-back,lost-read" && reaped.s.errs.length === 1 && /^  t1: back in the pool/.test(reaped.s.errs[0]) && b3 !== "stop" && b3.gone === "deleted",
+     `…a claim no longer this worker's is not set back: its row is read and said, and it is lost or deleted by what the row says, still in --limit's count (${JSON.stringify(b2)}, ${JSON.stringify(b3)}; ${reaped.s.errs[0]})`);
+  const refusedBack = engine({ setBack: pg("57P01") });
+  const b4 = await setBackAborted(refusedBack.host, refusedBack.t, "judge call");
+  ok(b4 === "stop" && refusedBack.hb.held.has("t1") && refusedBack.s.errs.join() === "  w1: could not set t1 back in the queue after its judge call was aborted (database error 57P01) — this worker stops, returning it with its leases",
+     `…and a set-back the database refuses stops the worker, the thought this worker's again, the engine's word for the call in the line (${refusedBack.s.errs.join()})`);
+
+  // The release of a finished claim.
+  const finish = async (o: Parameters<typeof engine>[0] & { release?: boolean | Error; failed?: string | null; hardStopped?: boolean }) => {
+    const e = engine(o);
+    e.s.hardStopped = o.hardStopped ?? false;
+    e.hb.held.delete("t1");
+    e.s.outage.begin("an outage", "t1");
+    e.s.outage.end();
+    let succeeded = 0;
+    const answer = await releaseFinished(e.host, e.t, {
+      release: () => (o.release instanceof Error ? Promise.reject(o.release) : Promise.resolve(o.release ?? true)),
+      failed: o.failed ?? null, doing: "judged", lapsedWhy: "its lease lapsed", succeeded: () => { succeeded++; },
+    });
+    return { answer, succeeded, s: e.s, hb: e.hb };
+  };
+  const good = await finish({});
+  const bad = await finish({ failed: "the judge refused it" });
+  ok(good.answer === "next" && good.succeeded === 1 && good.s.failed === 0 && good.s.errs.length === 0 && good.s.progress === 1 && !good.s.outage.blames("t1") && good.s.statements.length === 0
+     && bad.answer === "next" && bad.succeeded === 0 && bad.s.failed === 1 && bad.s.errs.join() === "  t1: the judge refused it" && bad.s.progress === 1 && !bad.s.outage.blames("t1"),
+     `releaseFinished: a release that went through counts the thought the engine's way when it succeeded, failed and said when it failed, a suspect no longer either way, and the progress line told (${bad.s.errs.join()})`);
+  const lapsed = await finish({ release: false, failed: "the judge refused it" });
+  const lapsedGood = await finish({ release: false });
+  ok(lapsed.answer === "next" && lapsed.s.lost === 1 && lapsed.s.failed === 0 && lapsed.s.progress === 1 && lapsed.s.outage.blames("t1") && lapsed.s.statements.join() === "exists"
+     && lapsed.s.errs.join(" | ") === "  t1: the claim was no longer this worker's at release — its lease lapsed; the row is the pool's or another worker's now |   t1: the judge refused it (not recorded — the row was not this worker's)"
+     && lapsedGood.s.errs.length === 1 && lapsedGood.succeeded === 0 && lapsedGood.s.lost === 1,
+     `…a claim no longer this worker's at release is counted lost, with the engine's reasons, a failure said as not recorded, and the suspect kept (${lapsed.s.errs.join(" | ")})`);
+  const goneNow = await finish({ release: false, exists: false });
+  const beaten = await finish({ release: false, hardStopped: true });
+  ok(goneNow.answer === "next" && goneNow.s.vanished === 1 && goneNow.s.lost === 0 && goneNow.s.progress === 0 && goneNow.s.errs.join() === "  t1: deleted while it was being judged" && beaten.answer === "stop" && beaten.s.errs.length === 0 && beaten.s.lost === 0,
+     `…a thought deleted meanwhile is counted so and said in the engine's word; the hard stop's release beating this one stops the worker with nothing said (${goneNow.s.errs.join()}; ${beaten.answer})`);
+  const cut = await finish({ release: pg("57P01") });
+  const cutOneShot = await finish({ release: pg("57P01"), follow: false });
+  const refusedRelease = await finish({ release: pg("42501", "permission denied for function release_thought") });
+  ok(cut.answer === "stop" && cut.hb.held.has("t1") && cut.s.errs.join() === "  t1: could not release the claim (database error 57P01) — this worker stops" && cut.s.progress === 0
+     && cutOneShot.answer === "stop" && !cutOneShot.hb.held.has("t1") && refusedRelease.answer === "stop" && !refusedRelease.hb.held.has("t1") && /could not release the claim \(permission denied for function release_thought\)/.test(refusedRelease.s.errs[0]),
+     `…and a release the database refuses stops the worker with it said; under --follow with the database gone the thought is this worker's again, for the finally to return (${cut.s.errs.join()})`);
+}
+
 listener.stop(true);
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
