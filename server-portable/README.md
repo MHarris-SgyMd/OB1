@@ -1093,8 +1093,8 @@ can't be removed mechanically), the twins that keep the same text, the hashed
 record it was ingested as, and the copies outside the brain. A name takes every
 thought here it is — the thought with that id, standing or deleted, the one keeping it as
 its `client_key`, and each deleted one whose tombstone kept that key — the others listed as
-`alsoForgotten`, and any not forgotten after the first (a replay, a fault) as
-`notForgotten`, which the same call sweeps when sent again; the reply names the thought's
+`alsoForgotten` (MCP's values: `alsoForgottenIds`), and any not forgotten after the first
+(a replay, a fault) as `notForgotten`, which the same call sweeps when sent again; the reply names the thought's
 own `client_key` too, so a copy of the call can reach it on a brain that knows it by that
 key alone. Forgotten already,
 it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log

@@ -956,7 +956,7 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
  * client_key, read before the forget redacted it, so a copy of the call can name the thought on a brain that knows it
  * by that key alone; and the other thoughts here the same name was, forgotten with it.
  */
-export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[]; notForgotten?: { id: string; code: string }[] };
+export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[]; notForgotten?: { id: string; code: string; errno?: string }[] };
 export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
 
 export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, confirm, detach_citations }: Input<"forget_thought">): Promise<Outcome<Forgotten, ForgetCode>> {
@@ -991,7 +991,7 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   let first: { id: string; key: string | null; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: true }> } | undefined;
   let refused: { id: string; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: false }> } | undefined;
   const also: string[] = [];
-  const missed: { id: string; code: string }[] = [];
+  const missed: { id: string; code: string; errno?: string }[] = [];
   for (const id of ids) {
     if (!first) {
       // The thought's own key before its forget redacts it: the reply names it.
@@ -1009,7 +1009,9 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
       if (r.ok) also.push(id);
       else if (r.error !== "NOT_FOUND" && r.error !== "FORGOTTEN") missed.push({ id, code: r.error });
     } catch (e) {
-      missed.push({ id, code: String((e as { errno?: unknown }).errno ?? "FAILED") });
+      // FAILED, the fault's SQLSTATE beside it: a code is a word the reply's values keep (review pass 3: 57P01 read null).
+      const errno = (e as { errno?: unknown }).errno;
+      missed.push({ id, code: "FAILED", ...(typeof errno === "string" && errno ? { errno } : {}) });
     }
   }
   if (!first) {

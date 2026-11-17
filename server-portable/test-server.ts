@@ -5304,9 +5304,10 @@ console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids
   const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
   const partial = await core.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
   const partialReply = renderForget(partial as never);
-  assert(partial.ok && JSON.stringify(partial.value.notForgotten) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "57P01" }]) && tried.join() === [N, D2, D3].join()
-      && /Not forgotten — the same thought under that name, still holding its text here: .*REPLAYING/.test(partialReply.content[0].text)
-      && Array.isArray((partialReply.structuredContent as Record<string, unknown>).notForgotten),
+  const scMissed = (partialReply.structuredContent as { notForgotten?: { id: string; code: string | null }[] }).notForgotten;
+  assert(partial.ok && JSON.stringify(partial.value.notForgotten) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED", errno: "57P01" }]) && tried.join() === [N, D2, D3].join()
+      && /Not forgotten — the same thought under that name, still holding its text here: .*REPLAYING.*\(FAILED 57P01\)/.test(partialReply.content[0].text)
+      && JSON.stringify(scMissed) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED" }]),
     `a refusal or a fault after the first thought is named, not lost, the first staying forgotten (${JSON.stringify(partial.ok ? partial.value.notForgotten : partial)})`);
   const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
   const noWord = thrown({ ok: false });
