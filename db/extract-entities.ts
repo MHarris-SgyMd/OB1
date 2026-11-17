@@ -217,9 +217,9 @@ import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { asPass, withCallWaits, type CallWaits } from "../server-portable/model-call.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, StoppedWaiting, idleWhile, inHandCalls, callWaitsFor, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
-import { claimWorker, recordFailedAndStop, thoughtFault, type FaultHost } from "./claim-loop.ts";
+import { claimWorker, recordFailedAndStop, releaseFinished, setBackAborted, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
 import { endOnRefusal, passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
@@ -1598,8 +1598,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // refusal is not the metadata model's to answer (review pass 1).
     const escalationCalled = (e: unknown): boolean => !!WINDOWING.escalateModel && (e as { model?: unknown }).model === WINDOWING.escalateModel;
     // What this engine gives claim-loop.ts's thoughtFault to read an error with (SMD-4308).
-    const faults: FaultHost = {
-      sql, job: JOB, follow: !!FOLLOW, err, outage, inCall, halt: () => halt,
+    const faults: FaultHost & ReleaseHost = {
+      sql, job: JOB, follow: !!FOLLOW, err, outage, inCall, halt: () => halt, limit: LIMIT, taken, progress,
       stopping: () => stopping, hardStopped: () => hardStopped,
       // Under --follow, what to do is worker-bootstrap.ts's `fault` (SMD-2636 PR 3a): the provider's state
       // — paused for, then an outage; the model missing (Ollama pulling it; the start probe saw it answer),
@@ -1625,7 +1625,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         const paused = inHand.get(workerId);
         if (paused) paused.since = Date.now();
       },
-      count: { providerStop: () => { providerStops++; }, failed: () => { failed++; }, lost: () => { lost++; } },
+      count: { providerStop: () => { providerStops++; }, failed: () => { failed++; }, lost: () => { lost++; }, vanished: () => { vanished++; } },
     };
     // The loop is db/claim-loop.ts's (SMD-4308): the gate, the claim, the heartbeat and the leases' return. What a
     // thought's processing does with an error, and its release, are below.
@@ -1687,18 +1687,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 stopNotes.set(workerId, counting);
                 await counting;
                 if (hardStopped) return "stop";
-                hb.held.delete(b.thought_id);
-                let back: boolean;
-                try {
-                  back = await setBack(sql, JOB, workerId, b.thought_id);
-                } catch (re) {
-                  hb.held.add(b.thought_id);
-                  err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
-                  return "stop";
-                }
-                // Not ours to set back: deleted, or edited or reaped meanwhile, and said so.
-                if (back && LIMIT > 0) taken.delete(b.thought_id);
-                outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
+                const back = await setBackAborted(faults, { id: b.thought_id, workerId, hb }, "call");
+                if (back === "stop") return "stop";
+                outcome = { outcome: "setBack", ...back };
                 continue;
               }
               // A first stop ended it between windows, those answered kept: it
@@ -1769,78 +1760,53 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           err(`  ${b.thought_id}: edited while it was being extracted; it is pending again and will be extracted from the new text`);
           return "next";
         }
-        let ok: boolean;
-        let gone = false;
-        try {
-          const release = () => sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
-                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
-          // A succeeded release spends the thought's kept windows (093), in
-          // the same statement: a delete after it, failed or cut short by an
-          // exit, left the row's stops beside a finished claim, which a later
-          // requeue of the same text revived (review pass 2). Of any text: a
-          // release that went through proves the claim still this worker's,
-          // and a row of earlier text kept would revive as well on a revert
-          // (review pass 4). A failed release keeps them, so --retry-failed resumes.
-          const spend = keeping && outcome.outcome === "succeeded";
-          if (spend) {
-            try {
-              [{ ok }] = await sql`
-                WITH r AS (${release()}),
-                     d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND (SELECT ok FROM r))
-                SELECT ok FROM r`;
-            } catch (e) {
-              // The table or its grant gone since the start: the release alone, said once.
-              const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
-              // Only 093's table's: a refusal on the claims themselves is the release's own (review pass 3).
-              if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
-              keepingFailed(e, "clear");
+        // The release's outcome is read by claim-loop.ts's releaseFinished, for both engines (SMD-4308): the statement is this engine's.
+        const finished = outcome;
+        return releaseFinished(faults, { id: b.thought_id, workerId, hb }, {
+          release: async () => {
+            let ok: boolean;
+            const release = () => sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
+                                     ${finished.outcome}, ${finished.outcome === "failed" ? finished.error : finished.caveat ?? null}) AS ok`;
+            // A succeeded release spends the thought's kept windows (093), in
+            // the same statement: a delete after it, failed or cut short by an
+            // exit, left the row's stops beside a finished claim, which a later
+            // requeue of the same text revived (review pass 2). Of any text: a
+            // release that went through proves the claim still this worker's,
+            // and a row of earlier text kept would revive as well on a revert
+            // (review pass 4). A failed release keeps them, so --retry-failed resumes.
+            const spend = keeping && finished.outcome === "succeeded";
+            if (spend) {
+              try {
+                [{ ok }] = await sql`
+                  WITH r AS (${release()}),
+                       d AS (DELETE FROM extraction_progress WHERE thought_id = ${b.thought_id}::uuid AND work_type = ${JOB} AND (SELECT ok FROM r))
+                  SELECT ok FROM r`;
+              } catch (e) {
+                // The table or its grant gone since the start: the release alone, said once.
+                const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+                // Only 093's table's: a refusal on the claims themselves is the release's own (review pass 3).
+                if ((code !== "42P01" && code !== "42501") || !/extraction_progress/.test((e as Error).message)) throw e;
+                keepingFailed(e, "clear");
+                [{ ok }] = await release();
+              }
+            } else {
               [{ ok }] = await release();
             }
-          } else {
-            [{ ok }] = await release();
-          }
-          if (!ok) {
-            const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
-            gone = !exists;
-          }
-        } catch (e) {
-          // The database went away under the release: the row is this
-          // worker's again, for the finally to return and --limit to give
-          // back (review pass 4).
-          if (FOLLOW && databaseUnavailable(e)) hb.held.add(b.thought_id);
-          err(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
-          return "stop";
-        }
-        if (gone) {
-          vanished++;
-          err(`  ${b.thought_id}: deleted while it was being extracted`);
-          return "next";
-        }
-        if (!ok) {
-          // The hard stop's release beat this one to the row: not a lapse to
-          // report, the caller's own stop; a release that went through first
-          // is counted below as any is — as reembed's (SMD-2425).
-          if (hardStopped) return "stop";
+            return ok;
+          },
+          failed: finished.outcome === "failed" ? finished.error : null,
+          doing: "extracted",
           // Either the lease expired, or the content was edited and migration
           // 016's trigger put the row back in the pool to be extracted from the
-          // new text. Not ours to finish either way: counted with the rows this
-          // worker lost, not the ones it finished.
-          err(`  ${b.thought_id}: the claim was no longer this worker's at release — an edit requeued it, its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
-          if (outcome.outcome === "failed") err(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
-          lost++;
-          progress();
-          return "next";
-        }
-        if (outcome.outcome === "failed") {
-          failed++;
-          err(`  ${b.thought_id}: ${outcome.error}`);
-        } else {
-          done++;
-          if (outcome.leftOut) { leftOut++; leftOutWindows += outcome.leftOut; } else if (outcome.caveat) partial++;
-        }
-        outage.settled(b.thought_id);
-        progress();
-        return "next";
+          // new text. Not ours to finish either way.
+          lapsedWhy: `an edit requeued it, its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker`,
+          succeeded: () => {
+            // Never true here (a failure is `failed` above); it narrows `finished` for the counts below.
+            if (finished.outcome !== "succeeded") return;
+            done++;
+            if (finished.leftOut) { leftOut++; leftOutWindows += finished.leftOut; } else if (finished.caveat) partial++;
+          },
+        });
       },
     });
   }

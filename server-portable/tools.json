@@ -158,6 +158,10 @@
       "scope": "write"
     },
     {
+      "name": "release_holder_claims",
+      "scope": "write"
+    },
+    {
       "name": "capture_deliverable",
       "scope": "write"
     },
