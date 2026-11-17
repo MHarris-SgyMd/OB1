@@ -115,6 +115,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     capture_thought: { content: "c", derived_from: [ID], metadata: { k: "v", n: 2, b: true } },
     update_thought: { id: ID, content: "new text", supersedes: null },
     delete_thought: { id: ID, detach_citations: true },
+    forget_thought: { id: ID, confirm: ID, detach_citations: true },
     reset_capture_stamp: { id: ID },
     // SMD-2690 PR 3b: the thought in the path, the entry in the body.
     append_thought_evidence: { id: ID, source_label: "a file & more?", excerpt: "the passage", source: "smart_ingest", extracted_at: "2026-11-10T09:00:00+01:00" },
@@ -128,6 +129,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     set_work_claim_cap: { cap: 50 },
     renew_claim: { id: ID, token: "wc_" + "1".repeat(64), lease_seconds: 3600 },
     release_claim: { id: ID, token: "wc_" + "2".repeat(64), reason: "merged", force: false },
+    release_holder_claims: { holder: "claude-code & a branch", reason: "retired a hog & more?" },
     // Priority assertions (SMD-3664): the item in the path — a ticket key and a uuid — the rest in the body or none.
     set_priority: { kind: "ticket", key: "smd-3664", level: 4, due_at: "2027-03-01", not_before: "2027-02-01T09:00:00+01:00", due_ref: { kind: "thought", key: ID }, reason: "a reason & more?", inferred: false },
     clear_priority: { kind: "thought", key: ID },

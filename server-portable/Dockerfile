@@ -45,7 +45,7 @@ COPY dashboard/package.json dashboard/bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY rest-client/*.ts /app/rest-client/
 COPY server-portable/oauth-edge.ts server-portable/auth.ts server-portable/brain-info.ts /app/server-portable/
-# brain-info.ts imports priority-kinds.ts and is-record.ts (SMD-3671 PR 2); test-server [36g] holds this list to every module the dashboard reaches.
+# brain-info.ts imports priority-kinds.ts and is-record.ts (SMD-3671 PR 2); test-server [36h] holds this list to every module the dashboard reaches.
 COPY server-portable/stated-status.ts server-portable/priority-kinds.ts server-portable/is-record.ts /app/server-portable/
 COPY server-portable/core/filter.ts /app/server-portable/core/
 COPY dashboard/svelte.config.js dashboard/vite.config.ts ./
@@ -99,7 +99,7 @@ COPY plugins /app/plugins
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /app/db/
 COPY db/coordinator.ts db/supervise.ts db/slot-relay.ts db/sleep.ts db/extract-entities.ts db/consolidate.ts db/sync-linear.ts \
      db/board-findings.ts db/linear-api.ts db/subject-sweep.ts db/rebuild.ts db/reembed.ts db/env.ts \
-     db/cli.ts db/connect.ts db/lease.ts db/pass-stamp.ts db/worker-bootstrap.ts \
+     db/cli.ts db/connect.ts db/lease.ts db/claim-loop.ts db/pass-stamp.ts db/worker-bootstrap.ts \
      db/ingest-contract.ts db/ingest-linear.ts db/ingest-structure.ts db/priority-writers.ts /app/db/
 COPY releases.json /app/releases.json
 

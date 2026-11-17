@@ -397,7 +397,8 @@ coordinator holds the brain's one connection, and its passes ask through it,
 as does the api where `OB1_SLOT_RELAY_KEY` is set (below).
 While the broker is away, a call waits a few seconds for it, then runs on the
 brain's own share (`OB1_BACKGROUND_SLOTS`), counted at the broker once it is
-back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
+back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`
+(`host.docker.internal` under Docker Engine on Linux).
 
 - **One coordinator per key.** A second coordinator on the same key — one run
   by hand from a checkout with the brain's environment, say — makes the
@@ -446,7 +447,7 @@ back. The URL is `ws://host.containers.internal:<broker.port>/v1/slots`.
 The broker is a compose project of its own, `ob1-federated`
 (`deploy/federated/`), as the edge is. It joins no brain's network: a brain's
 container reaches it at the host alias, as it reaches the host's Ollama, and
-its port is published on the host's loopback alone.
+its port is published only where that alias lands (below).
 
 ```bash
 cp deploy/federated/federation.example.yaml deploy/federated/federation.local.yaml   # ignored by git
@@ -469,13 +470,37 @@ bun --no-env-file deploy/federated/federated.ts down
   set) is kept for live calls, but background keeps at least one slot, so with
   `slots: 1` background and live share it.
 - **`bases` lists every base URL a brain reaches the server by**, such as
-  `http://host.containers.internal:11434/v1`. A call to any other base isn't
-  brokered.
-- **Only podman machine is measured.** There, a container dials
-  `host.containers.internal:<port>` and the loopback port answers. On Docker
-  Engine on Linux a container reaches the host at the bridge's gateway, which
-  a loopback port doesn't answer, so `federated.ts` refuses it until a shape
-  is measured there.
+  `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
+  brain under Docker Engine on Linux). A call to any other base isn't
+  brokered: it runs on the brain's own share, unsaid.
+- **Two runtimes are measured, a shape each** (SMD-3379 PR 3b-3a):
+  - **podman machine (macOS, rootful):** a container dials
+    `host.containers.internal:<port>`, which reaches the host's loopback, so
+    the port is published on `127.0.0.1`.
+  - **Docker Engine on Linux (rootful):** a container dials
+    `host.docker.internal:<port>`, the default bridge's gateway, which a
+    loopback port doesn't answer (Docker documents a port published on
+    `127.0.0.1` as reached from the host alone). So the port is published on
+    that gateway address, read from Docker at each `check` and `up`. The host
+    and its containers reach it, and so can a machine beside the host that
+    routes the bridge's subnet through it (Docker's own caveat), so the brain
+    keys are the guard there: an unknown key is refused before any upgrade.
+    `up` then has a container on the default bridge dial the broker at the
+    alias, and fails naming why where none answers: a firewall dropping the
+    bridge's traffic to the host, a daemon whose `host-gateway-ip` isn't the
+    bridge's gateway, or an alias that resolves to IPv6 first. A brain dials
+    from its own network, which a firewall may treat apart (a rule for
+    `docker0` alone), so allow the brains' bridges too. CI measures this
+    shape: the stack's own coordinator container is granted a slot there. A
+    daemon of another host (a `DOCKER_HOST` or a Docker context pointing
+    elsewhere) is refused: it names another host, or its gateway is no address
+    of this host's. So is `federated.ts` run in a container. A daemon
+    restarted with another bridge address leaves the broker's old address
+    unbound: run `up` again. Where podman is installed beside Docker, pass
+    `--runtime docker` to each command: `federated.ts` takes podman first.
+
+  `federated.ts` refuses any other runtime: Docker Desktop, rootless podman
+  or Docker, podman on Linux.
 - **The broker keeps nothing across a restart.** A brain re-registers the
   slots it holds when it reconnects. For `warm_s` (10 unless set) after a
   start, background calls wait while that happens.
@@ -1288,7 +1313,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `door` | `mcp` (the MCP server) or `api` (the REST core) |
 | `method` | the HTTP method |
 | `route` | the route as a template, never the path it was given: the REST core's (`/v1/thoughts/:id`), or an MCP server mirror's (`/health`, `/worker-status`, `/worker-run`, `/jobs/:id/stream` — under whatever prefix it came); the MCP endpoint, the MCP server's preflights, `/.well-known/` answers and 405s, the REST core's 404s and 405s, and an unmatched path have none |
-| `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods is `other` — so a newer client's (2025-11-25's `tasks/*`) is too |
+| `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods and the 2026-07-28 revision's `server/discover` and `subscriptions/listen` is `other` — so another newer method (2025-11-25's `tasks/*`) is too |
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
@@ -1477,7 +1502,7 @@ request), `http.response.body.size`, `mcp.method.name` (with
 tool that ran — not one refused at its key, nor one that never ran), and
 `ob1.door`, `ob1.tool`, `ob1.agent`, `ob1.outcome` and `ob1.code` as the line
 has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
-method outside the schema's). No `url.*`: the path is a key's or an id's, and
+method the `rpc` field writes `other`). No `url.*`: the path is a key's or an id's, and
 behind the proxy the scheme is not the server's to know. A tool call's span is
 `execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
 operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none). A

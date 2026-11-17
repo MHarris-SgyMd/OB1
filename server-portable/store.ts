@@ -1175,6 +1175,35 @@ export type MutationResult =
 export type DeleteResult =
   | { ok: true; id: string; detached?: number; inactive?: number }
   | { ok: false; error: MutationError; currentUpdatedAt?: string; citedBy?: number; citations?: Citation[] };
+/**
+ * What forget_thought answers (migrations 139 and 144, SMD-1723): the
+ * evidence of what each store gave up. `removed` counts by store (139's keys:
+ * relations, inactive_citations, detached_citations, derived_refs,
+ * page_sections, query_log_rows, priority_statements, priority_findings,
+ * item_reasons, item_proposals, item_events, items, deliverable_events,
+ * audit_events), `gone` that the row was deleted before the call,
+ * `irreproducible` the thoughts derived from it and `pages` the pages a person
+ * reviews, `twins` the standing thoughts that keep the same text, `source` the
+ * record it was ingested as (its identity hashed), `outside` the copies
+ * beyond the brain's reach.
+ */
+export type ForgetEvidence = {
+  id: string; forgottenAt: string; gone: boolean; orphanEntities: number;
+  removed: Record<string, number>;
+  irreproducible: string[]; pages: string[]; twins: string[];
+  source: { system: string; identitySha256: string } | null;
+  itemIds: string[]; proposalIds: string[]; outside: string[];
+};
+/**
+ * forget_thought's refusals: NOT_FOUND (the log never held the id), FORGOTTEN
+ * (forgotten already, nothing left; `forgottenAt`, and the bare orphan
+ * entities pruned on the way), CITED (as delete_thought's), REPLAYING
+ * (rebuild_derived refused under a replay: nothing done), and any refusal of
+ * delete_thought's the forget passed through (a citation racing the check).
+ */
+export type ForgetResult =
+  | ({ ok: true } & ForgetEvidence)
+  | { ok: false; error: string; forgottenAt?: string; orphanEntities?: number; citedBy?: number; citations?: Citation[] };
 /** The three stamp keys a thought's metadata carries (050, 073), as a reset leaves them; null where the row has none. */
 export type ActorStamp = { actorKind: string | null; actorName: string | null; trust: string | null };
 /**
@@ -1275,6 +1304,50 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
 }
 
 /**
+ * forget_thought's jsonb (139, 144) as the store's union. A refusal keeps its
+ * own word; CITED's count and rows are read as delete_thought's are. A body
+ * that is no envelope throws: an answer this server cannot read is a fault,
+ * and a forget the caller cannot see the evidence of must not read as done.
+ */
+export function normaliseForget(r: unknown): ForgetResult {
+  const o = r !== null && typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : undefined;
+  if (!o || typeof o.ok !== "boolean") throw new Error(`forget_thought answered no envelope: ${JSON.stringify(r)?.slice(0, 120)}`);
+  const ids = (v: unknown): string[] => (Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === "string") : []);
+  const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  if (o.ok === true) {
+    const removed: Record<string, number> = {};
+    if (o.removed !== null && typeof o.removed === "object" && !Array.isArray(o.removed)) {
+      for (const [k, v] of Object.entries(o.removed as Record<string, unknown>)) removed[k] = count(v);
+    }
+    const src = o.source !== null && typeof o.source === "object" && !Array.isArray(o.source) ? (o.source as Record<string, unknown>) : null;
+    return {
+      ok: true,
+      id: String(o.id),
+      forgottenAt: isoTimestampOpt(o.forgotten_at) ?? (() => { throw new Error(`forget_thought answered no forgotten_at: ${JSON.stringify(r)?.slice(0, 120)}`); })(),
+      gone: o.gone === true,
+      orphanEntities: count(o.orphan_entities),
+      removed,
+      irreproducible: ids(o.irreproducible),
+      pages: ids(o.pages),
+      twins: ids(o.twins),
+      source: src && typeof src.system === "string" && typeof src.identity_sha256 === "string" ? { system: src.system, identitySha256: src.identity_sha256 } : null,
+      itemIds: ids(o.item_ids),
+      proposalIds: ids(o.proposal_ids),
+      outside: ids(o.outside),
+    };
+  }
+  if (typeof o.error !== "string") throw new Error(`forget_thought refused with no error word: ${JSON.stringify(r)?.slice(0, 120)}`);
+  const cited = o.error === "CITED" ? normaliseMutation(o) : undefined;
+  return {
+    ok: false,
+    error: o.error,
+    forgottenAt: isoTimestampOpt(o.forgotten_at),
+    orphanEntities: typeof o.orphan_entities === "number" ? o.orphan_entities : undefined,
+    ...(cited && !cited.ok ? { citedBy: cited.citedBy, citations: cited.citations } : {}),
+  };
+}
+
+/**
  * ob1_reset_capture_stamp's jsonb (migration 086) as the store's union. An error the function does not name, or a body
  * that is no envelope, throws: a refusal this server cannot word is a fault.
  */
@@ -1326,6 +1399,10 @@ export type WorkClaim = {
   releaseReason: string | null;
   state: "live" | "lapsed" | "released";
 };
+/** A list_work_claims page's place on its order (SMD-3606 PR 2): a claim's issue, piece_key (folded, '' for a whole-ticket claim), claimed_at (Postgres's text) and id. The store's `after` and the page's `next`. */
+export type ClaimPosition = { issue: string; pieceKey: string; claimedAt: string; id: string };
+/** A page of work claims (SMD-3606 PR 2, migration 143's keyset cursor): the claims, the next page's position while more follow (else null) and how many follow this page. */
+export type ClaimPage = { claims: WorkClaim[]; next: ClaimPosition | null; remaining: number };
 /** The refusal codes 115's writers answer with (SMD-3597). */
 export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_LIMIT" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
 /** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. Its ticket as 115 keyed it, and the releaser's kind, read whether board-sync ended it (SMD-3600). `byAgentId` (claim_work's form): the claim was made under an agent id, so 115's holder test needs that id to read it as the caller's (SMD-3705). */
@@ -1560,6 +1637,36 @@ export function normaliseSetCap(r: unknown): SetCapResult {
   if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
   if (o?.ok === false && o.error === "BAD_CAP" && typeof o.message === "string") return { ok: false, error: "BAD_CAP", message: o.message };
   throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/** A claim release_holder_claims ended, as list_work_claims identifies it: its id, ticket and piece (null for a whole-ticket claim). */
+export type ReleasedClaim = { id: string; issue: string; piece: string | null };
+
+/**
+ * release_holder_claims' answer (145, SMD-3606 PR 3). Released: the holder's live claims that ended (unreleased and
+ * unexpired), each kept as history with the operator and reason. Refused: NOT_OPERATOR (not a key the registry
+ * classifies operator by its agent id; `kind` what it is), NO_HOLDER or NO_REASON (a blank argument — the surface's
+ * schema requires both, so from a client these are unreachable, a fault if they come).
+ */
+export type ReleaseHolderResult =
+  | { ok: true; holder: string; released: number; claims: ReleasedClaim[] }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "NO_HOLDER" | "NO_REASON"; message: string };
+
+/** release_holder_claims' jsonb (145) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseReleaseHolder(r: unknown): ReleaseHolderResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  if (o?.ok === true && typeof o.holder === "string" && typeof o.released === "number" && Array.isArray(o.claims)) {
+    const claims: ReleasedClaim[] = o.claims.map((c) => {
+      const e = (c !== null && typeof c === "object" ? c : {}) as Record<string, unknown>;
+      return { id: String(e.id), issue: String(e.issue), piece: typeof e.piece === "string" ? e.piece : null };
+    });
+    return { ok: true, holder: o.holder, released: o.released, claims };
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
+  if (o?.ok === false && (o.error === "NO_HOLDER" || o.error === "NO_REASON") && typeof o.message === "string") return { ok: false, error: o.error, message: o.message };
+  throw new Error(`release_holder_claims answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
 /**
@@ -2613,6 +2720,29 @@ export interface ThoughtStore {
   }): Promise<DeleteResult>;
 
   /**
+   * Forget a thought (migrations 139 and 144, SMD-1723): forget_thought, which
+   * removes the row and every store holding its text or id, redacts its
+   * events, writes the ledger, and answers the evidence. Refused CITED while
+   * an active citation leans on it, unless `detach`, which deletes the citing
+   * rows with the rest. Runs as the function's owner since 144: the
+   * connecting role needs EXECUTE on it alone, and a role without it throws
+   * (42501).
+   */
+  forgetThought(opts: {
+    id: string;
+    actor?: Actor;
+    detach?: boolean;
+  }): Promise<ForgetResult>;
+
+  /**
+   * When the brain forgot this text, or null (migration 144's
+   * ob1_text_forgotten_at: 139's refusal rule, asked before an embedding is
+   * paid for). Null on a brain before 144, whose refusal trigger still
+   * answers at the write.
+   */
+  textForgottenAt(content: string): Promise<string | null>;
+
+  /**
    * The operator's reset of a capture-only key's label that a re-capture
    * settled or moved (migration 086, SMD-2744): ob1_reset_capture_stamp,
    * which decides who may — a key the registry classifies operator — and
@@ -2637,8 +2767,13 @@ export interface ThoughtStore {
   releaseClaim(opts: { id: string; token?: string; reason?: string; force?: boolean; actor?: Actor }): Promise<ClaimAnswer>;
   /** Whether a token is this claim's, by 115's hash (a token in its shape: the writer that refused it read it so); never the hash itself. */
   claimTokenIs(id: string, token: string): Promise<boolean>;
-  /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
-  listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
+  /**
+   * list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name
+   * or all, by ticket then piece then claim time then id. `after` (143's keyset cursor) picks the page after a position,
+   * so a full read pages past the 1,000 cap; the page's `next` is the next cursor while more follow, `remaining` how
+   * many. Throws ListCursorRefused for a cursor time Postgres cannot read (SMD-3606 PR 2).
+   */
+  listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number; after?: ClaimPosition }): Promise<ClaimPage>;
   /**
    * The unreleased claims — live, and lapsed but never released — on the tickets `issues` names, keyed as 115 keys
    * them (SMD-3599: a read's whole page at once, so a result says who holds a ticket it names, or held it and may
@@ -2720,6 +2855,12 @@ export interface ThoughtStore {
    * operator, by its agent id — and checks the cap in 140's words. A database before 140 throws.
    */
   setWorkClaimCap(opts: { cap: number | null; actor?: Actor }): Promise<SetCapResult>;
+  /**
+   * An operator ends every live claim one holder holds, in one call (migration 145's release_holder_claims, SMD-3606
+   * PR 3): the holder's key name and a reason, each released claim kept as history. The function decides who may — a key
+   * the registry classifies operator, by its agent id. A database before 144 throws.
+   */
+  releaseHolderClaims(opts: { holder: string; reason: string; actor?: Actor }): Promise<ReleaseHolderResult>;
   /**
    * The priority review's findings (migration 142, SMD-3671): those of one status (null: every one) and kind (null:
    * every kind), the pending oldest found first, then the rest most recently decided or mooted first, ties by id; `total`
@@ -3109,9 +3250,9 @@ export function maskUrl(url: string): string {
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
-  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
+  statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, listPriorityFindings: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 

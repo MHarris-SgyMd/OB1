@@ -28,7 +28,7 @@ import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normalisePriorityFinding, normaliseReviewFinding, type FindingPosition, type PriorityFinding, type ReviewFindingResult, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -42,9 +42,11 @@ import type {
   ListPosition,
   ThoughtListPage,
   DeleteResult,
+  ForgetResult,
   ResetStampResult,
   SetWeightsResult,
   SetCapResult,
+  ReleaseHolderResult,
   ProvenanceNode,
   QueryActionLog,
   QueryAgendaLog,
@@ -1000,6 +1002,27 @@ export class SqlStore implements ThoughtStore {
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }
 
+  async forgetThought(opts: { id: string; actor?: Actor; detach?: boolean }): Promise<ForgetResult> {
+    // 139's three arguments, always sent, as delete_thought's are. One
+    // statement: the function is one transaction, and READ COMMITTED alone
+    // (ob1_priority_isolation refuses any other).
+    const rows = await this.sql`
+      SELECT forget_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;
+    return normaliseForget(rows[0]?.r);
+  }
+
+  async textForgottenAt(content: string): Promise<string | null> {
+    try {
+      const rows = await this.sql`SELECT ob1_text_forgotten_at(${content}::text) AS at`;
+      return isoTimestampOrNull(rows[0]?.at ?? null);
+    } catch (e) {
+      // A brain before 144 has no such function: the refusal trigger (139)
+      // still answers at the write, after the embedding.
+      if ((e as { errno?: string }).errno === "42883") return null;
+      throw e;
+    }
+  }
+
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
     // 086: one statement, as the note and the restamp are made; the function
     // decides who may, and names the actor in the event it appends.
@@ -1033,13 +1056,35 @@ export class SqlStore implements ThoughtStore {
     return rows[0]?.mine === true;
   }
 
-  async listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]> {
-    const rows = await this.sql`
-      SELECT id, issue, piece, holder, holder_agent_id, holder_kind, label, claimed_at, renewed_at, expires_at,
-             released_at, released_by, released_by_kind, release_reason, state
-        FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
-                              ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int)` as Record<string, unknown>[];
-    return rows.map((r) => normaliseWorkClaim(r, "list_work_claims"));
+  async listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number; after?: ClaimPosition }): Promise<ClaimPage> {
+    // Migration 115, under 143's eight-argument form. Eight arguments, always: 115 re-applied by hand lands its
+    // four-argument form beside 143's, and a call both forms take is then ambiguous (42725, not unique) and fails;
+    // eight resolve (preflight's ticket-claims check names the leftover by its signature). Its columns by name, never
+    // `*`: a migration that adds one to the function leaves this statement's result type as it was, so the connection's
+    // prepared plan is re-planned rather than failing 0A000 (SMD-3302).
+    const a = opts.after;
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT id, issue, piece, holder, holder_agent_id, holder_kind, label, claimed_at, renewed_at, expires_at,
+               released_at, released_by, released_by_kind, release_reason, state, page_key, remaining
+          FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
+                                ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int,
+                                ${a?.issue ?? null}::text, ${a?.pieceKey ?? null}::text, ${a?.claimedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)` as Record<string, unknown>[];
+    } catch (e) {
+      // list_thoughts' rule (SMD-2995): a time cast that failed is read alone, and only a cursor time Postgres cannot
+      // read is the caller's, refused; anything else is the store's fault.
+      if (!a || !timeCastFailed(e)) throw e;
+      const unread = await this.sql`SELECT ${a.claimedAt}::timestamptz`.then(() => false, (p: unknown) => (timeCastFailed(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
+    }
+    // 143: each row's page_key is its place for the next call; remaining counts the selection from this page's first on,
+    // so what follows the page is that less the rows listed, read off the listing as it came back.
+    const remaining = rows.length ? Math.max(0, Number(rows[0].remaining) - rows.length) : 0;
+    const lastKey = remaining > 0 ? JSON.parse(String(rows[rows.length - 1].page_key)) as string[] : null;
+    const next: ClaimPosition | null = lastKey ? { issue: lastKey[0], pieceKey: lastKey[1], claimedAt: lastKey[2], id: lastKey[3] } : null;
+    return { claims: rows.map((r) => normaliseWorkClaim(r, "list_work_claims")), next, remaining };
   }
 
   async unreleasedClaimsOn(issues: string[], limit: number): Promise<WorkClaim[]> {
@@ -1214,6 +1259,13 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT set_work_claim_cap(${opts.cap}, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseSetCap(rows[0]?.r);
+  }
+
+  // SMD-3606 PR 3: 145's operator write, one statement. The holder and reason ride as text; the function decides who may and ends every live claim of the holder.
+  async releaseHolderClaims(opts: { holder: string; reason: string; actor?: Actor }): Promise<ReleaseHolderResult> {
+    const rows = await this.sql`
+      SELECT release_holder_claims(${opts.holder}, ${opts.reason}, ${actorPayload(opts.actor)}::jsonb) AS r`;
+    return normaliseReleaseHolder(rows[0]?.r);
   }
 
   // SMD-3671 PR 2: 142's findings, one statement. The matching rows are read narrow — the id and the order's keys

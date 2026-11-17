@@ -10,7 +10,8 @@
 // below is that file, the MCP server this one replaced, retired in SMD-2287
 // PR 6b (`git show 52f77d4f:server-portable/index.ts`), never this directory's.
 
-import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
+import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport, type AuthInfo } from "@modelcontextprotocol/server";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Hono, type Context } from "hono";
 import { presentedKeys, queryOf } from "../server-portable/auth.ts";
 import { BRAIN_VERSION } from "../server-portable/version.ts";
@@ -330,6 +331,8 @@ const WORDS: Record<ToolName, Words> = {
   capture_thought: { render: (o) => say.renderCapture(o), fault: (err) => say.storeUnavailable(err) },
   update_thought: { render: (o) => say.renderUpdate(o), fault: writeFault("update_thought failed: ") },
   delete_thought: { render: (o) => say.renderDelete(o), fault: writeFault("delete_thought failed: ") },
+  // Forgetting (SMD-1723 PR 2, migrations 139 and 144).
+  forget_thought: { render: (o) => say.renderForget(o), fault: writeFault("forget_thought failed: ", say.forgetHint) },
   reset_capture_stamp: { render: (o) => say.renderResetCaptureStamp(o), fault: writeFault("reset_capture_stamp failed: ", say.resetHint) },
   append_thought_evidence: { render: (o) => say.renderAppendThoughtEvidence(o), fault: writeFault("append_thought_evidence failed: ") },
   review_supersession_proposal: { render: (o) => say.renderReviewProposal(o), fault: writeFault("review_supersession_proposal failed: ", say.reviewHint) },
@@ -343,6 +346,7 @@ const WORDS: Record<ToolName, Words> = {
   list_claims: { render: (o) => say.renderListClaims(o), fault: readFault() },
   // The per-holder claim cap (SMD-3606 PR 1b, migration 140).
   set_work_claim_cap: { render: (o) => say.renderSetWorkClaimCap(o), fault: writeFault("set_work_claim_cap failed: ", say.setCapHint) },
+  release_holder_claims: { render: (o) => say.renderReleaseHolderClaims(o), fault: writeFault("release_holder_claims failed: ", say.releaseHolderHint) },
   // Priority assertions (SMD-3664).
   set_priority: { render: (o) => say.renderSetPriority(o), fault: writeFault("set_priority failed: ") },
   clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },
@@ -371,6 +375,9 @@ const WORDS: Record<ToolName, Words> = {
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };
 
+/** The revision family a request speaks, as the SDK names the two: `legacy` the 2025-era revisions, `modern` 2026-07-28 and later. */
+type Era = "legacy" | "modern";
+
 /**
  * The MCP server for one request: the tools the caller's operations name,
  * each validated by the SDK against the tool's own schema (core/schemas.ts,
@@ -378,10 +385,15 @@ const WORDS: Record<ToolName, Words> = {
  * its answer said by render.ts. `endpoint`: the path the request came to, no
  * trailing slash — a scan's job links go under it, as server-portable's do.
  * `ops`: the enabled plugins' operations. `raw`: each call's arguments as its
- * client sent them (argumentsById), which a plugin tool sends on.
+ * client sent them (argumentsById), which a plugin tool sends on. `era`: the
+ * revision family the request speaks (SMD-4345). A 2026-07-28 server says it
+ * sends no list-changed notification: this server holds no connection open to
+ * send one on, and a client told so opens no `subscriptions/listen` stream
+ * (Claude Code 2.1.325, measured; serving that stream is SMD-4347). The
+ * 2025-era server declares what the SDK declares for it, as it always has.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION });
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void, era: Era): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION }, era === "modern" ? { capabilities: { tools: { listChanged: false } } } : undefined);
   const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
   // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250), and
   // under its own span, the request's child (index.ts's registerOp, PR 4c): what it sends the REST core carries that
@@ -487,6 +499,27 @@ export function createMcpApp(deps: McpDeps): Hono {
       warn(`mcp-server: the REST core runs ${name}, which is no tool here: run this server from the REST core's build, with its OB1_PLUGINS`);
     }
   };
+
+  // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
+  // by the function the request's route hands it (forRequest), so that server is the caller's, as a 2025-era
+  // request's is. 2025-era traffic never reaches it (`legacy: "reject"`): the route sends that to the transport it
+  // always had. What it serves it answers as an event stream, as that transport does: a JSON body would arrive
+  // only when the tool ends, with nothing for withSseKeepalive to keep open (SMD-1864). What it refuses before
+  // serving (a header that disagrees with the body, a revision it does not serve, a body not sent as JSON, one
+  // past its bound) is a JSON answer. Its own 15 s keepalive stays on, as the transport's does, so sse.ts's account
+  // of a stream past its bound holds for both.
+  //
+  // `onerror` is told of each request it refused and of each fault it caught, a throw building the server among
+  // them, which it answers 500 and says nowhere else. The route cannot tell the two apart there, so the error is
+  // kept for the request that is running (handlerSaid) and the route reads it once it has the answer's status.
+  const handlerSaid = new AsyncLocalStorage<{ err?: Error }>();
+  const modern = createMcpHandler((ctx) => {
+    const build = (ctx.authInfo?.extra as { build?: () => McpServer } | undefined)?.build;
+    if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
+    return build();
+  }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; } });
+  /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
+  const forRequest = (build: () => McpServer): AuthInfo => ({ token: "", clientId: "", scopes: [], extra: { build } });
 
   // Every request's record (SMD-1849, telemetry.ts's RequestTrace), made first
   // and ended here, as index.ts's first middleware makes and ends it — the MCP
@@ -922,10 +955,32 @@ export function createMcpApp(deps: McpDeps): Hono {
       label = requestLabel(rawBody);
       read(rawBody);
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
-      const server = buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err));
-      const transport = new WebStandardStreamableHTTPServerTransport();
-      await server.connect(transport);
-      const response = await transport.handleRequest(new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined }));
+      const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era);
+      const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
+      // Which revision family the request speaks, by the SDK's own rule (SMD-4345). A well-formed 2025-era
+      // request (no envelope, no 2026-07-28 header) stays on the 2025-era transport, as every request did. One
+      // carrying the 2026-07-28 envelope goes to the SDK's handler. So does whatever the rule cannot place: a
+      // request that mixes the two (a 2026-07-28 header on a 2025-era body, or the reverse), a body that is JSON
+      // and no JSON-RPC message, and a body past the SDK's 4 MiB bound. The handler refuses each in its own
+      // words, where the transport's differed or it served the request; the SDK asks that its rule's `false` go
+      // to the handler and never to a 2025-era one. Each path reads the body itself, so the bound is one: handing
+      // either the body already parsed would lift it for one revision and not the other.
+      let response: Response | undefined;
+      if (await isLegacyRequest(request)) {
+        const transport = new WebStandardStreamableHTTPServerTransport();
+        await build("legacy").connect(transport);
+        response = await transport.handleRequest(request);
+      } else {
+        const said: { err?: Error } = {};
+        response = await handlerSaid.run(said, () => modern.fetch(request, { authInfo: forRequest(() => build("modern")) }));
+        // A fault the handler caught and answered 500: thrown here, so it is said and recorded as a 2025-era
+        // request's is (the catch above: this server's 500, its line `error`, one line in the log). A request the
+        // handler refused is a 4xx, and its error is let go: the request's line says it by its status.
+        if (response.status >= 500 && said.err) {
+          void response.body?.cancel().catch(() => {});
+          throw said.err;
+        }
+      }
       if (!response) {
         settled = true;
         trace.status = 500;

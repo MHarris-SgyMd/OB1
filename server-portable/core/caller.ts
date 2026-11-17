@@ -30,7 +30,7 @@ export async function asked<T, E extends Error>(Refused: abstract new (...args: 
   }
 }
 
-type UnattributedCode = "CLAIM_UNATTRIBUTED" | "PRIORITY_UNATTRIBUTED" | "ITEM_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED";
+type UnattributedCode = "CLAIM_UNATTRIBUTED" | "PRIORITY_UNATTRIBUTED" | "ITEM_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED";
 /**
  * What a claim's refusal names beyond its cause: its id, whether a force was asked, and when the caller's own claim
  * had lapsed, if it had (SMD-3705). The other two name nothing more.
@@ -48,6 +48,7 @@ export function unattributedAs(code: "CLAIM_UNATTRIBUTED", principal: Principal,
 export function unattributedAs(code: "PRIORITY_UNATTRIBUTED", principal: Principal): Outcome<never, "PRIORITY_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "ITEM_UNATTRIBUTED", principal: Principal): Outcome<never, "ITEM_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED"> | null;
+export function unattributedAs(code: "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, "RELEASE_HOLDER_UNATTRIBUTED"> | null;
 export function unattributedAs(code: UnattributedCode, principal: Principal, facts?: ClaimFacts): Outcome<never, UnattributedCode> | null {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
   // Typed by the refusal's own shape, PRIORITY_UNATTRIBUTED's causes the narrowest of the three, so a mistyped cause

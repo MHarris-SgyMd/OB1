@@ -31,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantStatements, quoteIdent, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey } from "./config.mjs";
 import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
@@ -767,7 +767,12 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 115, 122, 123 or 129 ([20cb]); 138 replaces 133's two writers, their answers naming
   // the item and every statement closed, and adds
   // ob1_priority_closed_json, refusing by name without 115, 116, 117,
-  // 122 or 133 ([20cc]); 140 adds the per-holder claim cap — a table, two
+  // 122 or 133 ([20cc]); 139 adds forgetting — the ledger, the log's redact
+  // amendment in 055's gate, the refusal of a forgotten text on thoughts,
+  // 116's, 117's and 134's guards admitting the forget's deletes, and
+  // forget_thought — refusing by name without 016, 034, 053, 055, 060, 064,
+  // 067, 116, 117, 123 or 134 ([20cg]);
+  // 140 adds the per-holder claim cap — a table, two
   // refusing triggers and eight functions, claim_work redefined to count a
   // holder's live claims under a per-holder lock and refuse CLAIM_LIMIT past the
   // operator-settable cap — refusing by name without 046, 061 or 115 ([20cd]);
@@ -778,12 +783,20 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 056's apply_entity_type_gate carried), refusing by name without 016,
   // 056, 061, 116, 133 or 136 ([20ce]); 142 adds priority_findings, the
   // priority review's scan and an operator's decision, refusing by name
-  // without 046, 068, 116, 117, 122 or 133 ([20cf]) — all recorded by the
+  // without 046, 068, 116, 117, 122 or 133 ([20cf]); 143 redefines 115's
+  // list_work_claims with a keyset after-cursor on (issue, piece_key,
+  // claimed_at, id) and the page_key and remaining columns, refusing by name
+  // without 115 ([20ch]); 144 renames 139's forget_thought to its body and
+  // makes forget_thought a SECURITY DEFINER wrapper over it, EXECUTE not
+  // PUBLIC's, and adds ob1_text_forgotten_at and ob1_forget_leftovers,
+  // refusing by name without 139 or 142 ([20ci]); 145 adds release_holder_claims,
+  // an operator's one-call release of every live claim a holder holds, refusing
+  // by name without 046 or 115 ([20cj]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 112, `030 is among the last one hundred and twelve migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 116, `030 is among the last one hundred and sixteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -6368,7 +6381,11 @@ console.log("\n[20ca] Migration 136: onto a populated brain at the file before i
   // what it left.
   const ROLE = "ob1_upgrade_136_nopriority";
   await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE}`);
-  for (const st of grantStatements(ROLE, { groups: ["capture", "server"] })) await sql.unsafe(st);
+  // The groups as a brain at 136 holds them: an object a later file adds (139's thought_forgotten in the capture
+  // group) is skipped, as migrate.ts --grant skips it on a partly migrated database.
+  const present136 = new Set(((await sql.unsafe(grantPresenceSql(grantedObjects(["capture", "server"])))) as { name: string; present: boolean }[])
+    .filter((r) => r.present).map((r) => r.name));
+  for (const st of grantStatements(ROLE, { groups: ["capture", "server"], present: present136 })) await sql.unsafe(st);
   const byRole = await thought("upgrade 136: deleted by a role without the priority grants"), onByRole = await put("thought", byRole, 2);
   let roleDelete = "";
   try {
@@ -6820,6 +6837,334 @@ console.log("\n[20cf] Migration 142: onto a populated brain at the file before i
   const again = (await sql`SELECT ob1_priority_review() AS r`)[0].r as { found: number; pending: number };
   assert(again.found === 0 && again.pending === first.pending, `a re-apply is a no-op: the finding stands and the scan finds nothing new (${JSON.stringify(again)})`);
   await sql.unsafe(`DROP OWNED BY ${OLD}; DROP ROLE ${OLD}`);
+  await sql.close();
+}
+
+console.log("\n[20cg] Migration 139: onto a populated brain at the file before it — refused by name without 067's rebuild_derived, nothing made; then applied: a role that writes thoughts reads the ledger; a thought captured and edited at 138 forgotten, every event of it redacted with its actor kept, the text refused on its way back; while a forget runs, a capture of an earlier text waits on its fingerprint lock, then is refused OB005; an edit that commits while the forget waits on the row gives its text to the ledger, refused after; a priority writer holding the item's lock is waited for; a close decision in flight is waited for, its copied reason blanked; a re-apply a no-op (SMD-1723)");
+{
+  const the139 = MIGRATIONS.find((f) => /^\d{3}_forget_thought\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the139 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const SECRET = "upgrade 139: the door code is 2468";
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-op', 'operator')`;
+  const ACT = JSON.stringify({ name: "upgrade-op", scope: "write" });
+  let id = "";
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    id = String((await tx`INSERT INTO thoughts (content, content_fingerprint) VALUES (${SECRET}, content_fingerprint_of(${SECRET})) RETURNING id`)[0].id);
+  });
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    await tx`UPDATE thoughts SET content = ${`${SECRET}, edited`}, content_fingerprint = content_fingerprint_of(${`${SECRET}, edited`}) WHERE id = ${id}::uuid`;
+  });
+  // A role granted thoughts' writes before 139, which the file grants the ledger the refusal reads.
+  await sql.unsafe(`CREATE ROLE ob1_upgrade_139_writer NOLOGIN; GRANT INSERT, UPDATE ON thoughts TO ob1_upgrade_139_writer`);
+  // …and one granted an UPDATE of one column alone, which the table's own ACL does not show (review pass 7).
+  await sql.unsafe(`CREATE ROLE ob1_upgrade_139_col NOLOGIN; GRANT UPDATE (content) ON thoughts TO ob1_upgrade_139_col`);
+  const made = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'forget_thought'`)[0].c);
+
+  // Without 067's rebuild_derived: refused by name, nothing made.
+  await sql`ALTER FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) RENAME TO rebuild_derived_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION rebuild_derived_away(uuid, text, boolean, text[], boolean, boolean) RENAME TO rebuild_derived`;
+  assert(/^migration 139 needs 016, 034, 053, 055, 060, 064, 067, 116, 117, 123 and 134 /.test(without) && await made() === 0,
+    `without 067's rebuild_derived the file is refused by name, nothing made (${without.slice(0, 90)} | ${await made()})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
+  const reads = Boolean((await sql`SELECT has_table_privilege('ob1_upgrade_139_writer', 'thought_forgotten', 'SELECT')
+                                          AND has_table_privilege('ob1_upgrade_139_col', 'thought_forgotten', 'SELECT') AS r`)[0].r);
+  const ans = (await sql`SELECT forget_thought(${id}::uuid, (${ACT}::text)::jsonb) AS r`)[0].r as { ok: boolean; removed: { audit_events: number } };
+  const log = (await sql`SELECT count(*)::int AS n, count(*) FILTER (WHERE redacted_at IS NOT NULL)::int AS red,
+                                count(*) FILTER (WHERE actor_name = 'upgrade-op')::int AS act,
+                                count(*) FILTER (WHERE diff::text LIKE '%door code%')::int AS text
+                           FROM thought_audit WHERE thought_id = ${id}::uuid`)[0] as { n: number; red: number; act: number; text: number };
+  let back = "taken";
+  try { await sql`INSERT INTO thoughts (content) VALUES (${SECRET})`; } catch (e) { back = String((e as { errno?: string }).errno ?? (e as { code?: string }).code); }
+  assert(reads && ans.ok === true && ans.removed.audit_events === 3 && log.n === 3 && log.red === 3 && log.act === 3 && log.text === 0 && back === "OB005",
+    `applied: the writers read the ledger, the column grant's too; the thought from 138 forgotten, its capture, edit and tombstone redacted with their actor kept; the text refused OB005 (${reads} | ${JSON.stringify(log)} | ${back})`);
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_139_writer; DROP ROLE ob1_upgrade_139_writer; DROP OWNED BY ob1_upgrade_139_col; DROP ROLE ob1_upgrade_139_col`);
+
+  // A race, on two connections (review pass 1): while a forget of R runs, a capture of R's earlier text waits on the
+  // fingerprint lock the forget holds; after the commit it is refused OB005, nothing written. (Another store's racing
+  // write is swept by a second forget: test-schema [129].)
+  const r = String((await sql`SELECT (upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    await tx`UPDATE thoughts SET content = ${"upgrade 139: the race's last text"}, content_fingerprint = content_fingerprint_of(${"upgrade 139: the race's last text"}) WHERE id = ${r}::uuid`;
+  });
+  const other = new SQL({ url: URL_, max: 2 });
+  const errOf = (e: unknown) => String((e as { errno?: string }).errno ?? (e as Error).message);
+  let capture: Promise<string> = Promise.resolve("not started");
+  const settled: string[] = [];
+  let waitedThenRefused = false;
+  await sql.begin(async (tx) => {
+    await tx`SELECT forget_thought(${r}::uuid, (${ACT}::text)::jsonb)`;
+    capture = other`SELECT upsert_thought(${"upgrade 139: the race's first text"}, '{}'::jsonb) AS r`
+      .then(() => "taken", errOf).finally(() => settled.push("capture"));
+    await new Promise((res) => setTimeout(res, 400));
+    // Read before the commit: once it lands the waiters are released, and on a fast runner they settle before the
+    // line after the transaction runs (CI, first push).
+    waitedThenRefused = settled.length === 0;
+  });
+  const cap = await capture;
+  await other.close();
+  const leftR = (await sql`SELECT count(*)::int AS t FROM thoughts WHERE content LIKE 'upgrade 139: the race%'`)[0] as { t: number };
+  assert(waitedThenRefused && cap === "OB005" && leftR.t === 0,
+    `while the forget ran the capture did not settle; after it the capture of the earlier text was refused OB005, nothing written (${waitedThenRefused}; ${cap}; ${JSON.stringify(leftR)})`);
+
+  // An edit that holds the row while the forget starts (review pass 3): the forget reads the texts before the row
+  // lock, waits, and reads them again under it, so the edited text reaches the ledger and is refused after.
+  const e = String((await sql`SELECT (upsert_thought(${"upgrade 139: before the edit"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  const editor = new SQL({ url: URL_, max: 1 });
+  let forgetting: Promise<unknown> = Promise.resolve(null);
+  await editor.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+    await tx`UPDATE thoughts SET content = ${"upgrade 139: after the edit"}, content_fingerprint = content_fingerprint_of(${"upgrade 139: after the edit"}) WHERE id = ${e}::uuid`;
+    forgetting = sql`SELECT forget_thought(${e}::uuid, (${ACT}::text)::jsonb) AS r`.then((x) => x);  // started now: a Bun query runs when awaited or then-ed
+    await new Promise((res) => setTimeout(res, 400));
+  });
+  await forgetting;
+  await editor.close();
+  const editedFp = String((await sql`SELECT content_fingerprint_of(${"upgrade 139: after the edit"}) AS f`)[0].f);
+  const inLedger = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM thought_forgotten WHERE thought_id = ${e}::uuid AND ${editedFp} = ANY(fingerprints)) AS x`)[0].x);
+  let editedBack = "taken";
+  try { await sql`SELECT upsert_thought(${"upgrade 139: after the edit"}, '{}'::jsonb)`; } catch (err) { editedBack = String((err as { errno?: string }).errno ?? (err as Error).message); }
+  assert(inLedger && editedBack === "OB005",
+    `an edit committed while the forget waited on the row: its text in the ledger, refused after (${inLedger}; ${editedBack})`);
+
+  // A priority writer holding the item's lock (review pass 7): the forget takes each item's lock before it deletes
+  // the item's statements, so it waits for the writer, as 116's writers wait for one another. The writer then takes a
+  // share lock on the thought's row, as a capture-scoped assert_priority does (138): the forget takes the priority
+  // locks before its row lock, so neither waits on the other (review pass 8: taken after it, the two deadlocked).
+  const pr = String((await sql`SELECT (upsert_thought(${"upgrade 139: a thought with a priority"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  await sql`SELECT assert_priority('thought', ${pr}, 4, NULL, NULL, NULL, NULL, 'upgrade 139', false, (${ACT}::text)::jsonb)`;
+  const lockHolder = new SQL({ url: URL_, max: 1 });
+  const codeOf = (e: unknown) => String((e as { errno?: string }).errno ?? (e as { code?: string }).code ?? (e as Error).message);
+  let prForget: Promise<string> = Promise.resolve("not started");
+  const prSettled: string[] = [];
+  let prWaited = false;
+  let share = "not run";
+  await lockHolder.begin(async (tx) => {
+    await tx`SELECT ob1_priority_lock('thought', ${pr})`;
+    prForget = sql`SELECT forget_thought(${pr}::uuid, (${ACT}::text)::jsonb) AS r`
+      .then((x) => String(((x as { r: { ok: boolean } }[])[0].r).ok), codeOf).finally(() => prSettled.push("forget"));  // started now
+    await new Promise((res) => setTimeout(res, 400));
+    prWaited = prSettled.length === 0;  // read before the commit releases it
+    share = await tx`SELECT 1 FROM thoughts WHERE id = ${pr}::uuid FOR SHARE`.then(() => "taken", codeOf);
+  }).catch((e) => { share = `${share}; the writer's transaction: ${codeOf(e)}`; });
+  const prAnswer = await prForget;
+  await lockHolder.close();
+  const prLeft = Number((await sql`SELECT count(*)::int AS c FROM priority_assertions WHERE item_key = ${pr}`)[0].c);
+  assert(prWaited && share === "taken" && prAnswer === "true" && prLeft === 0,
+    `a priority writer holding the thought's lock, then a share lock on its row: the forget waited for it, neither deadlocked, then the statement deleted (${prWaited}, ${share}, ${prAnswer}, ${prLeft})`);
+
+  // A close decision in flight (review pass 6): it copies the proposal's reason onto the item's status event and holds
+  // the proposal; the forget locks the proposals citing its thought first, so it waits, then blanks the copy.
+  const cited = String((await sql`SELECT (upsert_thought(${"upgrade 139: the cited note, door code 1357"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  const holder = String((await sql`SELECT (upsert_thought(${"upgrade 139: the item's own note"}, '{}'::jsonb)->>'id') AS id`)[0].id);
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-decider', 'operator')`;
+  const itemH = String(((await sql`SELECT open_item('an item of the holder', NULL, NULL, ${holder}::uuid, NULL, false, (${ACT}::text)::jsonb) AS r`)[0] as { r: { item: { id: string } } }).r.item.id);
+  await sql`SELECT propose_item_close(${itemH}, 'done', ${cited}::uuid, NULL, ${"done, per the door code 1357"}, (${ACT}::text)::jsonb)`;
+  const propId = String((await sql`SELECT id FROM open_item_close_proposals WHERE item_id = ${itemH}::uuid`)[0].id);
+  const decider = new SQL({ url: URL_, max: 1 });
+  let racing: Promise<unknown> = Promise.resolve(null);
+  await decider.begin(async (tx) => {
+    await tx`SELECT decide_item_close(${propId}::uuid, true, NULL, (${JSON.stringify({ name: "upgrade-decider", scope: "write" })}::text)::jsonb)`;
+    racing = sql`SELECT forget_thought(${cited}::uuid, (${ACT}::text)::jsonb) AS r`.then((x) => x);  // started now
+    await new Promise((res) => setTimeout(res, 400));
+  });
+  await racing;
+  await decider.close();
+  const copyLeft = Number((await sql`SELECT count(*)::int AS c FROM open_item_events WHERE item_id = ${itemH}::uuid AND reason LIKE '%1357%'`)[0].c);
+  const itemKept = Number((await sql`SELECT count(*)::int AS c FROM open_items WHERE item_id = ${itemH}::uuid`)[0].c);
+  assert(copyLeft === 0 && itemKept === 1,
+    `a close decision in flight: the forget waited on the proposal, then blanked the reason it copied, the holder's item kept (${copyLeft}, ${itemKept})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the139 });
+  const ledger = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten`)[0].c);
+  assert(ledger === 5 && await made() === 1, "a re-apply is a no-op: the ledger kept, one forget_thought");
+  await sql.close();
+}
+
+console.log("\n[20ch] Migration 143: onto a populated brain at the file before it — refused by name without 115's ob1_work_claim_text, the eight-argument form not made; then applied: list_work_claims pages with the after-cursor, each claim once to the end, remaining counting down; a partial cursor refused; a re-apply a no-op (SMD-3606)");
+{
+  const the143 = MIGRATIONS.find((f) => /^\d{3}_work_claims_cursor\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the143 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('cur-holder', 'agent')`;
+  const hid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'cur-holder'`)[0].id);
+  const H = JSON.stringify({ name: "cur-holder", agent_id: hid });
+
+  // Without 115's ob1_work_claim_text (the body calls it): refused by name, the new form not made.
+  await sql`ALTER FUNCTION ob1_work_claim_text(text, integer, text) RENAME TO ob1_work_claim_text_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_text_away(text, integer, text) RENAME TO ob1_work_claim_text`;
+  const eight = async () => (await sql`SELECT to_regprocedure('list_work_claims(text[],text,boolean,integer,text,text,timestamptz,uuid)') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 143 needs 115 \(ob1_work_claim_text\); this schema lacks it/.test(without) && !(await eight()),
+    `without 115's ob1_work_claim_text the file is refused by name; the eight-argument form not made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 });
+
+  // Five claims by one holder (the built-in cap 50 allows), on tickets that sort in order.
+  for (const n of [1, 2, 3, 4, 5]) await sql`SELECT claim_work(${`SMD-710${n}`}, NULL, NULL, 14400, NULL, (${H}::text)::jsonb)`;
+  type Row = { id: string; issue: string; page_key: string; remaining: number | string };
+  const page = async (after: string[] | null): Promise<Row[]> =>
+    await sql`SELECT id, issue, page_key, remaining
+                FROM list_work_claims(NULL, ${"cur-holder"}::text, false, 2, ${after?.[0] ?? null}::text, ${after?.[1] ?? null}::text, ${after?.[2] ?? null}::timestamptz, ${after?.[3] ?? null}::uuid)` as Row[];
+  const seen: string[] = [];
+  let after: string[] | null = null;
+  let more = true;
+  for (let i = 0; i < 10 && more; i++) {
+    const rows: Row[] = await page(after);
+    if (rows.length === 0) break;
+    for (const r of rows) seen.push(r.issue);
+    const left = Number(rows[rows.length - 1].remaining) - rows.length;  // the rows after this page
+    more = left > 0;
+    after = more ? JSON.parse(rows[rows.length - 1].page_key) as string[] : null;
+  }
+  assert(seen.length === 5 && new Set(seen).size === 5 && JSON.stringify(seen) === JSON.stringify(["SMD-7101", "SMD-7102", "SMD-7103", "SMD-7104", "SMD-7105"]),
+    `list_work_claims pages with the after-cursor, each of the five claims once to the end, in ticket order (${seen.join(",")})`);
+
+  // A partial cursor — some of the four values set, not all — is refused by name, no rows.
+  const partial = await sql`SELECT * FROM list_work_claims(NULL, NULL, false, 2, 'SMD-7101', NULL, NULL, NULL)`.then(() => "listed", (e: Error) => e.message);
+  assert(/the after-cursor is four values/.test(partial), `a partial after-cursor is refused by name (${partial.slice(0, 80)})`);
+
+  // A re-apply is a no-op: the listing still pages, remaining counts the five.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the143 });
+  const reapplied = await page(null);
+  assert(reapplied.length === 2 && Number(reapplied[0].remaining) === 5,
+    `a re-apply is a no-op: the listing still pages, remaining counts the five (${reapplied.length}, ${reapplied[0]?.remaining})`);
+
+  await sql.close();
+}
+
+console.log("\n[20ci] Migration 144: onto a populated brain at the file before it — refused by name without 139's forget_thought, nothing changed; then applied: forget_thought its owner's, EXECUTE no longer PUBLIC's but carried to the role 139's function was granted to; a role holding a plain --grant, refused at 142 for want of the stores' privileges, forgets a thought at 144; a replay's setting the role set first is not carried in, and is its own again after; a re-apply a no-op (SMD-1723)");
+{
+  const the144 = MIGRATIONS.find((f) => /^\d{3}_forget_thought_definer\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the144 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-144-op', 'operator')`;
+  const ACT = JSON.stringify({ name: "upgrade-144-op", scope: "write" });
+  const thought = async (content: string) => {
+    let id = "";
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('ob1.actor', ${ACT}, true)`;
+      id = String((await tx`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+    });
+    return id;
+  };
+  // Roles made at 142: one granted every group a plain migrate.ts --grant issues (the objects there), one that may
+  // delete a thought, one that may only read.
+  const ROLE = "ob1_upgrade_144_granted";
+  await sql.unsafe(`CREATE ROLE ${ROLE} NOLOGIN; GRANT USAGE ON SCHEMA public TO ${ROLE};
+                    CREATE ROLE ob1_upgrade_144_deleter NOLOGIN; GRANT SELECT, DELETE ON thoughts TO ob1_upgrade_144_deleter;
+                    CREATE ROLE ob1_upgrade_144_reader NOLOGIN; GRANT SELECT ON thoughts TO ob1_upgrade_144_reader`);
+  const present142 = new Set(((await sql.unsafe(grantPresenceSql(grantedObjects([...ROLE_GRANT_GROUPS])))) as { name: string; present: boolean }[])
+    .filter((r) => r.present).map((r) => r.name));
+  for (const st of grantStatements(ROLE, { groups: [...ROLE_GRANT_GROUPS], present: present142 })) await sql.unsafe(st);
+  /** forget_thought as the granted role, `before` run first as it; the answer, or the error's SQLSTATE, and the role's settings after. */
+  const forgetAs = async (id: string, before: string[] = []) => {
+    let out = "";
+    let after = "";
+    try {
+      await sql.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE ${ROLE}`);
+        for (const st of before) await tx.unsafe(st);
+        const r = (await tx`SELECT forget_thought(${id}::uuid, (${ACT}::text)::jsonb) AS r`)[0].r as { ok: boolean; error?: string };
+        out = r.ok ? "ok" : String(r.error);
+        after = String((await tx`SELECT current_setting('ob1.projecting_replay', true) AS v`)[0].v);
+      });
+    } catch (e) { out = String((e as { errno?: string }).errno ?? (e as Error).message); }
+    return { out, after };
+  };
+  const A = await thought("upgrade 144: the door code is 8642");
+  const at142 = await forgetAs(A);
+  // to_regprocedure, read as the statement runs: a ::regprocedure literal is resolved when the statement is planned,
+  // and the cached plan kept the OID 144 renames to ob1_forget_thought_body.
+  const definer = async () => Boolean((await sql`SELECT prosecdef AS d FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].d);
+
+  // Without 139's forget_thought: refused by name, nothing changed.
+  await sql`ALTER FUNCTION forget_thought(uuid, jsonb, boolean) RENAME TO forget_thought_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION forget_thought_away(uuid, jsonb, boolean) RENAME TO forget_thought`;
+  assert(at142.out === "42501" && /^migration 144 needs 139 and 142 /.test(without) && !(await definer()),
+    `at 142 a role holding a plain --grant may not forget (${at142.out}); without forget_thought the file is refused by name, the function its caller's still (${without.slice(0, 60)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 });
+  const may = async (role: string) => Boolean((await sql`SELECT has_function_privilege(${role}, 'forget_thought(uuid, jsonb, boolean)', 'EXECUTE') AS y`)[0].y);
+  const publicMay = Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)') AND a.grantee = 0) AS y`)[0].y);
+  const shape144 = async () => JSON.stringify({ definer: await definer(), deleter: await may("ob1_upgrade_144_deleter"), reader: await may("ob1_upgrade_144_reader"), granted: await may(ROLE),
+    acl: (await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = to_regprocedure('forget_thought(uuid, jsonb, boolean)')`)[0].a });
+  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_144_deleter")) && !(await may("ob1_upgrade_144_reader")) && !publicMay,
+    `applied: forget_thought its owner's; EXECUTE PUBLIC's no more, carried from 139's function to the --grant role, not given to a role that may only delete or read (${await shape144()})`);
+
+  // The same role forgets now: the row gone, its events redacted, the ledger written, as the owner.
+  const at144 = await forgetAs(A);
+  const left = (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE id = ${A}::uuid) AS row,
+      (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${A}::uuid AND (redacted_at IS NULL OR diff::text LIKE '%8642%')) AS open,
+      (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = ${A}::uuid AND actor_name = 'upgrade-144-op') AS led`)[0] as { row: number; open: number; led: number };
+  assert(at144.out === "ok" && left.row === 0 && left.open === 0 && left.led === 1,
+    `at 144 the same role forgets the thought: the row gone, its events redacted, the ledger naming the actor (${at144.out}; ${JSON.stringify(left)})`);
+
+  // A replay's setting, set by the role first: not carried in — the forget runs as a live write, no REPLAYING — and
+  // the role's own again after the call.
+  const B = await thought("upgrade 144: forgotten by a caller claiming a replay");
+  const replayed = await forgetAs(B, [`SELECT set_config('ob1.projecting_replay', 'on', true)`]);
+  const bLed = Number((await sql`SELECT count(*)::int AS c FROM thought_forgotten WHERE thought_id = ${B}::uuid`)[0].c);
+  assert(replayed.out === "ok" && replayed.after === "on" && bLed === 1,
+    `a caller's ob1.projecting_replay is not carried in: forgotten as a live write, and the setting is the caller's again after (${replayed.out}, ${replayed.after})`);
+
+  // A re-apply is a no-op: still the owner's, the grants kept.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the144 });
+  assert(await definer() && await may(ROLE) && !(await may("ob1_upgrade_144_deleter")) && !(await may("ob1_upgrade_144_reader")),
+    `a re-apply is a no-op: the definer and the grants kept (${await shape144()})`);
+  await sql.unsafe(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}; DROP OWNED BY ob1_upgrade_144_deleter; DROP ROLE ob1_upgrade_144_deleter;
+                    DROP OWNED BY ob1_upgrade_144_reader; DROP ROLE ob1_upgrade_144_reader`);
+  await sql.close();
+}
+console.log("\n[20cj] Migration 145: onto a populated brain at the file before it — refused by name without 115's ob1_work_claim_actor, release_holder_claims not made; then applied: an operator ends every live claim one holder holds with the reason, counted and named; an agent key refused NOT_OPERATOR, nothing more released; a re-apply a no-op (SMD-3606)");
+{
+  const the145 = MIGRATIONS.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the145 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('up-op', 'operator')`;
+  await sql`SELECT set_agent_kind('up-h', 'agent')`;
+  const opid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'up-op'`)[0].id);
+  const hid = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'up-h'`)[0].id);
+  const OP = JSON.stringify({ name: "up-op", agent_id: opid });
+  const H = JSON.stringify({ name: "up-h", agent_id: hid });
+  const live = async (name: string) => Number((await sql`SELECT count(*)::int AS n FROM work_claims WHERE holder_name = ${name} AND released_at IS NULL AND expires_at > now()`)[0].n);
+
+  // Without 115's ob1_work_claim_actor (the body calls it): refused by name, the function not made.
+  await sql`ALTER FUNCTION ob1_work_claim_actor(jsonb, text) RENAME TO ob1_work_claim_actor_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_actor_away(jsonb, text) RENAME TO ob1_work_claim_actor`;
+  const made = async () => (await sql`SELECT to_regprocedure('release_holder_claims(text,text,jsonb)') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 145 needs 115 \(ob1_work_claim_actor\); this schema lacks it/.test(without) && !(await made()),
+    `without 115's ob1_work_claim_actor the file is refused by name; release_holder_claims not made (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 });
+
+  // Three live claims by one holder (the built-in cap 50 allows); an operator ends them all.
+  for (const n of [1, 2, 3]) await sql`SELECT claim_work(${`SMD-720${n}`}, NULL, NULL, 14500, NULL, (${H}::text)::jsonb)`;
+  const out = (await sql`SELECT release_holder_claims(${"up-h"}, ${"upgrade cleanup"}, (${OP}::text)::jsonb) AS r`)[0].r as { ok: boolean; holder: string; released: number; claims: { issue: string }[] };
+  // Two more claims, then an agent key is refused — nothing more released.
+  for (const n of [4, 5]) await sql`SELECT claim_work(${`SMD-720${n}`}, NULL, NULL, 14500, NULL, (${H}::text)::jsonb)`;
+  const byAgent = (await sql`SELECT release_holder_claims(${"up-h"}, ${"nope"}, (${H}::text)::jsonb) AS r`)[0].r as { ok: boolean; error: string; kind: string | null };
+  assert(out.ok === true && out.holder === "up-h" && out.released === 3 && out.claims.length === 3
+         && byAgent.ok === false && byAgent.error === "NOT_OPERATOR" && byAgent.kind === "agent" && (await live("up-h")) === 2,
+    `an operator ends the holder's three live claims (released ${out.released}, ${out.claims.length} named); an agent key refused NOT_OPERATOR, the two later claims left (${byAgent.error}:${byAgent.kind}, ${await live("up-h")} live)`);
+
+  // A re-apply is a no-op: the operator still releases the two left.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the145 });
+  const after = (await sql`SELECT release_holder_claims(${"up-h"}, ${"after re-apply"}, (${OP}::text)::jsonb) AS r`)[0].r as { released: number };
+  assert(after.released === 2 && (await live("up-h")) === 0,
+    `a re-apply is a no-op: the operator still releases the two left (${after.released})`);
+
   await sql.close();
 }
 

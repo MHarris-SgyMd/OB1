@@ -3974,6 +3974,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   } as never, at)) as Record<string, unknown>;
   assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
     `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  const modernRpc = ["server/discover", "subscriptions/listen"].map((rpc) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rpc, status: 200, outcome: "ok", ms: 1 }, at)) as { rpc?: unknown }).rpc);
+  assert(JSON.stringify(modernRpc) === '["server/discover","subscriptions/listen"]', `the two methods the 2026-07-28 revision adds are named, not \`other\` (SMD-4345: ${JSON.stringify(modernRpc)})`);
   assert(odd.agent === "laptop?{\"forged\":1}" && !JSON.stringify(odd).includes("the-key") && !JSON.stringify(odd).includes("private") && !("url" in odd) && !("query" in odd),
     "…the agent's name held to printable ASCII (a line break is `?`); a field the record does not declare is not written");
 
@@ -5266,6 +5268,30 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
     `a retried hundredth entry found, not full; a null entry passed over; each answer's stamp; deleted under the read NOT_FOUND; a longer list at its count; busy 503 and the list's refusals 409 over REST (${JSON.stringify([retried, pastNull.ok, appendedStamp, goneUnder.ok ? "ok" : goneUnder.refusal.code])})`);
 }
 
+console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids among the values, the twins' wording, the hint for a brain without 144, and a malformed answer a fault (SMD-1723 PR 2)");
+{
+  const { renderForget, forgetHint } = await import("./render.ts");
+  const { normaliseForget } = await import("./store.ts");
+  const T = "00000000-0000-4000-8000-000000001723", I = "00000000-0000-4000-8000-0000000017a1", P = "00000000-0000-4000-8000-0000000017b1", TW = "00000000-0000-4000-8000-0000000017c1";
+  const evidence = { id: T, forgottenAt: "2026-11-16T00:00:00.000Z", gone: false, orphanEntities: 0, removed: { audit_events: 2 }, irreproducible: [], pages: [], twins: [] as string[], source: null, itemIds: [I], proposalIds: [P], outside: [] };
+  const plain = renderForget({ ok: true, value: evidence } as never);
+  const twinned = renderForget({ ok: true, value: { ...evidence, twins: [TW] } } as never);
+  const sc = plain.structuredContent as Record<string, unknown>;
+  assert(JSON.stringify(sc.itemIds) === JSON.stringify([I]) && JSON.stringify(sc.proposalIds) === JSON.stringify([P])
+      && /the same text is refused if captured again/.test(plain.content[0].text) && !/refused if captured again/.test(twinned.content[0].text)
+      && new RegExp(`lands on them rather than being refused: ${TW}`).test(twinned.content[0].text),
+    `the values carry the item and proposal ids; the text promises a refusal only when no twin keeps the text (${JSON.stringify({ itemIds: sc.itemIds, proposalIds: sc.proposalIds })})`);
+  const tableHint = forgetHint("permission denied for table thought_audit");
+  const fnHint = forgetHint("permission denied for function forget_thought");
+  assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
+    `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
+  const noWord = thrown({ ok: false });
+  const noTime = thrown({ ok: true, id: T, removed: {} });
+  assert(noWord !== "answered" && noTime !== "answered" && thrown({ ok: false, error: "NOT_FOUND", id: T }) === "answered",
+    `a refusal with no error word and an answer with no forgotten_at are faults, not NOT_FOUND or "at ." (${noWord} | ${noTime})`);
+}
+
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
 {
   const { keptStampKeys } = await import("./core/writes.ts");
@@ -5282,7 +5308,7 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
       && JSON.stringify(planted) === '[{"key":"actor_name","value":null,"present":true},{"key":"trust","value":null,"present":false}]',
     `the patch against the write's stamp: nothing for a patch naming no stamp key or a database that answered no stamp; the kept keys, an echo not among them; a non-string present, a null absent (${JSON.stringify({ none, kept, pre088, planted })})`);
   // Through the operation, on a store answering as 088 does — and as a database before it does.
-  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
+  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ textForgottenAt: async () => null, updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
   const principal = { name: "laptop", scope: "write", keyHash: "x" } as never;
   const lowered = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
   const echoed = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "x", metadata_patch: { trust: "agent" } } as never);
@@ -6946,11 +6972,71 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
   const released = say.renderReleaseClaim({ ok: true, value: { outcome: "released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releaseReason: "merged" }) } } as never);
   const already = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z" }) } } as never);
   const overtaken = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "codex", releaseReason: "lapsed; taken over" }) } } as never);
-  const listed = say.renderListClaims({ ok: true, value: { claims: [claim()], truncated: false } } as never);
+  // list_claims' JSON carries 143's cursor, remaining and pastCursor (AS_JSON, so the cursor token rides untouched); a bad cursor and one with other filters are refused REFUSED_CURSOR (SMD-3606 PR 2).
+  const listed = say.renderListClaims({ ok: true, value: { claims: [claim()], truncated: true, cursor: "Y3Vyc29y", remaining: 3, pastCursor: false } } as never);
+  const curShape = say.renderListClaims({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "nope", reason: "shape" } } as never);
+  const curFilters = say.renderListClaims({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "nope", reason: "filters" } } as never);
   assert(/^Released claim 1111[0-9a-f-]+ on SMD-3379 PR 1b-2 \(merged\)\.$/.test(text(released)) && /had already ended at 2026-10-30T12:00:00\.000Z\.$/.test(text(already))
       && /had already ended at 2026-10-30T12:00:00\.000Z: it lapsed and was taken over by codex\.$/.test(text(overtaken))
-      && JSON.parse(text(listed)).claims.length === 1 && !text(listed).includes("token"),
-    `release_claim's two answers in words, and list_claims' JSON, no token field (${text(released)} | ${text(already).slice(-40)})`);
+      && JSON.parse(text(listed)).claims.length === 1 && JSON.parse(text(listed)).cursor === "Y3Vyc29y" && JSON.parse(text(listed)).remaining === 3 && !text(listed).includes("token")
+      && curShape.isError === true && /not a list_claims cursor/.test(text(curShape)) && curFilters.isError === true && /made with other filters/.test(text(curFilters)),
+    `release_claim's two answers in words, and list_claims' JSON with 143's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
+
+  // release_holder_claims' render (SMD-3606 PR 3, migration 145): the count and holder in words, the claims in the value; the refusals name the key's kind or the registry away; the fault names a brain before 145.
+  const relMany = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 3, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }, { id: "c", issue: "SMD-2", piece: "PR 2" }] } } as never);
+  const relOne = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 1, claims: [{ id: "a", issue: "SMD-1", piece: null }] } } as never);
+  const relZero = say.renderReleaseHolderClaims({ ok: true, value: { holder: "ghost", released: 0, claims: [] } } as never);
+  const relAgent = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key: "bob", kind: "agent" } } as never);
+  const relUnid = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key: "bob", kind: null, unidentified: true } } as never);
+  const relAway = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "RELEASE_HOLDER_UNATTRIBUTED", retryable: true, cause: "registry_away" } } as never);
+  const relStuck = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "RELEASE_HOLDER_UNATTRIBUTED", retryable: false, cause: "registry_refused" } } as never);
+  const relSv = relMany.structuredContent;
+  assert(text(relMany) === "Released 3 live claims held by codex across 2 tickets, each with the reason. The rows stay as history; list_claims and the per-holder cap no longer count them."
+      && text(relOne) === "Released 1 live claim held by codex, with the reason. The rows stay as history; list_claims and the per-holder cap no longer count them."
+      && text(relZero) === "No live claims held by ghost; nothing was released."
+      && relAgent.isError === true && text(relAgent).includes("This key, bob, is classified agent") && !text(relAgent).includes("\n")
+      && relUnid.isError === true && /reached the brain with none; call with the operator's own key\.$/.test(text(relUnid))
+      && relAway.isError === true && text(relAway) === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && relStuck.isError === true && /the agent registry cannot give this server until an operator acts/.test(text(relStuck))
+      && relSv.holder === "codex" && relSv.released === 3 && (relSv.claims as unknown[]).length === 3 && !/wc_/i.test(JSON.stringify(relSv)),
+    `release_holder_claims' render: the count and holder, the claims in the value, the refusals and the registry away (${text(relMany)} | ${text(relAgent).slice(0, 60)})`);
+  assert(/migration 145/.test(say.releaseHolderHint("function release_holder_claims(text, text, jsonb) does not exist")) && say.releaseHolderHint("connection refused") === "",
+    `release_holder_claims' hint names a brain before 145 (${say.releaseHolderHint("function release_holder_claims does not exist").slice(0, 60)})`);
+
+  // The list_work_claims cursor codec (SMD-3606 PR 2): this listing's own round-trips with its selection; another tag, a
+  // wrong length, a non-boolean include_ended, an over-long or non-string ticket/holder, an empty issue, an over-long
+  // piece_key, a non-uuid id, a day that does not exist, a clock past 23:59 and a null time are none of its cursors;
+  // sameClaimSelection tells one selection from another.
+  const { parseClaimCursor, claimCursor, sameClaimSelection } = await import("./core/list-cursor.ts");
+  const b64c = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+  const UC = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const SELC = { ticket: "SMD-3379", holder: "codex", includeEnded: true } as const;
+  const CLA = (...v: unknown[]) => b64c(["claims", null, null, false, ...v]);
+  const okClaim = parseClaimCursor(claimCursor(SELC, "SMD-3379", "pr 2", "2024-02-29 23:59:59+00", UC.toUpperCase()));
+  const badClaimCur = [
+    b64c(["proposals", null, null, false, "SMD-1", "", "2026-09-25 00:00:00+00", UC]),        // another tag
+    b64c(["claims", null, null, false, "SMD-1", "", "2026-09-25 00:00:00+00"]),               // seven, not eight
+    b64c(["claims", null, null, "true", "SMD-1", "", "2026-09-25 00:00:00+00", UC]),          // include_ended a string
+    b64c(["claims", 7, null, false, "SMD-1", "", "2026-09-25 00:00:00+00", UC]),              // ticket a number
+    b64c(["claims", "x".repeat(201), null, false, "SMD-1", "", "2026-09-25 00:00:00+00", UC]), // ticket over 200
+    CLA("", "", "2026-09-25 00:00:00+00", UC),                                                // issue empty
+    CLA("SMD-1", "x".repeat(201), "2026-09-25 00:00:00+00", UC),                              // piece_key over 200 (100's CHECK, 2x for lower() expansion)
+    CLA("SMD-1", "", "2026-09-25 00:00:00+00", "not-a-uuid"),                                 // id no uuid
+    CLA("SMD-1", "", "2026-02-30 00:00:00+00", UC),                                           // Feb 30
+    CLA("SMD-1", "", "2026-09-25 24:00:00+00", UC),                                           // 24:00
+    CLA("SMD-1", "", null, UC),                                                               // a null time
+    "a sentence, not a cursor", "",
+  ];
+  assert(okClaim?.issue === "SMD-3379" && okClaim.pieceKey === "pr 2" && okClaim.claimedAt === "2024-02-29 23:59:59+00" && okClaim.id === UC && JSON.stringify(okClaim.selection) === JSON.stringify(SELC)
+      && badClaimCur.every((b) => parseClaimCursor(b) === null)
+      && sameClaimSelection(SELC, { ticket: "SMD-3379", holder: "codex", includeEnded: true }) && !sameClaimSelection(SELC, { ticket: "SMD-3379", holder: "codex", includeEnded: false }),
+    `the claims cursor round-trips with its selection (an upper-case id read lower, a leap day), none of ${badClaimCur.length} others reads as one, and sameClaimSelection tells selections apart (${JSON.stringify(okClaim)})`);
+  // A cursor for a claim with max-length identifiers (ticket/holder/issue/piece_key each up to 200) reaches ~1200 chars — over the other cursors' 512 — and must still round-trip, so the raised bound admits it rather than leaving the claim un-pageable (SMD-3606 PR 2 review).
+  const longSel = { ticket: "T".repeat(200), holder: "H".repeat(200), includeEnded: true };
+  const longCur = claimCursor(longSel, "I".repeat(200), "p".repeat(200), "2026-11-15 01:49:48.466123+00", UC);
+  const longParsed = parseClaimCursor(longCur);
+  assert(longCur.length > 512 && longCur.length <= 2048 && longParsed?.issue === "I".repeat(200) && longParsed.pieceKey === "p".repeat(200) && JSON.stringify(longParsed.selection) === JSON.stringify(longSel),
+    `a max-length claims cursor exceeds 512 and still round-trips under the raised 2048 bound (${longCur.length} chars)`);
 }
 
 console.log("\n[33c] The claimed label in the core and the words (SMD-3599): one claims read per page, the keys a row is filed under first, then the first 50 others its text names; live and lapsed-unreleased claims, a released one never; the caller's own said so; ten named and the rest counted; nothing read when no row names a ticket; a failed read is null and said; a cut read over-counts rather than misses");
@@ -7943,7 +8029,47 @@ console.log("\n[36e] The operator's work-claim cap in the core and the words (SM
     `brain_info's Work-claim cap row: before 140, unread, built in, the operator's, the operator's refused; a read answering no cap throws (${lines.join(" | ")} | ${badRead.join(",")})`);
 }
 
-console.log("\n[36f] The priority review's findings in the core and the words (SMD-3671 PR 2, migration 142): the list passing its filters to the store and a row read from its evidence; a decision's arguments that do not go together refused before the store, a date due at its day's end, the id lower-cased and the key's scope in the envelope; each of 142's answers as a value or its refusal; the no-agent-id paths; an envelope the store cannot read a fault; the words and values; the hint for a brain before 142; brain_info's row");
+console.log("\n[36f] The operator's holder-release in the core and the words (SMD-3606 PR 3, migration 145): releaseHolderClaims passing the holder, reason and the caller's key to the store; its answer and its NOT_OPERATOR refusal said; the no-agent-id paths (the registry away RELEASE_HOLDER_UNATTRIBUTED, a principal with none REFUSED_NOT_OPERATOR, neither reaching the store); an envelope the store cannot read a fault");
+{
+  const { releaseHolderClaims } = await import("./core/claims.ts");
+  const { normaliseReleaseHolder } = await import("./store.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ releaseHolderClaims: async (o: Record<string, unknown>) => { asked.push(o); return normaliseReleaseHolder(answer); } }) });
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  // 144's envelopes, as the scratch brain answers them.
+  const okA = { ok: true, holder: "codex", released: 2, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }] };
+  const agentA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may release a holder's claims; op-key is agent" };
+  const holderA = { ok: false, error: "NO_HOLDER", message: "name the holder whose live claims to release: a key's name, as list_work_claims shows it" };
+  const released = await releaseHolderClaims(core(okA) as never, P, { holder: "codex", reason: "cleanup" } as never);
+  const agent = await releaseHolderClaims(core(agentA) as never, P, { holder: "codex", reason: "cleanup" } as never);
+  const sent = asked[0] as Record<string, unknown> | undefined;
+  const actor = sent?.actor as Record<string, unknown> | undefined;
+  assert(sent?.holder === "codex" && sent?.reason === "cleanup" && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test"
+      && released.ok && released.value.holder === "codex" && released.value.released === 2 && released.value.claims.length === 2
+      && !agent.ok && agent.refusal.code === "REFUSED_NOT_OPERATOR" && agent.refusal.kind === "agent",
+    `the holder and reason reach the store with the caller's key, its agent id and the door; the answer and the NOT_OPERATOR refusal said (${JSON.stringify(sent)} | ${released.ok} | ${!agent.ok ? agent.refusal.code : "?"})`);
+
+  // The no-agent-id paths: the registry away is RELEASE_HOLDER_UNATTRIBUTED (retryable, or not when an operator must act); a principal with none by design is REFUSED_NOT_OPERATOR, named so; neither reaches the store.
+  const before = asked.length;
+  const away = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { holder: "codex", reason: "x" } as never);
+  const stuck = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { holder: "codex", reason: "x" } as never);
+  const none = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write" } as never, { holder: "codex", reason: "x" } as never);
+  assert(asked.length === before && !away.ok && away.refusal.code === "RELEASE_HOLDER_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "RELEASE_HOLDER_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR" && none.refusal.unidentified === true
+      && /reached the brain with none; call with the operator's own key\.$/.test(text(say.renderReleaseHolderClaims(none))),
+    `with no agent id nothing reaches the store: the registry away RELEASE_HOLDER_UNATTRIBUTED (retryable or not), a principal with none REFUSED_NOT_OPERATOR unidentified (${!away.ok ? away.refusal.code : "?"}/${!stuck.ok ? String(stuck.refusal.retryable) : "?"}/${!none.ok ? none.refusal.code : "?"})`);
+
+  // NO_HOLDER/NO_REASON are unreachable from the schema (holder and reason are required, non-blank): a database that answers one is a divergence fault, a throw, not the caller's refusal.
+  let threw = "";
+  try { await releaseHolderClaims(core(holderA) as never, P, { holder: "codex", reason: "cleanup" } as never); } catch (e) { threw = (e as Error).message; }
+  assert(/release_holder_claims: the database refused an argument the schema requires/.test(threw),
+    `a NO_HOLDER the schema should have caught throws as a divergence fault (${threw.slice(0, 70)})`);
+}
+
+console.log("\n[36g] The priority review's findings in the core and the words (SMD-3671 PR 2, migration 142): the list passing its filters to the store and a row read from its evidence; a decision's arguments that do not go together refused before the store, a date due at its day's end, the id lower-cased and the key's scope in the envelope; each of 142's answers as a value or its refusal; the no-agent-id paths; an envelope the store cannot read a fault; the words and values; the hint for a brain before 142; brain_info's row");
 {
   const { listPriorityFindings, reviewPriorityFinding } = await import("./core/findings.ts");
   const { normalisePriorityFinding, normaliseReviewFinding } = await import("./store.ts");
@@ -8197,7 +8323,7 @@ console.log("\n[36f] The priority review's findings in the core and the words (S
     `preflight's row: a skip before 142, a refusal and a timeout warned with their fixes, the pending ok in brain_info's words (${rows.map((r) => `${r.status}: ${r.detail.slice(0, 60)}`).join(" | ")})`);
 }
 
-console.log("\n[36g] The dashboard's build stage copies every module the dashboard reaches (SMD-3671 PR 2): server-portable/Dockerfile's dashboard-build stage names the server's files it copies, and every relative import the dashboard's sources reach, followed through the server's files and the REST client's, is among them — brain-info.ts's import of priority-kinds.ts broke the image's build, which no suite saw");
+console.log("\n[36h] The dashboard's build stage copies every module the dashboard reaches (SMD-3671 PR 2): server-portable/Dockerfile's dashboard-build stage names the server's files it copies, and every relative import the dashboard's sources reach, followed through the server's files and the REST client's, is among them — brain-info.ts's import of priority-kinds.ts broke the image's build, which no suite saw");
 {
   const { readFileSync, readdirSync, existsSync } = await import("node:fs");
   const { dirname, join, relative, resolve } = await import("node:path");

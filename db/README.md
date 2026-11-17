@@ -194,24 +194,24 @@ acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed.
 
 **Stop the server and any re-embed or extraction worker first, let any backup
-(`db/backup.ts`, `pg_dump`) finish — its lock keeps a migration that alters a
-table it reads waiting, and the brain's reads and writes of that table behind
-it, until the 10 s lock timeout fails the run — and connect directly, not
-through a transaction-mode pooler:** the migrator sets session
-state (the lock timeout, the pgvector search path) and takes locks across
-statements. It sets a 10 s lock timeout for everything it does — for the
+or sweep (`db/backup.ts`, `pg_dump`, `db/lint-sweep.ts`) finish — its lock
+keeps a migration that alters a table it reads waiting, and the brain's reads
+and writes of that table behind it, until the 10 s lock timeout fails the run —
+and connect directly, not through a transaction-mode pooler:** the migrator
+sets session state (the lock timeout, the pgvector search path) and takes locks
+across statements. It sets a 10 s lock timeout for everything it does — for the
 session, and again inside every transaction — so a held lock fails the run
-rather than freezing it and every reader behind it. 001 and 003
-take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
-`OB1_TRGM_INDEX` is on and the index is absent; 023's and 050's backfill calls
-run again and take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on
-a first apply; they write nothing when no row is waiting); 055's locks the audit
-rows it fills and then builds its partial index over `thought_audit` (SHARE,
-tens of milliseconds); 025 re-validates its constraints over the table. 021's
-evidence backfill runs as written, the acceptances out of its sight (above);
-030, reached after it in the same transaction, finds nothing of 021's to take
-back and corrects the own-key labels an earlier paste of the body left
-(SMD-1193, SMD-1421).
+rather than freezing it and every reader behind it. 001 and 003 take ACCESS
+EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if `OB1_TRGM_INDEX`
+is on and the index is absent; 023's and 050's backfill calls run again and
+take `thoughts` EXCLUSIVE (`OB1_BACKFILL_LIMIT` bounds each, as on a first
+apply; they write nothing when no row is waiting); 055's locks the audit rows
+it fills and then builds its partial index over `thought_audit` (SHARE, tens of
+milliseconds); 025 re-validates its constraints over the table. 021's evidence
+backfill runs as written, the acceptances out of its sight (above); 030,
+reached after it in the same transaction, finds nothing of 021's to take back
+and corrects the own-key labels an earlier paste of the body left (SMD-1193,
+SMD-1421).
 
 ### 6. Plugin migrations (SMD-2310)
 
@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and forty-one (141) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and forty-five (145) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2508,6 +2508,33 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 144 makes `forget_thought` run as its owner (SMD-1723 PR 2). Under 139 a
+role calling it needed every store's privilege: `UPDATE` on `thought_audit`, the
+deletes on the append-only tables, the query log's writes and `INSERT` on the
+ledger, more than a full `--grant` issues, and a role holding them all could forget
+by hand. 139's function is renamed `ob1_forget_thought_body`, and
+`forget_thought` is now a SECURITY DEFINER wrapper over it (the maintainer's
+choice, 2026-11-15): its `search_path` pinned to the schemas the migration ran
+under with `pg_temp` last, and every `ob1.*` setting but `ob1.actor` emptied for
+the call and given back after, so a caller can't carry a replay's or an
+amendment's exemption in as the owner; a forget called inside a replay runs as a
+live write. The settings are emptied by `set_config`, not pinned on the function:
+PostgreSQL refuses a custom setting there to an owner that is not a superuser.
+`ob1_forgetting()` now reads its setting through a cast that cannot raise: 139's
+raised `22P02` in every guard once a forget had left the setting empty in a
+session. `EXECUTE` is revoked
+from PUBLIC and is the **server** grant group's: a grant 139's function held is
+carried to the wrapper, and a role granted before 144 needs `--grant` again (not every
+role that may delete a thought: a delete can be undone from the log, a forget
+cannot). `ob1_text_forgotten_at(text)` answers when a text was
+forgotten, by 139's refusal rule, so the server refuses a forgotten text before it
+pays for an embedding; `ob1_forget_leftovers()` lists every forgotten thought a
+store still holds the id or text of, a write that raced the forget, which
+preflight's `forgotten` row names; it reads each store once, as its owner. A re-applied 139 puts its body back under
+`forget_thought`, running as its caller, until 144 is re-applied: preflight's
+`forget definer` row says so. Needs 139 and 142; a re-apply is a no-op. test-schema [131], test-upgrade
+[20ci].
+
 Migration 142 proposes a review of stale, overdue, disagreeing and settled priority
 statements (SMD-3671 PR 1). A priority stated once stood for ever; docs/priority.md
 decision 6 has the brain propose findings and an operator decide them.
@@ -2564,6 +2591,46 @@ standing. Like 136's restatement, one on another item is the newest within its t
 there, and may outrank another maker's written after the original. Needs 016, 056,
 061, 116, 133 and 136, refusing by name without them; a re-apply is a no-op.
 test-schema [127], test-upgrade [20ce].
+
+Migration 139 forgets a thought (SMD-1723 PR 1). `delete_thought` removes the row
+but the brain keeps what it said: every event in the log carries the text, and the
+entities, vectors, facets, page sections, priority statements, open items,
+deliverables and query log keep the text or the id. `forget_thought(id, actor)`
+removes the thought and all of these in one transaction, and returns what each
+store gave up; a thought deleted first is forgotten from what remains. A capture
+of one of its texts waits for a running forget and is refused after (`OB005`);
+another store's write that lands beside a forget is swept by a second
+`forget_thought` of the same id. A thought another cites is refused `CITED`, as
+a delete is, unless the caller detaches (`forget_thought(id, actor, true)`):
+the citing rows are deleted with the rest. Each call also deletes every
+bare orphan entity (no mention, edge, priority statement or merge record): once
+an entity's mentions are gone, whose it was can't be told. Every event of it in
+`thought_audit` is redacted in place through the log's third named amendment,
+`redact`: each text becomes the marker `[forgotten]` and each metadata object
+`{"forgotten": true}`, the `source` copied from the metadata blanked, while ids,
+fingerprints, times and the actor stay. The amendment takes only a deleted
+thought's events under the forget's own setting, once. `thought_forgotten`
+records each forgetting, append-only; a capture or edit to a forgotten text is
+refused `OB005` unless `ob1.reinstate_forgotten` is on, or a standing thought
+already holds that text. The whole record a thought was ingested as is forgotten
+too: the ledger keeps its identity as a sha256, and `sync-linear.ts` leaves a
+forgotten ticket out of its plan (not missing, not fetched, no drift in
+`--audit`, `--only` included) and a forgotten section out of its parts, while
+`ingest-records.ts` counts a record the brain forgot, by its id or its identity,
+as `forgotten`; edits at the source included, until a row stands there again. A
+thought deleted before it is forgotten has lost its record: detach with
+`forget_thought`, not `delete_thought`. It runs under READ COMMITTED alone,
+taking each item's priority lock before the row's, as the priority writers do. A
+twin holding the same text keeps it and is named. Thoughts derived from the
+forgotten one, and every page whose own log names it (its earlier renders, and a
+section once built on it whose revision keeps the earlier body), are listed for
+a person to review: prose that absorbed the text can't be removed mechanically.
+Copies outside the brain (sleep dumps, posted Linear comments, digest files,
+extraction dumps, earlier backups) are named, not reached. Each role that writes
+thoughts is granted SELECT on the ledger. The operation over REST and MCP came
+with 144; the other brains are PR 3. Needs 016, 034, 053, 055, 060, 064, 067, 116, 117,
+123 and 134; a re-apply keeps the ledger. test-schema [129], test-upgrade
+[20cg].
 
 Migration 138 has the priority writers name every statement they closed (SMD-4238).
 Since 133 a ticket and its own rows are one item to the writers, so a key's new
@@ -3069,6 +3136,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_ticket_head` (068) | `SELECT, INSERT, UPDATE, DELETE` — 068's triggers reconcile the node_state projection as the writer on a write that moves an issue key, a ticket's status or watermark, or a `supersedes` pointer, and `node_lifecycle()` reads it (SMD-2256); a plain capture never touches it |
 | | `ob1_superseded_by` (068) | `SELECT, INSERT, UPDATE, DELETE` — the same triggers, and `node_state()`'s `superseded_by` (SMD-2256) |
 | | `ob1_source_gate` (071) | `SELECT, INSERT, UPDATE, DELETE` — 071's triggers keep node_state's gate as the writer on a source row's write (a delete of a sourced thought included, through its cascade) and on a status move between a known and an unknown `status_type`, and `node_dependencies()`' gates and the dependency columns read it (SMD-2267); a plain capture, an edit that moves no status and a delete of an unsourced thought never touch it. |
+| | `thought_forgotten` (139) | `SELECT` — 139's refusal on `thoughts` reads the ledger of forgotten texts on every capture and every edit of a text (SMD-1723), so after 139 a role without it cannot write a thought at all; 139 grants it to each role already writing thoughts, by a grant on the table, on one of its columns, or through PUBLIC |
 | **server** — the server's soft extras, beyond capture; never fatal to a bare capture (the `SELECT` on `ob1_agents` 046 made hard is in capture, above), but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
 | | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
@@ -3076,6 +3144,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
+| | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
+| | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
@@ -3096,7 +3166,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. The per-holder cap (140, SMD-3606): `claim_work` reads `work_claim_cap_settings` on every new claim, and `set_work_claim_cap` writes it, a trigger holding the write to an operator key by its agent id. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release and 144's forget_thought and ob1_forget_leftovers). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. The per-holder cap (140, SMD-3606): `claim_work` reads `work_claim_cap_settings` on every new claim, and `set_work_claim_cap` writes it, a trigger holding the write to an operator key by its agent id. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
 | | `work_claim_cap_settings` (140; the operator's cap, one standing row, history after — a DELETE and TRUNCATE refused by trigger, for the owner too) | `SELECT, INSERT, UPDATE` |
 | **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
 | | `work_claims` (115) | `SELECT, UPDATE` |
@@ -4781,13 +4851,36 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 4 is the pass's** (`@p4d4`, SMD-3203): version 3, with the
+- **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with no
+  evolves of its own. The tier's evolves is folded into related before its best
+  verdict is chosen (related + evolves), so a related stands at the share of the
+  word it now stands for, and the folded related outweighs a duplicate or an
+  unrelated the two words outweigh together (a tie below): a few pairs version 4
+  called duplicate or unrelated are related. The relation words' mass, which the
+  floor reads, is the same folded or not, so a pair it related before is related
+  still. A pair evolves when the newer comes next on the older's own subject's
+  work thread, the edge migration 120 keeps between consecutive thoughts of a
+  thread (origin `thread`), not by a pair's judgement. The link step is asked
+  only first, on the tier's outdates at the floor; version 4's check after an
+  evolves goes with the evolves, so a pair it capped at P(related) now stands at
+  the folded share, among a thought's strongest relations. A tie goes to the
+  first verdict in prompt 4's order (unrelated, related, evolves, duplicate): a
+  folded related that ties a duplicate is related, and one that ties an
+  unrelated is not. The run's verdicts line counts no evolves, and a relation's
+  note and dump line say `threaded` where the fold moved the verdict. The board
+  findings ("Posted once", below) take a pair posted as evolves, or as a
+  duplicate, as posted for related, so a re-judge posts none of them again. An
+  evolves version 4 stored stands until its pair is judged again: a new key
+  pools every thought, but a pair whose newer thought is superseded, or no
+  longer among its candidates, is not judged again, and its evolves stays in the
+  counts and the board findings.
+- **Version 4** (`@p4d4`, SMD-3203): version 3, with the
   writer's **link step**, the mediated-pair test's step 2
   (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
   equal to the ADR's by `evals/eval-mediated-pairs.ts --self-check`):
   - **When:** first on the tier's outdates at the floor, before any proposal
     is written, and after on a pair the pass would store as evolves (its
-    relation words' mass at the floor).
+    relation words' mass at the floor), which version 5 drops.
   - **The cap:** an H link (one thought's own subject named in passing by the
     other), an F link (both mention a third subject that is neither's own),
     or an answer naming none of the four caps the pair: related at most, and
@@ -4828,9 +4921,10 @@ tier gives each pair's verdict, not the judge:
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
   on, or a new decide version, starts a fresh pass: the tier again for every
   pooled thought's candidates, the link step for each outdates at the floor
-  and each evolves it would store, and the writer for each outdates at the
-  floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
-  about 3.8 s a pair.
+  (and, under version 4, each evolves it would store), and the writer for
+  each outdates at the floor not yet proposed that the link step leaves
+  uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at about
+  3.8 s a pair.
 - **Refused at start:** the run refuses with neither `OB1_CONSOLIDATE_DECIDER_URL`
   nor `OB1_JEV_BASE_URL` set, or, on the shared tier, with `OB1_JEV_MODEL` naming
   another model (SMD-3326).
@@ -4842,7 +4936,9 @@ tier gives each pair's verdict, not the judge:
   the tier and the writer said (`judged.decide`): since version 3 both of the
   writer's quotes, so a proposal can be checked again under another quote
   rule, and the floor when the writer was not asked; since version 4 the link
-  step's answer, when it was asked (`judged.decide.link`).
+  step's answer, when it was asked (`judged.decide.link`); since version 5
+  whether folding the tier's evolves moved the verdict
+  (`judged.decide.threaded`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -5752,6 +5848,45 @@ failing mid-read leaving no file of its own, a SIGTERM while the run waits on it
 a brain with no companion table, the CLI's defaults, and a failed rename. Loaded back into a brain the rows pass through its triggers and lack
 what the export leaves out: recipes/brain-backup/README.md says what; pg_dump
 brings a brain back.
+
+## A quality audit of the brain (SMD-3318)
+
+### `lint-sweep.ts`
+
+```bash
+bun lint-sweep.ts --url postgres://…                         # both tiers; ./lint-report-YYYY-MM-DD.md
+bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
+#   --tier 1|2|all (all; 3 is refused until SMD-3318 PR 2b)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
+#   exits 0 report written · 1 a read or the write failed (no report) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+```
+
+Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read in
+one REPEATABLE READ, READ ONLY transaction. Tier 1: the thoughts' row count and
+rows with no fingerprint (exact), and in the 2,000 newest the thoughts with no
+topics, tags or people, with more than 10 tags, or with empty or
+over-20,000-character content once trimmed of what a preview drops or
+collapses; a metadata list's entries are those the brain shows. Tier 2: in the
+500 newest, the thoughts no `thought_entities` row mentions, and the
+`ob1_entities` with no edge (exact). The recipe's two `importance` checks and
+its fingerprint groups are gone: the core has no `importance` (SMD-3661), and
+migration 003's partial unique index makes a set fingerprint unique (a twin of
+a fingerprinted thought's content keeps none, among the rows the no-fingerprint
+count counts). A thought with no `created_at`, or an infinite one, is in no
+sample, and counted; each tier reads its sample once, ordered by `created_at`
+alone, so ties at its edge cost nothing. The transaction's first statement
+locks the tables the tiers read (ACCESS SHARE, as pg_dump does), under
+`--statement-timeout` (60 s), which the whole-table counts lift; every lock
+wait, the counts' included, is bounded by the same value (`lock_timeout`). Keep
+a sweep apart from an upgrade: an `ALTER` of those tables waits for it, and
+their traffic behind the `ALTER`. The markdown report is written 0600 through a
+file of the run's own renamed into place, once every read succeeded. Tier 3, a
+model's reading of sampled thoughts, follows in SMD-3318 PR 2b through the
+provider and the egress gate. test-live [26] holds every count against a
+planted table (undated and infinite rows, non-array metadata, and each
+threshold's edge among it), the report's previews made safe and its path rules,
+the bound on a lock wait (a held table, and a held REINDEX under an unbounded
+count), a role that may not read a table, a report that cannot be written, and
+the refusals.
 
 ## Extensions
 
@@ -7106,14 +7241,20 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
 - **Posted once.** Migration 087's `board_findings_posted` holds one row per
   ticket pair and word (`outdates`, `related`, `evolves`, `duplicate`), so a
   relation a re-judge replaced at another score is not posted again, and a pair
-  is posted again only for a word not posted for it before (a proposal judged
-  the other way round is not). The comment's last line is a marker,
+  is posted again only for a word not posted for it before, nor covered by one
+  posted (a proposal judged the other way round is not). `related` and
+  `evolves` each cover the other, since both ask the board to link the pair as
+  related, and a `duplicate` covers a `related`, the lesser ask: decide
+  version 5 folds an evolves into related, and turns a few pairs version 4
+  called duplicate related, so a re-judge posts none of them again. The
+  comment's last line is a marker,
   `ob1-finding SMD-A SMD-B words`, in letters, digits, hyphens and spaces:
   Linear keeps a comment as rich text and returns
   markdown derived from it, so the marker is read back with identifiers
   un-autolinked and escapes undone. Before posting, both tickets' comments are
-  read (the first 250 of each); a word a marker already names — another brain
-  posted it, or this one lost its row — is recorded `found` and not posted.
+  read (the first 250 of each); a word a marker already names or covers —
+  another brain posted it, or this one lost its row — is recorded `found` and
+  not posted.
   So a person who writes the line on either ticket silences that word for the
   pair. Two brains on one board read each other's markers; two that post the
   same pair in the same moment can both post.
@@ -7182,8 +7323,9 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   (a proposal the pass took back and a text move reopened does not wait), a
   link since notwithstanding; **withdrawn** — within the window, its proposal settled by
   the pass's own re-judge (067's `settled by the pass:` note, a rejection no
-  person made), or a relation the judge stopped saying at that word (one
-  re-judged at the same word still stands); or its proposals or relation
+  person made), or a relation the judge stopped saying at that word or one it
+  covers (one re-judged at the same word, or a posted evolves re-judged
+  related, still stands); or its proposals or relation
   deleted with a thought, which leaves no time — the comment stays on the
   board, so past the window that reads unanswered. What the judge last
   asserted decides (SMD-2913): the pass's settles are kept across 067's
@@ -7228,7 +7370,7 @@ page, which Brain Checks writes on every push to main (SMD-3614).
 
 ```bash
 bun test-schema.ts                          # PGlite, no container
-./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
@@ -7238,7 +7380,7 @@ OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outsi
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-coordinator.ts                     # the coordinator's passes, each one's settings and command line — no database; as root, its planted /proc check
-bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run() — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run(), and the claim workers' loop and its reading of a failed call (claim-loop.ts's claimWorker and thoughtFault, SMD-4308) over stand-ins for the database and the engine — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject, and what became of a finding posted (SMD-2682) — no database

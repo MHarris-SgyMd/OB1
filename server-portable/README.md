@@ -51,7 +51,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
-| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (its own at `OB1_CONSOLIDATE_DECIDER_URL`, else the shared tier at `OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). Since decide version 4 it first answers the mediated-pair test's link step for those pairs and for an evolves the pass would store, and a pair linked only through a third subject or a passing mention is related at most, with no proposal (SMD-3203). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight warns without a tier for it, or on the shared tier with `OB1_JEV_MODEL` naming another model, and `db/consolidate.ts` refuses to start then (SMD-3115) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (its own at `OB1_CONSOLIDATE_DECIDER_URL`, else the shared tier at `OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). Since decide version 4 it first answers the mediated-pair test's link step for those pairs, and a pair linked only through a third subject or a passing mention is related at most, with no proposal (SMD-3203); since version 5 the tier's evolves is folded into related before a verdict is chosen, a work thread's edges giving evolves (SMD-3306). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight warns without a tier for it, or on the shared tier with `OB1_JEV_MODEL` naming another model, and `db/consolidate.ts` refuses to start then (SMD-3115) |
 | `OB1_CONSOLIDATE_DECIDER_URL` / `OB1_CONSOLIDATE_DECIDER_LOCAL` | unset (decide mode asks the shared tier at `OB1_JEV_BASE_URL`) | Decide mode's own tier (a tier per caller, SMD-3326): H2O-Lightning-4B served on the host by `jev/h2o/serve.py` (port 8022), reached as `http://host.containers.internal:8022` under podman machine, and `1` declaring it on this machine, as `OB1_JEV_LOCAL` declares the shared tier. Held to the decider, so an answer from another model is refused. Preflight's decide tier row dials it on every start and warns when it does not answer: the server starts, and the consolidation pass decides nothing until it does (`jev/h2o/README.md`, "When the tier is down") |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
@@ -1074,6 +1074,34 @@ Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed`,
 gated by a **write** key (stricter than the read routes; a read/capture/no key gets the
 bodiless `ok`).
 
+## Forgetting a thought (SMD-1723)
+
+**`forget_thought(id, confirm, detach_citations?)`** is a **write-scoped** tool
+(`POST /v1/thoughts/{id}/forget`) that removes a thought and every copy of its text
+or id the brain holds, where `delete_thought` keeps the removed text in the audit
+trail. It calls migration 139's `forget_thought`, which since 144 runs as its owner:
+the server's role needs `EXECUTE` on it (the **server** grant group) and nothing on
+the stores it reaches. Forgetting cannot be undone, so `confirm` must be the `id`
+again, exactly as sent (an id or a `client_key`), or the call is refused
+`REFUSED_CONFIRM` before anything is read. A thought another cites is refused
+`REFUSED_CITED` unless `detach_citations` is true, which deletes the citations with
+it. The answer is the evidence: what each store gave up (`removed`), the thoughts
+derived from it and the pages for a person to review (prose that absorbed the text
+can't be removed mechanically), the twins that keep the same text, the hashed
+record it was ingested as, and the copies outside the brain. Forgotten already,
+it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log
+row: the query log is one of the stores it clears.
+
+A capture or an edit of a forgotten text is refused `FORGOTTEN` before the
+embedding call (144's `ob1_text_forgotten_at`), so the model provider never sees
+it again; the refusal trigger's `OB005`, raised if a forget lands between that
+check and the write, is the same refusal. A capture-only key is told the text was
+forgotten, not when. Writing it again is the operator's, in SQL, under
+`ob1.reinstate_forgotten`. Preflight's `forget definer` row warns when a re-applied
+139 has reset the definer or the server's role lacks `EXECUTE`, and its
+`forgotten` row names any forgotten thought a store still holds, a write that
+raced the forget, which a second `forget_thought` sweeps.
+
 ## The operator's label reset (SMD-2744)
 
 **`reset_capture_stamp(id)`** is a **write-scoped** tool for the operator alone: the key
@@ -1182,8 +1210,9 @@ repeats a write on a second brain (the canary, SMD-2872) passes **`client_key`**
 `capture_thought`: a UUID, by convention the thought's id on the brain where it was
 first written. The copy keeps it as `metadata.client_key`, one thought per key
 (migration 112's unique index), and every name a write takes resolves to **the thought
-with that id, else the one keeping it as its key**: `update_thought`'s and
-`delete_thought`'s `id` (and the REST paths `PATCH`/`DELETE /v1/thoughts/{id}`), and
+with that id, else the one keeping it as its key**: `update_thought`'s,
+`delete_thought`'s and `forget_thought`'s `id` (and the REST paths
+`PATCH`/`DELETE /v1/thoughts/{id}` and `POST /v1/thoughts/{id}/forget`), and
 the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
 second brain the same ids it sent the first. A thought a refresh copied has the same id
 on both brains, and a key equal to it names that thought.
@@ -1239,10 +1268,16 @@ and MCP alike:
 - **`renew_claim`** (`POST /v1/claims/{id}/renew`) and **`release_claim`**
   (`POST /v1/claims/{id}/release`), write scope: the caller's own claim, by its key
   and its token. `release_claim` takes `force` with a `reason` for an operator key,
-  classified `operator` by its agent id.
+  classified `operator` by its agent id; to end every live claim one holder holds in one
+  call, an operator uses `release_holder_claims` (below).
 - **`list_claims`** (`GET /v1/claims`, read scope): the live claims, of one ticket or
-  one holder's key, or every claim with `include_ended`, and `truncated` when the
-  limit cut the list. Never a token.
+  one holder's key, or every claim with `include_ended`, by ticket then piece then
+  claim time. `truncated` is true when more follow this page; page to the end with
+  `after` set to the reply's `cursor` and the same `ticket`, `holder` and
+  `include_ended` (migration 143's keyset cursor), `remaining` counting how many
+  follow. A cursor carries the filters it was made under, so one passed with others
+  — or any string that is not this listing's cursor — is refused `REFUSED_CURSOR`
+  (400). Never a token.
 
 **The token** is a bearer secret to its key: anyone holding it under that key acts as
 the holder. It travels in a JSON body, never a URL, and as a bind parameter, never
@@ -1269,6 +1304,7 @@ calls does.
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
 | `CLAIM_CAP_UNATTRIBUTED` | 503 | `set_work_claim_cap` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `PRIORITY_UNATTRIBUTED`, for the cap setter (SMD-3606 PR 1b). |
+| `RELEASE_HOLDER_UNATTRIBUTED` | 503 | `release_holder_claims` could not get the key's agent id to tell whether it is an operator: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). As `CLAIM_CAP_UNATTRIBUTED`, for the holder-release (SMD-3606 PR 3). |
 | `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), the claim unreleased; or a `claim_work` with that token on exactly that claim's work while it is unreleased, live or lapsed, which 115 would otherwise read as another's: refused WORK_CLAIMED while live, taken over once lapsed (SMD-3705). On a renew and on that `claim_work`, `lapsedAt` when the claim's lease had run out (a release carries none): another claim may cover its work by now, so list the ticket's claims before carrying on. `forced: true`: a forced release, which needs the id to classify an operator. |
 
 A whole ticket and any of its pieces are the same work; two different pieces are not.
@@ -1357,6 +1393,19 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   was the one standing, and nothing was written; a replaced setting stays as history.
   `brain_info`'s `database.workClaimCap` shows the standing cap — built in, the
   operator's, or the operator's refused.
+- **`release_holder_claims`** (`POST /v1/claims/release-holder`, write scope; SMD-3606 PR 3,
+  migration 145): the operator ends every live claim one holder holds in one call — the undo
+  of a claim hog, where `release_claim` ends one claim by id. `holder` is a key's name (as
+  `list_claims` shows it, surrounding white space ignored) and `reason` is kept on each
+  released claim as history; only the holder's live claims (unreleased and unexpired) end,
+  its lapsed and released claims and every other holder's standing, and a holder with none
+  ends 0. Past the scope, the database admits a key the operator classified `operator`, by
+  its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR` (403); while the registry
+  cannot give the key's agent id the call is refused `RELEASE_HOLDER_UNATTRIBUTED` (503,
+  retryable), as `set_work_claim_cap` answers `CLAIM_CAP_UNATTRIBUTED`. The answer is
+  `{holder, released, claims}`: `released` the count ended, `claims` each ended claim's id,
+  ticket and piece (bounded by the per-holder cap, since the cap holds how many live claims
+  a holder may have).
 - **`list_priority_findings`** (`GET /v1/priority-findings`, read scope; SMD-3671 PR 2,
   migration 142): the priority review's findings, which sleep's scan proposes —
   `stale`, `overdue`, `disagree` and `settled` (`db/README.md`, migration 142). `status`
@@ -1595,7 +1644,7 @@ MCP tools do rather than a copy of it:
   function of the caller's principal and its typed input: the search operation with its
   egress gate and query log, the store reads, `brain_info`'s shared read, the job tools.
   `core/writes.ts` holds `capture_thought`, `update_thought`, `delete_thought`,
-  `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
+  `forget_thought`, `reset_capture_stamp` and `append_thought_evidence`: the shapes, a capture-only key's
   trimmed provenance and owned pointers, the egress gate, the model calls, the write and
   its cites. `core/workers.ts` holds the worker actions (`retry_failed`,
   `release_stale_leases`, `run_worker`'s dry run), which the keyed REST POSTs
@@ -1743,7 +1792,7 @@ stripped (`X-Forwarded-Prefix`).
 - **Routes** come from `rest/routes.ts`, one per tool in the manifest (a tool
   without one does not compile): `GET /v1/thoughts`, `GET`/`PATCH`/`DELETE
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
-  /v1/thoughts/{id}/reset-capture-stamp` and `/evidence`, `POST /v1/search` (and
+  /v1/thoughts/{id}/reset-capture-stamp`, `/evidence` and `/forget`, `POST /v1/search` (and
   `/keyword`, `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
   `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET

@@ -37,7 +37,7 @@ export interface paths {
         post?: never;
         /**
          * Delete Thought
-         * @description Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.
+         * @description Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. To remove its text for good — a secret, a password, personal data the user wants gone — use forget_thought instead. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.
          */
         delete: operations["delete_thought"];
         options?: never;
@@ -353,6 +353,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/thoughts/{id}/forget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Forget Thought
+         * @description Forget a thought for good: remove it and every copy of its text or id the brain holds, and say what was removed. Use it only when the user asks for the text to be gone for good (a secret, a password, personal data); to tidy or correct, use delete_thought or update_thought. Read the thought back first (fetch takes the id) to be sure it is the one. Unlike delete_thought, which keeps the removed text in the audit trail so a deletion can be reconstructed, this redacts the thought's audit events (who acted and when stay; the text does not), deletes its entities, search windows and vectors, strips its id from other thoughts' derived_from, deletes the relations and expired or detached citations naming it, the page sections built on it, its priority statements, open items, close proposals and deliverable events, and clears it from the logged searches. It records the forgetting in a ledger, so a later capture or edit of the same text is refused FORGOTTEN, and the record it was ingested as (a Linear ticket, a note) is left out of every sync. Cannot be undone. Pass the same id again as `confirm`. The reply lists what could not be removed mechanically: thoughts derived from it, whose prose may have absorbed its text (`irreproducible`), pages to review, and copies outside the brain. Refused while statements in other thoughts cite it, unless `detach_citations` is true. A thought deleted earlier can still be forgotten: what it left behind is removed.
+         */
+        post: operations["forget_thought"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/thoughts/{id}/reset-capture-stamp": {
         parameters: {
             query?: never;
@@ -482,7 +502,7 @@ export interface paths {
         };
         /**
          * List Work Claims
-         * @description List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means the limit cut the list: narrow by ticket or holder. Never shows a claim's token.
+         * @description List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means more claims follow this page: page to the end by calling again with `after` set to the reply's `cursor` and the same `ticket`, `holder` and `include_ended`; `remaining` counts how many follow. A cursor that is not this tool's, or made with other filters, is refused (REFUSED_CURSOR). Never shows a claim's token.
          */
         get: operations["list_claims"];
         put?: never;
@@ -599,6 +619,26 @@ export interface paths {
          * @description Operator only: a key the operator classified `operator` (set_agent_kind). Set the per-holder cap on how many live work claims one key may hold at once — the backstop claim_work enforces, so no runaway or buggy agent hoards the board (SMD-3606). The cap is per holder (a key's agent id, or its name where it has none) and counts only live claims (unreleased and unexpired), so a lapsed claim frees a slot; a new claim past it is refused CLAIM_LIMIT, while a renewal of the holder's own claim is never capped. The default is 50; `null` clears the setting, so the built-in 50 stands. The setting replaces the one standing, which stays in the brain's history; `brain_info` shows the one standing. The reply gives the cap now and before (`changed` false: it was the one standing, and nothing was written). A cap outside 1 to 100000 is refused; any key not classified operator is refused.
          */
         post: operations["set_work_claim_cap"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/claims/release-holder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release Holder Claims
+         * @description Operator only: a key the operator classified `operator` (set_agent_kind). End every live work claim one holder holds, in one call — the undo of a claim hog, where release_claim ends one claim at a time (SMD-3606). `holder` is the key's name as list_claims shows it (its `holder`); `reason` says why and is kept on each released claim as history. Only the holder's live claims (unreleased and unexpired) end; its lapsed and released claims, and every other holder's, stand. The reply gives how many ended and which (id, ticket, piece). A holder with no live claims ends none (`released` 0). Any key not classified operator, or reaching the brain with no agent id, is refused.
+         */
+        post: operations["release_holder_claims"];
         delete?: never;
         options?: never;
         head?: never;
@@ -979,7 +1019,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1024,7 +1064,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1051,7 +1091,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1084,7 +1124,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1129,7 +1169,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1156,7 +1196,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1191,7 +1231,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1236,7 +1276,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1263,7 +1303,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1311,7 +1351,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1356,7 +1396,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1383,7 +1423,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1495,7 +1535,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1540,7 +1580,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1567,7 +1607,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1631,7 +1671,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1676,7 +1716,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1703,7 +1743,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1745,7 +1785,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1790,7 +1830,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1817,7 +1857,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1857,7 +1897,7 @@ export interface operations {
                     metadata?: {
                         [key: string]: string | number | boolean;
                     };
-                    /** @description An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's and delete_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it. */
+                    /** @description An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's, delete_thought's and forget_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it. */
                     client_key?: string;
                 };
             };
@@ -1872,7 +1912,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1917,7 +1957,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1944,7 +1984,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -1980,7 +2020,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2025,7 +2065,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2052,7 +2092,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2088,7 +2128,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2133,7 +2173,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2160,7 +2200,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2194,7 +2234,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2239,7 +2279,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2266,7 +2306,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2300,7 +2340,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2345,7 +2385,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2372,7 +2412,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2409,7 +2449,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2454,7 +2494,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2481,7 +2521,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2512,7 +2552,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2557,7 +2597,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2584,7 +2624,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2621,7 +2661,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2666,7 +2706,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2693,7 +2733,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2724,7 +2764,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2769,7 +2809,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2796,7 +2836,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2827,7 +2867,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2872,7 +2912,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2899,7 +2939,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -2930,7 +2970,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2975,7 +3015,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3002,7 +3042,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3035,7 +3075,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3080,7 +3120,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3107,7 +3147,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3145,7 +3185,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3190,7 +3230,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3217,7 +3257,121 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    forget_thought: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The `id` again, exactly as you passed it: forgetting cannot be undone, so the call is refused unless the two match */
+                    confirm: string;
+                    /** @description When statements in other thoughts cite this one as their source, the forget is refused and the reply names them. Pass true to forget anyway: the citations are deleted with it, since each one may restate its text; the thoughts that made them stay. Default false. */
+                    detach_citations?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description The operation's value. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
+            };
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: "token"` (and `WWW-Authenticate: Bearer error="invalid_token"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: "token"`, a token whose subject the agent registry revoked, which no new sign-in clears. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY, ITEM_NOT_YOURS, READ_ONLY_KEY, ITEM_UNOWNABLE, PROPOSAL_YOURS, CONFIRM_NOT_YOURS, WRITE_SCOPE_REQUIRED, VERIFY_NOT_YOURS. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Nothing there: NOT_FOUND, CLAIM_NOT_FOUND, ITEM_NOT_FOUND, ORIGIN_NOT_FOUND, EVIDENCE_NOT_FOUND, PROPOSAL_NOT_FOUND, NOT_A_DELIVERABLE. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED, SPEC_NOT_FOUND, REFUSED_SUPERSEDED_GONE. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3254,7 +3408,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3299,7 +3453,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3326,7 +3480,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3375,7 +3529,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3420,7 +3574,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3447,7 +3601,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3499,7 +3653,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3544,7 +3698,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3571,7 +3725,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3609,7 +3763,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3654,7 +3808,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3681,7 +3835,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3723,7 +3877,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3768,7 +3922,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3795,7 +3949,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3837,7 +3991,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3882,7 +4036,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3918,7 +4072,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -3938,6 +4092,7 @@ export interface operations {
                 holder?: string;
                 include_ended?: boolean;
                 limit?: number;
+                after?: string;
             };
             header?: never;
             path?: never;
@@ -3954,7 +4109,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3999,7 +4154,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4026,7 +4181,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4072,7 +4227,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4117,7 +4272,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4144,7 +4299,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4186,7 +4341,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4231,7 +4386,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4258,7 +4413,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4302,7 +4457,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4347,7 +4502,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4374,7 +4529,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4408,7 +4563,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4453,7 +4608,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4480,7 +4635,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4535,7 +4690,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4580,7 +4735,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4607,7 +4762,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4641,7 +4796,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4686,7 +4841,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4713,7 +4868,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4780,7 +4935,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4825,7 +4980,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4852,7 +5007,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4890,7 +5045,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4935,7 +5090,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4962,7 +5117,119 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    release_holder_claims: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The holder whose live claims to release: a key's name, as list_claims shows it (its `holder`). Surrounding white space is ignored */
+                    holder: string;
+                    /** @description Why the claims are released; kept on each released claim as history */
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The operation's value. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
+            };
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: "token"` (and `WWW-Authenticate: Bearer error="invalid_token"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: "token"`, a token whose subject the agent registry revoked, which no new sign-in clears. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY, ITEM_NOT_YOURS, READ_ONLY_KEY, ITEM_UNOWNABLE, PROPOSAL_YOURS, CONFIRM_NOT_YOURS, WRITE_SCOPE_REQUIRED, VERIFY_NOT_YOURS. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Nothing there: NOT_FOUND, CLAIM_NOT_FOUND, ITEM_NOT_FOUND, ORIGIN_NOT_FOUND, EVIDENCE_NOT_FOUND, PROPOSAL_NOT_FOUND, NOT_A_DELIVERABLE. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED, SPEC_NOT_FOUND, REFUSED_SUPERSEDED_GONE. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -4998,7 +5265,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5043,7 +5310,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5070,7 +5337,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5121,7 +5388,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5166,7 +5433,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5193,7 +5460,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5230,7 +5497,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5275,7 +5542,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5302,7 +5569,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5350,7 +5617,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5395,7 +5662,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5422,7 +5689,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5494,7 +5761,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5539,7 +5806,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5566,7 +5833,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5609,7 +5876,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5654,7 +5921,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5681,7 +5948,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5714,7 +5981,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5759,7 +6026,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5786,7 +6053,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5830,7 +6097,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5875,7 +6142,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5902,7 +6169,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -5947,7 +6214,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5992,7 +6259,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6019,7 +6286,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6069,7 +6336,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6114,7 +6381,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6141,7 +6408,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6183,7 +6450,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6228,7 +6495,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6255,7 +6522,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6297,7 +6564,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6342,7 +6609,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6369,7 +6636,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6402,7 +6669,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6447,7 +6714,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6474,7 +6741,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6521,7 +6788,7 @@ export interface operations {
                     "application/json": Record<string, unknown>;
                 };
             };
-            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -6566,7 +6833,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -6593,7 +6860,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6660,7 +6927,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6738,7 +7005,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */
@@ -6816,7 +7083,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

@@ -446,6 +446,19 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   assert(ddo.ok && dd.content[0].text === dm.text && same(dd.structuredContent, dm.sc) && same(shapeOf(d.body), dWhole),
     `delete_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${ddo.ok ? `${firstDiff(dd.structuredContent, dm.sc)} / ${firstDiff(shapeOf(d.body) as Record<string, unknown>, dWhole)}` : "refused"})`);
 
+  // forget_thought (SMD-1723 PR 2): each door forgets its own row, the id echoed in `confirm`. The time, and the bare
+  // orphans the first forget's brain-wide prune may take, differ by call: swapped in, as the id is.
+  const fgRest = String((await rest("POST", "/v1/thoughts", { content: "eta: a note REST forgets", source: "rest-suite" })).body.id);
+  const fgMcp = String((await mcp("capture_thought", { content: "eta: a note MCP forgets", source: "rest-suite" })).sc.id);
+  const fg = await rest("POST", `/v1/thoughts/${fgRest}/forget`, { confirm: fgRest });
+  const fgm = await mcp("forget_thought", { id: fgMcp, confirm: fgMcp });
+  const fgr = rendered((v) => say.renderForget(ok(v)), swap(fg.body, fgm.sc, ["id", "forgottenAt", "orphanEntities"]));
+  const fgGone = await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE id IN (${fgRest}::uuid, ${fgMcp}::uuid)) AS rows,
+    (SELECT count(*)::int FROM thought_forgotten WHERE thought_id IN (${fgRest}::uuid, ${fgMcp}::uuid)) AS led`;
+  assert(fg.status === 200 && fg.body.id === fgRest && typeof (fg.body.removed as Record<string, unknown> | undefined)?.audit_events === "number"
+      && fgr.content[0].text === fgm.text && same(fgr.structuredContent, fgm.sc) && fgGone[0].rows === 0 && fgGone[0].led === 2,
+    `forget_thought: the REST answer is the evidence, both thoughts gone and in the ledger, and the same reply as MCP's (${fg.status}; first difference: ${firstDiff(fgr.structuredContent, fgm.sc)})`);
+
   // reset_capture_stamp (SMD-2744): the operator's alone, so the writer is
   // classified for it here and unclassified after. Each door resets the
   // hook's own row, which nothing settled: the same "nothing to reset".
@@ -853,6 +866,9 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     ["update_thought", { id: ids[2] }, "PATCH", `/v1/thoughts/${ids[2]}`, {}],
     ["update_thought", { id: missing, content: "zeta" }, "PATCH", `/v1/thoughts/${missing}`, { content: "zeta" }],
     ["delete_thought", { id: missing }, "DELETE", `/v1/thoughts/${missing}`, undefined],
+    // SMD-1723 PR 2: the echo refused before anything is read, then an id the log never held.
+    ["forget_thought", { id: missing, confirm: "not the id" }, "POST", `/v1/thoughts/${missing}/forget`, { confirm: "not the id" }],
+    ["forget_thought", { id: missing, confirm: missing }, "POST", `/v1/thoughts/${missing}/forget`, { confirm: missing }],
     // The writer is unclassified: the database refuses it the reset (SMD-2744).
     ["reset_capture_stamp", { id: ids[0] }, "POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {}],
     ["reset_capture_stamp", { id: "not-a-uuid" }, "POST", "/v1/thoughts/not-a-uuid/reset-capture-stamp", {}],
@@ -882,6 +898,8 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
   const withFacts: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, fact: string][] = [
     ["capture_thought", { content: "kappa", derived_from: [ids[0], missing] }, "POST", "/v1/thoughts", { content: "kappa", derived_from: [ids[0], missing] }, "positions"],
     ["update_thought", { id: ids[0], content: "alpha, edited", if_unchanged_since: "2020-01-01T00:00:00Z" }, "PATCH", `/v1/thoughts/${ids[0]}`, { content: "alpha, edited", if_unchanged_since: "2020-01-01T00:00:00Z" }, "currentUpdatedAt"],
+    // SMD-1723 PR 2: [3]'s forgotten text, captured again: refused, and when it was forgotten.
+    ["capture_thought", { content: "eta: a note REST forgets" }, "POST", "/v1/thoughts", { content: "eta: a note REST forgets" }, "forgottenAt"],
   ];
   for (const [tool, args, method, path, body, fact] of withFacts) {
     const r = await rest(method, path, body);
@@ -901,7 +919,7 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
   // server as a REST client says every refusal as server-portable does.
   const renderOf: Record<string, (o: never) => say.Reply> = {
     fetch: say.renderFetch, thought_changes: say.renderThoughtChanges, list_thought_ids: say.renderThoughtIds, list_logged_searches: say.renderLoggedSearches,
-    search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete,
+    search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete, forget_thought: say.renderForget,
     reset_capture_stamp: say.renderResetCaptureStamp, append_thought_evidence: say.renderAppendThoughtEvidence, review_supersession_proposal: say.renderReviewProposal, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
   };
   // A capture-only key's refusals too (review pass 1), the words its facts
@@ -3413,14 +3431,87 @@ console.log("\n[23] set_work_claim_cap through both doors (SMD-3606 PR 1b, migra
   }
 }
 
-console.log("\n[24] The priority review's findings through both doors (SMD-3671 PR 2, migration 142): sleep's scan finds an agent's level-4 statement stale, listed with an older finding first and counted in full past the limit, by kind and status, one value over both doors; an agent key and a read key refused, arguments that do not go together refused before the brain is asked, a level off the scale and a bad id by the schema; an accept the writer refuses leaves the finding pending; the operator's accept states its own level, a second decision is refused, a reject changes nothing, a clear with nothing to clear and a finding not there refused; brain_info and its row count them; a brain without the table faults naming 142");
+console.log("\n[24] The work-claims listing cursor through both doors (SMD-3606 PR 2, migration 143): four pieces of one ticket held by a key, list_work_claims paged two at a time — GET /v1/claims?after=… and MCP list_claims after — each piece once in piece order, the cursor, remaining, truncated and pastCursor in the reply, the last page's cursor null; a bad cursor and a cursor passed with other filters refused 400 REFUSED_CURSOR; the claims released after");
+{
+  await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24] reset' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  // Four pieces of one ticket are four different works, so one key may hold all four and the ticket filter isolates them.
+  for (const p of ["PR 1", "PR 2", "PR 3", "PR 4"]) await rest("POST", "/v1/claims", { ticket: "SMD-9360", piece: p }, KEYS.fresh);
+  try {
+    // REST: page two at a time, following the body's cursor to the end.
+    const restSeen: string[] = [];
+    let body: Record<string, unknown> = {};
+    let after: string | undefined;
+    let restPages = 0;
+    for (let i = 0; i < 6; i++) {
+      const r = await rest("GET", `/v1/claims?ticket=SMD-9360&limit=2${after ? `&after=${encodeURIComponent(after)}` : ""}`, undefined, KEYS.fresh);
+      body = r.body as Record<string, unknown>;
+      restPages++;
+      for (const c of (body.claims as { piece: string }[])) restSeen.push(c.piece);
+      if (!body.cursor) break;
+      after = String(body.cursor);
+    }
+    // MCP: the same walk, from the structuredContent.
+    const mcpSeen: string[] = [];
+    let mAfter: string | undefined;
+    for (let i = 0; i < 6; i++) {
+      const r = await mcp("list_claims", { ticket: "SMD-9360", limit: 2, ...(mAfter ? { after: mAfter } : {}) }, KEYS.fresh);
+      for (const c of (r.sc.claims as { piece: string }[])) mcpSeen.push(c.piece);
+      if (!r.sc.cursor) break;
+      mAfter = String(r.sc.cursor);
+    }
+    // A bad cursor, and a good one passed with other filters (a different ticket), refused through both doors.
+    const firstPage = await rest("GET", "/v1/claims?ticket=SMD-9360&limit=2", undefined, KEYS.fresh);
+    const goodCursor = String((firstPage.body as Record<string, unknown>).cursor);
+    const badRest = await rest("GET", "/v1/claims?ticket=SMD-9360&after=not-a-cursor", undefined, KEYS.fresh);
+    const badMcp = await mcp("list_claims", { ticket: "SMD-9360", after: "not-a-cursor" }, KEYS.fresh);
+    const otherFilter = await rest("GET", `/v1/claims?ticket=SMD-9361&after=${encodeURIComponent(goodCursor)}`, undefined, KEYS.fresh);
+    // The ticket is the one filter the SQL normalizes (upper + clean), so the same cursor pages on with the ticket written in another case — not refused as other filters.
+    const lowerTicket = await rest("GET", `/v1/claims?ticket=smd-9360&limit=2&after=${encodeURIComponent(goodCursor)}`, undefined, KEYS.fresh);
+    assert(JSON.stringify(restSeen) === JSON.stringify(["PR 1", "PR 2", "PR 3", "PR 4"]) && JSON.stringify(mcpSeen) === JSON.stringify(["PR 1", "PR 2", "PR 3", "PR 4"])
+        && body.cursor === null && Number(body.remaining) === 0 && body.truncated === false && body.pastCursor === true
+        && badRest.status === 400 && badRest.body.code === "REFUSED_CURSOR" && badMcp.isError && badMcp.sc.code === "REFUSED_CURSOR"
+        && otherFilter.status === 400 && otherFilter.body.code === "REFUSED_CURSOR" && otherFilter.body.reason === "filters"
+        && lowerTicket.status === 200 && (lowerTicket.body.claims as unknown[]).length === 2
+        && restPages === 2,
+      `the cursor pages each of the four pieces once through both doors in exactly two pages (the last full page ends the walk, no extra empty fetch — remaining counts the rows after this page, not this page's), the last page cursor null / remaining 0 / truncated false / pastCursor true; a bad cursor and one with other filters refused 400 REFUSED_CURSOR, but the same ticket in another case pages on (REST ${restSeen.join(",")} in ${restPages} pages | MCP ${mcpSeen.join(",")} | bad ${badRest.status}/${String(badRest.body.code)} | other ${otherFilter.status}/${String(otherFilter.body.reason)} | lower ${lowerTicket.status})`);
+  } finally {
+    await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[24]' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  }
+}
+
+console.log("\n[25] release_holder_claims through both doors (SMD-3606 PR 3, migration 145): an operator ends every live claim one holder holds — POST /v1/claims/release-holder and MCP release_holder_claims — the count and the claims (id, ticket, piece) in the reply and no token; an agent key refused 403 NOT_OPERATOR; a holder with no live claims releases 0");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('rival', 'agent')`;
+  try {
+    // "fresh" holds the claims (the operator is the writer, rest/mcp's default key; rival is the agent key for the refusal). Reset it first — other sections hold claims under their own keys — so the count is exactly what this section makes.
+    await rest("POST", "/v1/claims/release-holder", { holder: "fresh", reason: "reset for [25]" });
+    for (const t of ["SMD-7301", "SMD-7302", "SMD-7303"]) await mcp("claim_work", { ticket: t, lease_seconds: 14400 }, KEYS.fresh);
+    // The operator ends fresh's three live claims over REST.
+    const relRest = await rest("POST", "/v1/claims/release-holder", { holder: "fresh", reason: "retired a hog over REST" });
+    // fresh claims two more; MCP ends them.
+    for (const t of ["SMD-7304", "SMD-7305"]) await mcp("claim_work", { ticket: t, lease_seconds: 14400 }, KEYS.fresh);
+    const relMcp = await mcp("release_holder_claims", { holder: "fresh", reason: "retired a hog over MCP" });
+    // An agent key (the rival) is refused by the gate; a holder with nothing live releases 0.
+    const byAgent = await rest("POST", "/v1/claims/release-holder", { holder: "fresh", reason: "nope" }, KEYS.rival);
+    const none = await mcp("release_holder_claims", { holder: "fresh", reason: "nothing left" });
+    assert(relRest.status === 200 && relRest.body.released === 3 && Array.isArray(relRest.body.claims) && (relRest.body.claims as unknown[]).length === 3 && !("token" in relRest.body)
+        && !relMcp.isError && relMcp.sc.released === 2 && /Released 2 live claims held by fresh/.test(relMcp.text)
+        && byAgent.status === 403 && byAgent.body.code === "REFUSED_NOT_OPERATOR"
+        && !none.isError && none.sc.released === 0,
+      `the operator ends fresh's claims over both doors (REST 3, MCP 2), an agent key refused 403 NOT_OPERATOR, a holder with none releases 0 (${relRest.status}/${String(relRest.body.released)} ${String(relMcp.sc.released)} ${String(byAgent.body.code)} ${String(none.sc.released)})`);
+  } finally {
+    await sql`UPDATE work_claims SET released_at = now(), released_by = 'test-rest-sql', release_reason = '[25]' WHERE holder_name = 'fresh' AND released_at IS NULL`;
+  }
+}
+
+console.log("\n[26] The priority review's findings through both doors (SMD-3671 PR 2, migration 142): sleep's scan finds an agent's level-4 statement stale, listed with an older finding first and counted in full past the limit, by kind and status, one value over both doors; an agent key and a read key refused, arguments that do not go together refused before the brain is asked, a level off the scale and a bad id by the schema; an accept the writer refuses leaves the finding pending; the operator's accept states its own level, a second decision is refused, a reject changes nothing, a clear with nothing to clear and a finding not there refused; brain_info and its row count them; a brain without the table faults naming 142");
 {
   await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('rival', 'agent')`;
   type Finding = { id: string; kind: string; item: { kind: string; key: string }; status: string; statements: { id: string; level: number | null; maker: string | null; role: string | null }[]; decidedBy: string | null; note: string | null; outcome: Record<string, unknown> | null };
   type Listed = { status: string; kind: string | null; total: number; findings: Finding[] };
-  const thought = String((await rest("POST", "/v1/thoughts", { content: "[24] a priority finding's thought, kappa" })).body.id);
-  const other = String((await rest("POST", "/v1/thoughts", { content: "[24] a second finding's thought, lambda" })).body.id);
-  const stated = await rest("POST", `/v1/priorities/thought/${thought}`, { level: 4, reason: "[24] an agent's level" }, KEYS.rival);
+  const thought = String((await rest("POST", "/v1/thoughts", { content: "[26] a priority finding's thought, kappa" })).body.id);
+  const other = String((await rest("POST", "/v1/thoughts", { content: "[26] a second finding's thought, lambda" })).body.id);
+  const stated = await rest("POST", `/v1/priorities/thought/${thought}`, { level: 4, reason: "[26] an agent's level" }, KEYS.rival);
   // The scan as sleep runs it, its clock 61 days on: the agent's statement is past the 60-day window, nothing since.
   await sql`SELECT ob1_priority_review(60, now() + interval '61 days')`;
   const stale = (await sql`SELECT id::text AS id FROM priority_findings WHERE kind = 'stale' AND item_kind = 'thought' AND item_key = ${thought} AND status = 'pending'`)[0]?.id as string | undefined;
@@ -3544,23 +3635,23 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
         && await pendingStill(missing.id),
       `an accept on a ticket the brain does not hold: 409 REFUSED_FINDING_DECISION WRITER_REFUSED (ITEM_NOT_FOUND), the finding still pending (${writerNo.status}/${writerNo.body.problem}/${writerNo.body.writerCode})`);
 
-    const accepted = await mcp("review_priority_finding", { id: stale, decision: "accept", level: 2, note: "[24] reviewed: medium now" });
+    const accepted = await mcp("review_priority_finding", { id: stale, decision: "accept", level: 2, note: "[26] reviewed: medium now" });
     const [row] = await sql`SELECT status, decided_by, decision_note, suppressed_until IS NOT NULL AS held FROM priority_findings WHERE id = ${stale}::uuid`;
     const history = await rest("GET", `/v1/priorities/thought/${thought}`);
     const winner = history.body.winner as { level?: number; maker?: { name?: string }; tierName?: string } | null;
     const again = await review(stale!, { decision: "reject" });
     const againM = await mcp("review_priority_finding", { id: stale, decision: "reject" });
     assert(!accepted.isError && accepted.sc.status === "accepted" && accepted.sc.outcome === "asserted" && (accepted.sc.assertion as { level?: number })?.level === 2
-        && accepted.text.startsWith(`Accepted the stale finding ${stale} on thought ${thought}: stated medium (2) by writer at the operator tier: "review of a stale finding: [24] reviewed: medium now"`)
+        && accepted.text.startsWith(`Accepted the stale finding ${stale} on thought ${thought}: stated medium (2) by writer at the operator tier: "review of a stale finding: [26] reviewed: medium now"`)
         && / The same finding is held back until \S+ while its statements stand\.$/.test(accepted.text)
-        && row.status === "accepted" && row.decided_by === "writer" && row.decision_note === "[24] reviewed: medium now" && row.held === true
+        && row.status === "accepted" && row.decided_by === "writer" && row.decision_note === "[26] reviewed: medium now" && row.held === true
         && winner?.level === 2 && winner.maker?.name === "writer" && winner.tierName === "operator"
         && again.status === 409 && again.body.code === "REFUSED_FINDING_DECISION" && again.body.problem === "NOT_PENDING" && again.body.status === "accepted"
         && againM.text === `Refused: finding ${stale} is accepted already, not pending; list_priority_findings with status accepted shows it.`,
       `the operator's accept over MCP states its level 2 at the operator tier, the item's winner now; the finding accepted by writer with the note, held back; a second decision 409 NOT_PENDING (accepted) (${accepted.text.slice(0, 160)} ${row.status} ${winner?.level}/${winner?.tierName} ${again.status}/${again.body.problem})`);
 
     // A note of 1200 characters past the BMP, 2400 UTF-16 units, is within 142's 2000 characters: taken, and kept whole.
-    const wideNote = `[24] Linear is right ${String.fromCodePoint(0x1f600).repeat(1200)}`;
+    const wideNote = `[26] Linear is right ${String.fromCodePoint(0x1f600).repeat(1200)}`;
     const rejected = await review(missing.id, { decision: "reject", note: wideNote });
     const keptNote = (await sql`SELECT decision_note FROM priority_findings WHERE id = ${missing.id}::uuid`)[0]?.decision_note;
     const nothing = await review(unheld.id, { decision: "accept", clear: true });
@@ -3597,7 +3688,7 @@ console.log("\n[24] The priority review's findings through both doors (SMD-3671 
     const byKind = Object.fromEntries((await sql`SELECT kind, count(*)::int AS n FROM priority_findings WHERE status = 'pending' GROUP BY kind`).map((r: { kind: string; n: number }) => [r.kind, r.n]));
     const [counts] = await sql`SELECT count(*) FILTER (WHERE status = 'pending')::int AS p, count(*) FILTER (WHERE status = 'pending' AND kind = 'disagree')::int AS d,
                                       count(*) FILTER (WHERE decided_at >= now() - interval '30 days')::int AS dec FROM priority_findings`;
-    assert(decidedRow?.status === "accepted" && decidedRow.decidedBy === "writer" && decidedRow.note === "[24] reviewed: medium now" && decidedRow.outcome?.outcome === "asserted"
+    assert(decidedRow?.status === "accepted" && decidedRow.decidedBy === "writer" && decidedRow.note === "[26] reviewed: medium now" && decidedRow.outcome?.outcome === "asserted"
         && (decidedRow.outcome?.assertion as { tierName?: string; level?: number } | undefined)?.tierName === "operator" && (decidedRow.outcome?.assertion as { level?: number }).level === 2
         && all.status === "all" && all.total === allTotal && all.findings.length === 1 && all.findings[0].status === "pending"
         && pendingAfter.findings.every((f) => f.status === "pending") && pendingAfter.total === counts.p

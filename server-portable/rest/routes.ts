@@ -47,6 +47,9 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_DUPLICATE_CONTENT: 409,
   REFUSED_WOULD_CYCLE: 409,
   REFUSED_CITED: 409,
+  REFUSED_CONFIRM: 400,
+  FORGOTTEN: 409,
+  REPLAYING: 503,
   REFUSED: 422,
   REFUSED_NOT_OPERATOR: 403,
   REFUSED_NOT_CAPTURE_STAMP: 409,
@@ -61,6 +64,7 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_CLAIM_KEY: 403,
   CLAIM_UNATTRIBUTED: 503,
   CLAIM_CAP_UNATTRIBUTED: 503,
+  RELEASE_HOLDER_UNATTRIBUTED: 503,
   ITEM_NOT_FOUND: 404,
   ITEM_NOT_YOURS: 403,
   REFUSED_PRIORITY_INPUT: 400,
@@ -145,6 +149,7 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   capture_thought: { method: "POST", path: "/v1/thoughts", ok: 201, fault: "STORE_UNAVAILABLE", call: CALLS.capture_thought },
   update_thought: { method: "PATCH", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.update_thought },
   delete_thought: { method: "DELETE", path: "/v1/thoughts/{id}", ok: 200, call: CALLS.delete_thought },
+  forget_thought: { method: "POST", path: "/v1/thoughts/{id}/forget", ok: 200, call: CALLS.forget_thought },
   reset_capture_stamp: { method: "POST", path: "/v1/thoughts/{id}/reset-capture-stamp", ok: 200, call: CALLS.reset_capture_stamp },
   append_thought_evidence: { method: "POST", path: "/v1/thoughts/{id}/evidence", ok: 200, call: CALLS.append_thought_evidence },
   review_supersession_proposal: { method: "POST", path: "/v1/proposals/{id}/review", ok: 200, call: CALLS.review_supersession_proposal },
@@ -162,6 +167,7 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   // The operator's weights every read takes as its defaults (SMD-4193 PR 2, migration 132): the weights in the body, {} to clear.
   set_priority_weights: { method: "POST", path: "/v1/priority-weights", ok: 200, call: CALLS.set_priority_weights },
   set_work_claim_cap: { method: "POST", path: "/v1/work-claim-cap", ok: 200, call: CALLS.set_work_claim_cap },
+  release_holder_claims: { method: "POST", path: "/v1/claims/release-holder", ok: 200, call: CALLS.release_holder_claims },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // The priority review's findings (SMD-3671 PR 2, migration 142): the list's filters in the query, a decision in the body.
   list_priority_findings: { method: "GET", path: "/v1/priority-findings", ok: 200, call: CALLS.list_priority_findings },
