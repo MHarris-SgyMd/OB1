@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
-import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
+import { canonicalType, displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, refuseRedirect, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
@@ -66,6 +66,15 @@ console.log("\n[3] Unknown and malformed values degrade to observation");
     assert(out.type === "observation", `${JSON.stringify(bad)} → observation`);
   }
   assert(normaliseType("wingding").raw === "wingding", "an invented type is preserved in type_raw");
+  // An object's inherited keys are no alias: TYPE_ALIASES["constructor"] was Object's function (SMD-3318).
+  for (const inherited of ["constructor", "Constructor", "__proto__"]) {
+    const out = normaliseType(inherited);
+    assert(out.type === "observation" && out.raw === inherited && canonicalType(inherited) === null, `${inherited} → observation, its words in type_raw; canonicalType names none`);
+  }
+  assert(JSON.stringify(canonicalType(" To-Do ")) === "null" && JSON.stringify(canonicalType("To Do")) === "null"
+         && JSON.stringify(canonicalType("Action Item")) === JSON.stringify({ type: "task", aliased: true })
+         && JSON.stringify(canonicalType(" Person-Note ")) === JSON.stringify({ type: "person_note", aliased: false }),
+    "canonicalType: an alias after folding (action item → task), a type after folding (Person-Note → person_note), none for to_do");
 }
 
 console.log("\n[4] Case and spacing are normalised, not rejected");
