@@ -25,7 +25,8 @@ jev/h2o/test_serve.py`); the real model's burst is the PR's own run against the 
   [14] serve_config.json's two_way block: read, or refused when absent or not the probes this port asks
   [15] H2O's start-up guard: within the tolerance of the recorded answers, and apart from the one-way ones
   [16] a two-way read is one whole pass a prompt, sharing nothing; the guard reads every probe question both ways
-  [17] a context over the two-way limit is a 422 naming the setting
+  [17] under two-way, a record over the model's limit and a prompt over the setting's are each refused in their own
+      words; a failure while a prompt is counted is a 500, not the pair's 422
 """
 import asyncio, importlib.util, json, math, os, sys, threading, time
 from pathlib import Path
@@ -50,8 +51,8 @@ def check(ok, label):
 class FakeReader:
     """The parts of serve.Reader the request path uses. A read sleeps `delay` seconds on the calling thread and
     records the most reads ever in flight at once."""
-    max_state_tokens = model_max_state_tokens = 1000
-    two_way = False
+    max_state_tokens = 1000
+    prompt_limit = None   # one-way: the prompt is not counted
     temperature = {"choice": 1.0, "noul": 1.0, "score": 1.0}
     answer = serve.Reader.answer
 
@@ -532,7 +533,8 @@ async def main():
     temps_ok = (serve.temperatures_of(0.7, "temperature"), serve.temperatures_of({"choice": 1, "noul": 0.8, "score": 0.65, "other": "x"}, "temperature"))
     check(temps_ok == ({"choice": 0.7, "noul": 0.7, "score": 0.7}, {"choice": 1.0, "noul": 0.8, "score": 0.65}), f"temperatures: one number for all, or one a type ({temps_ok})")
     temp_refusals = []
-    for bad in ({"noul": 0.7}, None, {"choice": 0.75, "noul": "0.8", "score": 0.65}, 0, -1, True, float("nan"), {"choice": 0.75, "noul": 0, "score": 0.65}):
+    for bad in ({"noul": 0.7}, None, {"choice": 0.75, "noul": "0.8", "score": 0.65}, 0, -1, True, float("nan"), {"choice": 0.75, "noul": 0, "score": 0.65},
+                0.04, 21, 10 ** 400, float("inf")):
         try:
             serve.two_way_config({**good, "two_way": {**good["two_way"], "temperature": bad}}, "v9")
             temp_refusals.append(False)
@@ -540,7 +542,18 @@ async def main():
             temp_refusals.append("two_way.temperature" in str(e))
         except Exception:
             temp_refusals.append(False)
-    check(all(temp_refusals), f"a two_way.temperature for one type alone, null, a string, zero, negative, true or NaN is refused by its name, never a bare error ({temp_refusals})")
+    check(all(temp_refusals), f"a two_way.temperature for one type alone, null, a string, zero, negative, true, NaN, or outside the shim's [0.05, 20] (a number too large for a float among them) is refused by its name, never a bare error ({temp_refusals})")
+    legacy = (serve.one_way_temperatures(0), serve.one_way_temperatures("0.75"), serve.one_way_temperatures({"choice": 0.75, "noul": 0.8, "score": 0.65, "x": 1}))
+    check(legacy == ({"choice": 0.0, "noul": 0.0, "score": 0.0}, {"choice": 0.75, "noul": 0.75, "score": 0.75}, {"choice": 0.75, "noul": 0.8, "score": 0.65}),
+          f"the one-way parse is the one it was: a zero and a numeric string still start a one-way tier ({legacy})")
+    only_two_way = {"temperature": "not a number", "two_way": good["two_way"]}
+    check(serve.two_way_config(only_two_way, "v9")[2] == {"choice": 0.5, "noul": 0.6, "score": 0.7}, "a two-way block with temperatures of its own is not refused over the top block's, which it never reads")
+    ref_refusals = []
+    for bad in (float("nan"), float("inf"), 1.2, -0.1, True, "0.5"):
+        broken = [dict(r) for r in reference]
+        broken[0] = {**broken[0], "outage": {"true": bad, "false": 0.3}}
+        ref_refusals.append(config_refused({**good, "two_way": {**good["two_way"], "probe_reference": broken}}) is not None)
+    check(all(ref_refusals), f"a recorded answer that is NaN, infinite, outside [0, 1], true or a string is refused: the reference rule cannot pass on nothing ({ref_refusals})")
     saved = serve.REVISION
     serve.REVISION = "v1.2.3"
     label = serve.revision_label("/cache/snapshots/acaf0d4ea251e54de928c75ef4352670d33192d3")
@@ -550,21 +563,24 @@ async def main():
           and "two_way block" in serve.RULES_TWO_WAY and "bounded whole" in serve.RULES_TWO_WAY,
           "each clause the two-way rules replace is in the one-way rules exactly once, and replaced")
 
-    print("\n[17] a context over the two-way limit")
+    print("\n[17] two limits under two-way: the model's on the record, the setting's on the prompt")
+    # The fake reader counts a record at a token a character against its own limit of 1000, and a prompt at a token
+    # for every four characters, so a test sets each length apart.
+    def one(context, **more):
+        return json.dumps({"decisions": [{"kind": "binary", "context": context, "proposition": "it holds", **more}]}).encode()
     R, gate = FakeReader(), serve.Gate()
-    R.two_way, R.model_max_state_tokens, R.max_state_tokens = True, 32000, 1000
-    s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
-    check(s == 422 and "1500 tokens" in b["error"] and "1000" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" in b["error"] and "head and tail" not in b["error"] and R.reads == 0,
-          f"under the model's limit and over the two-way one: a 422 naming the setting, nothing read ({s}, {b.get('error')})")
-    R.model_max_state_tokens = 1200
-    s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
-    check(s == 422 and "head and tail" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" not in b["error"], f"over the model's own limit too: the model's refusal, as one-way gives ({b.get('error')})")
-    R.model_max_state_tokens = 0
-    s, b, _ = await post(R, gate, json.dumps({"decisions": [{"kind": "binary", "context": "y" * 1500, "proposition": "it holds"}]}).encode())
-    check(s == 422 and "H2O_TWO_WAY_MAX_TOKENS" in b["error"] and "head and tail" not in b["error"], f"a model with no limit of its own: the two-way limit's refusal ({b.get('error')})")
-    # The prompt is what a two-way read squares: a short record under long options is counted whole. The fake
-    # tokenizer reads a token for every four characters, so 24 options of 400 characters are about 2,400 tokens.
-    R.model_max_state_tokens = 32000
+    R.prompt_limit = 200
+    s, b, _ = await post(R, gate, one("y" * 900))
+    check(s == 422 and "decision 0: its prompt" in b["error"] and "over the 200 this tier reads two-way (H2O_TWO_WAY_MAX_TOKENS)" in b["error"] and "head and tail" not in b["error"] and R.reads == 0,
+          f"a record within the model's limit whose prompt passes the setting's: a 422 naming the prompt and the setting, nothing read ({s}, {b.get('error')})")
+    s, b, _ = await post(R, gate, one("y" * 1500))
+    check(s == 422 and "its context is 1500 tokens, over the 1000 this model reads whole" in b["error"] and "H2O_TWO_WAY_MAX_TOKENS" not in b["error"],
+          f"a record over the model's own limit: the model's refusal, with the model's number, as one-way gives ({b.get('error')})")
+    R.prompt_limit = 5000
+    s, b, _ = await post(R, gate, one("y" * 1500))
+    check(s == 422 and "over the 1000 this model reads whole" in b["error"], f"a setting above the model's limit does not raise the record's limit, nor is it named ({b.get('error')})")
+    # The prompt is what a two-way read squares: a short record under long options is counted whole
+    R.prompt_limit = 1000
     options = [{"id": f"o{k}", "description": "d" * 400} for k in range(24)]
     wide = {"decisions": [{"kind": "binary", "context": "short record", "proposition": "it holds"},
                           {"kind": "choice", "context": "short record", "question": "Which?", "options": options}]}
@@ -573,17 +589,21 @@ async def main():
           f"a short record under options that take the prompt past the limit: a 422 naming the prompt, nothing read ({s}, {b.get('error')})")
     s, b, _ = await post(R, gate, json.dumps({"decisions": wide["decisions"][:1]}).encode())
     check(s == 200 and R.reads == 1, f"the same record under a short question is read ({s})")
-    R.two_way = False
+    R.prompt_limit = None
     s, _, _ = await post(R, gate, json.dumps(wide).encode())
     check(s == 200, f"one-way, whose cost does not square, still reads the wide question ({s})")
     class Unpromptable(FakeReader):
+        error = None
         def prompt(self, *a):
-            raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+            raise self.error
     R = Unpromptable()
-    R.two_way, R.model_max_state_tokens = True, 32000
+    R.prompt_limit, R.error = 8000, UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
     s, b, _ = await post(R, gate, body())
     check(s == 422 and "question or options cannot be encoded" in b["error"] and R.reads == 0 and gate.admitted == 0, f"a question the tokenizer cannot encode is that decision's 422 under two-way ({s}, {b.get('error')})")
-
+    R.error = RuntimeError("Already borrowed")
+    s, b, _ = await post(R, gate, body())
+    check(s == 500 and "the model failed" in b["error"] and "Already borrowed" in b["error"] and R.reads == 0 and gate.admitted == 0 and gate.bytes == 0,
+          f"any other failure while a prompt is counted is the tier's 500, which a caller retries, never a 422 against the pair ({s}, {b.get('error')})")
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")

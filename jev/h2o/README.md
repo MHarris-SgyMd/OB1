@@ -168,12 +168,22 @@ H2O_REVISION=v1.4.2 H2O_ATTENTION=two-way JEV_PORT=8023 \
   of a request reads its record again, whatever `H2O_SHARE` says. Decide mode
   asks one question a pair and pays nothing for that; a request asking eight
   of one pair reads it eight times.
-- **It has a length limit of its own.** A two-way read's attention grows with
-  the square of its length, and the question and its options are part of that
-  length. A prompt over `H2O_TWO_WAY_MAX_TOKENS` (8000, the longest read
-  measured here: 7,821 tokens in 6.7 s) gets the 422 a record over the model's
-  limit gets, naming the setting, and `/info`'s `max_tokens` says that limit.
-  One-way keeps counting the record alone, as before.
+- **It has a length limit of its own, on the whole prompt.** A two-way read's
+  attention grows with the square of its length, and the question and its
+  options are part of that length. A prompt over `H2O_TWO_WAY_MAX_TOKENS`
+  (8000, the longest read measured here: 7,821 tokens in 6.7 s) gets a 422
+  naming the prompt and the setting. The model's limit on the record
+  (`max_state_tokens`) stays what it is, with its own 422, in both modes.
+  `/info`'s `max_tokens` is the smaller of the two, so under two-way a record
+  just under it can still be refused once its question is added: the 422 says
+  the prompt's count. `H2O_TWO_WAY_MAX_TOKENS` is read only under two-way.
+- **A request of many questions takes a pass each.** The client's deadline is
+  30 s and a second a decision (`server-portable/jev.ts`), and it packs up to
+  64 decisions a request. At 4,200 tokens a two-way pass is 3.3 s, so more than
+  about a dozen questions of one long record pass the deadline, and the tier
+  still reads them all. Decide mode sends a few a request. A caller that asks
+  many sets its own `timeoutMs` or sends fewer a request; nothing here does it
+  for the caller yet.
 - **A revision not trained for it is refused before its weights are fetched.**
   The start reads `serve_config.json` alone first, so `H2O_ATTENTION=two-way`
   on the default `v1.2.3` stops in under a second, naming the revision.

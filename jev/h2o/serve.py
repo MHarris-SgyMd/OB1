@@ -148,15 +148,23 @@ def probe_state(state):
     return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, separators=(",", ":"))
 
 
+def one_way_temperatures(t):
+    """The one-way read's temperatures, parsed as this port always parsed them: one value for all three types, or one
+    per type, each through float(). Kept as it was so that a one-way tier starts on every config it started on before
+    two-way existed (review pass 2: the stricter two-way reader had replaced it)."""
+    return {k: float(t[k] if isinstance(t, dict) else t) for k in ("choice", "noul", "score")}
+
+
 def temperatures_of(t, where):
-    """serve_config.json's temperatures by question type: one number for all three, or one per type. Anything else
-    stops the start by name (review pass 1: a block giving one type alone was a bare KeyError), and so does a value
-    that is not a positive finite number, which `answer` would otherwise read as its floor."""
+    """A two-way read's temperatures by question type: one number for all three, or one per type, each within the
+    shim's own range for them, [0.05, 20]. Anything else stops the start by the field's name (review pass 1: a block
+    giving one type alone was a bare KeyError). The comparison is an integer's or a float's own, so a number too large
+    to be a float is refused like any other, and a NaN fails it."""
     out = {}
     for k in ("choice", "noul", "score"):
         v = t.get(k) if isinstance(t, dict) else t
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
-            raise SystemExit(f"serve_config.json's {where} gives no positive number for {k!r} (one number, or one per type: choice, noul, score)")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.05 <= v <= 20:
+            raise SystemExit(f"serve_config.json's {where} gives no number in [0.05, 20] for {k!r} (one number, or one per type: choice, noul, score)")
         out[k] = float(v)
     return out
 
@@ -176,9 +184,11 @@ def two_way_config(cfg, revision):
         for qid, typ, _, criteria in questions:
             names = probe_options(typ, criteria)[0]
             got = entry.get(qid) if isinstance(entry, dict) else None
+            # A probability per option: a NaN here (JSON as Python reads it allows one) would count for nothing in the
+            # verdict's max, and the reference rule would pass whatever was read (review pass 2)
             if (not isinstance(got, dict) or sorted(got) != sorted(names)
-                    or not all(isinstance(got[n], (int, float)) and not isinstance(got[n], bool) for n in names)):
-                raise SystemExit(f"two_way.probe_reference has no answer per option for the probe question {qid!r}: not the probes this port asks")
+                    or not all(isinstance(got[n], (int, float)) and not isinstance(got[n], bool) and 0 <= got[n] <= 1 for n in names)):
+                raise SystemExit(f"two_way.probe_reference has no probability per option for the probe question {qid!r}: not the probes this port asks")
     tol = tw.get("probe_tolerance", 0.05)
     if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 < tol < 0.5:
         raise SystemExit(f"two_way.probe_tolerance is a number in (0, 0.5), not {tol!r}")
@@ -223,8 +233,9 @@ def revision_label(path):
 
 
 def read_limit(max_state_tokens, attention, two_way_max):
-    """The most tokens of context one read takes: serve_config.json's max_state_tokens, and under two-way no more than
-    H2O_TWO_WAY_MAX_TOKENS, since a two-way read's attention grows with the square of its length."""
+    """/info's max_tokens: serve_config.json's max_state_tokens, the record's limit, and under two-way no more than
+    H2O_TWO_WAY_MAX_TOKENS, the prompt's, since no record longer than its prompt's limit can be read. The two limits
+    stay two: a record is refused over the first in the model's words, a prompt over the second in the setting's."""
     if attention != "two-way":
         return max_state_tokens
     return min(max_state_tokens, two_way_max) if max_state_tokens else two_way_max
@@ -268,15 +279,15 @@ class Reader:
         self.system, self.prefill = p.get("system") or None, p.get("prefill", "Answer:")
         self.max_state_tokens = int(p.get("max_state_tokens", 32000))
         self.default_instructions = p.get("default_instructions", "Answer the question below.")
-        self.temperature = temperatures_of(self.cfg.get("temperature"), "temperature")
         # Two-way (SMD-4369): its own block's temperatures (shipped equal to the one-way ones), no shared prefix, and
-        # a limit on a read's length below the model's own
+        # a limit on the whole prompt beside the model's limit on the record, which stays what it was
         self.attention, self.two_way = attention, attention == "two-way"
-        self.model_max_state_tokens = self.max_state_tokens
+        self.prompt_limit = two_way_max if self.two_way else None
         if self.two_way:
             self.probe_reference, self.probe_tolerance, self.temperature = two_way_config(self.cfg, revision_label(self.path))
             self.share = False
-            self.max_state_tokens = read_limit(self.max_state_tokens, attention, two_way_max)
+        else:
+            self.temperature = one_way_temperatures(self.cfg["temperature"])
         self.labels = [str(l) for l in self.cfg["labels"]][: int(self.cfg.get("max_options", len(self.cfg["labels"])))]
         self.tok = AutoTokenizer.from_pretrained(path)
         model = Qwen3_5ForConditionalGeneration.from_pretrained(path, dtype=getattr(torch, self.dtype))
@@ -663,26 +674,26 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                     except Exception as e:
                         return 422, {"error": f"decision {i}: its context cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
                 if seen[ctx] is not None:
-                    # Under two-way the limit in force is the tier's own unless the model's is the one passed: a model
-                    # with no limit (0) has only the tier's (review pass 1: `<= 0` named the model's)
-                    if R.two_way and not (R.model_max_state_tokens and seen[ctx] > R.model_max_state_tokens):
-                        return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
-                                              f"tier reads two-way (H2O_TWO_WAY_MAX_TOKENS): a two-way read's memory grows with the "
-                                              f"square of its length, so it is refused"}, {}
                     return 422, {"error": f"decision {i}: its context is {seen[ctx]} tokens, over the {R.max_state_tokens} this "
                                           f"model reads whole; a cut to its head and tail is not a faithful read, so it is refused"}, {}
-                if R.two_way:
-                    # A two-way read's cost is the whole prompt's square, and the question and its options are part of
-                    # it: 24 options of 20,000 characters under a short record made a prompt of 100,000 tokens that
-                    # the context's count let through (review pass 1). So the prompt itself is counted.
+                if R.prompt_limit:
+                    # Two-way alone. A two-way read's cost is the whole prompt's square, and the question and its
+                    # options are part of it: 24 options of 20,000 characters under a short record made a prompt of
+                    # 100,000 tokens that a count of the record let through (review pass 1). The record's own limit
+                    # above stays the model's; this one is the setting's, and each refusal names its own (pass 2).
                     instr, names, descs = question_of(dd)[:3]
                     try:
                         n = len(R.encode(R.prompt(ctx, instr, names, descs)))
-                    except Exception as e:
+                    except UnicodeError as e:
+                        # a lone surrogate in the question or an option, as in a context: a fact about the text
                         return 422, {"error": f"decision {i}: its question or options cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
-                    if n > R.max_state_tokens:
+                    except Exception as e:
+                        # anything else is this tier's failure, not the pair's: the contract's 500, which a caller
+                        # retries, never a 422 it would record against the pair for good (review pass 2)
+                        return 500, {"error": f"the model failed: {type(e).__name__}: {str(e)[:200]}"}, {}
+                    if n > R.prompt_limit:
                         return 422, {"error": f"decision {i}: its prompt (the record, the question and its options) is {n} tokens, over the "
-                                              f"{R.max_state_tokens} this tier reads two-way (H2O_TWO_WAY_MAX_TOKENS): a two-way read's memory "
+                                              f"{R.prompt_limit} this tier reads two-way (H2O_TWO_WAY_MAX_TOKENS): a two-way read's memory "
                                               f"grows with the square of its length, so it is refused"}, {}
             return None
         refused = await asyncio.to_thread(first_unreadable)
@@ -715,7 +726,8 @@ def build_app(R, model_info, gate):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, PlainTextResponse
     info = {"contract": CONTRACT, "model": model_info, "kinds": ["binary", "choice"],
-            "max_options": MAX_OPTIONS, "max_batch": MAX_BATCH, "max_tokens": R.max_state_tokens}
+            "max_options": MAX_OPTIONS, "max_batch": MAX_BATCH,
+            "max_tokens": read_limit(R.max_state_tokens, R.attention, R.prompt_limit)}
     app = FastAPI()
 
     # Both answer from the event loop, which a read never holds: it runs on the gate's worker thread
@@ -747,13 +759,17 @@ def main():
     import uvicorn
     gate = Gate(knob("JEV_MAX_QUEUED", DEFAULT_MAX_QUEUED), knob("JEV_MAX_QUEUED_BYTES", DEFAULT_MAX_QUEUED_BYTES))
     # Read before the weights are hashed and loaded, so a mistyped setting stops the start at once
-    attention, two_way_max = attention_of(os.environ.get("H2O_ATTENTION")), knob("H2O_TWO_WAY_MAX_TOKENS", DEFAULT_TWO_WAY_MAX_TOKENS)
+    # The two-way limit is read only under two-way: a one-way tier starts whatever that setting holds (review pass 2)
+    attention = attention_of(os.environ.get("H2O_ATTENTION"))
+    two_way_max = knob("H2O_TWO_WAY_MAX_TOKENS", DEFAULT_TWO_WAY_MAX_TOKENS) if attention == "two-way" else DEFAULT_TWO_WAY_MAX_TOKENS
     t0 = time.time()
     if attention == "two-way":
         # serve_config.json alone first: a revision not trained for two-way (the default pin is one) is refused on a
-        # file of a few kilobytes, not after its weights are downloaded and hashed (review pass 1)
+        # file of a few kilobytes, not after its weights are downloaded and hashed (review pass 1). Its directory is
+        # the commit the revision resolved to, so this refusal and the Reader's name the revision alike.
         from huggingface_hub import hf_hub_download
-        two_way_config(json.loads(Path(hf_hub_download(REPO, "serve_config.json", revision=REVISION)).read_text()), REVISION)
+        early = Path(hf_hub_download(REPO, "serve_config.json", revision=REVISION))
+        two_way_config(json.loads(early.read_text()), revision_label(early.parent))
     path = snapshot()
     weights = Path(path) / "model.safetensors"
     h = hashlib.sha256()
@@ -764,7 +780,7 @@ def main():
     if R.two_way:
         ok, gap, sep, why = R.two_way_matches()
         if not ok: raise SystemExit(f"this is not H2O's two-way read: {why}")
-        reading = (f"two-way, every prompt read whole, at most {R.max_state_tokens} tokens a prompt (H2O's probes matched "
+        reading = (f"two-way, every prompt read whole, at most {R.prompt_limit} tokens a prompt (H2O's probes matched "
                    f"within {gap:.4f}, {sep:.4f} from the one-way read)")
     elif SHARE:
         ok, worst = R.shared_read_matches()
