@@ -4229,6 +4229,8 @@ if (want("9f")) {
   let probeDownNext = false;
   /** Every row's call answers OpenRouter's 402 "can only afford", the probe's passing (SMD-2636 PR 3b, the build's mutants). */
   let rowsAfford402 = false;
+  /** That 402's words, as OpenRouter says them: the flag above's and the one below's. */
+  const AFFORD_402 = "This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12.";
   /** While above zero, the next row's call alone answers that 402, whatever its text, 300 ms late (SMD-4352): one worker's refusal while another's call is in flight. */
   let afford402Next = 0;
   /** Every row's call that arrived, whatever its answer (SMD-4352). */
@@ -4336,9 +4338,9 @@ if (want("9f")) {
         afford402Next--;
         // Late, so the other worker's call is made by then: answered at once, the refusal met it between its claim and its call.
         await Bun.sleep(300);
-        return Response.json({ error: { message: "This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12." } }, { status: 402 });
+        return Response.json({ error: { message: AFFORD_402 } }, { status: 402 });
       }
-      if (rowsAfford402 && !probe) return Response.json({ error: { message: `This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12. ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
+      if (rowsAfford402 && !probe) return Response.json({ error: { message: `${AFFORD_402} ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
       // A zz-deadline thought's call never answers, so its deadline passes; the probe after it answers unless a flag
       // above says otherwise (SMD-2636 PR 3b).
       if (input.includes("zz-deadline") && deadlinesHang) {
