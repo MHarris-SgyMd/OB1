@@ -372,6 +372,49 @@ export function parsedBody(bodyText: string | null): ParsedBody {
   }
 }
 
+/** The line's word for a request that named no MCP revision (telemetry.ts's MCP_REVISIONS holds it). */
+const UNNAMED_REVISION = "unnamed";
+/** Where a 2026-07-28 request carries its revision: this key of `params._meta`, the request's envelope. */
+const ENVELOPE_REVISION = "io.modelcontextprotocol/protocolVersion";
+
+/**
+ * The MCP revision a request names (SMD-4363), for its line:
+ *  - its envelope's, the body being a 2026-07-28 request's word on itself, over
+ *    a header that disagrees and over its method. The SDK sends a request that
+ *    claims an envelope to its 2026-07-28 handler, to answer or refuse; an
+ *    `initialize` too, where the envelope is whole and names 2026-07-28. One
+ *    whose envelope is not is answered as a 2025-era handshake, and its line
+ *    still says what the envelope claimed;
+ *  - else an `initialize`'s offer (`params.protocolVersion`), which is what the
+ *    SDK's 2025-era transport acts on, over a 2025-era header sent with it;
+ *  - else its `MCP-Protocol-Version` header's. The 2025-06-18 and 2025-11-25
+ *    revisions have a client send it on every request after `initialize`;
+ *    2025-03-26 and earlier define no such header, though the SDK's client
+ *    sends the revision it negotiated, whichever that is;
+ *  - else `unnamed`: no revision named. That is a request with no header that
+ *    is no `initialize`: a client on 2025-03-26 or earlier that sends what its
+ *    revision defines, a later one that leaves the header out, a batch (an
+ *    array is read by its header alone, an array of one message too), and a
+ *    body unread or no JSON-RPC request.
+ * What it records is what the request said, not what the server then did: an
+ * offer the transport negotiates down is the offer, and a request refused is
+ * still the revision it named. The value is the caller's string, and
+ * telemetry.ts writes it only if it is a revision it knows; a caller's own
+ * `unnamed` is not this function's word, and is returned as a string no
+ * revision is, so the line says `other`.
+ */
+export function revisionOf(headers: Headers, body: ParsedBody): string {
+  const header = headers.get("mcp-protocol-version");
+  const message = body && !Array.isArray(body.value) ? body.value as { method?: unknown; params?: { protocolVersion?: unknown; _meta?: unknown } | null } | null : null;
+  const params = typeof message?.params === "object" ? message.params : null;
+  const meta = typeof params?._meta === "object" && params._meta !== null ? params._meta as Record<string, unknown> : null;
+  const enveloped = meta?.[ENVELOPE_REVISION];
+  const named = typeof enveloped === "string" ? enveloped
+    : message?.method === "initialize" && typeof params?.protocolVersion === "string" ? params.protocolVersion
+    : header;
+  return named === null ? UNNAMED_REVISION : named === UNNAMED_REVISION ? "" : named;
+}
+
 /** What the request's JSON line (telemetry.ts) reads from its body. */
 export type RequestParts = { rpc?: string; tool?: string; toolCalls: number };
 
