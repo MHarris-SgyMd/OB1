@@ -18310,10 +18310,10 @@ if (want("16")) {
       judgeCrashMarker = "crash-cut";
       judgeCrashProbes = 1;
       judgeCrashedBy.length = 0;
-      await sql.unsafe(`CREATE SEQUENCE smd4352_cut`);
-      await sql.unsafe(`CREATE FUNCTION smd4352_cut_once() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN IF nextval('smd4352_cut') = 1 THEN PERFORM pg_terminate_backend(pg_backend_pid()); END IF; RETURN NEW; END $f$`);
-      await sql.unsafe(`CREATE TRIGGER smd4352_cut_once BEFORE UPDATE ON thought_work_claims FOR EACH ROW WHEN (OLD.status = 'claimed' AND NEW.status = 'failed') EXECUTE FUNCTION smd4352_cut_once()`);
       try {
+        await sql.unsafe(`CREATE SEQUENCE smd4352_cut`);
+        await sql.unsafe(`CREATE FUNCTION smd4352_cut_once() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN IF nextval('smd4352_cut') = 1 THEN PERFORM pg_terminate_backend(pg_backend_pid()); END IF; RETURN NEW; END $f$`);
+        await sql.unsafe(`CREATE TRIGGER smd4352_cut_once BEFORE UPDATE ON thought_work_claims FOR EACH ROW WHEN (OLD.status = 'claimed' AND NEW.status = 'failed') EXECUTE FUNCTION smd4352_cut_once()`);
         const cut = await followOver([["The spare table names the weekly lead.", "The spare table names the daily lead now."], ["The cut table names the crash-free lead.", "The cut table names the crash-cut lead now."]], 120_000, { workers: 1 });
         const cutSaid = cut.lines.some((l) => new RegExp(`the database is not answering \\(.*\\) — recording nothing for ${cut.ids[1]}; it returns to the pool when the database answers$`).test(l));
         const ratio = cut.lines.map((l) => /(\d+) pair\(s\) judged — ([\d.]+) per thought judged, (\d+) calls per thousand thoughts/.exec(l)).find((m) => m !== null) ?? null;
@@ -19561,9 +19561,9 @@ if (want("16")) {
     await seed("[16h] The ferry left at nine once.", 33, 2, ["ferry"]);
     let abortRefused: InHandAbort | undefined;
     const refusedLines: string[] = [];
-    await sql.unsafe(`CREATE FUNCTION smd4352_refuse_set_back() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'the set-back is refused, for a test'; END $f$`);
     slowMs = 3000;
     try {
+      await sql.unsafe(`CREATE FUNCTION smd4352_refuse_set_back() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'the set-back is refused, for a test'; END $f$`);
       const refusedFrom = calls;
       const refusedRun = runConsolidate({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortRefused = a; }, writer: { out: (l) => refusedLines.push(l), err: (l) => refusedLines.push(l) } });
       const inFlight = await pollUntil(async () => calls > refusedFrom, 10_000);
