@@ -4235,6 +4235,8 @@ if (want("9f")) {
   let afford402Next = 0;
   /** Every row's call that arrived, whatever its answer (SMD-4352). */
   let rowCalls = 0;
+  /** While above zero, the next row's call is held 1.5 s, not slowMs, whatever its text (SMD-4401): one worker done while the other's call is in flight. */
+  let quickNext = 0;
   let modelGone404 = false;
   /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
   let limitConcurrent = false;
@@ -4364,7 +4366,10 @@ if (want("9f")) {
         if (input.includes("slow hemlock")) await Bun.sleep(1000);
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
       }
-      if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
+      if (!probe && quickNext > 0) {
+        quickNext--;
+        await Bun.sleep(1500);
+      } else if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
       v[axisFor(input)] = 1;
@@ -4979,60 +4984,55 @@ if (want("9f")) {
         `a one-shot run with its probe skipped, the first row's call refused 401, halts: that row failed, the batch's other three left pending and said so, not failed row by row (SMD-4352; exit ${haltCode}; ${JSON.stringify(haltClaims)}; halt said ${haltSaid} time(s), pending said ${haltPending})`);
       await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(haltIds, "TEXT")}::uuid[])`;
 
-      // The record moved while a worker waits at the admit gate, and moved back before the gate lets it through
-      // (SMD-4352): the follower has seen the move and ends, so the worker claims nothing once through, though the
-      // record it would read names its model again. The gate here is deaf to the drain's end — it opens when the row
-      // says, not when its signal aborts, which is where a gate that rejects then ends the worker without this rule.
-      // It holds the second ask of a drain, the second worker's: both ask before either claims.
-      let deafArmed = false;
-      let deafAsks = 0;
-      const deafBefore = new Set<AbortSignal>();
-      const deafCounts = new Map<AbortSignal, number>();
-      let deafHeld: AbortSignal | null = null;
-      let deafOpen: (() => void) | null = null;
-      const deafAdmit: NonNullable<ReembedOptions["admit"]> = (signal) => {
-        deafAsks++;
-        if (!deafArmed) {
-          deafBefore.add(signal);
-          return Promise.resolve();
-        }
-        if (deafBefore.has(signal) || deafHeld !== null) return Promise.resolve();
-        const asked = (deafCounts.get(signal) ?? 0) + 1;
-        deafCounts.set(signal, asked);
-        if (asked !== 2) return Promise.resolve();
-        deafHeld = signal;
-        return new Promise<void>((resolve) => { deafOpen = resolve; });
-      };
-      const moved = liveFollower({ workers: 2, admit: deafAdmit });
+      // The record moved, seen by one worker while the other's call is in flight, and moved back before that call
+      // ends (SMD-4352, SMD-4401): the follower has seen the move and ends, so the second worker, through the gate
+      // after the thought it holds, claims nothing more, though the record it would read names its model again. The
+      // rule is read after every pass of the gate, an open one's too: the gate here is the scheduler's own, open
+      // throughout, and the row only reads the signal it is asked with, which aborts when the drain ends. The first
+      // call to arrive takes 1.5 s and the rest 4 s, and the record is moved while both are in flight: one worker
+      // reads it while the other's call is in flight, whatever the order the five are claimed in. Should the move
+      // land late, the quick worker has a third call in flight when the other reads it, and the row holds the same:
+      // no call is made after the move is seen.
+      const movedGate = liveGate();
+      // The follower's own stop signal, which its polls ask with — the first ask is one — and the drain's, which its workers ask with.
+      let movedPoll: AbortSignal | null = null;
+      let movedSignal: AbortSignal | null = null;
+      const movedAdmit: NonNullable<ReembedOptions["admit"]> = Object.assign((signal: AbortSignal) => {
+        if (movedPoll === null) movedPoll = signal;
+        else if (signal !== movedPoll) movedSignal = signal;
+        return movedGate.admit(signal);
+      }, { closedSince: movedGate.admit.closedSince });
+      // A 30 s call timeout: the section's 2 s would end the 4 s call as a deadline, and its probe, cut short by the drain's end, would stop the worker before the gate.
+      const moved = liveFollower({ workers: 2, admit: movedAdmit, env: { ...env, OB1_LLM_TIMEOUT: "30" } });
       await moved.idle();
-      // A poll's own ask first, so the follower's stop signal is one the gate knew before it was armed.
-      await pollUntil(async () => deafAsks >= 1, 15_000);
+      await pollUntil(async () => movedPoll !== null, 15_000);
       let movedIds: string[] = [];
-      let movedHeld = false;
+      let movedInFlight = false;
       let movedSeen = false;
-      let movedBefore = -1;
-      let movedPending = -1;
+      let movedCallsThen = -1;
       let movedEnd: string | null = null;
+      const movedCalls = rowCalls;
       const movedAtModel = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE id = ANY(${sql.array(movedIds, "TEXT")}::uuid[]) AND embedding IS NOT NULL AND embedding_model = 'stub-embed'`)[0].n);
-      slowMs = 1000;
-      deafArmed = true;
+      slowMs = 4000;
+      quickNext = 1;
       try {
         movedIds = ((await sql`INSERT INTO thoughts (content) SELECT 'a thought of five the moved record leaves, number ' || g FROM generate_series(1, 5) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
-        movedHeld = await pollUntil(async () => deafHeld !== null, 15_000);
+        movedInFlight = await pollUntil(async () => rowCalls >= movedCalls + 2, 15_000);
         await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
-        // The other worker's read of the record ends the drain, which the held ask's signal says.
-        movedSeen = await pollUntil(async () => (deafHeld as AbortSignal | null)?.aborted === true, 15_000);
-        movedBefore = await movedAtModel();
-        movedPending = Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'pending' AND thought_id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`)[0].n);
+        // The quick worker's read of the record ends the drain, which the drain's signal says.
+        movedSeen = await pollUntil(async () => (movedSignal as AbortSignal | null)?.aborted === true, 15_000);
+        movedCallsThen = rowCalls - movedCalls;
       } finally {
         await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
-        (deafOpen as (() => void) | null)?.();
         movedEnd = await moved.ended();
+        quickNext = 0;
         slowMs = 0;
       }
       const movedAfter = await movedAtModel();
-      assert(movedHeld && movedSeen && movedPending >= 1 && movedAfter === movedBefore && movedEnd === "exit 2" && moved.lines.some((l) => /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(l)),
-        `a worker let through the admit gate after the follower saw the record move claims nothing, the record moved back or not: no thought re-embedded after the gate opened, the follower ended 2 (SMD-4352; held ${movedHeld}, move seen ${movedSeen}; ${movedBefore} re-embedded before the gate opened, ${movedAfter} after, ${movedPending} pending then; ${movedEnd})`);
+      const movedPending = Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'pending' AND thought_id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`)[0].n);
+      assert(movedInFlight && movedSeen && movedCallsThen <= 3 && rowCalls - movedCalls === movedCallsThen && movedAfter === movedCallsThen && movedPending >= 2 && movedEnd === "exit 2"
+          && moved.lines.some((l) => /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(l)),
+        `a worker through the admit gate after the follower saw the record move claims nothing, the record moved back or not: the thought it holds lands and no call is made after the move was seen, the follower ended 2 (SMD-4352, SMD-4401; in flight ${movedInFlight}, move seen ${movedSeen} at ${movedCallsThen} call(s); ${rowCalls - movedCalls} call(s) in all, ${movedAfter} re-embedded, ${movedPending} pending; ${movedEnd})`);
       await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`;
     })();
 

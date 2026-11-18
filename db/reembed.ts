@@ -2251,7 +2251,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       stopping: () => stopping || haltedByProvider || configError !== null,
       hardStopped: () => hardStopped, isolated: () => isolated, pollNow: () => { pollNow = true; },
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
-      // The record's model moved while this worker waited at the gate.
+      // The follower saw the record's model move: a worker through the gate again claims nothing, though the record has
+      // moved back since and the read before its claim would pass it (SMD-4401). Under a gate only: the loop asks nowhere else.
       afterGate: () => switchedTo !== null,
       // A follower reads the record before each batch, not only at its poll: a --switch-model run by hand beside
       // it had the whole drain — a sleep's backlog — written at the old model after the switch (SMD-2679 PR 4b,
