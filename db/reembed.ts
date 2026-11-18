@@ -598,6 +598,14 @@ export interface ReembedOptions {
    */
   stamper?: PassStamper | null;
   /**
+   * The sleep scheduler's alone (SMD-4254): a follower's wait on an outage that made a thought a suspect
+   * (ProviderOutage's byThought) probes the provider every this many ms from the wait's start, no doubling and nothing
+   * carried from the last wait (waitOutProvider's fixedProbeMs) — the scheduler leaves such a wait running within a
+   * bound a wait and a cap a period, which the doubling schedule carried across an isolation's waits passed. A positive
+   * number of ms, which db/sleep.ts checks; left out — a follower run by hand — every outage keeps its schedule.
+   */
+  thoughtProbeMs?: number;
+  /**
    * A follower's start alone, as extract-entities.ts's (SMD-2752): the
    * banner, the egress gate, the tables, the recorded model and the
    * provider's probe — then 0, before the pass's first write (the record, a
@@ -2620,6 +2628,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       wake: onStop.signal,
       writer: { out, err },
       stamper,
+      // The sleep scheduler's fixed probe on a thought's outage (SMD-4254); a follower by hand keeps the schedule.
+      ...(opts.thoughtProbeMs === undefined ? {} : { fixedProbeMs: opts.thoughtProbeMs }),
     });
     const back = await (stamper ? stamper.during(waited) : waited);
     if (back === "answered") {

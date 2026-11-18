@@ -393,11 +393,14 @@ const providerRows = (passes: readonly string[]) =>
  * re-embed follower's, and the scheduler's own words for the rest. An
  * outage's names a thought that crashes the provider as a cause of one that
  * comes back every period, and how to find it (SMD-4254): the scheduler waits
- * out such a thought's outage up to two minutes, so one that keeps the
- * provider down longer still sets re-embed down at each period's first claim.
+ * out an outage that made a thought a suspect up to 2 min a wait and 4 min of
+ * such waits a period (db/sleep.ts's REEMBED_THOUGHT_WAIT_MS and
+ * REEMBED_THOUGHT_PERIOD_MS), and a crashing thought costs four waits, so one
+ * that keeps the provider down past about 80 s a crash is set down at the
+ * cap each period, retried at the next period's first claim.
  */
 const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = false): string =>
-  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider and keeps it down past the two minutes the scheduler waits on such an outage, which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
+  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages (2 min a wait, 4 min of them a period; a crashing thought takes four waits, so one whose crash lasts past about 80 s is never failed), which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
   // Under OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out, as the claim passes' held fix says (review pass 3 of SMD-3379 PR 1c-4b).
   : kind === "statement" ? `a statement passed ${ownTimeout ? "the role's or the database's own statement_timeout" : "its statement_timeout"}, which its log names: ${ownTimeout ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs," : "raise OB1_SLEEP_STATEMENT_TIMEOUT"} in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
   : kind === "failed" ? "it ended by itself, and its log gives the reason"
@@ -5592,16 +5595,22 @@ if (configFailed) {
             } else if (waitingFor || waitingMid) {
               const cap = (t: string) => `${t.charAt(0).toUpperCase()}${t.slice(1)}`;
               // Re-embed's provider is the embedding endpoint (SMD-2679 PR 4b).
-              // Re-embed's wait ends at the scheduler's next poll, set down for the period (review pass 1).
-              const waitTail = (passes: readonly string[], one: string, many: string, after: string) => {
+              // Re-embed's wait ends at the scheduler's next poll, set down for the period (review pass 1) — but one
+              // mid-pass on an outage that made a thought a suspect is left running, within a bound a wait and a cap a
+              // period, which the row carries (`reembedWait`, SMD-4254).
+              const left = h.reembedWait;
+              const reembedWords = (mid: boolean) => mid && left
+                ? `re-embed is left waiting: an outage made the thought in hand a suspect — a thought's embedding may have crashed the provider — so the scheduler waits it out and, once it answers, retries the suspects one at a time; it sets re-embed down for the period, extraction going on, once the provider has not answered for ${ago(left.boundS)} from the wait's start (this one began ${ago(Math.max(0, secondsSince(h, left.since)))} ago) or after ${ago(left.periodS)} of such waits this period (${ago(left.earlierS)} before this one), and the next period with work tries it again`
+                : "re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again";
+              const waitTail = (passes: readonly string[], one: string, many: string, after: string, mid = false) => {
                 const others = passes.filter((p) => p !== "reembed").length;
                 return [others ? (others > 1 ? many : one) : null,
-                  passes.includes("reembed") ? "re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again" : null]
+                  passes.includes("reembed") ? reembedWords(mid) : null]
                   .filter((t) => t !== null).join("; ") + after;
               };
               if (waitingFor) fixes.push(`${cap(providerWaitWords(waitingFor))}: the provider does not answer ${waitingFor.every((p) => p === "reembed") ? "an embedding call" : "a one-token call"} — check it, and ${providerRows(waitingFor)}; ${waitTail(waitingFor, "the pass begins on its own once it answers", "the passes begin on their own once it answers", ".")}`);
               // Mid-pass, the cause is known where "its log says which" was all it had (SMD-2905).
-              if (waitingMid) fixes.push(`${cap(providerWaitWords(waitingMid, true))}: the provider stopped answering — check it, and ${providerRows(waitingMid)}; ${waitTail(waitingMid, "the pass goes on by itself once it answers", "the passes go on by themselves once it answers", waitingMid.some((p) => p !== "reembed") ? ", the thoughts in hand back in the pool meanwhile." : ".")}`);
+              if (waitingMid) fixes.push(`${cap(providerWaitWords(waitingMid, true))}: the provider stopped answering — check it, and ${providerRows(waitingMid)}; ${waitTail(waitingMid, "the pass goes on by itself once it answers", "the passes go on by themselves once it answers", waitingMid.some((p) => p !== "reembed") ? ", the thoughts in hand back in the pool meanwhile." : ".", true)}`);
             } else if (stmt && !stmtFixed) {
               // Its cause is known where "its log says which" was all it had
               // (SMD-2679); and once the setting passes the bound it stopped

@@ -23,7 +23,9 @@
  * (SleepHeld, SMD-2694), and `budget`, its budget in force and the sleeps
  * stopped on it (SleepBudget, SMD-2679; `slept.budget` says which stopped); and `waitingMidPass`, the passes waiting mid-pass for a
  * provider that stopped answering — the sleep scheduler's by name, a
- * follower's its own (SMD-2905); and `restart`, on a row ended by db/supervise.ts, the compose
+ * follower's its own (SMD-2905) — and beside it `reembedWait`, the scheduler's re-embed left waiting mid-pass on an
+ * outage that made a thought a suspect, the wait's start and the period's earlier such waits against their limits
+ * (ReembedThoughtWait, SMD-4254); and `restart`, on a row ended by db/supervise.ts, the compose
  * services' command, which runs the follower again on its own (SMD-3214) — written there, not
  * here; and `models`, the process's model calls by pass since it began — their class, failures and own
  * time, their asks for a slot — where it has made any (SMD-3379 PR 2b-2a: no telemetry runs in a worker); and
@@ -51,7 +53,7 @@
 
 import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
-import type { BoardLimited, BudgetStop, SleepAside, SleepBudget, SleepHeld, SleepHold } from "../server-portable/brain-info.ts";
+import type { BoardLimited, BudgetStop, ReembedThoughtWait, SleepAside, SleepBudget, SleepHeld, SleepHold } from "../server-portable/brain-info.ts";
 import { modelCallTallies } from "../server-portable/model-call.ts";
 
 /**
@@ -149,6 +151,15 @@ export interface PassStamper {
    */
   waitingMidPass?(passes: readonly string[]): void;
   /**
+   * The sleep scheduler's mark of re-embed left waiting mid-pass on an outage
+   * that made a thought a suspect (`reembedWait` in the value, left out while
+   * re-embed waits on none, and on an ended row; SMD-4254): the wait's start,
+   * the period's earlier such waits, and the bound and the cap past which the
+   * scheduler sets re-embed down — preflight's fix says so, where it said the
+   * next poll sets it down. Only the scheduler sets it.
+   */
+  reembedWait?(w: ReembedThoughtWait | null): void;
+  /**
    * Which start refusal ended the row (`refused` in the value): one of
    * worker-bootstrap.ts's StartRefusal, set before the end that writes it, so
    * preflight names the cause and its remedy rather than "start it again",
@@ -176,7 +187,8 @@ export interface PassStamper {
    * With the word that it waits, `byThought`: whether the outage is a
    * thought's doing (worker-bootstrap.ts's ProviderOutage), which the
    * scheduler's per-pass stamper reads for re-embed — such a wait is left
-   * running, up to a bound, rather than set down (SMD-4254). A follower's own
+   * running, within a bound a wait and a cap a period, rather than set down
+   * (SMD-4254). A follower's own
    * stamper, and the subject sweep's word, leave it out.
    */
   providerWait?(on: boolean, byThought?: boolean): Promise<void>;
@@ -363,6 +375,7 @@ export function passStamper(opts: {
   let slept: SleepMark | null = null;
   let waiting: readonly string[] = [];
   let waitingMidPass: readonly string[] = [];
+  let reembedWait: ReembedThoughtWait | null = null;
   let refused: string | null = null;
   let held: SleepHeld | null = null;
   let budget: SleepBudget | null = null;
@@ -380,7 +393,7 @@ export function passStamper(opts: {
     // stamp carries them — their class, failures and own time, their asks for a slot (SMD-3379 PR 2b-2a).
     const tallies = modelCallTallies();
     const models = Object.keys(tallies).length ? { models: tallies } : {};
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(holds.length ? { holds } : {}), ...(limited ? { limited } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }), ...models });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(reembedWait ? { reembedWait } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(holds.length ? { holds } : {}), ...(limited ? { limited } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }), ...models });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -416,6 +429,7 @@ export function passStamper(opts: {
       // An ended row waits on nothing (SMD-2752 PR 3, review pass 1), mid-pass included (SMD-2905).
       waiting = [];
       waitingMidPass = [];
+      reembedWait = null;
       resting = false;
       paused = null;
       limited = null;
@@ -451,6 +465,9 @@ export function passStamper(opts: {
     },
     waitingMidPass(passes) {
       waitingMidPass = [...passes];
+    },
+    reembedWait(w) {
+      reembedWait = w === null ? null : { ...w };
     },
     // A follower's own: its row says it waits mid-pass for the provider, at
     // once — inside `during`, so running (SMD-2905). The scheduler's per-pass

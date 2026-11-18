@@ -873,6 +873,55 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
       });
       ok(/for one token after 160 s and then twice as long each time, up to 5 min \(back within/.test(lines[0] ?? ""), `waitOutProvider: a carry a step short of the cap says its 160 s (${lines[0]})`);
     }
+    // The sleep scheduler's fixed probe on a thought's outage (SMD-4254, review pass 1): an isolation's three waits at
+    // the shipped schedule and re-embed's 15 s poll, the provider back 50 s after each crash, nothing settled between
+    // them. With fixedProbeMs each is probed every 5 s from its own start, nothing carried, so each ends 50 s on; the
+    // schedule carried across them ran 75 s, then 80 s, then 160 s, past the scheduler's 120 s bound.
+    {
+      const iso = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
+      let downUntil = 0;
+      const sleeps: number[][] = [];
+      const waits: number[] = [];
+      const said: string[] = [];
+      const crashedWait = async (crash: () => unknown, fixedProbeMs?: number) => {
+        crash();
+        downUntil = clock + 50_000;
+        const from = clock, slept: number[] = [];
+        lines.length = 0;
+        const back = await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: iso,
+          probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "500 crashed" }), sleep: async (ms) => { slept.push(ms); clock += ms; },
+          ...(fixedProbeMs === undefined ? {} : { fixedProbeMs }) });
+        waits.push(clock - from);
+        sleeps.push(slept);
+        said.push(lines[0] ?? "");
+        clock += 500;
+        return back;
+      };
+      const backs = await onTheClock(async () => [
+        await crashedWait(() => iso.begin("500 crashed", "P"), 5_000),
+        await crashedWait(() => iso.blame("P", "500 crashed", false), 5_000),
+        await crashedWait(() => iso.blame("P", "500 crashed", false), 5_000),
+      ]);
+      ok(backs.every((b) => b === "answered") && waits.every((w) => w === 50_000) && sleeps.every((s) => s.length === 10 && s.every((ms) => ms === 5_000))
+          && said.every((l) => /the follower calls e at b every 5 s, an outage that made a thought a suspect$/.test(l)),
+        `waitOutProvider: a thought's outage under a fixed interval probes every 5 s from each wait's start, nothing carried — an isolation's three waits each 50 s on a provider back 50 s after each crash (${waits.map((w) => w / 1000).join(", ")} s; probes after ${sleeps.map((s) => s.map((ms) => ms / 1000).join("+")).join(" | ")}; ${said.map((l) => l.slice(-80)).join(" | ")})`);
+      // An outage no thought's doing — backpressure, no suspect — keeps the doubling and its carry, the interval passed.
+      const busy = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
+      const busyLines = await onTheClock(async () => {
+        const got: string[] = [];
+        for (let i = 0; i < 2; i++) {
+          busy.begin("503 busy");
+          downUntil = clock + 15_000;
+          lines.length = 0;
+          await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: busy, fixedProbeMs: 5_000,
+            probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "503 busy" }), sleep: async (ms) => { clock += ms; } });
+          got.push(lines[0] ?? "");
+        }
+        return got;
+      });
+      ok(/calls e at b after 5 s and then twice as long each time, up to 5 min$/.test(busyLines[0]) && /calls e at b after 20 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(busyLines[1]),
+        `waitOutProvider: an outage that is no thought's doing keeps the doubling and carries it, a fixed interval passed or not (${busyLines.map((l) => l.slice(-140)).join(" | ")})`);
+    }
     // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
     // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
     const pausesMs = TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0);

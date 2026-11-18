@@ -122,19 +122,27 @@
  * serves) — said, on the row (`aside`, its kind; the row's outcome failed for
  * a cause the operator mends, not for an outage; a thrown error's reason in
  * the log), the other passes running on; the next period tries it
- * again (Work). But an outage a thought's call brought down — one that made
- * the thought in hand a suspect, or a suspect's alone (worker-bootstrap.ts's
- * ProviderOutage.byThought) — is waited out mid-pass, said, up to
- * REEMBED_THOUGHT_WAIT_MS (120 s) from the wait's start (SMD-4254, the
- * maintainer's choice): a provider a thought crashed comes back in seconds,
- * and the run then retries the suspects one at a time and fails the thought
- * at its third outage alone, as a re-embed follower by hand does, the
- * backlog behind it re-embedded in the period. Past the bound it is set down
- * as at any outage, so an endpoint really down with a thought in hand holds
- * the claim passes two minutes at most; an outage with no suspect — a 429, a
- * 503, the model loading — and a wait at its start set it down at once, as
- * before. A statement past its timeout holds it until a restart, as it
- * holds any pass (Budget).
+ * again (Work). But an outage that made the thought in hand a suspect — or a
+ * suspect's alone (worker-bootstrap.ts's ProviderOutage.byThought), as when
+ * a thought's call crashes the provider — is waited out mid-pass, said, the
+ * provider probed every REEMBED_THOUGHT_PROBE_MS (5 s) from the wait's start
+ * (SMD-4254, the maintainer's choice of 2026-11-18): up to
+ * REEMBED_THOUGHT_WAIT_MS (120 s) a wait, and REEMBED_THOUGHT_PERIOD_MS
+ * (240 s) of such waits a period. Once the provider answers the run retries
+ * the suspects one at a time and fails the thought at its third outage alone,
+ * as a re-embed follower by hand does. A crashing thought costs four waits —
+ * its batch's outage, two alone, and the one it leaves once recorded failed —
+ * so it is failed in one period if the provider is back within about 80 s of
+ * each crash, and the backlog behind it re-embedded too if within about 60 s;
+ * a crash of a few seconds costs about 20 s once. Past either limit re-embed
+ * is set down as at any outage, said, and the next period tries it again, so
+ * the claim passes are held 4 minutes at most a period. An endpoint simply
+ * down that a call first meets mid-pass with a 5xx, a refused or reset
+ * connection or a timeout makes a suspect too, and costs up to the bound
+ * once; the next period's start finds it down and sets re-embed down at once.
+ * An outage with no suspect — a 429, a 503, the model loading — and a wait at
+ * its start set it down at once, as before. A statement past its timeout
+ * holds it until a restart, as it holds any pass (Budget).
  * Before this, sleep needed no embedding endpoint, and a refused one would
  * have stopped the passes that do not use it. Its writes are marked
  * background, as the vector mender's are, so a vectorless row it gives a
@@ -526,17 +534,41 @@ const VECTOR_FLOOR_S = 60;
 /** How often the logs are read in a period: the most a pass goes on claiming beside a live call before it pauses; a call in hand runs on, to N12's bound once paused. */
 const DEFAULT_POLL_S = 5;
 /**
- * How long the poll leaves re-embed waiting mid-pass on an outage a thought's call brought down (SMD-4254, the
- * maintainer's choice of 2026-11-18), from the wait's start, before it sets re-embed down for the period as at any
+ * How long the poll leaves re-embed waiting mid-pass on an outage that made the thought in hand a suspect (SMD-4254,
+ * the maintainer's choice of 2026-11-18), from the wait's start, before it sets re-embed down for the period as at any
  * other outage. A provider a thought crashed comes back in seconds: its probe answering ends the wait, and the run
  * retries the outage's suspects one at a time and fails the thought at its third outage alone, where a set-down forgot
  * them and the thought, handed back at the pool's front, crashed the provider at every period's first claim. But
  * re-embed runs alone at a period's start, the claim passes starting only once it ends, so a wait with no bound would
  * hold extraction and consolidation for the period whenever the embedding endpoint is really down with a thought in
  * hand — what the set-down is for, as the chat endpoint can serve while the embedding one is down. Two minutes: a
- * crashed model server's restart, not an endpoint's outage.
+ * crashed model server's restart, not an endpoint's outage. An endpoint simply down, first met mid-pass with a 5xx, a
+ * refused or reset connection or a timeout, makes a suspect too, and costs up to this once, before the next period's
+ * start finds it down and sets re-embed down at once. Each wait's own, from its start: REEMBED_THOUGHT_PERIOD_MS caps
+ * them together.
  */
 const REEMBED_THOUGHT_WAIT_MS = 120_000;
+/**
+ * The most the poll leaves re-embed waiting in all, in a period, on such outages (REEMBED_THOUGHT_WAIT_MS's; SMD-4254,
+ * the maintainer's choice of 2026-11-18), counted from each wait's start to its end and begun again at each period's
+ * start; past it re-embed is set down for the period as at the bound. The bound is a wait's, so without this a provider
+ * that keeps erring and coming back within it — a flapping endpoint, each error making a suspect — would keep re-embed
+ * waiting, and the claim passes behind it, the whole period. A crashing thought costs four waits (its batch's outage,
+ * two alone, then the outage it leaves once recorded failed): under this cap it is failed in one period if the
+ * provider is back within about 80 s of each crash (three waits), the backlog behind it re-embedded too within about
+ * 60 s (four). Longer crashes are set down at the cap and the thought retried the next period, as before SMD-4254; the
+ * claim passes are held 4 minutes at most a period.
+ */
+const REEMBED_THOUGHT_PERIOD_MS = 240_000;
+/**
+ * How often re-embed's follower probes its provider while waiting on such an outage under the scheduler, from each
+ * wait's start (ReembedOptions' thoughtProbeMs, waitOutProvider's fixedProbeMs; SMD-4254, the maintainer's choice of
+ * 2026-11-18): a fixed interval, no doubling and nothing carried from the last wait. The schedule a follower by hand
+ * keeps (5, 15, 35, 75, 155 s, carried across waits nothing settles between) carried an isolation's waits past the
+ * bound: a provider back 36-75 s after each crash waited 75 s, then 80 s, then the bound, every period. At 5 s a
+ * crash of a few seconds costs about 20 s over its four waits, and a wait outlasts its provider by under 5 s.
+ */
+const REEMBED_THOUGHT_PROBE_MS = 5_000;
 /**
  * The time after the newest live write before a period begins or paused
  * passes go on (SMD-3379 PR 1c-3b, 1c-4b): draft 5's 20 s until 1c measures
@@ -686,8 +718,12 @@ export interface SleepOptions {
   wakeSlackMs?: number;
   /** The least time between two whole reads a vector's arrival brings forward, in ms, in place of VECTOR_FLOOR_S, when a test reaches it sooner (SMD-3379 PR 1d). */
   vectorFloorMs?: number;
-  /** How long re-embed is left waiting on an outage a thought brought down, in ms, in place of REEMBED_THOUGHT_WAIT_MS, when a test reaches it sooner (SMD-4254). */
+  /** How long re-embed is left waiting on an outage that made a thought a suspect, in ms, in place of REEMBED_THOUGHT_WAIT_MS, when a test reaches it sooner (SMD-4254). */
   reembedThoughtWaitMs?: number;
+  /** How long re-embed is left waiting on such outages in all in a period, in ms, in place of REEMBED_THOUGHT_PERIOD_MS, when a test reaches it sooner (SMD-4254). */
+  reembedThoughtPeriodMs?: number;
+  /** How often re-embed's follower probes on such an outage, in ms, in place of REEMBED_THOUGHT_PROBE_MS, when a test scales it (SMD-4254). */
+  reembedThoughtProbeMs?: number;
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
@@ -1191,7 +1227,7 @@ export async function run(opts: SleepOptions): Promise<number> {
   // --follow at all. The rule the flags' numbers keep (SMD-3048).
   const followProblem = opts.passFollowS === undefined ? null : numberProblem("passFollowS", opts.passFollowS, { min: 1 });
   if (followProblem !== null) throw new RangeError(followProblem);
-  for (const [name, v] of [["pollMs", opts.pollMs], ["captureMs", opts.captureMs], ["rescanMs", opts.rescanMs], ["sweepLimit", opts.sweepLimit], ["reembedThoughtWaitMs", opts.reembedThoughtWaitMs]] as const) {
+  for (const [name, v] of [["pollMs", opts.pollMs], ["captureMs", opts.captureMs], ["rescanMs", opts.rescanMs], ["sweepLimit", opts.sweepLimit], ["reembedThoughtWaitMs", opts.reembedThoughtWaitMs], ["reembedThoughtPeriodMs", opts.reembedThoughtPeriodMs], ["reembedThoughtProbeMs", opts.reembedThoughtProbeMs]] as const) {
     const problem = v === undefined ? null : numberProblem(name, v, { min: 1 });
     if (problem !== null) throw new RangeError(problem);
   }
@@ -1244,8 +1280,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const RESCAN = opts.rescanMs !== undefined ? opts.rescanMs / 1000 : n.rescan;
   /** N12's bound (SMD-3379 PR 1c-3b). */
   const ABORT_AFTER_MS = opts.abortAfterMs ?? n.abortAfter * 1000;
-  /** How long re-embed is left waiting on an outage a thought brought down (REEMBED_THOUGHT_WAIT_MS, SMD-4254). */
+  /** How long re-embed is left waiting on an outage that made a thought a suspect, a wait and a period, and how often it probes meanwhile (SMD-4254). */
   const REEMBED_THOUGHT_WAIT = opts.reembedThoughtWaitMs ?? REEMBED_THOUGHT_WAIT_MS;
+  const REEMBED_THOUGHT_PERIOD = opts.reembedThoughtPeriodMs ?? REEMBED_THOUGHT_PERIOD_MS;
+  const REEMBED_THOUGHT_PROBE = opts.reembedThoughtProbeMs ?? REEMBED_THOUGHT_PROBE_MS;
   /** N12's caps a period's hour, by pass: consolidation's and the subject sweep's (SMD-3306 PR 6b-2). */
   const ABORT_CAPS: Partial<Record<PassName, number>> = { consolidate: opts.consolidateAborts ?? CONSOLIDATE_ABORTS, subjects: opts.subjectsAborts ?? SUBJECTS_ABORTS };
   /** Whether the subject sweep is one of the passes (SMD-3306 PR 6b-2): a test of the other three keeps it out. */
@@ -1511,8 +1549,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * Re-embed set down for this period (review pass 1, the maintainer's
    * choice): refused at its start or mid-pass, its provider not answering —
-   * past REEMBED_THOUGHT_WAIT_MS for an outage a thought brought down
-   * (SMD-4254) — said, on the row, the claim passes running on; the next period with work
+   * past REEMBED_THOUGHT_WAIT_MS a wait or REEMBED_THOUGHT_PERIOD_MS a period
+   * for an outage that made a thought a suspect (SMD-4254) — said, on the
+   * row, the claim passes running on; the next period with work
    * tries it again. Cleared as each period begins — but a statement past its
    * timeout holds it until a restart (N9).
    */
@@ -1909,16 +1948,28 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   const waitingMidPass = new Set<PassName>();
   /**
-   * Re-embed's wait mid-pass on an outage a thought brought down
-   * (providerWait's byThought, SMD-4254): when it began, as the scheduler
-   * heard it, and whether the poll has said it leaves it running. The poll
-   * leaves such a wait running up to REEMBED_THOUGHT_WAIT; null while
-   * re-embed waits on no such outage.
+   * Re-embed's wait mid-pass on an outage that made the thought in hand a
+   * suspect (providerWait's byThought, SMD-4254): when it began, as the
+   * scheduler heard it, and whether the poll has said it leaves it running.
+   * The poll leaves such a wait running up to REEMBED_THOUGHT_WAIT from its
+   * start, and while the period's such waits stay under
+   * REEMBED_THOUGHT_PERIOD; null while re-embed waits on no such outage.
    */
   let reembedThoughtWait: { since: number; said: boolean } | null = null;
+  /** The period's ended such waits in all, in ms, each from its start to its end: begun again as each period begins (asleep). */
+  let reembedThoughtWaited = 0;
+  /** The wait in hand, if any, ended: its length counted to the period's. */
+  const endThoughtWait = (): void => {
+    if (reembedThoughtWait !== null) reembedThoughtWaited += Date.now() - reembedThoughtWait.since;
+    reembedThoughtWait = null;
+  };
   const sayWaiting = async (outcome?: "ok" | "failed"): Promise<void> => {
     stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
     stamper.waitingMidPass?.(PASSES.filter((p) => waitingMidPass.has(p)));
+    // Re-embed left waiting, its limits beside it, for preflight's fix (SMD-4254).
+    stamper.reembedWait?.(reembedThoughtWait !== null && waitingMidPass.has("reembed")
+      ? { since: new Date(reembedThoughtWait.since).toISOString(), earlierS: Math.round(reembedThoughtWaited / 1000), boundS: Math.max(1, Math.round(REEMBED_THOUGHT_WAIT / 1000)), periodS: Math.max(1, Math.round(REEMBED_THOUGHT_PERIOD / 1000)) }
+      : null);
     await stamper.alive(outcome);
   };
   /** What a pass stamps goes to the sleep's row: its outcome mid-period, never an end, which is the scheduler's. */
@@ -1943,8 +1994,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     async providerWait(on, byThought) {
       if (on) waitingMidPass.add(pass);
       else waitingMidPass.delete(pass);
-      // Each wait its own: its start is the bound's, taken as the word comes (SMD-4254).
-      if (pass === "reembed") reembedThoughtWait = on && byThought === true ? { since: Date.now(), said: false } : null;
+      // Each wait its own: its start is the bound's, taken as the word comes, and its length, at its end, the period's
+      // (SMD-4254).
+      if (pass === "reembed") {
+        endThoughtWait();
+        if (on && byThought === true) reembedThoughtWait = { since: Date.now(), said: false };
+      }
       // Re-embed's provider not answering is the provider's state, not a
       // failure (SMD-2679 PR 4b): the failed word its follower stamps as the
       // wait begins goes at once, not at the poll that sets it down, where the
@@ -2067,7 +2122,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // and summary read by none of it, under the pool the brain names — the rules' asking no model — its claims bounded
     // by the period's (SMD-3306 PR 6b-2); consolidation its judge calls' limit, read at each call, beside it (review
     // passes 2 and 3).
-    p.done = (name === "reembed" ? runReembed(common) : name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs })
+    // Re-embed's waits on an outage that made a thought a suspect probe on a fixed interval, carrying nothing from the
+    // last wait, so each fits the poll's bound (SMD-4254).
+    p.done = (name === "reembed" ? runReembed({ ...common, thoughtProbeMs: REEMBED_THOUGHT_PROBE }) : name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs })
       : name === "subjects" ? sweepSubjects({ ...common, model: JOBS.subjects !== SUBJECTS_RULES_POOL, ...(subjectsBound === null ? {} : { claimsBy: subjectsBound }), ...(opts.subjectsTimeoutS === undefined ? {} : { timeout: opts.subjectsTimeoutS }) })
       : runConsolidate({ ...common, ...(opts.consolidateTimeoutS === undefined ? {} : { timeout: opts.consolidateTimeoutS }), timeoutNow: consolidateTimeoutS, ...(DUMP ? { dump: DUMP } : {}) })).then((code) => {
       p.settled = true;
@@ -2143,6 +2200,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (waitingMidPass.size) {
       waitingMidPass.clear();
       stamper.waitingMidPass?.([]);
+    }
+    if (reembedThoughtWait !== null) {
+      endThoughtWait();
+      stamper.reembedWait?.(null);
     }
     const thrown = results.find((r) => r.status === "rejected");
     if (thrown) throw (thrown as PromiseRejectedResult).reason;
@@ -2620,6 +2681,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // The last period's set-down gone before the re-derive sweep, whose clock reads it (review pass 4: the row kept its word).
     reembedLeft = false;
     subjectsLeft = false;
+    // Re-embed's waits on outages that made a thought a suspect are capped a period: the count begins again (SMD-4254).
+    reembedThoughtWaited = 0;
     // Not a statement's hold, which lasts until a restart (N9; review pass 1 of PR 1c-4b).
     if (reembedDown !== null && !statementHeld.has("reembed")) {
       reembedDown = null;
@@ -3132,8 +3195,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // does not answer — the embedding endpoint can be down while chat
       // serves — it stops after the thought in hand and the claim passes
       // start as they would have; it tries again at the next period. But a
-      // wait mid-pass on an outage a thought's call brought down is left
-      // running, up to REEMBED_THOUGHT_WAIT from its start (SMD-4254): the
+      // wait mid-pass on an outage that made the thought in hand a suspect is
+      // left running, up to REEMBED_THOUGHT_WAIT from its start and while the
+      // period's such waits stay under REEMBED_THOUGHT_PERIOD (SMD-4254): the
       // provider back, the run retries the outage's suspects one at a time and
       // fails the thought that crashes it at its third outage alone, where a
       // set-down forgot them and the thought crashed every period's first claim.
@@ -3142,14 +3206,22 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         if (rp === null) return stopped();
         const waits = waitingAtStart.has("reembed") || waitingMidPass.has("reembed");
         const thoughtWait = waitingMidPass.has("reembed") && !waitingAtStart.has("reembed") ? reembedThoughtWait : null;
-        const leftWaiting = thoughtWait !== null && Date.now() - thoughtWait.since < REEMBED_THOUGHT_WAIT;
+        const waitedMs = thoughtWait === null ? 0 : Date.now() - thoughtWait.since;
+        const pastBound = waitedMs >= REEMBED_THOUGHT_WAIT;
+        const pastPeriod = reembedThoughtWaited + waitedMs >= REEMBED_THOUGHT_PERIOD;
+        const leftWaiting = thoughtWait !== null && !pastBound && !pastPeriod;
         if (leftWaiting && !thoughtWait.said) {
           thoughtWait.said = true;
-          out(`  re-embed waits for its provider, which a thought's call brought down — left running up to ${REEMBED_THOUGHT_WAIT / 1000} s from the wait's start, so once it answers the outage's suspects are retried one at a time`);
+          out(`  re-embed waits for its provider after an outage that made the thought in hand a suspect — left running up to ${REEMBED_THOUGHT_WAIT / 1000} s from the wait's start and ${REEMBED_THOUGHT_PERIOD / 1000} s of such waits this period (${Math.round(reembedThoughtWaited / 1000)} s before this one), its provider probed every ${REEMBED_THOUGHT_PROBE / 1000} s, so once it answers the outage's suspects are retried one at a time`);
         }
         if (drained(rp) || (waits && !leftWaiting)) {
           if (drained(rp)) out("  re-embed drained — extracting");
-          else if (thoughtWait !== null) out(`  re-embed's provider, which a thought's call brought down, has not answered in ${REEMBED_THOUGHT_WAIT / 1000} s — set down as at any outage`);
+          // Which limit it passed, the wait's before the period's (SMD-4254).
+          else if (thoughtWait !== null) {
+            out(pastBound
+              ? `  re-embed's provider has not answered in ${REEMBED_THOUGHT_WAIT / 1000} s from the wait's start, after an outage that made the thought in hand a suspect — set down as at any outage`
+              : `  re-embed has waited ${REEMBED_THOUGHT_PERIOD / 1000} s this period on outages that made the thought in hand a suspect — set down as at any outage`);
+          }
           if (await endReembed()) return stopped();
           if (!drained(rp) && reembedDown === null && reembedAside === null) await setReembedDown("outage");
           reembedding = false;

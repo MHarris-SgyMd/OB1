@@ -750,10 +750,11 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
  * anything but out, so a model the provider turns out not to serve, once it
  * answers, is refused there rather than waited on for ever (review pass 2).
  */
-export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless, from = 0): Promise<Probe | null> {
+export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless, from = 0, everyMs?: number): Promise<Probe | null> {
   // `from`: the schedule's first step — an outage that comes back at once carries on from the last one's (waitOutProvider's, SMD-2679, SMD-2636 PR 2).
+  // `everyMs`: a fixed interval in place of the schedule, no doubling (waitOutProvider's fixedProbeMs, SMD-4254).
   for (let step = from; ; step++) {
-    await sleep(outageWait(step), wake);
+    await sleep(everyMs ?? outageWait(step), wake);
     if (wake.aborted) return null;
     const p = await probe();
     if (settles(p)) return p;
@@ -864,10 +865,13 @@ export class ProviderOutage {
    * Whether the outage in progress is a thought's doing, as far as the follower can tell (SMD-4254): begun or joined
    * over an error that made the thought in hand a suspect, a suspect's outage alone (`blame`), or the one a suspect
    * blamed alone at its last leaves (`begin`'s `blamed`). Not backpressure alone — a 429, a 503, the model not served
-   * — which makes no suspect, nor an outage that met none of the last one's suspects still kept for isolation.
-   * waitOutProvider says it with the wait (providerWait): the sleep scheduler leaves re-embed waiting out such an
-   * outage, up to a bound, so its suspects are retried one at a time once the provider answers; any other outage sets
-   * re-embed down for the period.
+   * — which makes no suspect, nor an outage that met none of the last one's suspects still kept for isolation. An
+   * endpoint that is simply down, first met mid-pass with a 500, 502 or 504, a refused or reset connection or a
+   * timeout, makes the thought in hand a suspect too, and reads as one: the follower cannot tell the two apart.
+   * waitOutProvider says it with the wait (providerWait) and, under the sleep scheduler, probes it on a fixed interval
+   * (its fixedProbeMs): the scheduler leaves re-embed waiting out such an outage, within a bound a wait and a cap a
+   * period, so its suspects are retried one at a time once the provider answers; any other outage sets re-embed down
+   * for the period.
    */
   get byThought(): boolean {
     return this.reason !== null && this.ofThought;
@@ -1170,6 +1174,12 @@ const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answe
  *   flight, which the outage does not abort, or a wait at the admit gate can take it past, and such a call usually
  *   answers and moves `settled()` anyway; an outage that begins with a timeout comes at least the call's timeout and
  *   the probe's after the last answer, past the window unless --timeout is short or the poll long.
+ * - **A fixed interval** (`fixedProbeMs`, the sleep scheduler's re-embed alone, SMD-4254): an outage that is a
+ *   thought's doing as the wait begins is probed every `fixedProbeMs` from the wait's start — no doubling, nothing
+ *   carried from the last wait, and nothing carried to the next (it ends at step 0). The scheduler leaves such a wait
+ *   running up to a bound and caps a period's such waits, and a schedule carried across an isolation's waits (5, 15,
+ *   35, 75, 155 s) passed the bound on a provider back within a minute of each crash. Any other outage keeps the
+ *   schedule and its carry, as does every wait of a follower run by hand, extract's and consolidate's.
  * - **Answered:** the outage ends at the step reached and the settled count (`outage.end`), said; the caller polls
  *   again at once.
  * - **Refused** — what the caller's probe reads so: a chat probe's 401, 402, 403 or 404, or a redirect (probeChat;
@@ -1198,24 +1208,35 @@ export async function waitOutProvider(o: {
   stamper?: { providerWait?: (on: boolean, byThought?: boolean) => Promise<void> | void } | null;
   /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
   sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
+  /**
+   * The probe's fixed interval, in ms, for an outage that is a thought's doing as the wait begins (ProviderOutage's
+   * byThought): no doubling and no carry (SMD-4254). The sleep scheduler's re-embed alone passes it (ReembedOptions'
+   * thoughtProbeMs); left out, every outage keeps outageWait's schedule.
+   */
+  fixedProbeMs?: number;
 }): Promise<"answered" | { refused: string; tier?: true } | null> {
   const down = Date.now();
   const windowMs = 60_000 + o.pollS * 1000 + (o.pausesBefore ? TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0) : 0);
-  const from = o.outage.resumeFrom(o.settled(), windowMs);
-  const schedule = outageWait(from) >= OUTAGE_MS.max
+  // Read once, as the wait begins, as providerWait hears it: a thought's outage under the scheduler starts afresh.
+  const byThought = o.outage.byThought;
+  const fixed = byThought ? o.fixedProbeMs : undefined;
+  const from = fixed !== undefined ? 0 : o.outage.resumeFrom(o.settled(), windowMs);
+  const schedule = fixed !== undefined ? `every ${fixed / 1000} s, an outage that made a thought a suspect`
+    : outageWait(from) >= OUTAGE_MS.max
     ? `every ${OUTAGE_MS.max / 60_000} min`
     : `after ${outageWait(from) / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`;
   o.writer.err(`  ${o.who} is not answering (${(o.outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${o.calls} ${schedule}${from > 0 ? (o.pausesBefore ? CARRIED_NOTE_PAUSED : CARRIED_NOTE) : ""}`);
-  await o.stamper?.providerWait?.(true, o.outage.byThought);
+  await o.stamper?.providerWait?.(true, byThought);
   try {
     let step = from;
-    const answered = await probeUntil(() => { step++; return o.probe(o.wake); }, o.wake, (p) => !isOut(p), o.sleep, from);
+    const answered = await probeUntil(() => { step++; return o.probe(o.wake); }, o.wake, (p) => !isOut(p), o.sleep, from, fixed);
     if (answered === null) return null;
     if (answered.state === "refused") {
       o.writer.err(`  ${answered.tier ? "the decision tier" : o.who} answers now, refusing the request itself (${answered.why.slice(0, 160)}) — the follower stops; nothing is marked failed`);
       return answered.tier ? { refused: answered.why, tier: true } : { refused: answered.why };
     }
-    o.outage.end(step, o.settled());
+    // A fixed interval's wait carries nothing to the next: it ends at the schedule's first step (SMD-4254).
+    o.outage.end(fixed !== undefined ? 0 : step, o.settled());
     o.writer.out(`  ${o.who} answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
     return "answered";
   } finally {

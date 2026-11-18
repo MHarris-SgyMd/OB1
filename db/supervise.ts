@@ -174,7 +174,7 @@ function jobOf(worker: StampingWorker, key: string): string | undefined {
 
 /**
  * End the follower's row with `restart`: its own last word kept when it wrote
- * one since `since`, else a row of its own here. The waits, the pause and
+ * one since `since`, else a row of its own here. The waits (re-embed's left wait, `reembedWait`, SMD-4254, among them), the pause and
  * board-sync's rate-limit hold go — an ended row waits on nothing, and is
  * paused or held by nothing (SMD-3379 PR 1c, SMD-4133) — its held passes stay as its last word, and a follower that did not exit
  * 0 failed. One statement, the row read and written under its own lock.
@@ -188,7 +188,7 @@ export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: stri
   await sql`
     INSERT INTO ob1_config (key, value)
     SELECT ${opts.key}, ((CASE WHEN c.updated_at >= ${opts.since} AND c.value IS JSON OBJECT THEN c.value::jsonb ELSE ${fresh}::jsonb END
-                         - 'waiting' - 'waitingMidPass' - 'resting' - 'paused' - 'limited') || ${set}::jsonb)::text
+                         - 'waiting' - 'waitingMidPass' - 'reembedWait' - 'resting' - 'paused' - 'limited') || ${set}::jsonb)::text
       FROM (SELECT 1) one LEFT JOIN ob1_config c ON c.key = ${opts.key}
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
 }

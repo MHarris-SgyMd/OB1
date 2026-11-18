@@ -242,6 +242,12 @@ export interface WorkerHeartbeat {
    */
   waitingMidPass?: SleepPass[];
   /**
+   * The sleep scheduler's re-embed left waiting mid-pass on an outage that made a thought a suspect (SMD-4254): the
+   * wait's start, the period's earlier such waits, and the bound and cap past which it is set down. On a live sleep
+   * row naming re-embed in `waitingMidPass` alone; absent otherwise, and when not of the shape.
+   */
+  reembedWait?: ReembedThoughtWait;
+  /**
    * The worker's model calls by pass since its process began, `-` for calls of no pass (SMD-3379 PR 2b-2a): by
    * class, how many failed, their own time, and their asks for a slot by how each ended — a slot taken, run without one (the
    * semaphore failed open), stopped — how many waited at all, their time in all and the longest. No telemetry runs in a worker, so its
@@ -333,6 +339,13 @@ export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "
 export type ReembedDown = (typeof REEMBED_DOWN)[number];
 /** `unprintable`: names outside a model name's alphabet, left out (recorded and configured empty) — the kind kept, so a set-aside is not hidden (review pass 6). */
 export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string; unprintable?: true } | { kind: ReembedDown } };
+/**
+ * The sleep scheduler's re-embed left waiting mid-pass on an outage that made a thought a suspect (WorkerHeartbeat's
+ * reembedWait, SMD-4254), as db/sleep.ts writes it: `since`, the wait's start (a UTC instant, the scheduler's clock);
+ * `earlierS`, the period's earlier such waits in all; `boundS`, how long one is left waiting from its start, and
+ * `periodS`, how long they are in all in a period — past either the scheduler sets re-embed down for the period.
+ */
+export type ReembedThoughtWait = { since: string; earlierS: number; boundS: number; periodS: number };
 
 /**
  * Who runs re-embed under a key, read from the heartbeat rows and the record
@@ -914,6 +927,9 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
         && mid.every((p) => (SLEEP_PASSES as readonly unknown[]).includes(p)) && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
       ? (mid as SleepPass[])
       : undefined;
+    // Re-embed left waiting on an outage that made a thought a suspect (SMD-4254): the sleep's, on a live row naming
+    // re-embed mid-pass alone, left off when not of the shape (read below, once `live` is).
+    const rw = worker === "sleep" && waitingMidPass?.includes("reembed") ? (v!.reembedWait as Record<string, unknown> | undefined) : undefined;
     const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // Its model calls by pass (SMD-3379 PR 2b-2a), left off whole when any part is not of the shape.
     const models = parseModels(v!.models);
@@ -933,6 +949,10 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Paused by a live call, on a live row alone, and its held passes, kept on an ended one (SMD-3379 PR 1c); each left off when not of the shape.
     const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
     const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
+    const reembedWait = live && rw !== null && typeof rw === "object" && typeof rw.since === "string" && UTC_INSTANT.test(rw.since)
+        && count(rw.earlierS, 86_400) && count(rw.boundS, 86_400) && (rw.boundS as number) > 0 && count(rw.periodS, 86_400) && (rw.periodS as number) > 0
+      ? { since: rw.since, earlierS: rw.earlierS as number, boundS: rw.boundS as number, periodS: rw.periodS as number }
+      : undefined;
     const holds = worker === "sleep" ? parseHolds(v!.holds) : undefined;
     // board-sync's hold on Linear's rate limit (SMD-4133), on a live row alone and left off when not of the shape.
     const lim = worker === "board-sync" && live ? (v!.limited as Record<string, unknown> | undefined) : undefined;
@@ -956,6 +976,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(slept ? { slept } : {}),
       ...(waiting ? { waiting } : {}),
       ...(waitingMidPass ? { waitingMidPass } : {}),
+      ...(reembedWait ? { reembedWait } : {}),
       ...(refused ? { refused } : {}),
       ...(models ? { models } : {}),
       ...(restart ? { restart } : {}),
