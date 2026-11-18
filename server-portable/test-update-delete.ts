@@ -650,8 +650,7 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
   const byIdGone = await full("forget_thought", { id: e1, confirm: e1 });
   assert(!byIdGone.isError && byIdGone.sc.clientKey === KE && new RegExp(`^Forgot ${e1}, its client_key ${KE} at `).test(byIdGone.text),
     `a keyed thought deleted, then forgotten by its id, names its key from the tombstone (${byIdGone.text.split("\n")[0].slice(0, 120)})`);
-  const left = [a1, a2, b1, b2, s1, t1, c1, e1].map(count);
-  const opens = await Promise.all(left);
+  const opens = await Promise.all([a1, a2, b1, b2, s1, t1, c1, e1].map(count));
   // A name tried again as an id (NOT_FOUND), or a copy forgotten already, is nothing left: never listed as not
   // forgotten, or every copied forget would be kept and sent again (pass 6's whole-diff mutant).
   const noneLeft = [byA, byB, byS, byId, byIdGone].every((r) => r.sc.notForgotten === undefined && !/Not forgotten/.test(r.text));

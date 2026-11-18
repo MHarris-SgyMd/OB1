@@ -1082,25 +1082,25 @@ or id the brain holds, where `delete_thought` keeps the removed text in the audi
 trail. It calls migration 139's `forget_thought`, which since 144 runs as its owner:
 the server's role needs `EXECUTE` on it (the **server** grant group) and nothing on
 the stores it reaches. Forgetting cannot be undone, so `confirm` must be the `id`
-again, exactly as sent (an id or a `client_key`, a deleted thought's too, read from the
-key its tombstone kept: the session hook's copy of a forget names a copy so, which a
-copied delete may have taken first), or the call is refused
+again, exactly as sent (an id or a `client_key`), or the call is refused
 `REFUSED_CONFIRM` before anything is read. A thought another cites is refused
 `REFUSED_CITED` unless `detach_citations` is true, which deletes the citations with
 it. The answer is the evidence: what each store gave up (`removed`), the thoughts
 derived from it and the pages for a person to review (prose that absorbed the text
 can't be removed mechanically), the twins that keep the same text, the hashed
 record it was ingested as, and the copies outside the brain. A name takes every
-thought here it is — the thought with that id, standing or deleted, the one keeping it as
-its `client_key`, and each deleted one whose tombstone kept that key — the others listed as
-`alsoForgotten` (MCP's values: `alsoForgottenIds`), and any it could not forget beside one it
-did (refused, or a fault) as `notForgotten` (MCP's values give each id and code; REST and the
-text a fault's SQLSTATE too), which the same call sweeps when sent again, with
-`detach_citations` for one left `CITED`; the reply names the thought's
-own `client_key` too, so a copy of the call can reach it on a brain that knows it by that
-key alone. Forgotten already,
-it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log
-row: the query log is one of the stores it clears.
+thought here it is: the thought with that id, standing or deleted; the one keeping
+it as its `client_key`; and each deleted one whose tombstone kept that key, since
+the session hook's copy of a forget names a copy by its key, which a copied delete
+may have removed first. The others are listed as `alsoForgotten` (MCP's values:
+`alsoForgottenIds`). Any it could not forget beside one it did (refused, or a
+fault) is listed as `notForgotten` (MCP's values give each id and code; REST and
+the text a fault's SQLSTATE too), and the same call sweeps it when sent again,
+with `detach_citations` for one left `CITED`. The reply names the thought's own
+`client_key` too, so a copy of the call can reach it on a brain that knows it by
+that key alone. Forgotten already, it is `FORGOTTEN`; an id the log never held,
+nor a key a thought here keeps, `NOT_FOUND`. It writes no action-log row: the query log is one of the stores it
+clears.
 
 A capture or an edit of a forgotten text is refused `FORGOTTEN` before the
 embedding call (144's `ob1_text_forgotten_at`), so the model provider never sees
@@ -1223,10 +1223,10 @@ first written. The copy keeps it as `metadata.client_key`, one thought per key
 with that id, else the one keeping it as its key**: `update_thought`'s,
 `delete_thought`'s and `forget_thought`'s `id` (and the REST paths
 `PATCH`/`DELETE /v1/thoughts/{id}` and `POST /v1/thoughts/{id}/forget`), and
-the `supersedes` and `derived_from` of a capture or an edit; a forget takes every thought
-its name is, not one (SMD-1723 PR 3). So the client sends the
-second brain the same ids it sent the first. A thought a refresh copied has the same id
-on both brains, and a key equal to it names that thought.
+the `supersedes` and `derived_from` of a capture or an edit; a forget takes every
+thought its name is, not one (SMD-1723 PR 3). So the client sends the second brain
+the same ids it sent the first. A thought a refresh copied has the same id on both
+brains, and a key equal to it names that thought.
 
 - **A key that names a thought already** (as its id or its key) returns that thought
   and writes nothing, with no model call: `Already captured — id …`, `keyed:

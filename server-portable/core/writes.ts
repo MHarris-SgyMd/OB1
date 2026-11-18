@@ -17,7 +17,7 @@ import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
 import { requestTimeoutMs, resolveJevConfig, type JevConfig } from "../jev.ts";
 import { decideCalls, type EgressSubject } from "../egress.ts";
-import { UUID_RE, type ActorStamp, type Citation, type ForgetEvidence, type RecaptureLabel, type ThoughtStore } from "../store.ts";
+import { UUID_RE, type ActorStamp, type Citation, type ForgetEvidence, type ForgetResult, type RecaptureLabel, type ThoughtStore } from "../store.ts";
 import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
 import { EVIDENCE_LIMITS, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
@@ -954,7 +954,7 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
 /**
  * What a forget did (139, 144; SMD-1723 PR 2 and 3): the evidence; the client_key it was named by; the thought's own
  * client_key, read before the forget redacted it, so a copy of the call can name the thought on a brain that knows it
- * by that key alone; and the other thoughts here the same name was, forgotten with it.
+ * by that key alone; and the other thoughts here the name is: those forgotten with it, and those it could not forget.
  */
 export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[]; notForgotten?: { id: string; code: string; errno?: string }[] };
 export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
@@ -978,8 +978,10 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   // its key, standing or deleted — a forget copied from another brain names
   // the copy so, and a delete copied before may have taken the row. The first
   // forgotten is the reply's; a CITED before it stops the rest. One not
-  // forgotten after it — refused, or a fault, each its own transaction — is
-  // named in the reply (notForgotten), never dropped (review pass 2).
+  // forgotten after it — refused, or a fault, each its own transaction — or
+  // refused before it holding its text is named in the reply (notForgotten),
+  // never dropped (review passes 2 and 5). With none forgotten, the refusal
+  // that says most is the answer (refusalRank, review pass 4).
   const store = await ctx.store();
   const actor = actorOf(ctx, principal);
   const detach = detach_citations === true;
@@ -991,10 +993,10 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
     order.push(...(await store.thoughtsKeyed(lower)));
   }
   const ids = [...new Set(order)];
-  let first: { id: string; key: string | null; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: true }> } | undefined;
-  let refused: { id: string; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: false }> } | undefined;
+  let first: { id: string; key: string | null; result: Extract<ForgetResult, { ok: true }> } | undefined;
+  let refused: { id: string; result: Extract<ForgetResult, { ok: false }> } | undefined;
   const also: string[] = [];
-  const missed: { id: string; code: string; errno?: string }[] = [];
+  const missed: NonNullable<Forgotten["notForgotten"]> = [];
   // Refused before the first thought forgotten, holding its text: named too if a later one is (review pass 5).
   const heldBefore: { id: string; code: string }[] = [];
   for (const id of ids) {
@@ -1003,12 +1005,12 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
       const key = canRead(principal) ? await store.clientKeyOf(id) : null;
       const r = await store.forgetThought({ id, actor, detach });
       if (r.ok) { first = { id, key, result: r }; missed.push(...heldBefore); continue; }
-      if (refusalRank(r.error) === 2 && r.error !== "CITED") heldBefore.push({ id, code: r.error });
       // A refusal that leaves a text here outranks FORGOTTEN, which outranks NOT_FOUND: a call sent again after a
       // partial forget, its first thought forgotten already, answers what still holds the text, never "nothing is
       // left" (review pass 4).
       if (!refused || refusalRank(r.error) > refusalRank(refused.result.error)) refused = { id, result: r };
       if (r.error === "CITED") break;
+      if (refusalRank(r.error) === 2) heldBefore.push({ id, code: r.error });
       continue;
     }
     // After the first: each its own transaction, so a refusal or a fault here leaves what came before forgotten, and
@@ -1018,7 +1020,7 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
       if (r.ok) also.push(id);
       else if (r.error !== "NOT_FOUND" && r.error !== "FORGOTTEN") missed.push({ id, code: r.error });
     } catch (e) {
-      // FAILED, the fault's SQLSTATE beside it: a code is a word the reply's values keep (review pass 3: 57P01 read null).
+      // FAILED, its SQLSTATE beside it: a code is a word the reply's values keep (review pass 3: 57P01 read null).
       const errno = (e as { errno?: unknown }).errno;
       missed.push({ id, code: "FAILED", ...(typeof errno === "string" && errno ? { errno } : {}) });
     }

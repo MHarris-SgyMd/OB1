@@ -1920,7 +1920,7 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
     mutationRefusalText, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
 
-/** forget_thought's refusals (139, 144; SMD-1723 PR 2). CITED is delete_thought's, its way through the forget's. */
+/** forget_thought's refusals (139, 144; SMD-1723 PR 2 and 3). CITED is delete_thought's, its way through the forget's. */
 function forgetRefusal(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_CONFIRM":
@@ -1942,9 +1942,10 @@ const removedText = (removed: Record<string, number>): string => {
 };
 
 /**
- * forget_thought's reply (139, 144; SMD-1723 PR 2): what each store gave up, then what the forget could not do
- * mechanically and a person reviews — the thoughts derived from it, the pages, the twins that keep the text, and the
- * copies outside the brain. The values are the database's: ids, counts, and the ingested record's hashed identity.
+ * forget_thought's reply (139, 144; SMD-1723 PR 2 and 3): what each store gave up, the other thoughts under the name
+ * it could not forget and those it forgot with it, then what the forget could not do mechanically and a person
+ * reviews — the thoughts derived from it, the pages, the twins that keep the text, and the copies outside the brain.
+ * The values are the database's: ids, counts, and the ingested record's hashed identity.
  */
 export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
   return render(o, (v) => {

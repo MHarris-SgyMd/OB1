@@ -2781,13 +2781,13 @@ export interface ThoughtStore {
   textForgottenAt(content: string): Promise<string | null>;
 
   /**
-   * Every thought that kept a client_key (SMD-1723 PR 3): those standing with
-   * it, and each deleted one whose tombstone's previous metadata held it — no
-   * thought standing under that id — never the thought whose id it is. A
-   * forget copied from another brain names its thought by that brain's id, the
-   * copy's key here; a copy deleted before (a delete copied earlier) is still
-   * to be forgotten, and only the log keeps its key. A tombstone a forget
-   * redacted keeps none.
+   * Every thought here that kept a client_key (SMD-1723 PR 3): the one
+   * standing with it (112's unique index), then each deleted one, not
+   * standing again, whose tombstone's previous metadata held it, newest
+   * first; never the thought whose id it is. A forget copied from another
+   * brain names its thought by that brain's id, the copy's key here; a copy
+   * deleted before (a delete copied earlier) is still to be forgotten, and
+   * only the log keeps its key. A tombstone a forget redacted keeps none.
    */
   thoughtsKeyed(key: string): Promise<string[]>;
 

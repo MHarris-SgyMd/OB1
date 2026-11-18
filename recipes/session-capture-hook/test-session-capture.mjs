@@ -2999,7 +2999,8 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const calls = [];
   const thoughts = new Map(); // id → { key, content }
   // Deleted copies' keys (the tombstone keeps them) and the ids forgotten (SMD-1723 PR 3); canaryNoForget answers as a
-  // server from before 144, with no forget_thought.
+  // server from before 144, with no forget_thought, missingAsEnvelope a tool it lacks as a real server does (a
+  // JSON-RPC error), canaryPartial a forget that leaves a copy, canaryReview one that names thoughts left to review.
   const gone = new Map(); // id → key
   const forgottenIds = new Set();
   let nextId = 7000, away = false, canaryOld = false, busy = false, slowMs = 0, canaryNoForget = false, canaryPartial = false, missingAsEnvelope = false, canaryReview = false;
@@ -3128,7 +3129,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const d1 = await post("delete_thought", { id: S(2) }, [{ type: "text", text: `Deleted ${S(2)}. Its previous content is preserved in the audit trail.` }]);
   assert(d1.code === 0 && calls[1]?.name === "delete_thought" && calls[1].args.id === S(2) && !thoughts.has(uuid(7002)), "a delete is copied by stable's id, and removes the canary's copy");
 
-  // A forget (SMD-1723 PR 3): copied by stable's id, the echo the id sent, detach_citations as the caller gave it; one
+  // A forget (SMD-1723 PR 3): copied by stable's id, the echo the id sent, detach_citations always true; one
   // the canary's copy was deleted before reaches it by the key its tombstone kept; one forgotten there already is done;
   // one stable refused is not copied.
   calls.length = 0;
@@ -3140,7 +3141,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const fCall = calls.find((c) => c.name === "forget_thought");
   assert(f1.code === 0 && fCall?.args.id === S(30) && fCall.args.confirm === S(30) && fCall.args.detach_citations === true && copy30 && !byName(S(30)) && forgottenIds.has(copy30)
       && new RegExp(`copied forget_thought of ${S(30)} → ${copy30}`).test(logOf(CANARY_ROOT)),
-    `a forget is copied by stable's id, its confirm that id, detach_citations kept, and forgets the canary's copy (${JSON.stringify(fCall?.args)})`);
+    `a forget is copied by stable's id, its confirm that id, detach_citations true, and forgets the canary's copy (${JSON.stringify(fCall?.args)})`);
   // The caller named the thought on stable by a client_key, not the id stable answered: the copy's confirm is the
   // answered id, not the caller's echo, which the canary would refuse REFUSED_CONFIRM (pass 6's whole-diff mutant).
   await post("capture_thought", { content: "a secret named by its key on stable" }, captured(S(45)));
@@ -3150,7 +3151,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const f1bCall = calls.find((c) => c.name === "forget_thought" && c.args.id === S(45));
   assert(f1b.code === 0 && f1bCall?.args.id === S(45) && f1bCall.args.confirm === S(45),
     `a forget named otherwise on stable is copied with its confirm the id stable answered, not the caller's echo (${JSON.stringify(f1bCall?.args)})`);
-  await post("delete_thought", { id: S(31) },[{ type: "text", text: `Deleted ${S(31)}. Its previous content is preserved in the audit trail.` }]);
+  await post("delete_thought", { id: S(31) }, [{ type: "text", text: `Deleted ${S(31)}. Its previous content is preserved in the audit trail.` }]);
   const f2 = await post("forget_thought", { id: S(31), confirm: S(31) }, forgot(S(31)));
   const f2Call = calls.filter((c) => c.name === "forget_thought").at(-1);
   assert(f2.code === 0 && copy31 && forgottenIds.has(copy31) && !gone.has(copy31) && f2Call?.args.detach_citations === true,
@@ -3172,7 +3173,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   // A forget drops the copies of its thought still queued — a capture held while the canary was away — so its text
   // never lands there after the forget (review pass 1); the forget itself, queued, finds nothing there to forget.
   // Its capture is queued behind another copy the canary did not answer, so it is never sent: one sent, its answer lost,
-  // is kept (the next case).
+  // stays (the next case).
   away = true;
   await post("capture_thought", { content: "another thought, sent while the canary is away" }, captured(S(48)));
   const c40 = await post("capture_thought", { content: "a secret captured while the canary is away, then forgotten" }, captured(S(40)));
@@ -3219,10 +3220,11 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
       && JSON.stringify(afterSent) === JSON.stringify([`capture_thought:${S(46)}`, `capture_thought:${S(47)}`, `forget_thought:${S(46)}`, `forget_thought:${S(47)}`])
       && drained46.code === 0 && !queueIn().length && sentBefore(`capture_thought:${S(46)}`, `forget_thought:${S(46)}`) && sentBefore(`capture_thought:${S(47)}`, `forget_thought:${S(47)}`)
       && !byName(S(46)) && !byName(S(47)),
-    `a capture sent, its answer lost, and one a killed drain left in flight, are kept past their thoughts' forgets, land, then are forgotten (${JSON.stringify({ sentMark, afterSent, order46 })})`);
+    `a capture sent, its answer lost, and one a killed drain left in flight, stay past their thoughts' forgets, land, then are forgotten (${JSON.stringify({ sentMark, afterSent, order46 })})`);
 
   // Whether a send may have reached the brain: a connection refused never did, nor an answer the brain gave (a refusal,
-  // a code to retry); a 502 or a fault may have (review passes 7 and 8). A forget given up after a week says its text stays.
+  // a provider to mend); a 502, a fault or a store it could not reach may have (review passes 7 to 9). A forget given
+  // up after a week says its text stays.
   const { postWrite: postOne } = await import(SCRIPT);
   const canaryWrite = { url: CANARY_URL, writeKey: "canary-write-key" };
   const refusedOne = await postOne({ url: "http://127.0.0.1:9/mcp", writeKey: "k" }, { tool: "capture_thought", args: { content: "x", client_key: S(43) } });
@@ -3235,7 +3237,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   writeFileSync(join(CANARY_ROOT, "writes", "pending", OLD_FORGET), JSON.stringify({ from: "stable", at: new Date(Date.now() - 8 * 24 * 3600_000).toISOString(), tool: "forget_thought", args: { id: S(43), confirm: S(43), detach_citations: true } }));
   const drainedOld = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
   away = false;
-  away = false; busy = true;
+  busy = true;
   const storeOne = await postOne(canaryWrite, { tool: "capture_thought", args: { content: "[[busy]] x", client_key: S(43) } });
   busy = false;
   const reach = [refusedOne, answeredOne, faultOne, lostOne, storeOne].map((o) => `${o.keep === true}/${o.unknown === true}`);
@@ -3246,7 +3248,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   rmSync(join(CANARY_ROOT, "writes", "pending", LEFT), { force: true });
   assert(JSON.stringify(reach) === JSON.stringify(["true/false", "true/false", "true/true", "true/true", "true/true"]) && leftAfter.sent === true && leftAfter.sending === undefined
       && /not copied \(given up after a week\): forget_thought of [^ ]+ — .* — its text stays on this brain until forgotten there by hand/.test(logOf(CANARY_ROOT)) && drainedOld.code === 1 && !queueIn().length,
-    `a refused connection and an answered refusal are not sent, a fault and a lost answer may be; a copy a killed drain left stays sent though refused after; a forget given up after a week says its text stays (${JSON.stringify({ reach, left: { sent: leftAfter.sent, sending: leftAfter.sending }, drained: drainedOld.code, queue: queueIn() })})`);
+    `a refused connection and an answered refusal are not sent, a fault, a lost answer and a store unreachable may be; a copy a killed drain left stays sent though refused after; a forget given up after a week says its text stays (${JSON.stringify({ reach, left: { sent: leftAfter.sent, sending: leftAfter.sending }, drained: drainedOld.code, queue: queueIn() })})`);
   rmSync(join(CANARY_ROOT, "writes", "dead", OLD_FORGET), { force: true });
 
   // A forget's drop that read a copy before the drain marked it removes it during the send: the drain, its answer a
