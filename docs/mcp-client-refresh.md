@@ -32,7 +32,7 @@ What Claude Code 2.1.325 does at connect:
 
 - **Today's `/mcp` leaves Claude Code stale.** It is 2025-era, has no session and offers no stream, so there is no channel and nothing to expire. This is read from the probe's copy of that wiring, on SDK 2.4.0 and again on 2.1.0, the brain's pin, with the same result. The brain's own server was not run.
 - **Serving 2026-07-28 does not fix that by itself.** A 2026-07-28 server that sends no notification leaves Claude Code as stale as today's, whatever `ttlMs` it answers, until a listen stream happens to drop.
-- **`subscriptions/listen` is what works for Claude Code.** It refreshes at once on a notification, and it heals after a restart: the dropped stream is opened again and the list fetched again.
+- **`subscriptions/listen` is what works for Claude Code.** It refreshes at once on a notification, and it heals after a restart: the dropped stream is opened again and the list fetched again. (A restart that leaves nothing serving was measured on 2026-11-18, below: behind a proxy it heals only if the server is back within 12 seconds of its stream's closing frame, or 7 of a stream that was dropped.)
 - **`ttlMs` alone does nothing for Claude Code 2.1.325.** It was the cheaper design, since it needs no open connection, but this client did not act on it in any of three runs.
 - **A 404 to a session id works on the 2025-era wire, at a cost.** The brain would have to issue session ids, the refresh waits for the client's next call, and the client initializes more than once on the way.
 
@@ -70,3 +70,95 @@ The SDK's own client (2.4.0) proves each path (`evals/mcp-clients/selfcheck.ts`;
 A second script (`evals/mcp-clients/run-claude-code-turns.sh`) keeps one session open for two user turns and makes the change from outside between them, to see whether a new turn alone makes the client list again. It did not, on the 2026-07-28 path under a `ttlMs` of 3000 or on the stateless 2025-era path.
 
 Each one-turn case was run once, except the `ttlMs` case, run twice. Each two-turn case was run once.
+
+## A restart, measured 2026-11-18 (SMD-4347)
+
+A dated addition. The table above is as it was written on 2026-11-14.
+
+Its last row cut the listen streams with the server still serving. A restart is harder on a client: for some seconds nothing serves. This section records what Claude Code 2.1.327 on macOS does then, headless but where a row says interactive, and how long the brain's own stack is away when it restarts. The date is UTC: the first nine runs and the first three stack timings were made on the evening of 2026-11-17, local time.
+
+### What the client does
+
+The probe ended every listen stream, changed its tool set without saying so, and then for a number of seconds answered every MCP request as something that is not serving:
+
+- **502**, as the stack's proxy answers while the server behind it is away;
+- **busy**, as the brain's edge answers when the registry cannot be asked: HTTP 200, JSON-RPC -32003, `Retry-After: 2`;
+- **500**, in plain text, as the brain's route answers when its key check throws;
+- **the port closed**, as when the whole stack is down.
+
+It ended each stream as the SDK's handler ends one at `close()`, with its closing frame, but in the row marked "dropped", where every connection was dropped where it stood, as by a server that dies.
+
+Times are seconds from the end of the stream.
+
+| Away for | Answered meanwhile | `subscriptions/listen` after its stream ended | Lists again? |
+| --- | --- | --- | --- |
+| 3 s | 502 | 6.0: opened | Yes, 3 ms later. |
+| 7 s | 502 | 6.0: 502. 8.0: opened | Yes. |
+| 11 s | 502 | 6.0, 8.0: 502. 12.0: opened | Yes. |
+| 20 s, twice | 502 | 6.0, 8.0, 12.0: 502. None after | No. Its last request in the one run was 34 s after the server returned; in the other it was watched for 160 s, a new turn 130 s in. |
+| 7 s, the stream dropped | 502 | 1.0, 3.0: 502. 7.0: opened | Yes. |
+| 7 s | busy | 6.0: busy. 8.0: opened | Yes. |
+| 20 s | busy | 6.0, 8.0, 12.0: busy. None after | No, in the 70 s after the server returned, a new turn among them. |
+| 7 s | 500 | 6.0: 500. 8.0: opened | Yes. Run twice: once with this body, once with a JSON-RPC one. |
+| 7 s | the port closed | 8.0: opened | Yes. |
+| 20 s | the port closed | 25.8: `server/discover` again, then opened | Yes. |
+| 60 s | the port closed | 64.4: `server/discover` again, then opened | Yes. |
+| 180 s | the port closed | None in the 35 s after the port opened. At its next tool call, 217 s: `server/discover` again, then opened | Yes, at that call. |
+| 60 s, an interactive session | the port closed | None while it sat idle, 52 s after the port opened. At its next tool call, 112 s: `server/discover` again, then opened | Yes, at that call. The turn began with the model saying that the harness reported the server as failed to connect (ECONNREFUSED); the `/mcp` panel after the turn showed the server with both tools. |
+
+And with no stream held, the probe started `LISTEN=off` so that it declares `tools.listChanged: false` as the brain's server does today:
+
+| Away for | Answered meanwhile | What the client sent | Lists again? |
+| --- | --- | --- | --- |
+| 20 s | 502 | Nothing, through the outage and the 40 s after it. At connect it had sent `server/discover` and `tools/list`, and no listen | No. Its next tool call was served, and no `tools/list` was sent. |
+| 60 s | the port closed | Nothing, through the outage and the 40 s after it | No. The same. |
+| 60 s, an interactive session | the port closed | Nothing, through the outage and the 50 s after it, until its next tool call | No. Its `/mcp` panel, opened 40 s after the port reopened and again after the turn, showed the server with one tool; the tool call was served, and no `tools/list` was sent. |
+
+What that shows:
+
+- **Three attempts, counted from the end of its stream, not from the server's return.** At 6, 8 and 12 seconds after a stream ended with its closing frame; at about 1, 3 and 7 after one that was dropped.
+- **A 502, a busy answer and a 500 each use an attempt up.** Three 502s end it, and so do three busy answers.
+- **One success is enough.** It lists at once, and the new tool is usable in the same session.
+- **After three refusals it stops.** The server's return, time, its own tool calls and a new turn did not start it again while it was watched. Its tool calls are served, so the session looks healthy and holds an old list. A tool call answered 502 after it had stopped was not seen.
+- **A closed port is treated differently.** It connects again from `server/discover`: by itself after 20 and after 60 seconds, headless, and at its next tool call after 180. The interactive session, after 60, did not while idle; its next turn began with the model saying the server had failed to connect, and its tool call reconnected and was served, with nothing done by hand. The harness's own message to the model is in neither log: this is the model's account of it. An attempt that met the closed port leaves nothing in the probe's log.
+- **With no stream it notices nothing.** It sends no request through an outage of either kind, and keeps its list. In the interactive run its `/mcp` panel, first opened 40 seconds after the port was back, showed the server as it had been.
+
+Its documentation (`https://code.claude.com/docs/en/mcp`, read 2026-11-18) names limits these runs could not reach: a reopened stream that closes again within 10 seconds is reopened "up to three times"; after "five reopens in an hour" it "waits about six hours"; a remote server that drops is reconnected "up to five times", after which an interactive session marks it failed and a `claude -p` run goes on without its tools, retrying for about half an hour. Every run here had one outage, and all but two were headless.
+
+Two things were seen once and by accident, in runs that were spoiled and are not in the tables:
+
+- **A session started while the server answered 502** sent `server/discover` and then `initialize` four times in 6 seconds, and did not try again in the 24 seconds left of the run.
+- **A tool call made while the server was away** failed with the proxy's words ("Bad Gateway"), and was not sent again in the 3 seconds left of that run.
+
+### The stack's own restart
+
+How long is the brain away when its servers are replaced? On a scratch stack built from main 6aad356b (podman, macOS), two requests were sent through the stack's proxy every 100 ms: a keyless `tools/list`, which the MCP server answers by itself, and a keyed one, which needs the REST core's `whoami` as a re-listen does.
+
+| Procedure | The MCP server away until a keyed request was served | Meanwhile |
+| --- | --- | --- |
+| `up -d --force-recreate --no-deps mcp`, three times (keyless requests only) | 6.62, 5.58, 5.90 s | 502 |
+| `deploy/canary.sh`'s order: `api` recreated, then `mcp` at once, twice | 5.55, 5.84 s | 502 |
+| A plugin enabled as `plugins/example/README.md` says: `up -d migrate api mcp` | 6.93 s | 502, then 500 for the last 0.3 s. 49 tools before, 52 after |
+| An upgrade's shape: `up -d --force-recreate migrate api mcp app coordinator` | 6.60 s | 502, then 500 for the last 0.3 s |
+| The same, the migrator made to take 15 s | 25.80 s | 502, then 500 for the last 0.5 s. The migrator ran while the MCP server was away |
+| The 15-second migrator run by itself first, then the same `up` | 7.30 s | The servers served through the migrator's run. Then 502, and 500 for the last 0.5 s |
+| A key's scope edited in the env file, write to read: `up -d` | Never away: the `mcp` container was not replaced | A keyed request was answered 500 for 7.7 s while the REST core was replaced. 49 tools before, 24 after |
+| The same edit with `restart: true` on `mcp`'s `depends_on`, twice | 11.5, 11.3 s | 502, then 500 for the last 0.1 s. Compose stopped `mcp` before it replaced the REST core, so a keyed request failed for the same 11.5 and 11.3 s. 24 tools and 49 by turns |
+| The same edit with a label on `mcp` that carries the key list, three times | 6.3, 6.1, 6.1 s | 502, then 500 for the last 0.2 s. The REST core was stopped first, a keyed request refused 500 for the 5 s before: 11.5, 11.3 and 11.5 s in all, where the edit costs 7.7 s as the stack stands. 49 tools and 24 by turns |
+
+So in every procedure that replaces the MCP server but two, an attempt at 6 seconds may still be refused and those at 8 and 12 are served. With `restart: true` only the attempt at 12 would be, by half a second. With a migration that takes time, applied by the same `up`, none is: in one `up` compose stopped the REST core, then the MCP server, and started both at the end, the migrator's run between. And a key's scope, edited as the stack stands, changes a tool list without replacing the MCP server at all; with the label it replaces both.
+
+A keyed request failed for longer than the MCP server was away, the REST core being replaced first: 12.6 and 12.3 seconds in the two canary-order runs (one request in the second was served between the two replacements), 14.0 with the plugin, 11.8 in the upgrade's shape. In the plugin's and the upgrade's runs the MCP server went on answering for 7 and 5 seconds after the REST core had stopped, and a keyed request was still refused for 0.3 seconds after its return.
+
+`deploy/canary.sh` itself was not run: its two commands were, on a running stack. No run had a migration of the core's to apply; the plugin run applied the example plugin's own, if its README is right, and the 15-second migrator is the stack's own behind a wait. The slow migrator and the two rows after the scope edit were made with compose override files kept outside the tree: none of the three settings is in `deploy/compose.yaml`. The order compose replaces services in is what was seen on Compose 5.8; its documentation promises the replacing, not the order. Adding the label replaced `mcp` once, 6.1 s.
+
+This is one machine and an idle stack, with no collector running.
+
+### How, and what is thin
+
+- The probe's controls `down/N`, `busy/N`, `fault/N`, `refuse/N` and `cut/N` and its `LISTEN=off` mode (`evals/mcp-clients/probe.ts`). `selfcheck.ts` holds, in each mode: what each of the five answers while it is away (the status or the closed port, and for `down`, `busy` and `fault` whether the body is plain text or a JSON-RPC error); that `down`, `busy` and `fault` last about what they were asked to, checked 1.5 s into two seconds and 0.3 s after; and that each changes the tool set. With a stream it also holds that each of the five ends a held stream as it should. It does not hold that the 2025-era sessions are forgotten. The 3-second run and one of the 20-second 502 runs were one-turn runs (`run-claude-code.sh`); the rest were two-turn runs (`run-claude-code-turns.sh`), the outage begun 30 s into the first turn's idle time and the second turn sent after it. The two interactive runs were driven through a terminal by an `expect` script, which also opened the `/mcp` panel before and after the second turn. In the run with a stream the first panel was not seen: the client had raised a dialog of its own, which took the keys, and one of them confirmed it. That script is not in the tree. Run against a stand-in client, it could still be made to press Enter on a dialog it had not read, and typing into a person's real session is not worth that: an interactive run is three things typed by hand, which the probe's header gives. Two further runs made while it was being mended, an interactive session whose stream was ended with the server still up, each asked again at 6.0 s and listed at once, as a headless one does.
+- The probe was extended three times during the day. The 502 runs of 3, 7, 11 and 20 seconds and the closed-port runs of 7 and 20 were made before `busy`, `fault`, `cut` and `LISTEN=off` existed; what `down` and `refuse` do to a client did not change, though the 502's content type and the log's fields did.
+- `cut/N` drops a stream with no closing frame. The 2026-11-14 table's row "every listen stream cut" used `drop`, which ends each with its frame: its 6 seconds is the first row's here.
+- A one-turn run cannot wait long: the headless session refuses a long sleep in the foreground. `sleep 110` was not run at all; `sleep 50` the model ran in the background, and waited. A two-turn run waits outside the session.
+- Twenty-two sessions in all: the eighteen in the tables, two of them interactive, each case once but the 20-second 502 and the 500; two spoiled; and the two made while the interactive script was being mended. Sixteen timed restarts of the stack. The 7-second busy run's script was edited while it ran and ended with a shell error after its second turn; the probe's log of the run is whole.
+- Not measured: an outage between 12 and 20 seconds behind a 502; a closed port for longer than 60 seconds interactive, or 180 headless; what the `/mcp` panel shows while a server is held as failed; a client whose own path to the server drops; more than one outage in a session, and so the five reopens an hour; a stream held through the stack's forwarder and proxy, or one a proxy drops; the edge's 503 for a token while the authorization server is away; any other client; the brain's own server, which holds no stream yet. `docs/mcp-listen-streams.md` is the decision this was measured for.
