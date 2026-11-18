@@ -390,6 +390,30 @@ free:
   others. Each has about half for calls well under five minutes. A call is
   never cut short, so a brain of minute-long calls has a little more (0.54
   of the time for 71 s calls beside 50 ms ones).
+- **A model that isn't loaded waits its turn** (SMD-3379 PR 3c-1), on a
+  server whose registry entry names `ps`, its list of loaded models. A model
+  server holds only so many models at once. A call for one that isn't loaded
+  may put another out, and that waits for every call on the other to end,
+  with each later load queued behind it. Measured before this rule: a load
+  waited 24 minutes for a model background calls kept busy, and live
+  embeddings queued behind it. So, for background calls only:
+  - **A call for a loaded model** goes as above.
+  - **A call for a model that isn't loaded** waits until the loaded models
+    have no background work and had no live call in the last two minutes. It
+    waits no longer than its `max_wait_s` (the pass's `--max-wait`, 60 s
+    unset), counted from the server's last load, so a model just loaded
+    stays at least that long.
+  - **The drain.** The broker then grants the server's other models no
+    background calls. Once those running have ended, it grants the waiting
+    call, and the others stay paused until the list names its model. One
+    model loads at a time.
+  - **A live call for a model that isn't loaded** is granted at once, as
+    every live call is, and pauses the server's other background calls the
+    same way until its model is loaded.
+
+  Where the loaded models can't share the server's memory, the next live
+  call after a background load waits for that model's running call to end,
+  then for its own to load.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
@@ -469,6 +493,17 @@ bun --no-env-file deploy/federated/federated.ts down
   `per_model: false`, and its slots are counted together. `reserve` (1 unless
   set) is kept for live calls, but background keeps at least one slot, so with
   `slots: 1` background and live share it.
+- **`ps` is where the server lists its loaded models**, read by the broker's
+  own container: `http://host.containers.internal:11434/api/ps` for the
+  host's Ollama (`host.docker.internal` under Docker Engine on Linux).
+  Optional, and for a `per_model` server only. The broker reads it every 3 s,
+  and every second while a model loads. Unreadable for 10 s (no answer in
+  2 s, no 200, a redirect, not a list of models), the server has no
+  residency rule until it reads again, and the broker's log says each
+  change once. A model's name is matched as Ollama lists it: lower-cased,
+  with `:latest` where a brain names no tag. A model whose calls end three
+  times with the list never naming it is left out of the rule until it is
+  listed, and the log says so.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
   brain under Docker Engine on Linux). A call to any other base isn't
@@ -511,7 +546,10 @@ bun --no-env-file deploy/federated/federated.ts down
 - **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
   broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says
   each brain's connections, and any server over its slots, at most once a
-  minute.
+  minute. For a server with `ps`, it says `its loaded models read (N
+  loaded): the residency rule is on` once they read, and each load it
+  drained for, at most once a minute: `not loaded, and granted after N s`
+  for background, `a live call to a model not loaded` for a live call.
 
 ## What is reachable from where
 

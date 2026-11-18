@@ -32,7 +32,7 @@
 //                                     `<id>:…`) no held named are given back now, not at KEEP_MS, and those of a relay
 //                                     no open socket speaks for (a coordinator replaced) — but for two relays on one key
 //   broker → brain  {op:"hello", brain, boot, lease_s, idle_s, warm_s_left, max_waiting, max_held, max_sockets,
-//                    max_frame, servers: [{name, bases, slots, reserve, per_model}]}
+//                    max_frame, servers: [{name, bases, slots, reserve, per_model, residency}]}
 //                                     on open; `boot` changes when the broker restarts
 //                   {op:"go", id}     granted (a `held` too). It may come with no `queued` before it, and after the
 //                                     brain's own `done` withdrew the ask — given back already, so the brain ignores it.
@@ -76,6 +76,25 @@
 //                with no brain at work in a pool, all start level again; within a brain, the oldest of the asks it
 //                put first (`first`, 2c-2's consolidation) or that have waited their `max_wait_s` (60 unset), else its
 //                oldest — 2c-2's turn, held here brain-wide.
+// Residency (PR 3c-1), per server whose registry entry names `ps` — its list of the models it has loaded now (Ollama's
+// GET /api/ps), read every PS_S (3 s; every second while a load is wanted or under way), a model's name read as
+// Ollama's list writes it (`tagged`). A server holds only so many models: one asked for that is not loaded may put
+// another out, which waits for every call on that one to end while each later load queues behind it (measured in PR
+// 3b-3b: a 22 GiB model's load waited 24 minutes for a model background calls kept busy, live embeds queued behind it).
+// So, for background alone — a live call is granted at once, as ever:
+//   loaded       an ask for a model the list names goes as above;
+//   not loaded   it waits until the server's loaded models have no background work, asked or running, and no live
+//                call in the last LIVE_QUIET_S (120 s) — at once where none is loaded — or until it has waited its
+//                `max_wait_s`, counted from the server's last load where that is later: a model just loaded stays at
+//                least that long (decided 2026-11-18: the ask's own bound, no registry setting);
+//   the drain    then the server's other models are granted no background, and once none of theirs runs the ask is
+//                granted — one load at a time a server — and they stay held until the list names its model or its
+//                calls have ended and the list is read again; a live call to a model not loaded holds them the same
+//                way, at once, and background to no model but its own goes while it is under way.
+// The list unread at the start, or unreadable PS_STALE_S (10 s) — no answer in 2 s, no 200, a redirect, over 1 MiB, not
+// its shape — is no rule at all, each change said once: the rule above the line, as before 3c-1. A model whose calls
+// end UNLISTED_AFTER (3) times running with the list never naming it — a name the server knows another way, a model
+// that never loads — is left out of the rule until it is listed, said once.
 // The trust (SMD-3268, no implicit trust): a key per brain, the registry holding only its hash; a brain sees its own
 // grants and asks, and `hello` names no other brain. A brain can call every call live, or say every call was held:
 // counted and logged, not capped.
@@ -123,10 +142,27 @@ export const MAX_SOCKETS = 16;
 export const MAX_BUFFERED = 1 << 20;
 /** A frame's largest size: an ask is well under 1 KiB. */
 export const MAX_FRAME = 4096;
+/** How often a server's loaded models are read (`ps`), and how often while a load is wanted or under way. */
+export const PS_S = 3;
+export const PS_FAST_S = 1;
+/** A read's bound, and the list's: Ollama's own is a few hundred bytes a model. */
+export const PS_TIMEOUT_MS = 2000;
+export const PS_MAX_BYTES = 1 << 20;
+export const PS_MAX_MODELS = 256;
+/** A list unreadable this long is no list: the server has no residency rule until it reads again. */
+export const PS_STALE_S = 10;
+/** A loaded model with a live call this lately is not put out for background work, short of the ask's max_wait_s. */
+export const LIVE_QUIET_S = 120;
+/** A model whose calls ended this many times running with the list never naming it is left out of the rule. */
+export const UNLISTED_AFTER = 3;
+/** The most models a server's residency remembers ended calls or misses for: a brain naming a new one each call. */
+export const MAX_NOTED = 256;
+/** A server of this many pools or fewer is turned at each change; a larger one at the broker's next tick. */
+export const TURN_NOW = 64;
 /** A broker key's mark: the key itself, which the registry never holds (its hash does). */
 export const KEY_PREFIX = "slot_";
 
-export type ModelServer = { name: string; bases: string[]; slots: number; reserve: number; perModel: boolean };
+export type ModelServer = { name: string; bases: string[]; slots: number; reserve: number; perModel: boolean; ps: string | null };
 export type Brain = { name: string; hash: string };
 export type Registry = { port: number; leaseS: number; warmS: number; idleS: number; servers: ModelServer[]; brains: Brain[] };
 
@@ -147,6 +183,51 @@ export function normalisedBase(base: string): string {
     return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
   } catch {
     return base.replace(/\/+$/, "");
+  }
+}
+
+/** A model's name as Ollama's list writes it: lower-cased, and `:latest` where it says no tag. */
+export function tagged(model: string): string {
+  const m = model.toLowerCase();
+  return m.slice(m.lastIndexOf("/") + 1).includes(":") ? m : `${m}:latest`;
+}
+
+/** The models a server's list names (Ollama's /api/ps: `{models: [{name, model}]}`), each `tagged`; null for any other shape. */
+export function loadedOf(text: string): string[] | null {
+  let v: unknown;
+  try { v = JSON.parse(text); } catch { return null; }
+  if (!isMapping(v) || !Array.isArray(v.models) || v.models.length > PS_MAX_MODELS) return null;
+  const out = new Set<string>();
+  for (const m of v.models) {
+    if (!isMapping(m)) return null;
+    const names = [m.name, m.model].filter((x): x is string => typeof x === "string" && x.length >= 1 && x.length <= 256);
+    if (!names.length) return null;
+    for (const n of names) out.add(tagged(n));
+  }
+  return [...out];
+}
+
+/** A server's list read: its text, or why not — in the broker's words, never the server's. */
+export async function readList(url: string): Promise<{ text: string } | { why: string }> {
+  try {
+    const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(PS_TIMEOUT_MS), headers: { accept: "application/json" } });
+    if (res.status !== 200 || !res.body) {
+      try { await res.body?.cancel(); } catch { /* gone already */ }
+      return { why: res.status >= 300 && res.status < 400 ? "a redirect, not followed" : `HTTP ${res.status}` };
+    }
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      n += value.byteLength;
+      if (n > PS_MAX_BYTES) { try { await reader.cancel(); } catch { /* gone already */ } return { why: "a list over 1 MiB" }; }
+      chunks.push(value);
+    }
+    return { text: Buffer.concat(chunks).toString("utf8") };
+  } catch (e) {
+    return { why: (e as Error)?.name === "TimeoutError" ? `no answer in ${PS_TIMEOUT_MS / 1000} s` : "no answer" };
   }
 }
 
@@ -181,7 +262,7 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
     const at = `servers.${name}`;
     if (!isName(name)) { problems.push(`${at}: a name is lower-case letters, digits and hyphens, starting with a letter, and no word YAML reads as a boolean or a null`); continue; }
     if (!isMapping(raw)) { problems.push(`${at}: not a mapping`); continue; }
-    for (const k of Object.keys(raw)) if (!["bases", "slots", "reserve", "per_model"].includes(k)) problems.push(`${at}.${k}: not a key of a server (bases, slots, reserve, per_model)`);
+    for (const k of Object.keys(raw)) if (!["bases", "slots", "reserve", "per_model", "ps"].includes(k)) problems.push(`${at}.${k}: not a key of a server (bases, slots, reserve, per_model, ps)`);
     const bases: string[] = [];
     if (!Array.isArray(raw.bases) || raw.bases.length === 0) problems.push(`${at}.bases: the base URLs brains reach it by, at least one`);
     else for (const b of raw.bases) {
@@ -200,7 +281,15 @@ export function parseRegistry(text: string): { registry?: Registry; problems: st
     if (raw.reserve !== undefined) { if (isInt(raw.reserve, 0, slots)) reserve = raw.reserve; else problems.push(`${at}.reserve: the slots background never takes (it keeps at least one), 0 to its slots (${slots})`); }
     let perModel = true;
     if (raw.per_model !== undefined) { if (typeof raw.per_model === "boolean") perModel = raw.per_model; else problems.push(`${at}.per_model: true (each model its own slots, as Ollama's) or false (the server's slots whatever the model, as a one-at-a-time decide tier's)`); }
-    servers.push({ name, bases, slots, reserve, perModel });
+    let ps: string | null = null;
+    if (raw.ps !== undefined) {
+      let u: URL | null = null;
+      try { u = typeof raw.ps === "string" ? new URL(raw.ps) : null; } catch { u = null; }
+      if (!u || !/^https?:$/.test(u.protocol) || u.username || u.password || u.search || u.hash) problems.push(`${at}.ps: where its loaded models are listed (Ollama: http://<host>:11434/api/ps), an http(s) URL without credentials, query or fragment`);
+      else if (!perModel) problems.push(`${at}.ps: a server with per_model: false is one pool whatever the model — it has no residency to read`);
+      else ps = u.href;
+    }
+    servers.push({ name, bases, slots, reserve, perModel, ps });
   }
   const brains: Brain[] = [];
   const hashOwner = new Map<string, string>();
@@ -252,6 +341,9 @@ type Ask = { kind: "ask"; conn: Conn; id: string; pool: Pool; first: boolean; ma
 type Grant = { kind: "grant"; conn: Conn; id: string; pool: Pool; live: boolean; at: number };
 type Pool = {
   key: string; server: ModelServer;
+  /** Its model as the server's list would name it (`tagged`), its server's residency where the rule reads it, and
+   *  what the rule last counted it as: 0, or a model not loaded with a call running — 1 background's alone, 2 a live one. */
+  model: string; res: Residency | null; cls: 0 | 1 | 2;
   live: Set<Grant>; bg: Set<Grant>;
   /** Each brain's live grants here, by its index: counted as they come and go, not by a walk of `live`. */
   liveBy: number[];
@@ -265,13 +357,45 @@ type Pool = {
   last: number;
 };
 
+/** A server's residency (PR 3c-1): what its list last named, and the load wanted or under way. */
+type Residency = {
+  server: ModelServer; url: string;
+  /** The models the list named at its last good read; null while unread, or unreadable PS_STALE_S: no rule. */
+  loaded: Set<string> | null;
+  /** When the list last read and when a read last began (performance.now), the reads begun, and the one under way. */
+  goodAt: number; readAt: number; seq: number; reading: Promise<void> | null;
+  /** Why the list could not be read, as last said; null once it reads. */
+  off: string | null;
+  /** A read begun as this one or later must end before background goes on: a call to a model not listed has ended,
+   *  and what the server holds now is not known. */
+  verifyFrom: number | null;
+  pools: Set<Pool>;
+  /** The pool of a model not loaded that goes next, the server's other background draining for it. */
+  want: Pool | null;
+  /** Background and live grants running on the server; its pools of a model not loaded with a call running, and
+   *  those of them with a live one. */
+  bgN: number; liveRun: number; pendN: number; liveN: number;
+  /** On the broker's clock: when a live call on a loaded model last began or ended, and when a load last began. */
+  liveAt: number; changedAt: number;
+  /** A model whose calls ended unlisted, with the reads begun by then; its misses running; the models left out of the rule. */
+  ended: Map<string, number>; misses: Map<string, number>; unlisted: Set<string>;
+  kicked: boolean;
+};
+
+/** What a test reads of a server's residency: the models listed (null: no rule), the pool drained for, the pools loading. */
+export type ResidencyView = Record<string, { loaded: string[] | null; want: string | null; loading: string[] }>;
+
 /** What a test reads of the broker: each pool's counts, and each brain's asks waiting and slot time there. */
 export type Snapshot = Record<string, { live: number; background: number; waiting: Record<string, number>; used: Record<string, number> }>;
 
-export type Broker = { port: number; stop(): Promise<void>; snapshot(): Snapshot };
+export type Broker = {
+  port: number; stop(): Promise<void>; snapshot(): Snapshot;
+  /** Each server's residency; the broker's tick run now; every server's list read now (a test's, each). */
+  residency(): ResidencyView; turn(): void; refresh(): Promise<void>;
+};
 
 /** Starts serving the registry's brains. `port` 0 takes a free one (a test's). */
-export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number; keepMs?: number; twinLapseMs?: number } = {}): Broker {
+export function startBroker(reg: Registry, opts: { hostname?: string; port?: number; log?: (line: string) => void; now?: () => number; keepMs?: number; twinLapseMs?: number; psMs?: number; psStaleMs?: number } = {}): Broker {
   const log = opts.log ?? ((line: string) => console.log(`slots: ${line}`));
   /** The broker's clock, in ms: performance.now() unless a test hands it one it moves itself. */
   const clock = opts.now ?? (() => performance.now());
@@ -281,6 +405,11 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const sockets = reg.brains.map(() => 0);
   const serverOf = new Map<string, ModelServer>();
   for (const s of reg.servers) for (const b of s.bases) serverOf.set(b, s);
+  /** Each server's residency, for those whose registry entry names `ps`. */
+  const residencies = new Map<ModelServer, Residency>();
+  for (const s of reg.servers) if (s.ps) residencies.set(s, { server: s, url: s.ps, loaded: null, goodAt: -Infinity, readAt: -Infinity, seq: 0, reading: null, off: null, verifyFrom: null, pools: new Set(), want: null, bgN: 0, liveRun: 0, pendN: 0, liveN: 0, liveAt: -Infinity, changedAt: -Infinity, ended: new Map(), misses: new Map(), unlisted: new Set(), kicked: false });
+  const psMs = opts.psMs ?? PS_S * 1000;
+  const psStaleMs = opts.psStaleMs ?? PS_STALE_S * 1000;
   let nextConn = 1;
   const keepMs = opts.keepMs ?? KEEP_MS;
   const twinLapseMs = opts.twinLapseMs ?? TWIN_LAPSE_MS;
@@ -318,12 +447,14 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const freeKept = (b: number, id: string) => { const o = keptBy[b].get(id); if (!o) return; keptBy[b].delete(id); release(o.g); };
   /** Connections and closes, said once a minute a brain and kind, with the count unsaid since (a link flapping). */
   const connSaid = new Map<string, { at: number; unsaid: number }>();
-  const sayConn = (b: number, kind: string, line: string) => {
-    const k = `${b}\n${kind}`, now = clock(), was = connSaid.get(k);
+  /** A line said once a minute a key, with the count unsaid since: bounded by the registry's servers and brains. */
+  const sayEvery = (k: string, line: string) => {
+    const now = clock(), was = connSaid.get(k);
     if (was && now - was.at < 60_000) { was.unsaid++; return; }
     log(`${line}${was?.unsaid ? ` (and ${was.unsaid} more since the last said)` : ""}`);
     connSaid.set(k, { at: now, unsaid: 0 });
   };
+  const sayConn = (b: number, kind: string, line: string) => sayEvery(`${b}\n${kind}`, line);
   /** This start's id, in each hello: a brain that sees it change knows the broker restarted, not only its own socket. */
   const boot = crypto.randomUUID();
 
@@ -335,12 +466,26 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     const model = server.perModel ? asked : "*";
     const key = `${server.name}/${model}`;
     let p = pools.get(key);
-    if (!p) { p = { key, server, live: new Set(), bg: new Set(), liveBy: reg.brains.map(() => 0), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 }; pools.set(key, p); }
+    if (!p) {
+      // An unnamed model is no name a list could say: outside the residency rule.
+      const res = asked === "?" ? null : residencies.get(server) ?? null;
+      p = { key, server, model: tagged(model), res, cls: 0, live: new Set(), bg: new Set(), liveBy: reg.brains.map(() => 0), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 };
+      pools.set(key, p);
+      res?.pools.add(p);
+    }
     return p;
   };
   // Only the pool the map holds: a pool pruned while a move still had it in hand must not drop its successor (review
   // pass 5: a moved ask's withdrawal pruned the pool the new ask then queued into, unseen, over-granted).
-  const prune = (p: Pool) => { if (pools.get(p.key) === p && p.live.size === 0 && p.bg.size === 0 && p.queues.every((q) => q.size === 0)) pools.delete(p.key); };
+  const prune = (p: Pool) => {
+    if (pools.get(p.key) !== p || p.live.size || p.bg.size || !p.queues.every((q) => q.size === 0)) return;
+    pools.delete(p.key);
+    const r = p.res;
+    if (!r) return;
+    r.pools.delete(p);
+    // The pool its server drained for has no ask left: the server's other background goes on.
+    if (r.want === p) { r.want = null; kick(r); }
+  };
   /** An ask taken out of its queue without a prune: its pool may be in hand. */
   const withdraw = (x: Ask) => { if (x.conn.held.get(x.id) === x) x.conn.held.delete(x.id); if (x.pool.queues[x.conn.brainAt].delete(x)) x.conn.waiting--; };
   const room = (p: Pool) => p.bg.size < Math.max(1, p.server.slots - p.server.reserve) && p.live.size + p.bg.size < p.server.slots;
@@ -390,11 +535,145 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     p.usedAt = now;
   };
 
+  // Asks on a socket heard from lately: none is granted into one silent half its idle_s, which may be dead and kept
+  // open by the grants themselves — Bun resets a socket's idle clock at each send (review pass 4 of 3a: a half-open
+  // socket's grants held the whole room 12–15 s).
+  const heard = (x: Ask) => performance.now() - x.conn.heardAt <= idleMs / 2;
+
+  // Residency (PR 3c-1; the file's head says the rule).
+  /** Whether the rule takes a pool's model for loaded: its server's list names it — or it is outside the rule: no
+   *  list read, or a name the list never said (`unlisted`). */
+  const resident = (p: Pool) => { const r = p.res; return !r || r.loaded === null || r.loaded.has(p.model) || r.unlisted.has(p.model); };
+  /** Whether background may be granted in the pool now, by its server's residency. */
+  const mayGrant = (p: Pool) => {
+    const r = p.res;
+    if (!r || r.loaded === null) return true;
+    // A call to a model not listed has ended: nothing more until the list is read again.
+    if (r.verifyFrom !== null) return false;
+    // A load under way — a model not loaded with a call running: background to that model alone, and where a live call
+    // waits on one, to no pool but a live call's.
+    if (r.liveN > 0) return p.cls === 2;
+    if (r.pendN > 0) return p.cls >= 1;
+    // A load wanted: its pool alone, once no other background runs on the server.
+    if (r.want) return r.want === p && r.bgN === 0;
+    return resident(p);
+  };
+  /** A key set last in a map kept to MAX_NOTED, its oldest dropped past that. */
+  const note = <V>(m: Map<string, V>, k: string, v: V) => { m.delete(k); m.set(k, v); while (m.size > MAX_NOTED) { const [oldest] = m.keys(); m.delete(oldest); } };
+  /** A pool counted anew, after its grants or its server's list changed: its server's loads under way kept by count, not walked. */
+  const mark = (p: Pool) => {
+    const r = p.res;
+    if (!r) return;
+    const cls = resident(p) ? 0 : p.live.size ? 2 : p.bg.size ? 1 : 0;
+    const was = p.cls;
+    if (cls === was) return;
+    if (was === 2) r.liveN--;
+    if (was >= 1) r.pendN--;
+    if (cls === 2) r.liveN++;
+    if (cls >= 1) r.pendN++;
+    p.cls = cls;
+    if (cls > was) return;
+    // Its calls all ended and the list never named it: whether it loaded, and what it put out, is not known until the
+    // list is read again — a read begun from now, which the server's background waits for.
+    if (cls === 0 && !resident(p)) { note(r.ended, p.model, r.seq); r.verifyFrom = r.seq + 1; if (!r.reading) void read(r); }
+    kick(r);
+  };
+  /** Whether a pool has an ask waiting on a socket heard from. */
+  const asking = (p: Pool) => { for (const q of p.queues) for (const x of q) if (heard(x)) return true; return false; };
+  /**
+   * Chooses the model not loaded that goes next, where none is chosen and no load is under way: the one whose ask has
+   * waited longest of those past their max_wait_s — counted from the server's last load where that is later, so a model
+   * just loaded stays that long — else, where the loaded models have no background work and no live call lately (or
+   * none is loaded), the one asked for first.
+   */
+  const settle = (r: Residency) => {
+    if (r.loaded === null) { r.want = null; return; }
+    const w = r.want;
+    if (w && (pools.get(w.key) !== w || resident(w) || !asking(w))) r.want = null;
+    if (r.want || r.pendN > 0 || r.verifyFrom !== null || warming()) return;
+    const now = clock();
+    let busy = r.bgN > 0, aged: Pool | null = null, agedAt = Infinity, idle: Pool | null = null, idleAt = Infinity;
+    for (const p of r.pools) {
+      const here = resident(p);
+      let oldest = Infinity, due = Infinity;
+      scan: for (const q of p.queues) for (const x of q) {
+        if (!heard(x)) continue;
+        if (x.at < oldest) oldest = x.at;
+        if (here) break scan;
+        if (x.at < due && now - Math.max(x.at, r.changedAt) >= x.maxWaitMs) due = x.at;
+      }
+      if (oldest === Infinity) continue;
+      if (here) { busy = true; continue; }
+      if (due < agedAt) { aged = p; agedAt = due; }
+      if (oldest < idleAt) { idle = p; idleAt = oldest; }
+    }
+    const quiet = r.loaded.size === 0 || (r.liveRun === 0 && now - r.liveAt >= LIVE_QUIET_S * 1000);
+    r.want = aged ?? (!busy && quiet ? idle : null);
+  };
+  /** A server's residency settled and each of its pools turned. */
+  const turn = (r: Residency) => { settle(r); for (const p of [...r.pools]) pump(p); };
+  /** The same once this event is done — a small server's; a large one's waits for the broker's tick (a second at most). */
+  const kick = (r: Residency) => {
+    if (r.kicked || r.pools.size > TURN_NOW) return;
+    r.kicked = true;
+    queueMicrotask(() => { r.kicked = false; if (!stopping) turn(r); });
+  };
+  /** A server's list read and taken up; one read at a time, a caller during one given that one. */
+  const read = (r: Residency): Promise<void> => {
+    if (r.reading) return r.reading;
+    const mine = ++r.seq;
+    r.readAt = performance.now();
+    r.reading = readList(r.url).then((got) => {
+      r.reading = null;
+      if (stopping) return;
+      const names = "text" in got ? loadedOf(got.text) : null;
+      if (names) {
+        const first = r.loaded === null;
+        r.goodAt = performance.now();
+        r.loaded = new Set(names);
+        for (const m of names) { r.misses.delete(m); if (r.unlisted.delete(m)) log(`${r.server.name}/${m}: listed now, and under the residency rule again`); }
+        // Each model whose calls ended before this read began, and still not listed: a miss; UNLISTED_AFTER running,
+        // and the rule leaves it be — else a name the list writes another way would hold the server's other
+        // background through every call to it.
+        for (const [m, at] of [...r.ended]) {
+          if (at >= mine) continue;
+          r.ended.delete(m);
+          if (r.loaded.has(m)) continue;
+          const n = (r.misses.get(m) ?? 0) + 1;
+          if (n < UNLISTED_AFTER) { note(r.misses, m, n); continue; }
+          r.misses.delete(m);
+          r.unlisted.add(m);
+          while (r.unlisted.size > MAX_NOTED) { const [oldest] = r.unlisted; r.unlisted.delete(oldest); }
+          log(`${r.server.name}/${m}: ${UNLISTED_AFTER} calls ended and the server's loaded models never named it — a name it lists another way, or a model that does not load: left out of the residency rule until it is listed`);
+        }
+        if (first) log(`${r.server.name}: its loaded models read${r.off !== null ? " again" : ""} (${names.length} loaded): the residency rule is on`);
+        r.off = null;
+      } else if (performance.now() - r.goodAt > psStaleMs) {
+        const why = "text" in got ? "not a list of models" : got.why;
+        if (r.off === null) log(`${r.server.name}: its loaded models could not be read (${why}): no residency rule there until they can`);
+        r.off = why;
+        r.loaded = null;
+      }
+      if (r.verifyFrom !== null && mine >= r.verifyFrom) r.verifyFrom = null;
+      for (const p of [...r.pools]) mark(p);
+      turn(r);
+      if (r.verifyFrom !== null) void read(r);
+    });
+    return r.reading;
+  };
+
   const grant = (conn: Conn, id: string, p: Pool, live: boolean) => {
     const g: Grant = { kind: "grant", conn, id, pool: p, live, at: clock() };
     if (live) { p.live.add(g); p.liveBy[conn.brainAt]++; } else p.bg.add(g);
     conn.held.set(id, g);
     conn.sent({ op: "go", id });
+    const r = p.res;
+    if (r) {
+      if (live) r.liveRun++; else r.bgN++;
+      // A call to a model not loaded is a load: the choice of the next begins again, counted from now.
+      if (!resident(p)) { r.changedAt = g.at; r.want = null; } else if (live) r.liveAt = g.at;
+      mark(p);
+    }
     watch(p, live ? conn : undefined);
   };
 
@@ -409,14 +688,10 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const pump = (p: Pool) => {
     if (warming()) return;
     const n = p.queues.length;
-    while (room(p)) {
+    while (room(p) && mayGrant(p)) {
       const now = clock();
       const score = scores(p, now);
       let at = -1;
-      // Asks on a socket heard from lately: none is granted into one silent half its idle_s, which may be dead and kept
-      // open by the grants themselves — Bun resets a socket's idle clock at each send (review pass 4: a half-open socket's
-      // grants held the whole room 12–15 s).
-      const heard = (x: Ask) => performance.now() - x.conn.heardAt <= idleMs / 2;
       const has = (b: number) => { for (const x of p.queues[b]) if (heard(x)) return true; return false; };
       for (let i = 1; i <= n; i++) {
         const b = (p.last + i + n) % n;
@@ -437,6 +712,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       a.conn.waiting--;
       p.last = at;
       a.conn.held.delete(a.id);
+      if (p.res && p.cls === 0 && !resident(p)) sayEvery(`${p.server.name}\nload`, `${p.key}: not loaded, and granted after ${Math.round((now - a.at) / 1000)} s — ${p.server.name}'s other background waits while it loads`);
       grant(a.conn, a.id, p, false);
     }
   };
@@ -444,14 +720,26 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   const release = (x: Ask | Grant) => {
     if (x.conn.held.get(x.id) === x) x.conn.held.delete(x.id);
     if (x.kind === "ask") { withdraw(x); prune(x.pool); return; }
-    if (x.live) { if (!x.pool.live.delete(x)) return; x.pool.liveBy[x.conn.brainAt]--; } else {
+    const r = x.pool.res;
+    if (x.live) {
+      if (!x.pool.live.delete(x)) return;
+      x.pool.liveBy[x.conn.brainAt]--;
+      if (r) { r.liveRun--; if (resident(x.pool)) r.liveAt = clock(); }
+    } else {
       if (!x.pool.bg.delete(x)) return;
+      if (r) r.bgN--;
       const now = clock();
       decay(x.pool, now);
       // Charged up to its socket's last sign of life, not past it: a grant into a socket that died, or kept for one that
       // never came back, is no slot time the brain had (review pass 5: two dead grants of 15 s starved it 40 s after).
       const until = x.conn.closed ? Math.min(now, x.conn.heardClock) : now;
       x.pool.used[x.conn.brainAt] += Math.max(0, until - x.at);
+    }
+    if (r) {
+      mark(x.pool);
+      // The last background call running on the server: the pool it drained for is granted now, or, with none
+      // chosen, the server may be free for one.
+      if (r.bgN === 0 && !x.live) { if (r.want) pump(r.want); else kick(r); }
     }
     watch(x.pool);
     pump(x.pool);
@@ -524,7 +812,11 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       grant(conn, id, p, cls === "live");
       return;
     }
-    if (cls === "live") { grant(conn, id, p, true); return; }
+    if (cls === "live") {
+      if (p.res && p.cls !== 2 && !resident(p)) sayEvery(`${server.name}\nlive-load`, `${p.key}: a live call to a model not loaded — ${server.name}'s other background waits while it loads`);
+      grant(conn, id, p, true);
+      return;
+    }
     // An ask its relay asked again on a new socket while the old one is half-open, not yet closed here: the old one's
     // grant moved and answered go, or its ask withdrawn and its age kept (review pass 4: counted on both, 7–12 s wasted).
     let olderAt = Infinity;
@@ -543,7 +835,9 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     conn.waiting++;
     conn.held.set(id, a);
     pump(p);
-    if (conn.held.get(id) === a) conn.sent({ op: "queued", id });
+    if (conn.held.get(id) !== a) return;
+    conn.sent({ op: "queued", id });
+    if (p.res && !p.res.want && p.res.pendN === 0 && !resident(p)) kick(p.res);
   };
 
   const server = Bun.serve<Conn>({
@@ -587,7 +881,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         // A probe already pending is left to run its course: opens coming fast must not keep a dead socket alive.
         for (const c of connsBy[conn.brainAt]) if (c !== conn && (c.probedAt === undefined || c.heardAt >= c.probedAt)) { c.probedAt = performance.now(); c.ping?.(); }
         sayConn(conn.brainAt, "open", `brain ${conn.brain.name} connected (socket ${conn.id})`);
-        conn.sent({ op: "hello", brain: conn.brain.name, boot, lease_s: reg.leaseS, idle_s: reg.idleS, warm_s_left: Math.max(0, Math.ceil(warmUntil - clock()) / 1000), max_waiting: MAX_WAITING, max_held: MAX_HELD, max_sockets: MAX_SOCKETS, max_frame: MAX_FRAME, servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve, per_model: s.perModel })) });
+        conn.sent({ op: "hello", brain: conn.brain.name, boot, lease_s: reg.leaseS, idle_s: reg.idleS, warm_s_left: Math.max(0, Math.ceil(warmUntil - clock()) / 1000), max_waiting: MAX_WAITING, max_held: MAX_HELD, max_sockets: MAX_SOCKETS, max_frame: MAX_FRAME, servers: reg.servers.map((s) => ({ name: s.name, bases: s.bases, slots: s.slots, reserve: s.reserve, per_model: s.perModel, residency: s.ps !== null })) });
       },
       pong(ws: ServerWebSocket<Conn>) {
         ws.data.heardAt = performance.now();
@@ -643,6 +937,8 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
     },
   });
 
+  /** Each server's residency settled — an ask come of age, a live call's quiet run out — and every pool turned. */
+  const turnAll = () => { for (const r of residencies.values()) settle(r); for (const p of [...pools.values()]) pump(p); };
   // The broker's own liveness, on real time: a socket not heard from (frame or pong) for idle_s is ended, its close
   // handler doing the rest; one quiet a third of it is pinged; and each pool turned again, so a socket heard from anew
   // has its asks granted (review pass 4: Bun's idle clock, reset at each send, never closed a dead socket being granted to).
@@ -660,8 +956,17 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       if (now - c.heardAt > idleMs / 3) c.ping?.();
     }
     for (let b = 0; b < twins.length; b++) if (twins[b]) noteTwins(b);
-    for (const p of [...pools.values()]) pump(p);
+    turnAll();
   }, Math.max(100, Math.min(1000, idleMs / 4)));
+  // Each server's list, read every PS_S, and every PS_FAST_S while a load is wanted or under way there.
+  const psTick = residencies.size ? setInterval(() => {
+    const now = performance.now();
+    for (const r of residencies.values()) {
+      const every = r.want || r.pendN > 0 || r.verifyFrom !== null ? Math.min(psMs, PS_FAST_S * 1000) : psMs;
+      if (!r.reading && now - r.readAt >= every - 20) void read(r);
+    }
+  }, Math.max(50, Math.min(psMs, PS_FAST_S * 1000))) : null;
+  for (const r of residencies.values()) void read(r);
   // The lease's backstop: a grant held past lease_s is taken back, and its socket told.
   const sweepMs = Math.max(250, Math.min(reg.leaseS * 250, 30_000));
   const sweep = setInterval(() => {
@@ -676,7 +981,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   }, sweepMs);
   // The warm-up's end: the asks it held are turned.
   const warm = reg.warmS > 0 ? setTimeout(() => { for (const p of [...pools.values()]) pump(p); }, reg.warmS * 1000 + 1) : null;
-  log(`serving on port ${server.port}: ${reg.brains.length} brain${reg.brains.length === 1 ? "" : "s"} on ${reg.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved)`).join(", ")}${reg.warmS ? `; background held ${reg.warmS} s while brains re-register` : ""}`);
+  log(`serving on port ${server.port}: ${reg.brains.length} brain${reg.brains.length === 1 ? "" : "s"} on ${reg.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved${s.ps ? ", its loaded models read" : ""})`).join(", ")}${reg.warmS ? `; background held ${reg.warmS} s while brains re-register` : ""}`);
 
   return {
     port: server.port ?? 0,
@@ -684,6 +989,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       stopping = true;
       clearInterval(sweep);
       clearInterval(live);
+      if (psTick) clearInterval(psTick);
       if (warm) clearTimeout(warm);
       for (const t of keepTimers) clearTimeout(t);
       keepTimers.clear();
@@ -701,6 +1007,13 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       }
       return out;
     },
+    residency() {
+      const out: ResidencyView = {};
+      for (const r of residencies.values()) out[r.server.name] = { loaded: r.loaded ? [...r.loaded].sort() : null, want: r.want?.key ?? null, loading: [...r.pools].filter((p) => p.cls > 0).map((p) => p.key).sort() };
+      return out;
+    },
+    turn: turnAll,
+    async refresh() { await Promise.all([...residencies.values()].map((r) => (r.reading ?? Promise.resolve()).then(() => read(r)))); },
   };
 }
 
@@ -728,6 +1041,11 @@ function selfCheck() {
     ["unknown keys are refused at each level", /extra: not a key of the registry/.test(problems(base + "extra: 1\n")) && /broker.pot: not a key of broker/.test(problems("broker:\n  pot: 1\n" + base)) && /servers.ollama.slot: not a key of a server/.test(problems(base.replace("slots: 3", "slots: 3\n    slot: 3"))) && /brains.stable.hash: not a key of a brain/.test(problems(base + "    hash: x\n"))],
     ["no server or no brain is refused", /servers: name at least one/.test(problems(`brains:\n  a:\n    key: ${h("a")}\n`)) && /brains: name at least one/.test(problems("servers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\n"))],
     ["broker settings out of range are refused", /broker.port/.test(problems("broker:\n  port: 0\n" + base)) && /broker.lease_s/.test(problems("broker:\n  lease_s: 0\n" + base)) && /broker.warm_s/.test(problems("broker:\n  warm_s: -1\n" + base)) && /broker.idle_s/.test(problems("broker:\n  idle_s: 7\n" + base))],
+    ["ps is no key by default; a server's list is taken as an http(s) URL without credentials, query or fragment", r?.servers[0].ps === null && ok(base.replace("slots: 3", "slots: 3\n    ps: http://host.containers.internal:11434/api/ps"))?.servers[0].ps === "http://host.containers.internal:11434/api/ps" && ["ftp://h/api/ps", "http://u:p@h:1/api/ps", "http://h:1/api/ps?x=1", "http://h:1/api/ps#x", "api/ps", 7].every((u) => /ps: where its loaded models are listed/.test(problems(base.replace("slots: 3", `slots: 3\n    ps: ${JSON.stringify(u)}`))))],
+    ["ps on a server with per_model: false is refused: one pool has no residency", /ps: a server with per_model: false is one pool/.test(problems(base.replace("slots: 3", "slots: 3\n    per_model: false\n    ps: http://h:1/api/ps")))],
+    ["a model's name is read as a list writes it: lower-cased, :latest where it says no tag, a registry's port no tag", tagged("Qwen2.5") === "qwen2.5:latest" && tagged("qwen2.5:7b") === "qwen2.5:7b" && tagged("hf.co/a/B") === "hf.co/a/b:latest" && tagged("reg:5000/a/b") === "reg:5000/a/b:latest" && tagged("reg:5000/a/b:q4") === "reg:5000/a/b:q4"],
+    ["a list's models are read by name and by model, each once; an empty list is a list", loadedOf('{"models":[{"name":"A:1","model":"a:1","size":1},{"model":"b"}]}')?.join() === "a:1,b:latest" && loadedOf('{"models":[]}')?.length === 0],
+    ["anything else is no list: not JSON, no models, a model with no name, more than PS_MAX_MODELS", ["", "[]", "{}", '{"models":{}}', '{"models":[{}]}', '{"models":["a"]}', '{"models":[{"name":7}]}', JSON.stringify({ models: Array.from({ length: PS_MAX_MODELS + 1 }, (_, i) => ({ name: `m${i}` })) })].every((t) => loadedOf(t) === null)],
     ["not YAML, or not a mapping, is refused", /does not parse/.test(problems("servers: [\n")) && /not one YAML mapping/.test(problems("- a\n"))],
     ["a key's brain is found by its hash, and no other key is", (() => { const reg = ok(base + `  canary:\n    key: ${hashKey("k2")}\n`)!; return brainOf(reg.brains, "k2")?.name === "canary" && brainOf(reg.brains, "k3") === null && brainOf(reg.brains, null) === null; })()],
   ];

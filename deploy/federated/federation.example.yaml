@@ -26,7 +26,14 @@
 #               (default 1; background keeps at least one);
 #   per_model   true (the default): each model has `slots` of its own, as
 #               Ollama's; false: the server's `slots` whatever the model, as
-#               a decide tier answering one call at a time.
+#               a decide tier answering one call at a time;
+#   ps          optional: where the server lists the models it has loaded
+#               now (Ollama's /api/ps), as the broker's container reaches
+#               it. With it, a background call for a model that is not
+#               loaded waits its turn, and the server's other background
+#               calls pause while that model loads, so no load waits behind
+#               a model background keeps busy (deploy/README.md). Without
+#               it, or while it can't be read, no such rule.
 # brains        each brain by name, with the sha256 of its broker key:
 #               `bun deploy/federated/federated.ts key --brain <name>` prints
 #               a new key once, for that brain's deploy/.env, and this line.
@@ -43,6 +50,8 @@ servers:
       # - http://host.docker.internal:11434/v1   # under Docker Engine on Linux
     slots: 3
     reserve: 1
+    ps: http://host.containers.internal:11434/api/ps
+    # ps: http://host.docker.internal:11434/api/ps   # under Docker Engine on Linux
   # The decide tier both brains reach (jev/h2o/README.md), one call at a time:
   # h2o:
   #   bases:

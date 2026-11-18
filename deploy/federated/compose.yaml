@@ -6,7 +6,9 @@
 # brain's container reaches it at the host alias, as it reaches the host's
 # Ollama, and the port is published only where that alias lands: the host's
 # loopback under podman machine, the default bridge's gateway under Docker
-# Engine on Linux (federated.ts says why, and what reaches each).
+# Engine on Linux (federated.ts says why, and what reaches each). Its one
+# call out is to a model server's list of loaded models, where the registry
+# names one (`ps`, SMD-3379 PR 3c-1), at the same alias.
 #
 # Run it with deploy/federated/federated.ts, which checks the registry with the
 # broker's own reading, refuses a runtime no shape was measured on, and runs
@@ -45,6 +47,13 @@ services:
         target: /federation.yaml
     # The two files' digests, as labels nothing reads, so a changed broker or
     # registry recreates the container on an `up`.
+    # The host's name where Docker gives a container none (Docker Engine on
+    # Linux), as the stack's api and coordinator have it (deploy/compose.yaml):
+    # the broker reads a model server's loaded models there, where a registry
+    # entry names its `ps` (SMD-3379 PR 3c-1). A hosts entry only; podman
+    # writes the name itself.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     labels:
       ob1.broker-sha256: ${FEDERATED_BROKER_SHA256:?run deploy/federated/federated.ts}
       ob1.registry-sha256: ${FEDERATED_REGISTRY_SHA256:?run deploy/federated/federated.ts}
