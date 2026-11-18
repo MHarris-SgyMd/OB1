@@ -199,7 +199,7 @@ def two_way_config(cfg, revision):
     them is no read H2O measured."""
     tw = cfg.get("two_way")
     if not isinstance(tw, dict) or not isinstance(tw.get("probe_reference"), list):
-        raise SystemExit(f"H2O_ATTENTION=two-way, but {revision}'s serve_config.json has no two_way.probe_reference: "
+        raise SystemExit(f"two-way reading is asked of {revision}, whose serve_config.json has no two_way.probe_reference: "
                          f"these weights were not trained to read two-way (H2O's are from v1.3)")
     ref = tw["probe_reference"]
     if len(ref) != len(TWO_WAY_PROBES):

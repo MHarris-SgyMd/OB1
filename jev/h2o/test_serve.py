@@ -659,20 +659,22 @@ async def main():
         return {"status": status, "payload": {"state": state, "questions": questions},
                 "response": {"attention_mode": mode, "answers": answers, "effort_used": effort, **({"usage": usage} if usage is not None else {})}}
     choice = {"type": "choice", "instructions": "Which?", "criteria": {"a": "the first", "b": None}}
-    yes_no = {"type": "noul", "instructions": "Does it hold?", "criteria": {"true": "yes", "false": "no"}}
+    yes_no = {"type": "noul", "instructions": "Does it hold?", "criteria": {"true": "yes", "false": ""}}
+    score = {"type": "score", "instructions": "How well?", "criteria": ["badly", "well"]}
     good = {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}
+    reread = lambda questions: {**once, "reread": {"below": 0.8, "first_weight": 0.6667, "questions": questions}}
     rows = [
         result_row({"q": choice}, good),                                                                               # 0: compared
-        result_row({"y": yes_no, "q": {**choice, "instructions": {"ask": "which"}}}, {"y": {"noul": True}, "q": {"probabilities": {"b": 0.3, "a": 0.7}}},
-                   state={"ticket": "t", "plan": "p"}, usage={"input_tokens": 999}),                                   # 1: its choice question, after a yes/no; its count is two questions' 
+        result_row({"y": yes_no, "q": {**choice, "instructions": {"ask": "which"}}, "s": score}, {"y": {"noul": True}, "q": {"probabilities": {"b": 0.3, "a": 0.7}}},
+                   state={"ticket": "t", "plan": "p"}, usage={"input_tokens": 500, "processed_input_tokens": 999}),    # 1: its choice question, between a yes/no and a score
         result_row({"y": yes_no}, {"y": {"noul": True, "probabilities": {"true": 0.801, "false": 0.199}}}),            # 2: a yes/no alone, floored
         result_row({"q": choice}, good, mode="causal"),                                                                # 3: read one-way
         result_row({"q": choice}, good, status="error"),                                                               # 4: not answered
         result_row({"q": choice}, {"q": {"probabilities": {"a": 1.0}}}),                                               # 5: an answer short an option
         result_row({"q": {**choice, "criteria": ["a", "b"]}}, good),                                                   # 6: criteria not by name
         {"status": "ok", "payload": {"state": "s", "questions": {"q": choice}}, "response": None},                     # 7: no response
-        result_row({"q": choice}, good, effort={"tier": "fast", "passes_per_decision": 2, "reread": True}),            # 8: a blend of two reads
-        result_row({"q": choice}, good, effort=None),                                                                  # 9: passes not said
+        result_row({"q": choice}, good, effort=reread(["q"])),                                                         # 8: answered from two reads blended
+        result_row({"q": choice}, good, effort=None),                                                                  # 9: compared: a response that says nothing of its effort
         result_row({"q": choice}, {"q": {"probabilities": {"a": float("nan"), "b": 0.1}}}),                            # 10: a NaN
         result_row({"q": choice}, {"q": {"probabilities": {"a": None, "b": 1.0}}}),                                    # 11: a null
         result_row({"q": choice}, {"q": {"probabilities": {"a": 1.2, "b": -0.2}}}),                                    # 12: outside [0, 1]
@@ -680,36 +682,63 @@ async def main():
         result_row({"q": "a question that is no object"}, good),                                                       # 14
         result_row({"q": {**choice, "instructions": None}}, good),                                                     # 15: compared, its instructions null
         result_row({"q": choice}, good, state="a record with a lone \ud800 surrogate"),                               # 16: nothing a tokenizer reads
-        result_row({"q": {**choice, "criteria": {"a": "the first", "b": "bro\udfffken"}}}, good),                     # 17: the same, in an option
-        result_row({"q": choice}, good, usage={"input_tokens": 123, "output_tokens": 0}),                              # 18: compared, and says its prompt's tokens
-        result_row({"q": choice}, good, usage={"input_tokens": True}),                                                 # 19: compared; a count that is no number is no count
+        result_row({"q": choice, "y": {**yes_no, "instructions": "bro\udfffken"}}, good),                             # 17: the same, in the request's other question
+        result_row({"q": choice}, good, usage={"input_tokens": 100, "processed_input_tokens": 123, "output_tokens": 1}),  # 18: compared, and says what the engine read
+        result_row({"q": choice}, good, usage={"input_tokens": 100, "processed_input_tokens": True}),                  # 19: compared; a count that is no number is no count
+        result_row({"q": choice}, good, effort=reread([])),                                                            # 20: compared: re-reading on, this request re-read nothing
+        result_row({"q": choice, "o": choice}, {**good, "o": {"probabilities": {"a": 0.5, "b": 0.5}}}, effort=reread(["o"])),  # 21: compared: the other question was re-read
+        result_row({"q": choice}, good, effort={**once, "state_selection": "record: BM25 selection to 32000 tokens"}),  # 22: a record cut to fit
+        result_row({"q": choice}, good, effort={**once, "reread": True}),                                              # 23: re-read, not said which: left out
+        result_row({"q": choice, "x": {"type": "box", "instructions": "Where?"}}, good),                               # 24: compared; its other question is none this port renders
     ]
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "results.jsonl.gz")
         with gzip.open(path, "wt", encoding="utf-8") as f:
             for r in rows: f.write(json.dumps(r) + "\n")
-            f.write("\n[1, 2]\n{not json\n")   # lines 20 to 22: blank, a JSON array, and no JSON at all
+            f.write("\n[1, 2]\n{not json\n")   # lines 25 to 27: blank, a JSON array, and no JSON at all
         lines, skipped = conformance.two_way_index(path)
-        fetched = conformance.two_way_rows(path, {1, 15, 18, 19})
-    check(lines == [0, 1, 15, 18, 19] and skipped == {"no choice question": 8, "a one-way row": 1, "not answered": 2, "read more than once": 2, "cannot be encoded": 2, "not a row": 3},
-          f"of twenty-three lines, the five with a two-way choice answer per option, read once, of texts a tokenizer reads, are compared; the others are counted by why not, a blank line and one that is no JSON object among them ({lines}, {skipped})")
-    check(fetched[1] == ('{"ticket":"t","plan":"p"}', "q", '{\n "ask": "which"\n}', ["a", "b"], ["the first", "b"], [0.7, 0.3], None) and fetched[15][2] == "null" and set(fetched) == {1, 15, 18, 19},
+        fetched = conformance.two_way_rows(path, {1, 15, 18, 19, 24})
+        raw = open(path, "rb").read()
+        cut_path = os.path.join(d, "cut.jsonl.gz")
+        open(cut_path, "wb").write(raw[:len(raw) // 2])
+        unreadable = []
+        for bad in (os.path.join(d, "no such file"), cut_path, __file__):
+            try:
+                conformance.two_way_index(bad)
+                unreadable.append(False)
+            except SystemExit as e:
+                unreadable.append("cannot be read as H2O's results.jsonl.gz" in str(e))
+    check(lines == [0, 1, 9, 15, 18, 19, 20, 21, 24] and skipped == {"no choice question": 8, "a one-way row": 1, "not answered": 2, "answered from more than one read": 2,
+                                                                      "cannot be encoded": 2, "a record or question H2O cut to fit": 1, "not a row": 3},
+          f"of twenty-eight lines, the nine with a two-way choice answer per option, from one whole read, of texts a tokenizer reads, are compared; the others are counted by why not ({lines}, {skipped})")
+    check(fetched[1][:6] == ('{"ticket":"t","plan":"p"}', "q", '{\n "ask": "which"\n}', ["a", "b"], ["the first", "b"], [0.7, 0.3]) and fetched[15][2] == "null",
           f"a row is fetched as the shim would render it: the record compact, instructions that are no string as JSON (a null as null), an option with no description by its name, H2O's probabilities in the options' order ({fetched[1][2]!r}, {fetched[15][2]!r})")
-    check(fetched[18][6] == 123 and fetched[1][6] is None and fetched[19][6] is None and fetched[15][6] is None,
-          f"a row of one question carries H2O's count of its prompt's tokens; a row of two, whose count is their sum, one with no count, and one whose count is no number carry none ({fetched[18][6]}, {fetched[1][6]}, {fetched[19][6]})")
+    check(fetched[18][6] == 123 and fetched[1][6] == 999 and fetched[19][6] is None and fetched[15][6] is None,
+          f"a row carries what H2O's engine read, its processed tokens and not its input's, which stays the full input when a record is cut; one with no such count, or one that is no number, carries none ({fetched[18][6]}, {fetched[1][6]}, {fetched[19][6]})")
+    check(fetched[1][7] == [("Does it hold?", ["true", "false"], ["yes", "it does not"]), ("How well?", ["0", "1"], ["badly", "well"])] and fetched[18][7] == [] and fetched[24][7] is None,
+          f"and the request's other questions as the shim renders them, a yes/no with its default for an empty side and a score by its levels' places; a question of another shape leaves the request with no count to make ({fetched[1][7]}, {fetched[24][7]})")
+    check(all(unreadable), f"a path that is not there, a download cut short and a file that is not gzip each stop the arm by name, before any model is loaded ({unreadable})")
     shared = [conformance.serve.is_probability(v) for v in (0, 1, 0.5, True, None, "0.5", float("nan"), float("inf"), -0.1, 1.01, 10 ** 400)]
     reads = [conformance.serve.is_read(g, n) for g, n in (([0.2, 0.8], 2), ([0.2, float("nan")], 2), ([0.2, float("inf")], 2), ([0.2], 2), ([0.2, 1], 2), ([], 0))]
     check(shared == [True, True, True] + [False] * 8 and reads == [True, False, False, False, False, True],
           f"the two rules both files use: a probability is a number in [0, 1], no bool, NaN or a number past a float; a read is a finite float an option ({shared}, {reads})")
     bar = [conformance.passes(100, 98, 0.01), conformance.passes(100, 97, 0.001), conformance.passes(100, 100, 0.0101), conformance.passes(0, 0, 0.0)]
     check(bar == [True, False, False, False], f"the bar: 98 of 100 at a median gap of 0.01 passes; 97, or a median over 0.01, or no question read, fails ({bar})")
-    S = conformance.TWO_WAY_STRATA
-    check([n for n, _, _ in S][-2:] == list(conformance.TWO_WAY_LONG) and S[-1][2] == conformance.serve.DEFAULT_TWO_WAY_MAX_TOKENS and all(x[2] == y[1] for x, y in zip(S, S[1:])) and S[0][1] == 0,
-          "the strata run from 0 to the adapter's two-way limit with no hole, and the two that must pass alone are the last two")
-    where = [conformance.stratum_of(n, 8000) for n in (0, 499, 500, 4299, 4300, 7999, 8000, 8001)]
+    S = conformance.two_way_strata(conformance.serve.DEFAULT_TWO_WAY_MAX_TOKENS)
+    wide = conformance.two_way_strata(12000)
+    try:
+        conformance.two_way_strata(4300)
+        low = None
+    except SystemExit as e:
+        low = str(e)
+    check([n for n, _, _ in S] == ["under 500", "500 to 2,000", "2,000 to 4,300", "4,300 to 8,000"] and S[0][1] == 0 and all(x[2] == y[1] for x, y in zip(S, S[1:]))
+          and wide[-1] == ("4,300 to 12,000", 4300, 12000) and wide[:3] == S[:3] and low is not None and "4300" in low,
+          f"the strata run from 0 to the tier's own two-way limit with no hole: 8,000 by default, 12,000 for a tier set to it, and a limit under the long strata's floor is refused ({[n for n, _, _ in wide]}, {low})")
+    where = [conformance.stratum_of(n, 8000, S) for n in (0, 499, 500, 4299, 4300, 7999, 8000, 8001)]
     check(where == ["under 500", "under 500", "500 to 2,000", "2,000 to 4,300", "4,300 to 8,000", "4,300 to 8,000", "4,300 to 8,000", None]
-          and conformance.stratum_of(6000, 5000) is None and conformance.stratum_of(5000, 5000) == "4,300 to 8,000",
-          f"a prompt of exactly the limit is in the last stratum, since the adapter reads it; one token more is over the limit, whatever the limit ({where})")
+          and conformance.stratum_of(12000, 12000, wide) == "4,300 to 12,000" and conformance.stratum_of(12001, 12000, wide) is None
+          and conformance.stratum_of(6000, 5000, S) is None and conformance.stratum_of(5000, 5000, S) == "4,300 to 8,000",
+          f"a prompt of exactly the limit is in the last stratum, since the tier reads it; one token more is over the limit, whatever the limit ({where})")
 
     # The sample: rows in the given order, a prompt tokenized unless its bytes cannot reach a stratum still short. A
     # fake tokenizer here reads a token a byte for a record of digits and a token for four bytes otherwise.
@@ -721,42 +750,52 @@ async def main():
         if "\ufb2c" in text:   # as the real tokenizer reads it: normalized to NFC first, four tokens a character
             return list(range(4 * len(text)))
         return list(range(len(text) if text.isdigit() else len(text.encode("utf-8")) // 4))
-    fetches = []
+    fake_prompt = lambda state, instr, *rest: state + instr
+    fetches, others_of = [], {}
     def fake_fetch(wanted):
         fetches.append(sorted(wanted))
-        return {k: (made[k], f"q{k}", "", ["a", "b"], ["", ""], [0.5, 0.5], None) for k in wanted}
-    take, over, counted = conformance.stratify(list(range(10)), fake_fetch, lambda state, *rest: state, fake_encode, 2, 40, chunk=4, strata=strata)
+        return {k: (made[k], f"q{k}", "", ["a", "b"], ["", ""], [0.5, 0.5], None, others_of.get(k, [])) for k in wanted}
+    others_of[2] = [("12345678", ["true", "false"], ["", ""]), ("abcd", ["a"], [""])]   # with the record: 88 bytes, 22 tokens, and 84 bytes, 21
+    others_of[1] = None
+    take, over, counted = conformance.stratify(list(range(10)), fake_fetch, fake_prompt, fake_encode, 2, 40, strata, chunk=4)
     got = {k: [(row[0], len(row[3])) for row in v] for k, v in take.items()}
     check(got == {"short": [(0, 4), (3, 3)], "long": [(1, 12), (2, 20)]} and over == 0 and counted == 4 and fetches == [[0, 1, 2, 3]],
           f"each stratum takes the first rows of its length in order, a record of digits by its tokens, and the file is not fetched again once all are full ({got}, {fetches})")
+    counts = {row[0]: row[6] for v in take.values() for row in v}
+    check(counts == {0: 4, 3: 3, 1: None, 2: 20 + 22 + 21},
+          f"a row taken is counted whole, as a two-way engine reads it: the record again under each of the request's questions; a request with a question not rendered has no count ({counts})")
     tokenized.clear(); fetches.clear()
-    take, over, counted = conformance.stratify([8, 10, 4, 7, 6, 5, 9], fake_fetch, lambda state, *rest: state, fake_encode, 1, 40, chunk=3, strata=strata)
+    take, over, counted = conformance.stratify([8, 10, 4, 7, 6, 5, 9], fake_fetch, fake_prompt, fake_encode, 1, 40, strata, chunk=3)
     got = {k: [(row[0], len(row[3])) for row in v] for k, v in take.items()}
     check(got == {"short": [(8, 0)], "long": [(6, 40)]} and over == 2 and counted == 4 and made[10] not in tokenized and made[4] in tokenized and made[7] in tokenized and fetches == [[4, 8, 10], [5, 6, 7]],
           f"once short is full a prompt too few bytes for long is passed without a count; one over the limit is counted and not taken; one of exactly the limit is taken ({got}, over {over}, {counted} counted)")
-    take, _, counted = conformance.stratify([8, 1], fake_fetch, lambda state, *rest: state, fake_encode, 1, 40, chunk=10, strata=strata)
+    take, _, counted = conformance.stratify([8, 1], fake_fetch, fake_prompt, fake_encode, 1, 40, strata, chunk=10)
     check([(r[0], len(r[3])) for r in take["long"]] == [(1, 12)] and counted == 2,
           f"a record of twelve digits is twelve tokens: with short full it is still counted for long, where a guess of three characters a token would pass it by ({take['long'] and take['long'][0][0]}, {counted} counted)")
-    take, _, counted = conformance.stratify([8, 11], fake_fetch, lambda state, *rest: state, fake_encode, 1, 40, chunk=10, strata=strata)
+    take, _, counted = conformance.stratify([8, 11], fake_fetch, fake_prompt, fake_encode, 1, 40, strata, chunk=10)
     check(len(made[11].encode("utf-8")) == 9 and len(unicodedata.normalize("NFC", made[11]).encode("utf-8")) == 18 and [(r[0], len(r[3])) for r in take["long"]] == [(11, 12)] and counted == 2,
           f"a prompt of nine bytes that NFC makes eighteen, and the tokenizer twelve tokens, is counted for long: the bytes that bound a prompt's tokens are the NFC text's ({take['long'] and take['long'][0][0]}, {counted} counted)")
-    take, _, _ = conformance.stratify([8, 0, 3], fake_fetch, lambda state, *rest: state, fake_encode, 2, 40, chunk=10, strata=strata)
+    take, _, _ = conformance.stratify([8, 0, 3], fake_fetch, fake_prompt, fake_encode, 2, 40, strata, chunk=10)
     check(len(take["short"]) == 2 and take["long"] == [], "a file with no long prompt leaves the long stratum empty, which the verdict fails")
 
+    long = ["2,000 to 4,300", "4,300 to 8,000"]
     full = {"2,000 to 4,300": (60, 60, 0.003), "4,300 to 8,000": (60, 59, 0.0003), "under 500": (60, 60, 0.0006)}
-    v = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0)
-    check(all(v.values()) and len(v) == 5, f"full long strata at the bar, the whole at the bar and every read a probability: every verdict passes ({v})")
-    thin = conformance.two_way_verdicts({**full, "4,300 to 8,000": (1, 1, 0.0003)}, (121, 121, 0.001), 60, 0)
-    gone = conformance.two_way_verdicts({k: full[k] for k in ("under 500", "2,000 to 4,300")}, (120, 120, 0.001), 60, 0)
+    v = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0, 0, 0, long)
+    check(all(v.values()) and len(v) == 5, f"full long strata at the bar, the whole at the bar, every read a probability and every request counted alike: every verdict passes ({v})")
+    thin = conformance.two_way_verdicts({**full, "4,300 to 8,000": (1, 1, 0.0003)}, (121, 121, 0.001), 60, 0, 0, 0, long)
+    gone = conformance.two_way_verdicts({k: full[k] for k in ("under 500", "2,000 to 4,300")}, (120, 120, 0.001), 60, 0, 0, 0, long)
     check(not thin["4,300 to 8,000, 60 questions"] and thin["2,000 to 4,300, 60 questions"] and thin["all"] and not gone["4,300 to 8,000, 60 questions"],
           f"a long stratum of one agreeing question, or none, fails though the whole sample passes ({thin})")
-    nan = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 1)
-    worse = conformance.two_way_verdicts({**full, "2,000 to 4,300": (60, 58, 0.003)}, (180, 177, 0.02), 60, 0)
+    nan = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 1, 0, 0, long)
+    worse = conformance.two_way_verdicts({**full, "2,000 to 4,300": (60, 58, 0.003)}, (180, 177, 0.02), 60, 0, 0, 0, long)
     check(not nan["every read a probability per option"] and nan["all"] and not worse["2,000 to 4,300, 60 questions"] and not worse["all"] and worse["4,300 to 8,000, 60 questions"],
           f"one read that was no probability fails the arm though every count passes; 58 of 60 fails its stratum, and a whole-sample median of 0.02 the whole ({nan}, {worse})")
-    cut = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0, 1)
-    check(not cut["every prompt counted as H2O counted it"] and cut["all"] and sum(cut.values()) == 4,
-          f"one prompt whose tokens H2O counted otherwise fails the arm though every count passes: a record cut or rendered differently is no read to compare ({cut})")
+    counted_as = "every request counted as H2O's engine read it"
+    cut = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0, 0, 1, long)
+    blank = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0, 1, 0, long)
+    wide_long = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0, 0, 0, ["2,000 to 4,300", "4,300 to 12,000"])
+    check(not cut[counted_as] and sum(cut.values()) == 4 and not blank[counted_as] and sum(blank.values()) == 4 and not wide_long["4,300 to 12,000, 60 questions"],
+          f"one request the engine read otherwise than this port counts it fails the arm, and so does one with no count to compare: a sample that says nothing passes on nothing; the long strata are the tier's own ({cut}, {blank})")
     refusals = []
     for n in (0, 1, 49):
         try:

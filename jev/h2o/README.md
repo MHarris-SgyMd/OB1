@@ -259,7 +259,8 @@ probabilities answered, read two-way on vLLM at v1.4.1, whose weights v1.4.2
 keeps. `--two-way` draws choice questions from it by seed in four strata of
 prompt length, reads each two-way, and compares the probabilities at the
 shipped temperature. A stratum is counted in this tokenizer's tokens, on the
-whole prompt, and the last runs to the adapter's two-way limit. The start-up guard holds the read on three probes of
+whole prompt, and the last runs to the tier's own two-way limit
+(`H2O_TWO_WAY_MAX_TOKENS`, read as the tier reads it). The start-up guard holds the read on three probes of
 about a hundred tokens; this holds it at the length of the pairs decide mode
 sends.
 
@@ -282,17 +283,22 @@ answers agree on all 240:
 It passes at the same bar, over the whole sample and in each of the two long
 strata on its own, and each of those must be full: a stratum of one question
 would pass on it, so `--n` is at least 50. Two more things fail the arm
-outright: a read that is not a probability per option, and a prompt whose
-tokens this port counts otherwise than H2O did. A row of one question carries
-H2O's own count of its prompt, so a record H2O cut, or a prompt this port
-renders differently, shows there and not as a gap blamed on the read. On this
-sample all 161 such rows count the same.
+outright: a read that is not a probability per option, and a request this port
+counts, in tokens, otherwise than H2O's engine read it. A row carries what the
+engine read (`usage.processed_input_tokens`): every question of the request a
+prompt of its own, the record read again under each. The port renders and
+counts the same, so a prompt it renders differently, or a record the engine
+read in part, shows there and not as a gap blamed on the read. A row with no
+such count fails too. On this sample all 240 requests count the same, among
+them requests of up to 32 questions.
 
 Left out, each counted in the run's first lines: yes/no questions (that run
-applied the shim's yes/no floor, 0.801, which this port never applies), a row
-read one-way, a row answered from more than one read (the Decision Index
-profile blends two), a row holding a lone surrogate, and a line that is no
-row. A prompt over the two-way limit is counted and not read. The file is 115 MB of public benchmark
+applied the shim's yes/no floor, 0.801, which this port never applies); a row
+read one-way; a row whose record or question H2O cut to fit
+(`effort_used.state_selection`); a question answered from two reads blended
+(`effort_used.reread`, the Decision Index profile's); a row holding a lone
+surrogate; and a line that is no row. A prompt over the two-way limit is
+counted and not read. This file has none of the middle four. The file is 115 MB of public benchmark
 rows under each benchmark's own licence (the dataset's `LICENSE.md`); fetch it
 into a directory of its own, and it is only read.
 
