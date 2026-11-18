@@ -51,7 +51,7 @@ The maintainer decided on 2026-11-14 not to put the probe at a public URL, so th
 
 Also not measured: a `ttlMs` longer than 3 s or a wait longer than 51 s; whether Claude Code lists again on a timer when idle for minutes; the SDK's `listMaxPages` and paged lists.
 
-The brain's request log cannot answer the first question for any client: it records neither the protocol version a request names nor the client's name. The probe's log did.
+The brain's request log cannot answer the first question for any client: it records neither the protocol version a request names nor the client's name. The probe's log did. (Since SMD-4363 the line's `rev` records the revision a request names; the client's name is still not recorded.)
 
 ## How it was measured
 

@@ -29,7 +29,7 @@ import { codeWord, ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
 import {
   BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, edgeRefusal, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, JSON_RPC_UNAUTHORIZED_CODE, MCP_METHODS,
   METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, notificationRefusedResponse, parsedBody,
-  partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing,
+  partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, revisionOf, shownNothing,
   unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type MirrorTool, type RefusalTarget, type RequestParts,
 } from "../server-portable/mcp-edge.ts";
 import type { Answer, RestClient } from "../rest-client/index.ts";
@@ -864,9 +864,11 @@ export function createMcpApp(deps: McpDeps): Hono {
     trace.deferred = true;
     let parts: RequestParts = { toolCalls: 0 };
     const read = (bodyText: string | null) => {
-      parts = partsOf(parsedBody(bodyText));
+      const body = parsedBody(bodyText);
+      parts = partsOf(body);
       trace.rpc = parts.rpc;
       trace.tool = parts.tool;
+      trace.rev = revisionOf(c.req.raw.headers, body);
     };
     const call: CallRecord = {};
     const finish = (end?: RequestOutcome, code?: string, bytes?: number) => {
