@@ -23,7 +23,7 @@ this port never applies. So is a row answered from more than one read.
 
   H2O_REVISION=v1.4.2 ~/decider-probe/.venv/bin/python -I jev/h2o/conformance.py --two-way results.jsonl.gz [--n 60] [--seed 4369] [--out f.jsonl]
 """
-import argparse, gzip, importlib.util, json, math, random, statistics, sys, time
+import argparse, gzip, importlib.util, json, random, statistics, sys, time, unicodedata
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("h2o_serve", Path(__file__).with_name("serve.py"))
@@ -52,7 +52,8 @@ def question(row):
 # lengths decide mode's pairs run to, and each must pass on its own, full.
 TWO_WAY_STRATA = [("under 500", 0, 500), ("500 to 2,000", 500, 2000), ("2,000 to 4,300", 2000, 4300), ("4,300 to 8,000", 4300, 8000)]
 TWO_WAY_LONG = ("2,000 to 4,300", "4,300 to 8,000")
-TWO_WAY_CHUNK = 20000   # rows fetched at a time, in the shuffled order: the file is read again for each, not held whole
+TWO_WAY_CHUNK = 2000    # rows fetched at a time, in the shuffled order: the file is read again for each, never held whole
+TWO_WAY_MIN_EACH = 50   # the fewest questions a stratum that the bar can be asked of: at 98%, fewer allow no miss at all
 
 
 def passes(n, agree, median):
@@ -64,14 +65,16 @@ def probabilities_of(v, names):
     """The answer's probability per option in the options' order, or None when it is not one: a missing or extra
     option, or a value that is no number in [0, 1] (a NaN among them, which JSON as Python reads it allows)."""
     if not isinstance(v, dict) or sorted(v) != sorted(names): return None
-    if not all(isinstance(v[k], (int, float)) and not isinstance(v[k], bool) and 0 <= v[k] <= 1 for k in names): return None
+    if not all(serve.is_probability(v[k]) for k in names): return None   # serve.py's own rule for a recorded answer
     return [float(v[k]) for k in names]
 
 
 def two_way_question(row):
     """What the arm compares of one of H2O's result rows: (question id, instructions, option names, descriptions,
-    H2O's probabilities), or the reason it is left out. A row's first choice question whose answer is a probability
-    per option, read once, two-way."""
+    H2O's probabilities, H2O's count of the prompt's tokens or None), or the reason it is left out. A row's first choice
+    question whose answer is a probability per option, read once, two-way, of texts a tokenizer can be handed."""
+    if not isinstance(row, dict):
+        return "not a row"
     resp, payload = row.get("response"), row.get("payload")
     if row.get("status") != "ok" or not isinstance(resp, dict) or not isinstance(payload, dict):
         return "not answered"
@@ -92,9 +95,18 @@ def two_way_question(row):
         names = list(c)
         theirs = probabilities_of(ans.get("probabilities"), names)
         if theirs is None: continue
-        instr = q.get("instructions", "")   # the shim's render_instr: a string as it is, anything else as JSON
-        return (qid, instr if isinstance(instr, str) else json.dumps(instr, indent=1), names,
-                [desc_text(c[k]) if c[k] is not None else k for k in names], theirs)
+        instr = q.get("instructions", "")   # the shim's render_instr, to the letter: a string as it is, else json.dumps(v, indent=1)
+        instr = instr if isinstance(instr, str) else json.dumps(instr, indent=1)
+        descs = [desc_text(c[k]) if c[k] is not None else k for k in names]
+        # a lone surrogate, which JSON lets through, is nothing a tokenizer reads: the row is left out here, not met
+        # as a crash once the model has loaded (review pass 2)
+        if not all(serve.encodable(t) for t in (serve.probe_state(payload.get("state")), instr, *names, *descs)):
+            return "cannot be encoded"
+        # H2O's own count of what it read. A row of one question says its prompt's tokens; a row of several says
+        # their sum, which is not compared.
+        usage = resp.get("usage")
+        count = usage.get("input_tokens") if isinstance(usage, dict) and len(questions) == 1 else None
+        return (qid, instr, names, descs, theirs, count if isinstance(count, int) and not isinstance(count, bool) else None)
     return "no choice question"
 
 
@@ -104,14 +116,18 @@ def two_way_index(path):
     lines, skipped = [], {}
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line_no, line in enumerate(f):
-            got = two_way_question(json.loads(line))
+            try:
+                got = two_way_question(json.loads(line))
+            except ValueError:   # a blank line, or one that is not JSON
+                got = "not a row"
             if isinstance(got, str): skipped[got] = skipped.get(got, 0) + 1
             else: lines.append(line_no)
     return lines, skipped
 
 
 def two_way_rows(path, wanted):
-    """{line number: (the record as the shim renders it, *two_way_question's five)} for the wanted lines."""
+    """{line number: (the record as the shim renders it, *two_way_question's six)} for the wanted lines, each one a
+    line two_way_index kept."""
     out = {}
     with gzip.open(path, "rt", encoding="utf-8") as f:
         for line_no, line in enumerate(f):
@@ -134,10 +150,13 @@ def stratum_of(tokens, limit, strata=None):
 
 def stratify(order, fetch, prompt_of, encode, n_each, limit, chunk=TWO_WAY_CHUNK, strata=None):
     """Fill each stratum with the first n_each prompts of its length, taking the rows in `order`: ({stratum: [(line,
-    question id, option names, token ids, H2O's probabilities)]}, prompts over the limit, prompts tokenized).
+    question id, option names, token ids, H2O's probabilities, H2O's token count)]}, prompts over the limit, prompts
+    tokenized).
 
-    A prompt is tokenized unless it cannot reach any stratum still short: a token is at least one byte, so a prompt
-    of fewer UTF-8 bytes than the lowest such stratum's floor has fewer tokens than it. That bound errs on no side, so
+    A prompt is tokenized unless it cannot reach any stratum still short: a token is at least one byte of the text
+    the tokenizer reads, so a prompt of fewer bytes than the lowest such stratum's floor has fewer tokens than it. The
+    tokenizer normalizes to NFC first, which can lengthen a text (serve.py's state_tokens: U+FB2C is three bytes and
+    four tokens), so the bytes counted are the NFC text's (review pass 2: the raw text's passed such a prompt by). So
     a record of digits or CJK, or a short record under a long question, is counted like any other (review pass 1: a
     guess of three to six characters a token, on the record alone, kept such rows out of the long strata)."""
     strata = TWO_WAY_STRATA if strata is None else strata
@@ -150,23 +169,24 @@ def stratify(order, fetch, prompt_of, encode, n_each, limit, chunk=TWO_WAY_CHUNK
         for line_no in part:
             short = [lo for name, lo, _ in strata if len(take[name]) < n_each]
             if not short: break
-            state, qid, instr, names, descs, theirs = rows[line_no]
+            state, qid, instr, names, descs, theirs, their_count = rows[line_no]
             text = prompt_of(state, instr, names, descs)
-            if len(text.encode("utf-8", "surrogatepass")) < min(short): continue
+            if len(unicodedata.normalize("NFC", text).encode("utf-8")) < min(short): continue
             ids = encode(text)
             counted += 1
             name = stratum_of(len(ids), limit, strata)
             if name is None: over_limit += 1
-            elif len(take[name]) < n_each: take[name].append((line_no, qid, names, ids, theirs))
+            elif len(take[name]) < n_each: take[name].append((line_no, qid, names, ids, theirs, their_count))
     return take, over_limit, counted
 
 
-def two_way_verdicts(report, overall, n_each, unread):
+def two_way_verdicts(report, overall, n_each, unread, miscounted=0):
     """{what: passed} for the arm, from {stratum: (questions, top answers agreeing, median gap)} and the same three
     over the whole sample: the whole sample; each long stratum on its own, which must be full (a stratum of one
-    question would pass on it); and no read that was not a probability per option (a NaN's gap sorts anywhere and its
-    top answer can agree by accident)."""
-    out = {"every read a probability per option": unread == 0, "all": passes(*overall)}
+    question would pass on it); no read that was not a probability per option (a NaN's gap sorts anywhere and its
+    top answer can agree by accident); and no prompt whose tokens this port counts otherwise than H2O did, where a row
+    says its count: a record H2O cut or selected, or a prompt the port renders differently, is not a read to compare."""
+    out = {"every read a probability per option": unread == 0, "every prompt counted as H2O counted it": miscounted == 0, "all": passes(*overall)}
     for name in TWO_WAY_LONG:
         r = report.get(name)
         out[f"{name}, {n_each} questions"] = r is not None and r[0] >= n_each and passes(*r)
@@ -176,9 +196,12 @@ def two_way_verdicts(report, overall, n_each, unread):
 def two_way(a):
     """The two-way arm: exit 0 when the read matches H2O's published two-way reads at the bar, over the whole sample
     and in each long stratum."""
-    n_each, seed = a.n or 60, 4369 if a.seed is None else a.seed
+    n_each, seed = 60 if a.n is None else a.n, 4369 if a.seed is None else a.seed
+    if n_each < TWO_WAY_MIN_EACH:
+        sys.exit(f"--n is at least {TWO_WAY_MIN_EACH} a stratum for the two-way arm: the bar asks 98% of top answers, and a long stratum of fewer could pass on a handful")
     t0 = time.time()
-    R = serve.Reader(serve.snapshot(), share=False, attention="two-way")   # first: another revision stops here, before the file is read
+    serve.two_way_revision_check()   # another revision stops here, on a few kilobytes, before its weights or the file are read
+    R = serve.Reader(serve.snapshot(), share=False, attention="two-way")
     print(f"revision {serve.REVISION}, {R.dtype}{' with decider MPS kernels' if R.patched else ''}, two-way limit {R.prompt_limit}; loaded in {time.time() - t0:.0f} s", flush=True)
     ok, gap, sep, why = R.two_way_matches()
     print(f"H2O's probes: {'matched' if ok else 'NOT matched: ' + str(why)} (gap {gap:.4f}, separation {sep:.4f})", flush=True)
@@ -191,14 +214,17 @@ def two_way(a):
     print("sampled: " + ", ".join(f"{name} {len(v)}" for name, v in take.items()) + f"; {over_limit} prompts over the limit not read; {counted} prompts counted", flush=True)
 
     out = open(a.out, "w") if a.out else None
-    report, all_gaps, unread = {}, [], 0
+    report, all_gaps, unread, said, miscounted = {}, [], 0, 0, 0
     for name, _, _ in TWO_WAY_STRATA:
         gaps, agree, secs = [], 0, 0.0
-        for line_no, qid, names, ids, theirs in take[name]:
+        for line_no, qid, names, ids, theirs, their_count in take[name]:
+            if their_count is not None:
+                said += 1
+                miscounted += their_count != len(ids)
             t = time.time()
             probs = R.answer(R.read([ids])[0], len(names), "choice")[1]
             secs += time.time() - t
-            if len(probs) != len(names) or not all(isinstance(x, float) and math.isfinite(x) for x in probs):
+            if not serve.is_read(probs, len(names)):
                 unread += 1   # counted against the stratum as a wrong answer at the largest gap there is
                 g, same = 1.0, False
             else:
@@ -207,7 +233,7 @@ def two_way(a):
             gaps.append(g)
             agree += same
             if out: out.write(json.dumps({"stratum": name, "line": line_no, "question": qid, "tokens": len(ids), "options": len(names),
-                                          "mine": probs, "theirs": theirs, "gap": g, "agree": same}) + "\n")
+                                          "their_tokens": their_count, "mine": probs, "theirs": theirs, "gap": g, "agree": same}) + "\n")
         if gaps:
             gaps.sort()
             n = len(gaps)
@@ -223,7 +249,8 @@ def two_way(a):
     all_agree = sum(r[1] for r in report.values())
     print(f"all {n}: {all_agree}/{n} top answers agree ({100 * all_agree / n:.1f}%); gap median {med:.4f}, max {all_gaps[-1]:.4f}"
           + (f", 99th percentile {all_gaps[int(0.99 * n)]:.4f}" if n >= 200 else ""))
-    verdicts = two_way_verdicts(report, (n, all_agree, med), n_each, unread)
+    print(f"the prompt: {said - miscounted} of the {said} rows of one question count the tokens this port counts" + (f"; {miscounted} do not" if miscounted else ""))
+    verdicts = two_way_verdicts(report, (n, all_agree, med), n_each, unread, miscounted)
     print("the bar (98% of top answers, median gap at most 0.01): " + "; ".join(f"{k}: {'PASS' if v else 'FAIL'}" for k, v in verdicts.items()))
     ok = all(verdicts.values())
     print("PASS: the port's two-way read is H2O's, at length" if ok else "FAIL: the port's two-way read is not shown to be H2O's at length")
@@ -242,7 +269,7 @@ def main():
         if a.dir: ap.error("give the routing_reproducibility directory or --two-way, not both")
         return two_way(a)
     if not a.dir: ap.error("give H2O's routing_reproducibility directory, or --two-way with its Decision Index results file")
-    a.n, a.seed = a.n or 300, 3058 if a.seed is None else a.seed
+    a.n, a.seed = 300 if a.n is None else a.n, 3058 if a.seed is None else a.seed
     d = Path(a.dir)
     preds = {(r["dataset"], r["source_id"], r["converted_row"]): r for r in map(json.loads, open(d / "predictions.jsonl"))}
     rows = [r for f in sorted((d / "questions").glob("*.jsonl")) for r in map(json.loads, open(f))]

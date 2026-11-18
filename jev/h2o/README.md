@@ -281,12 +281,18 @@ answers agree on all 240:
 
 It passes at the same bar, over the whole sample and in each of the two long
 strata on its own, and each of those must be full: a stratum of one question
-would pass on it. A read that is not a probability per option fails the arm
-outright. Left out, each counted in the run's first lines: yes/no questions
-(that run applied the shim's yes/no floor, 0.801, which this port never
-applies), a row read one-way, and a row answered from more than one read (the
-Decision Index profile blends two). A prompt over the two-way limit is counted
-and not read. The file is 115 MB of public benchmark
+would pass on it, so `--n` is at least 50. Two more things fail the arm
+outright: a read that is not a probability per option, and a prompt whose
+tokens this port counts otherwise than H2O did. A row of one question carries
+H2O's own count of its prompt, so a record H2O cut, or a prompt this port
+renders differently, shows there and not as a gap blamed on the read. On this
+sample all 161 such rows count the same.
+
+Left out, each counted in the run's first lines: yes/no questions (that run
+applied the shim's yes/no floor, 0.801, which this port never applies), a row
+read one-way, a row answered from more than one read (the Decision Index
+profile blends two), a row holding a lone surrogate, and a line that is no
+row. A prompt over the two-way limit is counted and not read. The file is 115 MB of public benchmark
 rows under each benchmark's own licence (the dataset's `LICENSE.md`); fetch it
 into a directory of its own, and it is only read.
 

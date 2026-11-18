@@ -171,6 +171,28 @@ def temperatures_of(t, where):
     return out
 
 
+def is_probability(v):
+    """A probability as a file may give one: a number in [0, 1]. Not a bool, and not a NaN (JSON as Python reads it
+    allows one), which fails the comparison."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1
+
+
+def is_read(got, options):
+    """A read's answer to a question of this many options: a finite float for each. max() passes over a NaN, and a
+    NaN's top answer can agree by accident, so whatever compares reads asks this first (conformance.py too)."""
+    return len(got) == options and all(isinstance(x, float) and math.isfinite(x) for x in got)
+
+
+def two_way_revision_check():
+    """Refuse a revision not trained for two-way on its serve_config.json alone, a file of a few kilobytes, before its
+    weights are fetched, hashed or loaded (review pass 1 of SMD-4369 PR 1). The file's directory is the commit the
+    revision resolved to, so this refusal and the Reader's name the revision alike. serve.py's start and
+    conformance.py's two-way arm both ask it first."""
+    from huggingface_hub import hf_hub_download
+    early = Path(hf_hub_download(REPO, "serve_config.json", revision=REVISION))
+    two_way_config(json.loads(early.read_text()), revision_label(early.parent))
+
+
 def two_way_config(cfg, revision):
     """(the probes' recorded answers, the tolerance, the temperatures by type) from serve_config.json's `two_way`
     block, or a refusal to start: weights from before v1.3 were not trained to read two-way, and an all-attend mask on
@@ -189,7 +211,7 @@ def two_way_config(cfg, revision):
             # A probability per option: a NaN here (JSON as Python reads it allows one) would count for nothing in the
             # verdict's max, and the reference rule would pass whatever was read (review pass 2)
             if (not isinstance(got, dict) or sorted(got) != sorted(names)
-                    or not all(isinstance(got[n], (int, float)) and not isinstance(got[n], bool) and 0 <= got[n] <= 1 for n in names)):
+                    or not all(is_probability(got[n]) for n in names)):
                 raise SystemExit(f"two_way.probe_reference has no probability per option for the probe question {qid!r}: not the probes this port asks")
     tol = tw.get("probe_tolerance", 0.05)
     if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 < tol < 0.5:
@@ -214,7 +236,7 @@ def two_way_verdict(reference, tolerance, one_way, two_way, min_separation=TWO_W
             # max() passes over a NaN, so an answer that is no number would count for nothing in either rule and a
             # read that overflowed on one probe could serve (review pass 1)
             for mode, got in (("two-way", two[qid]), ("one-way", one[qid])):
-                if len(got) != len(names) or not all(isinstance(x, float) and math.isfinite(x) for x in got):
+                if not is_read(got, len(names)):
                     return False, float("nan"), float("nan"), (f"its {mode} answer to the probe question {qid!r} is not a probability "
                                                                f"per option ({got}): the read failed, in this dtype or on this device")
             gap = max(gap, max(abs(a - b) for a, b in zip(two[qid], want)))
@@ -785,12 +807,7 @@ def main():
     two_way_max = knob("H2O_TWO_WAY_MAX_TOKENS", DEFAULT_TWO_WAY_MAX_TOKENS) if attention == "two-way" else DEFAULT_TWO_WAY_MAX_TOKENS
     t0 = time.time()
     if attention == "two-way":
-        # serve_config.json alone first: a revision not trained for two-way (the default pin is one) is refused on a
-        # file of a few kilobytes, not after its weights are downloaded and hashed (review pass 1). Its directory is
-        # the commit the revision resolved to, so this refusal and the Reader's name the revision alike.
-        from huggingface_hub import hf_hub_download
-        early = Path(hf_hub_download(REPO, "serve_config.json", revision=REVISION))
-        two_way_config(json.loads(early.read_text()), revision_label(early.parent))
+        two_way_revision_check()
     path = snapshot()
     weights = Path(path) / "model.safetensors"
     h = hashlib.sha256()
