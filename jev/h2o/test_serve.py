@@ -26,7 +26,8 @@ jev/h2o/test_serve.py`); the real model's burst is the PR's own run against the 
   [15] H2O's start-up guard: within the tolerance of the recorded answers, and apart from the one-way ones
   [16] a two-way read is one whole pass a prompt, sharing nothing; the guard reads every probe question both ways
   [17] under two-way, a record over the model's limit and a prompt over the setting's are each refused in their own
-      words; a failure while a prompt is counted is a 500, not the pair's 422
+      words; a failure while a prompt is counted is a 500, not the pair's 422; a lone surrogate in a record, a question
+      or an option is the pair's 422 in both modes
 """
 import asyncio, importlib.util, json, math, os, sys, threading, time
 from pathlib import Path
@@ -618,6 +619,21 @@ async def main():
     outs = [await post(R, gate, raw) for raw in surrogates]
     check(all(s == 422 and "decision 0: its question or options cannot be encoded" in b["error"] for s, b, _ in outs) and R.reads == 0 and gate.admitted == 0,
           f"a lone surrogate in a proposition, an option or a question is that decision's 422 under two-way, though the tokenizer raises TypeError for one ({[(s, b.get('error', '')[:40]) for s, b, _ in outs]})")
+    # One-way too (review pass 4): before SMD-4369 the record alone was checked, so a surrogate in a proposition or an
+    # option reached the read and came back a 500 on the running tier, which the client retries for ever.
+    R = RealisticSurrogates()
+    outs = [await post(R, gate, raw) for raw in surrogates]
+    check(R.prompt_limit is None and all(s == 422 and "decision 0: its question or options cannot be encoded (a lone surrogate)" in b["error"] for s, b, _ in outs) and R.reads == 0 and gate.admitted == 0,
+          f"one-way, a lone surrogate in a proposition, an option or a question is that decision's 422 too, never read ({[s for s, _, _ in outs]})")
+    s, b, _ = await post(R, gate, one("short \ud800 record"))
+    check(s == 422 and "decision 0: its context cannot be encoded (a lone surrogate)" in b["error"] and R.reads == 0,
+          f"a lone surrogate in a record under the limit, which the count never encodes here, is its 422 by the text ({s}, {b.get('error')})")
+    second = json.dumps({"decisions": [{"kind": "binary", "context": "short record", "proposition": "it holds"},
+                                       {"kind": "binary", "context": "short record", "proposition": "it \udfff holds"}]}).encode()
+    s, b, _ = await post(R, gate, second)
+    check(s == 422 and "decision 1: its question or options" in b["error"] and R.reads == 0, f"the refusal names the decision that holds it, and the request's others are not read ({s}, {b.get('error')})")
+    s, _, _ = await post(R, gate, one("short record", proposition="an astral \U0001f600 and an accent é hold"))
+    check(s == 200 and R.reads == 1, f"a proposition of ordinary non-ASCII text is read ({s})")
     class Unpromptable(FakeReader):
         error = None
         def prompt(self, *a):

@@ -614,8 +614,8 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
     In order: 413 for a Content-Length over 8 MB, or over JEV_MAX_QUEUED_BYTES on its own; 503 when admission is full,
     or when the body (its Content-Length, or the bytes as they arrive) would pass the held-bytes bound; 413 for a body
     that runs past either limit; 408 for a body not all arrived within BODY_TIMEOUT_S; 499 for a caller gone mid-body;
-    400 malformed; 409 another model; 422 for a context the model would read only in part, or cannot encode; 499 for a
-    caller gone before its turn; the result, or 500 when the model fails."""
+    400 malformed; 409 another model; 422 for a context the model would read only in part, or a context, question or
+    option it cannot encode; 499 for a caller gone before its turn; the result, or 500 when the model fails."""
     # A body no wait could admit is a 413, not a 503 a caller would retry for ever (review pass 1): over 8 MB, or over
     # the held-bytes bound on its own (a JEV_MAX_QUEUED_BYTES set below a valid body).
     def too_big(n):
@@ -682,6 +682,17 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
             seen = {}
             for i, dd in enumerate(decs):
                 ctx = dd["context"]
+                # A lone surrogate anywhere in what the model would read (the record, the question, an option) is a
+                # fact about the text: the pair's 422, in both modes. It is read off the text itself, since what a
+                # tokenizer raises for one is its own affair (review pass 3: this one raises TypeError, so a branch on
+                # UnicodeError never ran). Before SMD-4369 only the record was checked, by what its count raised, so
+                # one-way a surrogate in a proposition or an option reached the read and came back a 500, which the
+                # client retries for ever (review pass 4, on the running tier).
+                instr, names, descs = question_of(dd)[:3]
+                if ctx not in seen and not encodable(ctx):
+                    return 422, {"error": f"decision {i}: its context cannot be encoded (a lone surrogate), so this model cannot read it"}, {}
+                if not all(encodable(t) for t in (instr, *names, *descs)):
+                    return 422, {"error": f"decision {i}: its question or options cannot be encoded (a lone surrogate), so this model cannot read it"}, {}
                 if ctx not in seen:
                     try:
                         seen[ctx] = R.state_tokens(ctx)
@@ -695,12 +706,6 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                     # options are part of it: 24 options of 20,000 characters under a short record made a prompt of
                     # 100,000 tokens that a count of the record let through (review pass 1). The record's own limit
                     # above stays the model's; this one is the setting's, and each refusal names its own (pass 2).
-                    instr, names, descs = question_of(dd)[:3]
-                    # A lone surrogate in the question or an option, as in a context, is a fact about the text: the
-                    # pair's 422. It is read off the text itself, since what a tokenizer raises for one is its own
-                    # affair (review pass 3: this one raises TypeError, so a branch on UnicodeError never ran).
-                    if not all(encodable(t) for t in (instr, *names, *descs)):
-                        return 422, {"error": f"decision {i}: its question or options cannot be encoded (a lone surrogate), so this model cannot read it"}, {}
                     try:
                         n = len(R.encode(R.prompt(ctx, instr, names, descs)))
                     except Exception as e:

@@ -80,6 +80,10 @@ Knobs:
   released. Otherwise a caller that declared a body and stalled would hold its
   place until its connection closed, and eight such callers would keep the tier
   answering 503.
+- **A lone surrogate is refused: 422.** JSON lets one through and no tokenizer
+  reads it. One in a record, a question or an option is that decision's 422,
+  read off the text itself, in both reading modes (SMD-4369; before it, one in
+  a proposition or an option was a 500 a caller retried without end).
 - **A context over `max_state_tokens` is refused: 422** (decided 2026-11-08).
   H2O's own shim cuts such a record to its head and tail around a `...` line
   and answers. The contract lets an adapter answer a cut it reads faithfully,
