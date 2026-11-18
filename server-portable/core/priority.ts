@@ -9,9 +9,9 @@
 // statements, reasons included.
 
 import type { Principal } from "../auth.ts";
-import { PriorityRefused, type PriorityAnswer, type PriorityAssertion, type PriorityItem, type PriorityRecord } from "../store.ts";
+import { closedOf, PriorityRefused, type PriorityAnswer, type PriorityAssertion, type PriorityItem, type PriorityRecord } from "../store.ts";
 import { asked, readOnly, unattributedAs, writerScope } from "./caller.ts";
-import { endOfDay } from "../priority-scale.ts";
+import { dueBy, startOf } from "../priority-scale.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -35,14 +35,6 @@ export type ClearPriorityCode = "REFUSED_PRIORITY_INPUT" | "READ_ONLY_KEY" | "PR
 export type PriorityHistoryResult = PriorityRecord;
 export type PriorityHistoryCode = "REFUSED_PRIORITY_INPUT" | "ITEM_NOT_FOUND";
 
-/**
- * A time as 116 takes it, whatever the database's time zone: a time with its offset is that instant. A date alone is
- * a due time's end of that day — the next day's start in UTC (SMD-3778: due on the 1st is due by the end of the 1st) —
- * and a not_before's start of it.
- */
-const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const dueBy = (t: string | undefined) => (t === undefined ? undefined : BARE_DATE.test(t) ? endOfDay(t) : t);
-const startOf = (t: string | undefined) => (t === undefined ? undefined : BARE_DATE.test(t) ? `${t}T00:00:00Z` : t);
 
 const inputRefused = (e: PriorityRefused) => refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: e.problem, message: e.message });
 /** The brain holds no such item, or no such due reference (`which`). */
@@ -120,7 +112,7 @@ export async function setPriority(ctx: Ctx, principal: Principal, input: Input<"
     // statement it closed alone.
     return ok({
       outcome: a.outcome, item: a.item ?? a.assertion.item, assertion: a.assertion, replaced: a.replaced,
-      closed: a.closed ?? (a.replaced ? [a.replaced] : []), winner: a.winner, winnerShown: scope === "write",
+      closed: closedOf(a), winner: a.winner, winnerShown: scope === "write",
     });
   }
   if (a.outcome === "refused") return refusedBy(ctx, a, principal, input);
@@ -144,7 +136,7 @@ export async function clearPriority(ctx: Ctx, principal: Principal, input: Input
     // given, the item asked, never the closed statement's, which may stand on the ticket's row.
     const item = a.item ?? await ctx.store().then((s) => s.priorityItem(input.kind, input.key)).then((r) => r.item,
       () => ({ kind: input.kind, key: input.key }));
-    return ok({ outcome: a.outcome, item, assertion: a.assertion, closed: a.closed ?? (a.assertion ? [a.assertion] : []), winner: a.winner, winnerShown: scope === "write" });
+    return ok({ outcome: a.outcome, item, assertion: a.assertion, closed: closedOf(a), winner: a.winner, winnerShown: scope === "write" });
   }
   if (a.outcome === "refused" && a.code === "READ_ONLY_KEY") return readOnly(principal);
   throw new Error("clear_priority answered an outcome this server does not read");

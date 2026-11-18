@@ -1350,7 +1350,7 @@ so end a ticket's claims, as it can already mislabel `moved`.
 A key states how much an item matters, and every statement is kept (migration 116,
 SMD-3663; `docs/priority.md`). An item is a thought (its id), a ticket (its key) or an
 entity (its id), addressed by its kind and key, or an open item (`item`, its id: migration
-117, SMD-3665). Three tools reach it, each over REST and MCP alike:
+117, SMD-3665). These tools reach it, each over REST and MCP alike:
 
 - **`set_priority`** (`POST /v1/priorities/{kind}/{key}`, capture scope): a level, 0
   none to 5 critical, and optionally `due_at`, `not_before`, `due_ref` (another item
@@ -1417,6 +1417,60 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   `{holder, released, claims}`: `released` the count ended, `claims` each ended claim's id,
   ticket and piece (bounded by the per-holder cap, since the cap holds how many live claims
   a holder may have).
+- **`list_priority_findings`** (`GET /v1/priority-findings`, read scope; SMD-3671 PR 2,
+  migration 142): the priority review's findings, which sleep's scan proposes —
+  `stale`, `overdue`, `disagree` and `settled` (`db/README.md`, migration 142). `status`
+  (`pending` by default, `accepted`, `rejected`, `moot` or `all`), `kind` (one of the
+  four), `limit` (1 to 200, 20 by default) and `after` (the previous page's
+  `cursor`). The answer is `{status, kind, total, before, findings, cursor}`: `total`
+  counts every finding matching, `before` those ahead of the page, and `cursor`, while
+  more follow (null at the end), is the last listed row's place, made under the status
+  and kind asked: one passed with others is refused `REFUSED_CURSOR` (400), `made`
+  naming the status and kind it was made under. A place, not an offset, so: every
+  finding that stood in the listing's status when paging began, and still does, is
+  listed: none is skipped. One that changes status, or one a scan adds, while paging
+  can be missing from the pages, and under `all` a decided one can be listed twice. A
+  listing with no cursor shows the current state. The pending come oldest found first; the rest most
+  recently decided or mooted first, ties by id. Each finding is `{id, kind, item: {kind, key}, status, statements,
+  evidence, windowDays, foundAt, refreshedAt, mootAt, decidedAt, decidedBy, note,
+  outcome, suppressedUntil}`: `statements` are read out of the evidence (a stale or
+  settled finding's statements; a disagreement's operator and source, each with its
+  `role`; an overdue finding names a due time, so none), and `evidence` keeps the rest
+  (a stale finding's `last_activity` and `window_days`, an overdue one's `due_at`,
+  `due_from` and `level`); `outcome` is what an accept's writer
+  answered, in the shape `review_priority_finding`'s reply gives it (null for a
+  reject). A stored answer this server does not read (a later writer's shape) is
+  null with `outcomeUnread: true`, the finding still listed; so is one of a kind or a
+  status or item kind this server does not know, kept as written with `kindUnread`,
+  `statusUnread` or `itemUnread`. A brain before 142 faults (500), the MCP text naming the migration.
+- **`review_priority_finding`** (`POST /v1/priority-findings/{id}/review`, write scope;
+  SMD-3671 PR 2, migration 142): an operator's decision on a pending finding.
+  `decision` is `accept` or `reject`; an accept takes `level` (0 to 5, with `due_at`
+  if wanted, a time with its offset or a date) or `clear: true`; `note` up to 2000
+  characters. An accept states the operator's own statement on the item through
+  `assert_priority` — the level the operator's own statement there already has
+  re-confirms it, keeping its start (unless after a due time given), its due
+  reference (unless the finding is overdue or a due time is given), its reason with
+  no note, and its due time while still ahead (unless one is given) — or closes the
+  operator's own statement there through `clear_priority`; a reject writes nothing.
+  Either holds the same finding back for its window while its statements are those
+  decided on. Past the scope, the database admits a key the operator classified
+  `operator`, by its agent id, alone: any other is refused `REFUSED_NOT_OPERATOR`
+  (403), and while the registry cannot give the key's agent id `PRIORITY_UNATTRIBUTED`
+  (503), as `set_priority_weights` answers. The answer is `{id, kind, item, status,
+  outcome, assertion, closed, winner, suppressedUntil, caller}`: `outcome` is
+  `asserted`, `unchanged` (re-confirmed) or `cleared`, null for a reject. A decision
+  142 recorded whose writer's answer this server does not read (a brain migrated
+  ahead of it) is still answered made, `outcome` and `assertion` null with
+  `answerUnread: true`, never a failure a retry would meet as `NOT_PENDING`. 142 asks
+  who may decide before whether the arguments go together, so a key that may not is
+  told so, whatever it sent; the schema refuses
+  a level off the scale, a note past 2000 characters (counted as 142 counts them, a
+  character past the BMP one) or an id that is no uuid (`REFUSED_INPUT`). A due time
+  Postgres cannot read (a year 0000, or past 9999) is `REFUSED_PRIORITY_INPUT` with
+  problem `time` (naming `due_at`), as `set_priority` answers it; it is refused binding
+  the call, after the server's agent-id check and before 142's operator check, so any
+  key with an agent id is told so, and told nothing about the finding.
 
 **A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
 let it state a priority on a thought it captured or an open item it opened, while
@@ -1436,6 +1490,12 @@ caller; a hook's principal is capture-scoped.
 | `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
 | `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Said after 116/117 answer ITEM_NOT_YOURS, so a plugin's call 117 grants goes through (SMD-3665 PR 2). A principal with no agent id by design (a plugin hook's) is answered by 116/117. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
 | `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
+| `REFUSED_FINDING_INPUT` | 400 | `review_priority_finding`'s arguments do not go together: `problem` is 142's error — `ACCEPT_NEEDS_OUTCOME` (an accept with neither a level nor clear, or both), `BAD_OUTCOME` (a level, a due time or clear on a reject, a due time without a level, or a settled finding accepted with a level above 0), `BAD_DECISION` or `BAD_NOTE`. Asked by 142 after who may decide: another key is refused `REFUSED_NOT_OPERATOR` whatever it sent. |
+| `REFUSED_FINDING_DECISION` | 409 | The finding's state refuses the decision, which decided nothing: `problem` `NOT_PENDING` (decided or moot already, `status` which), `NOTHING_TO_CLEAR` (the operator holds no statement on the item; state 0 to outrank another maker's), or `WRITER_REFUSED` (the writer refused the outcome, `writerCode` its code, such as `ITEM_NOT_FOUND`); the finding stays pending but for `NOT_PENDING`. |
+
+`review_priority_finding` also answers `NOT_FOUND` (404) for a finding not there, and
+`WRITE_SCOPE_REQUIRED` (403) for a key without write scope met through a caller of the
+core's own (142's `NOT_WRITE_SCOPE`).
 
 Each writer is one statement, its own READ COMMITTED transaction holding its item's
 lock (116's rule); the history reads the winner and the statements in one statement.
