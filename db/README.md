@@ -2558,8 +2558,11 @@ clears the operator's own statement through `clear_priority`, so the history sho
 the operator's key; rejecting changes nothing; both suppress the same finding for the
 window while its statements are those decided on (a moved deadline, or the source's new
 level, raises it at once). Moot findings past the window are pruned; decided ones stay.
-No finding changes a priority. The operations over REST and MCP, `brain_info`
-and preflight are PR 2; posting to Linear is SMD-4304. Needs 046, 068, 116, 117, 122
+No finding changes a priority. Since PR 2 an operator reads them over REST and MCP
+(`list_priority_findings`, `GET /v1/priority-findings`) and decides each
+(`review_priority_finding`, `POST /v1/priority-findings/{id}/review`;
+server-portable/README.md), `brain_info` counts the pending (`priorityFindings`), and
+preflight's `priority findings` row says them; posting to Linear is SMD-4304. Needs 046, 068, 116, 117, 122
 and 133, refusing by name without them; a re-apply is a no-op. test-schema [128],
 test-upgrade [20cf].
 
