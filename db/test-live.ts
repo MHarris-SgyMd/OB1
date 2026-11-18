@@ -4229,6 +4229,12 @@ if (want("9f")) {
   let probeDownNext = false;
   /** Every row's call answers OpenRouter's 402 "can only afford", the probe's passing (SMD-2636 PR 3b, the build's mutants). */
   let rowsAfford402 = false;
+  /** That 402's words, as OpenRouter says them: the flag above's and the one below's. */
+  const AFFORD_402 = "This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12.";
+  /** While above zero, the next row's call alone answers that 402, whatever its text, 300 ms late (SMD-4352): one worker's refusal while another's call is in flight. */
+  let afford402Next = 0;
+  /** Every row's call that arrived, whatever its answer (SMD-4352). */
+  let rowCalls = 0;
   let modelGone404 = false;
   /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
   let limitConcurrent = false;
@@ -4327,7 +4333,14 @@ if (want("9f")) {
         return Response.json({ error: { message: `stub: overloaded — ${"every replica is busy, retry after the queue drains; ".repeat(3)}` } }, { status: 503 });
       }
       // Past the worker line's 200 characters and the closing line's 300, as OpenRouter's is with its advice (review pass 3).
-      if (rowsAfford402 && !probe) return Response.json({ error: { message: `This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 12. ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
+      if (!probe) rowCalls++;
+      if (!probe && afford402Next > 0) {
+        afford402Next--;
+        // Late, so the other worker's call is made by then: answered at once, the refusal met it between its claim and its call.
+        await Bun.sleep(300);
+        return Response.json({ error: { message: AFFORD_402 } }, { status: 402 });
+      }
+      if (rowsAfford402 && !probe) return Response.json({ error: { message: `${AFFORD_402} ${"To increase, visit https://openrouter.ai/settings/credits and add more credits; ".repeat(3)}` } }, { status: 402 });
       // A zz-deadline thought's call never answers, so its deadline passes; the probe after it answers unless a flag
       // above says otherwise (SMD-2636 PR 3b).
       if (input.includes("zz-deadline") && deadlinesHang) {
@@ -4908,6 +4921,120 @@ if (want("9f")) {
     assert(affordEnd === "exit 2" && affordRow?.refused === "provider" && affordClaim?.status === "pending" && affordSaid && affordWorkerSaid && probeCalls === affordProbes,
       `a 402 "can only afford" ends the follower with 2 unprobed, refused provider, the thought pending, its worker's line saying why (${affordEnd}; row ${JSON.stringify(affordRow)}; claim ${JSON.stringify(affordClaim)}; said ${affordSaid}, worker ${affordWorkerLine.trim().slice(-120)}; ${probeCalls - affordProbes} probe(s))`);
     await sql`DELETE FROM thoughts WHERE id = ${affordThought}::uuid`;
+
+    // Three rows of SMD-4352's, in a function of their own: the module's body is at the size TypeScript's flow analysis stops at.
+    await (async () => {
+      // One worker's call refused so while the other's is in flight (SMD-4352): the refusal ends every worker, as a stop
+      // does. The other finishes the thought it holds, or hands back one it had not sent, and claims no more: no call
+      // is made after the two, and the pool is left pending, not drained by the worker the refusal did not reach.
+      // Whichever call arrives first is the one refused, 300 ms late, and the rest take 800 ms, so the counts hold
+      // whatever the order the five are claimed in.
+      const pairStop = liveFollower({ workers: 2 });
+      await pairStop.idle();
+      let pairEnd: string | null = null;
+      let pairIds: string[] = [];
+      const pairCalls = rowCalls;
+      slowMs = 800;
+      afford402Next = 1;
+      try {
+        pairIds = ((await sql`INSERT INTO thoughts (content) SELECT 'a thought of five, one call of which the account cannot afford, number ' || g FROM generate_series(1, 5) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        pairEnd = await pairStop.ended();
+      } finally {
+        afford402Next = 0;
+        slowMs = 0;
+      }
+      const pairClaims = (await sql`SELECT status, count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND thought_id = ANY(${sql.array(pairIds, "TEXT")}::uuid[]) GROUP BY status`) as { status: string; n: number }[];
+      const pairOf = (status: string) => pairClaims.find((c) => c.status === status)?.n ?? 0;
+      const pairRefusals = pairStop.lines.filter((l) => /: the embedding provider refuses the request itself \(/.test(l)).length;
+      assert(pairEnd === "exit 2" && pairRefusals === 1 && rowCalls - pairCalls <= 2 && pairOf("pending") >= 4 && pairOf("pending") + pairOf("succeeded") === 5,
+        `one of two workers' calls refused as the request's ends the other with the thought it holds, no call made after the two: at most one of five re-embedded, the rest pending, none failed, the follower ended 2 (SMD-4352; ${pairEnd}; ${JSON.stringify(pairClaims)}; ${pairRefusals} refusal(s) said; ${rowCalls - pairCalls} row call(s); ${pairStop.lines.filter((l) => /reembed-|returned|pool:/.test(l)).map((l) => l.trim().replace(/reembed-\S+-(\d)-\w+/g, "w$1").slice(0, 110)).join(" | ").slice(0, 600)})`);
+      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(pairIds, "TEXT")}::uuid[])`;
+
+      // A one-shot run whose probe the gate skips, its first row's call refused 401 (SMD-4352): the first row stands in
+      // for the probe, the run halts, and the worker claims no more of its batch — that row recorded failed, the
+      // other three left pending, not failed one by one. The four are the only thoughts not at the model, so the pool is theirs.
+      const haltEnv = { ...env, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "type:halt-row" } as Record<string, string>;
+      const haltOthers = Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM 'stub-embed'`)[0].n);
+      const haltIds = ((await sql`INSERT INTO thoughts (content, metadata) SELECT 'a thought of four the halted run leaves pending, number ' || g, ${{ type: "halt-row" }}::jsonb FROM generate_series(1, 4) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+      const haltLines: string[] = [];
+      let haltCode: number | null = null;
+      keyRefused401 = true;
+      try {
+        const haltAc = new AbortController();
+        const haltRun = runReembed({ url: URL_!, env: haltEnv, workers: 1, batch: 4, signal: haltAc.signal, writer: { out: (l) => haltLines.push(l), err: (l) => haltLines.push(l) } });
+        haltCode = await Promise.race([haltRun, Bun.sleep(15_000).then(() => null)]);
+        if (haltCode === null) {
+          haltAc.abort();
+          await haltRun;
+        }
+      } finally {
+        keyRefused401 = false;
+      }
+      const haltClaims = (await sql`SELECT status, count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND thought_id = ANY(${sql.array(haltIds, "TEXT")}::uuid[]) GROUP BY status`) as { status: string; n: number }[];
+      const haltOf = (status: string) => haltClaims.find((c) => c.status === status)?.n ?? 0;
+      const haltSaid = haltLines.filter((l) => /the first row failed before any succeeded — .* 401 .* halting so the pool is not marked failed row by row/.test(l)).length;
+      const haltPending = haltLines.some((l) => /3 row\(s\) are still pending: every worker stopped before the pool was empty — the provider's first answer was a failure/.test(l));
+      assert(haltOthers === 0, `before the halted run, no other thought waits to be pooled: an earlier row's left behind would be claimed beside the four (${haltOthers} not at the model)`);
+      assert(haltCode === 1 && haltLines.some((l) => /probe: +skipped — /.test(l)) && haltSaid === 1 && haltOf("failed") === 1 && haltOf("pending") === 3 && haltPending,
+        `a one-shot run with its probe skipped, the first row's call refused 401, halts: that row failed, the batch's other three left pending and said so, not failed row by row (SMD-4352; exit ${haltCode}; ${JSON.stringify(haltClaims)}; halt said ${haltSaid} time(s), pending said ${haltPending})`);
+      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(haltIds, "TEXT")}::uuid[])`;
+
+      // The record moved while a worker waits at the admit gate, and moved back before the gate lets it through
+      // (SMD-4352): the follower has seen the move and ends, so the worker claims nothing once through, though the
+      // record it would read names its model again. The gate here is deaf to the drain's end — it opens when the row
+      // says, not when its signal aborts, which is where a gate that rejects then ends the worker without this rule.
+      // It holds the second ask of a drain, the second worker's: both ask before either claims.
+      let deafArmed = false;
+      let deafAsks = 0;
+      const deafBefore = new Set<AbortSignal>();
+      const deafCounts = new Map<AbortSignal, number>();
+      let deafHeld: AbortSignal | null = null;
+      let deafOpen: (() => void) | null = null;
+      const deafAdmit: NonNullable<ReembedOptions["admit"]> = (signal) => {
+        deafAsks++;
+        if (!deafArmed) {
+          deafBefore.add(signal);
+          return Promise.resolve();
+        }
+        if (deafBefore.has(signal) || deafHeld !== null) return Promise.resolve();
+        const asked = (deafCounts.get(signal) ?? 0) + 1;
+        deafCounts.set(signal, asked);
+        if (asked !== 2) return Promise.resolve();
+        deafHeld = signal;
+        return new Promise<void>((resolve) => { deafOpen = resolve; });
+      };
+      const moved = liveFollower({ workers: 2, admit: deafAdmit });
+      await moved.idle();
+      // A poll's own ask first, so the follower's stop signal is one the gate knew before it was armed.
+      await pollUntil(async () => deafAsks >= 1, 15_000);
+      let movedIds: string[] = [];
+      let movedHeld = false;
+      let movedSeen = false;
+      let movedBefore = -1;
+      let movedPending = -1;
+      let movedEnd: string | null = null;
+      const movedAtModel = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE id = ANY(${sql.array(movedIds, "TEXT")}::uuid[]) AND embedding IS NOT NULL AND embedding_model = 'stub-embed'`)[0].n);
+      slowMs = 1000;
+      deafArmed = true;
+      try {
+        movedIds = ((await sql`INSERT INTO thoughts (content) SELECT 'a thought of five the moved record leaves, number ' || g FROM generate_series(1, 5) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        movedHeld = await pollUntil(async () => deafHeld !== null, 15_000);
+        await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+        // The other worker's read of the record ends the drain, which the held ask's signal says.
+        movedSeen = await pollUntil(async () => (deafHeld as AbortSignal | null)?.aborted === true, 15_000);
+        movedBefore = await movedAtModel();
+        movedPending = Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'pending' AND thought_id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`)[0].n);
+      } finally {
+        await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+        (deafOpen as (() => void) | null)?.();
+        movedEnd = await moved.ended();
+        slowMs = 0;
+      }
+      const movedAfter = await movedAtModel();
+      assert(movedHeld && movedSeen && movedPending >= 1 && movedAfter === movedBefore && movedEnd === "exit 2" && moved.lines.some((l) => /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(l)),
+        `a worker let through the admit gate after the follower saw the record move claims nothing, the record moved back or not: no thought re-embedded after the gate opened, the follower ended 2 (SMD-4352; held ${movedHeld}, move seen ${movedSeen}; ${movedBefore} re-embedded before the gate opened, ${movedAfter} after, ${movedPending} pending then; ${movedEnd})`);
+      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`;
+    })();
 
     // The model missing mid-pass (a 404 naming it, as while Ollama pulls it) is waited for, as an outage is — not the request refused.
     const pulled = liveFollower();
