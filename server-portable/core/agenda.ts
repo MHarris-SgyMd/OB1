@@ -7,7 +7,8 @@
 // calling key for `mine`, answers the agenda's refusal of `mine` (123's words,
 // kept by 124) as CLAIMS_UNREADABLE, a due order on a brain before 129 as
 // ORDER_UNAVAILABLE and 122's refusal of the call's weights (SMD-4193) as
-// REFUSED_WEIGHTS, and writes the call's query_log row.
+// REFUSED_WEIGHTS, writes the call's query_log row, and marks each item sleep
+// holds a pending stale finding on (SMD-3671 PR 3), a mark that moves no place.
 
 import type { Principal } from "../auth.ts";
 import type { AgendaResult, PriorityWeights } from "../store.ts";
@@ -15,6 +16,7 @@ import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { weightsRefused } from "./weights.ts";
+import { unreviewedFor, unreviewedOf } from "./reads.ts";
 
 export type { AgendaResult };
 /** The agenda's answer: the store's, and the weights the call passed (SMD-4193), null for the defaults. */
@@ -31,8 +33,9 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
   // The call's own weights (SMD-4193): none given, or an empty set, is the defaults.
   const weights = input.weights && Object.keys(input.weights).length ? input.weights : undefined;
   let r: AgendaResult;
+  const store = await ctx.store();
   try {
-    r = await (await ctx.store()).agenda({
+    r = await store.agenda({
       scope, holder, limit: input.limit,
       includeBlocked: input.include_blocked, includeClaimed: input.include_claimed, includeProposed: input.include_proposed,
       includeStarted: input.include_started, order: input.order, ...(weights ? { weights } : {}),
@@ -56,5 +59,8 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
   }
   await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed, include_started: input.include_started, order: input.order, ...(weights ? { weights } : {}) },
     input.limit, r.items.map((i) => ({ kind: i.kind, key: i.key, effective: i.effective })));
-  return ok({ ...r, weights: weights ?? null });
+  // The unreviewed mark (SMD-3671 PR 3): each listed item's pending stale finding, read after the agenda decided its
+  // list, so it never moves a place; best-effort, a failed read every mark null.
+  const read = await unreviewedOf(store, r.items);
+  return ok({ ...r, items: r.items.map((i) => ({ ...i, unreviewed: unreviewedFor(read, i) })), weights: weights ?? null });
 }

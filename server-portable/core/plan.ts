@@ -22,7 +22,7 @@ import type { AgendaItem, AgendaOther, AgendaWaiting, ThoughtHybridMatch } from 
 import { TOOLS, unlocks, visibleToolNames, type ToolScope } from "../tools.ts";
 import type { Ctx } from "./context.ts";
 import { loadPlugins } from "./plugins.ts";
-import { labelHits, runSearch, ticketsNamedBy, type QueryVectorFailed, type SearchHit } from "./reads.ts";
+import { labelHits, runSearch, ticketsNamedBy, unreviewedFor, unreviewedOf, type QueryVectorFailed, type SearchHit } from "./reads.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 
@@ -341,12 +341,17 @@ export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; 
     board = { available: false, reason: "deadline", waitsOn: [] };
   } else {
     try {
-      const a = await (await ctx.store()).agenda({
+      const store = await ctx.store();
+      const a = await store.agenda({
         scope: { keys: named.keys }, limit: BOARD_LIMIT, includeBlocked: true, includeClaimed: true, includeProposed: false, includeStarted: true, timeoutMs: leftMs,
       });
       // An agenda before 126 refuses a keys scope (below), so an answer without `keyed` is a fault.
       if (a.keyed === null) throw new Error("agenda answered no keyed tickets for a keys scope");
-      board = { available: true, tickets: a.items, others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
+      // The unreviewed mark (SMD-3671 PR 3), as the agenda's: one indexed read of the listed tickets' pending stale
+      // findings, best-effort (it never throws), outside the deadline's statement timeout: at most 100 keys, by 142's index.
+      const read = await unreviewedOf(store, a.items);
+      const tickets = a.items.map((i) => ({ ...i, unreviewed: unreviewedFor(read, i) }));
+      board = { available: true, tickets, others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
       if (a.keyed.missing.length) gaps.push({ gap: "tickets_missing", keys: a.keyed.missing });
       // Open named tickets past the list's 100: in total alone (review pass 2).
       named = { ...named, notRead: named.notRead + Math.max(0, a.total - a.items.length) };

@@ -578,6 +578,31 @@ whenever stated (None's 0 too), every other field only where it says something
 (no null, false, or zero urgency or unblocks), and no `key` on a result's own
 thought, which is its id. Over REST every field is there, with the terms.
 
+**Unreviewed, a mark on a priority (SMD-3671 PR 3).** Each item a priority
+label names carries `unreviewed`: sleep's pending stale finding on it (migration
+142's `priority_findings`), a statement by the brain's own keys older than the
+review's window, with nothing done on the item since, that no operator has
+decided. It is `{findingId, statedAt, days, windowDays}`: `statedAt` the newest
+`asserted_at` among the finding's statements, so `days`, whole days from it to
+the database's now, never overstates how long a statement has stood; both null
+when the finding's statements, or any one's time, could not be read (the item is
+still marked, without an age, as a finding stands on it). `false` is none;
+`null` is not read: a brain before 142, a role without SELECT on the table, a
+read that failed (one log line names why), or an item past the read's reach of
+1000. The agenda's items and `plan_context`'s board tickets carry it too. Over
+MCP a marked item reads `…, stated 75 days ago, unreviewed` (`1 day`, `today`,
+or no age) in the `Priority` line, the title and the agenda's line, the reply
+says once what it means, and marks not read are said once; the compact value
+carries `unreviewed` only where an item is marked, or null where the marks were
+not read. One read per reply, of the labelled items alone, after the priorities
+(none when nothing is labelled), by 142's partial index of the pending; it never
+fails or nulls the priority. It is a mark, never a weight: no order, rank or
+filter reads it, so a ranked search, the agenda and the board order alike with
+it or without. It lags the review, whose scan writes and moots findings at most
+every six hours, and with sleep off nothing is marked. An operator's accept or
+reject (`review_priority_finding`), or the scan mooting the finding, takes the
+mark away.
+
 ### Tickets that moved since a hit was written (migration 095)
 
 Both searches label, and never rank lower, a hit naming a ticket whose status

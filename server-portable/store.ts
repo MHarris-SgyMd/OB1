@@ -1781,6 +1781,39 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
 }
 
 /**
+ * The unreviewed mark (SMD-3671 PR 3): a pending stale finding on an item, as a read labels its priority. `statedAt` is
+ * the newest `asserted_at` among the finding's statements, so the days never overstate how long the statement has
+ * stood; `days` the whole days from it to the database's now (the clock that stamped it), 0 at the least. Both null
+ * when the evidence's statements, or any one's time, could not be read: the item is still marked, without a count, as a
+ * finding stands on it. `windowDays` is the scan's window the finding was found under.
+ */
+export type Unreviewed = { findingId: string; statedAt: string | null; days: number | null; windowDays: number };
+/**
+ * A priority label's unreviewed mark (SMD-3671 PR 3): the item's pending stale finding; `false` when it has none; null
+ * when it was not read — the findings read failed (a brain before 142, a role without its SELECT), the item was past
+ * the read's reach, or the answer came from a store or REST core that does not read them.
+ */
+export type UnreviewedMark = Unreviewed | false | null;
+const DAY_MS = 86_400_000;
+
+/**
+ * One pending stale finding as the unreviewed mark reads it, from its id, item, evidence, window and the database's now;
+ * leniently, as the list reads evidence: a row with no id or item key is skipped (null), never a fault; statements the
+ * evidence does not hold readably, or any statement's time not read, leave `statedAt` and `days` null rather than a
+ * count from the statements that were (one unread could be the newest, and the count would overstate).
+ */
+export function normaliseStaleUnreviewed(r: Record<string, unknown>): { item: { kind: string; key: string }; unreviewed: Unreviewed } | null {
+  if (typeof r.id !== "string" || typeof r.item_kind !== "string" || typeof r.item_key !== "string") return null;
+  const { statements, read } = findingStatements(isRecord(r.evidence) ? r.evidence : {});
+  const times = statements.map((s) => s.assertedAt);
+  const whole = read.includes("statements") && times.length > 0 && times.every((t): t is string => t !== null);
+  const statedAt = whole ? times.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : null;
+  const now = r.now instanceof Date ? r.now.getTime() : typeof r.now === "string" ? Date.parse(r.now) : NaN;
+  const days = statedAt === null || Number.isNaN(now) ? null : Math.max(0, Math.floor((now - Date.parse(statedAt)) / DAY_MS));
+  return { item: { kind: r.item_kind, key: r.item_key }, unreviewed: { findingId: r.id, statedAt, days, windowDays: Number(r.window_days) } };
+}
+
+/**
  * review_priority_finding's answer (142, SMD-3671). Decided: the finding's id, kind (`kindUnread` for one this server does
  * not know), item (as written, or null, with `itemUnread`, when this server does not read it) and status now, the writer's answer to an accept (assert_priority's or clear_priority's; null for a
  * reject, or with `answerUnread` for one this server does not read), and until when the decision holds the
@@ -1942,7 +1975,7 @@ export type AgendaOrder = (typeof AGENDA_ORDERS)[number];
  * 122's terms behind its place. `status` is a ticket's Linear status (`statusType` its type: triage, backlog,
  * unstarted or started) or an open item's (open or proposed, `statusType` null). `claimed` names live claims (shown only with
  * include_claimed or holder mine), `lapsedClaim` claims never released whose lease ran out, `blockers` the open items
- * blocking it (shown only with include_blocked).
+ * blocking it (shown only with include_blocked), `unreviewed` sleep's pending stale finding on it (SMD-3671 PR 3).
  */
 export type AgendaItem = {
   rank: number;
@@ -1967,6 +2000,11 @@ export type AgendaItem = {
   claimed: AgendaClaim[];
   lapsedClaim: AgendaClaim[];
   blockers: string[];
+  /**
+   * Sleep's pending stale finding on the item (SMD-3671 PR 3), a label that never moves its place: the core reads it
+   * beside the agenda (core/reads.ts unreviewedOf). The store's own answer carries null, not read.
+   */
+  unreviewed: UnreviewedMark;
 };
 /** An agenda (migrations 123 and 124): the first `limit` items, how many passed the filters, how many carry no priority, what was left out and why, board-sync's last heartbeat, and the live claims the brain records. */
 export type AgendaResult = {
@@ -2041,6 +2079,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
       effective: e.effective, level: e.level, inheritedFrom: e.inheritedFrom, dueAt: e.dueAt, dueFrom: e.dueFrom, urgency: e.urgency,
       overdue: e.overdue, unblocks: e.unblocks, terms: e.terms, winner: e.winner,
       claimed: claimsOf(i.claimed, what), lapsedClaim: claimsOf(i.lapsed_claim, what), blockers: i.blockers as string[],
+      unreviewed: null,
     };
   });
   return {
@@ -2907,6 +2946,13 @@ export interface ThoughtStore {
    */
   listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; after?: FindingPosition }): Promise<{ total: number; before: number; findings: PriorityFinding[]; next: FindingPosition | null }>;
   /**
+   * The pending stale findings on these items (migration 142, SMD-3671 PR 3), for the unreviewed mark on a priority
+   * label: one statement over 142's partial index of the pending (kind, item kind, item key), each item as a finding keys
+   * it (a thought its lower-case id, a ticket its upper-case key, a ticket's own rows as the ticket). The caller bounds
+   * the items (1000). An item with none is absent. A database before 142, or a role without SELECT on the table, throws.
+   */
+  staleUnreviewedOn(items: readonly { kind: string; key: string }[]): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]>;
+  /**
    * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
    * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent
    * id, with write scope (the envelope states the key's) — and every rule of the decision. A due time Postgres cannot
@@ -3290,7 +3336,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 

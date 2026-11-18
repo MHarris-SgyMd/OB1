@@ -3736,6 +3736,128 @@ console.log("\n[26] The priority review's findings through both doors (SMD-3671 
   }
 }
 
+console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's scan finds two agents' statements on a ticket stale, and every read that shows its priority — search, search_thoughts, search_thoughts_keyword, list_thoughts and fetch, through both doors — says it stated 75 days ago (the newer of the two), unreviewed; a thought's own and the agenda's and plan_context's board ticket alike; a board-sync statement never marked; the operator's reject takes the mark away; the order and every effective priority the same with it and without; a brain without the table marks nothing and keeps the priorities");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('rival', 'agent')`;
+  type On = { kind: string; key: string; self?: boolean; effective: number; unreviewed?: { findingId: string; statedAt: string | null; days: number | null; windowDays: number } | false | null };
+  type Row = Record<string, unknown> & { id: string; priority?: On[] | null };
+  const pick = (rows: unknown, id: string) => (rows as Row[] | undefined)?.find((r) => r.id === id);
+  const STALE = "SMD-99971", MIRROR = "SMD-99972", AG = "SMD-99973", AG2 = "SMD-99974", P = "Unreviewed rest [27]";
+  // Backdated statements, written raw: assert_priority stamps its own now, and 116 refuses an update of asserted_at. Two
+  // agents' on a ticket no row records (so nothing else is its activity), 90 and 75 days ago; board-sync's, a source's,
+  // on another, 90 days ago. The projection made current for each, as the writers do.
+  const raw = (key: string, level: number, maker: string, kind: string, tier: number, source: boolean, days: number) => sql`
+    INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
+    VALUES ('ticket', ${key}, ${level}, ${maker}, ${kind}, ${kind}, 'write', ${source}, ${tier}, now() - make_interval(days => ${days}::int)) RETURNING id::text AS id`;
+  await raw(STALE, 2, "[27] agent a", "agent", 3, false, 90);
+  await raw(STALE, 2, "[27] agent b", "agent", 3, false, 75);
+  await raw(MIRROR, 3, "board-sync", "ingested", 2, true, 90);
+  await sql`SELECT ob1_priority_project('ticket', ${STALE}), ob1_priority_project('ticket', ${MIRROR})`;
+  // The note naming both, its own level stated by an agent now; a second note naming the agenda's ticket for plan_context.
+  const note = await rest("POST", "/v1/thoughts", { content: `[27] omicron-quietmark: the stale ${STALE} and the mirrored ${MIRROR}` });
+  const tid = String(note.body.id);
+  const own = await rest("POST", `/v1/priorities/thought/${tid}`, { level: 1, reason: "[27] a note's own level" }, KEYS.rival);
+  // The scan as sleep runs it, on today's clock.
+  const scan = (await sql`SELECT ob1_priority_review(60, now()) AS r`)[0].r as { ok?: boolean };
+  const [found] = await sql`SELECT id::text AS id, evidence FROM priority_findings WHERE kind = 'stale' AND status = 'pending' AND item_kind = 'ticket' AND item_key = ${STALE}`;
+  const mirrored = await sql`SELECT id FROM priority_findings WHERE item_kind = 'ticket' AND item_key = ${MIRROR}`;
+  // The agenda's ticket and a higher one beside it, rows of their own (so their activity is today's: the scan would
+  // never find them stale); a pending stale finding written directly on the lower, its statements 100 and 80 days old,
+  // and one on the note itself, 70 days old — after the scan, which moots a finding whose condition no longer holds.
+  const ticket = async (issue: string) => {
+    const content = `${issue} — [27] ${issue}`;
+    const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", project: P })}::text)::jsonb) RETURNING id`;
+    await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+  };
+  await ticket(AG); await ticket(AG2);
+  await rest("POST", `/v1/priorities/ticket/${AG}`, { level: 3 });
+  await rest("POST", `/v1/priorities/ticket/${AG2}`, { level: 4 });
+  const plan = await rest("POST", "/v1/thoughts", { content: `[27] "quill plan omega" needs ${AG} and ${AG2}` });
+  const stmt = (days: number) => sql`SELECT jsonb_build_object('id', gen_random_uuid(), 'level', 3, 'maker', 'writer', 'asserted_at', now() - make_interval(days => ${days}::int)) AS s`.then((r) => r[0].s);
+  const [agF] = await sql`
+    INSERT INTO priority_findings (kind, item_kind, item_key, evidence, window_days)
+    VALUES ('stale', 'ticket', ${AG}, jsonb_build_object('statements', jsonb_build_array(${await stmt(100)}::jsonb, ${await stmt(80)}::jsonb), 'window_days', 60), 60) RETURNING id::text AS id`;
+  const [noteF] = await sql`
+    INSERT INTO priority_findings (kind, item_kind, item_key, evidence, window_days)
+    VALUES ('stale', 'thought', ${tid}, jsonb_build_object('statements', jsonb_build_array(${await stmt(70)}::jsonb), 'window_days', 60), 60) RETURNING id::text AS id`;
+  // A pending finding of another kind on board-sync's ticket: only a stale one marks.
+  await sql`
+    INSERT INTO priority_findings (kind, item_kind, item_key, evidence, window_days)
+    VALUES ('disagree', 'ticket', ${MIRROR}, jsonb_build_object('statements', jsonb_build_array(${await stmt(95)}::jsonb)), 60)`;
+  // A quoted span, so the searches match the note exactly whatever the stub embedding ranks; the keyword search its words.
+  const q = '"omicron-quietmark"', kwq = "omicron-quietmark";
+  const reads = async () => {
+    const [compat, compatMcp, st, stMcp, kw, kwMcp, list, listMcp, fetched, fetchedMcp, ranked, ag, agMcp, pc, pcMcp] = await Promise.all([
+      rest("POST", "/v1/search/compat", { query: q }), mcp("search", { query: q }),
+      rest("POST", "/v1/search", { query: q, limit: 10 }), mcp("search_thoughts", { query: q, limit: 10 }),
+      rest("POST", "/v1/search/keyword", { query: kwq }), mcp("search_thoughts_keyword", { query: kwq }),
+      rest("GET", "/v1/thoughts?limit=100"), mcp("list_thoughts", { limit: 100 }),
+      rest("GET", `/v1/thoughts/${tid}`), mcp("fetch", { id: tid }),
+      // A ranked search reuses its window's answers for the label: marked all the same.
+      rest("POST", "/v1/search", { query: q, limit: 10, priority_weight: 0.5 }),
+      rest("GET", `/v1/agenda?project=${encodeURIComponent(P)}`), mcp("agenda", { project: P }),
+      rest("POST", "/v1/plan-context", { request: 'how do I do "quill plan omega"', limit: 20 }), mcp("plan_context", { request: 'how do I do "quill plan omega"', limit: 20 }),
+    ]);
+    const items = (ag.body.items ?? []) as { key: string; rank: number; effective: number; unreviewed?: On["unreviewed"] }[];
+    const board = ((pc.body.board as { tickets?: { key: string; effective: number; unreviewed?: On["unreviewed"] }[] } | undefined)?.tickets ?? []);
+    return {
+      rest: [pick(compat.body.results, tid), pick(st.body.hits, tid), pick(kw.body.hits, tid), pick(list.body.thoughts, tid), fetched.body as Row, pick(ranked.body.hits, tid)],
+      compatTitle: String(pick(JSON.parse(compatMcp.text).results, tid)?.title ?? ""), fetchTitle: String(JSON.parse(fetchedMcp.text).title ?? ""),
+      texts: [stMcp.text, kwMcp.text, listMcp.text],
+      sc: [pick(stMcp.sc.hits, tid)?.priority, pick(kwMcp.sc.hits, tid)?.priority, pick(listMcp.sc.thoughts, tid)?.priority, pick(JSON.parse(compatMcp.text).results, tid)?.priority, JSON.parse(fetchedMcp.text).priority] as (On[] | null | undefined)[],
+      order: [(st.body.hits as Row[]).map((h) => h.id).join(), (ranked.body.hits as Row[]).map((h) => h.id).join(), (list.body.thoughts as Row[]).map((h) => h.id).join()],
+      items, agText: agMcp.text, agSame: same({ ...agMcp.sc, now: null }, { ...ag.body, now: null }),
+      board, pcText: pcMcp.text, pcBoard: ((pcMcp.sc.board as { tickets?: { key: string; unreviewed?: unknown }[] } | undefined)?.tickets ?? []),
+    };
+  };
+  const on = (r: Row | undefined, key: string) => r?.priority?.find((p) => p.key === key);
+  const days = (u: On["unreviewed"] | undefined) => (u === false ? "none" : u === null ? "unread" : u === undefined ? "absent" : u.days);
+  // Everything a mark leaves alone: each read's order, and each item's kind, key and effective priority.
+  const bare = (r: Awaited<ReturnType<typeof reads>>) => JSON.stringify({ order: r.order, prio: r.rest.map((x) => x?.priority?.map((p) => [p.kind, p.key, p.effective])),
+    items: r.items.map((i) => [i.rank, i.key, i.effective]), board: r.board.map((t) => [t.key, t.effective]) });
+  try {
+    const marked = await reads();
+    const ev = ((found?.evidence as { statements?: { asserted_at: string }[] } | undefined)?.statements ?? []).map((s) => s.asserted_at);
+    assert(note.status === 201 && own.status === 200 && scan.ok === true && typeof found?.id === "string" && ev.length === 2 && mirrored.length === 0,
+      `the scan on today's clock finds the two agents' statements stale, one finding with both, and nothing on board-sync's (${found?.id} ${ev.join(", ")} ${mirrored.length})`);
+    assert(marked.rest.every((r) => days(on(r, STALE)?.unreviewed) === 75 && (on(r, STALE)?.unreviewed as { findingId?: string }).findingId === found.id && days(on(r, MIRROR)?.unreviewed) === "none"
+        && days(r?.priority?.find((p) => p.self)?.unreviewed) === 70),
+      `every read's REST answer marks the stale ticket stated 75 days ago (the newer statement's, not the 90), with its finding; board-sync's ticket not, a pending disagreement on it no mark; the note's own 70 (${marked.rest.map((r) => `${days(on(r, STALE)?.unreviewed)}/${days(on(r, MIRROR)?.unreviewed)}/${days(r?.priority?.find((p) => p.self)?.unreviewed)}`).join(" ")})`);
+    assert(marked.texts.every((t) => t.includes(`ticket ${STALE} at 2 (medium (2)), stated 75 days ago, unreviewed`) && !new RegExp(`ticket ${MIRROR} at [^;]*unreviewed`).test(t) && t.includes("this thought at 1 (low (1)), stated 70 days ago, unreviewed")
+          && t.split("Unreviewed: sleep's priority review found that statement stale").length === 2)
+        && marked.sc.every((p) => days(p?.find((x) => x.key === STALE)?.unreviewed) === 75 && !("unreviewed" in (p?.find((x) => x.key === MIRROR) ?? { unreviewed: 1 })))
+        && [marked.compatTitle, marked.fetchTitle].every((t) => t.startsWith(`[priority: this thought low (1), stated 70 days ago, unreviewed; ticket ${MIRROR} high (3); and 1 more] `)),
+      `the MCP texts, values and titles say it: search_thoughts', search_thoughts_keyword's and list_thoughts' lines and the key once, every value (search's and fetch's too), search's and fetch's titles (${(marked.texts[0].match(/Priority: .*/) ?? ["none"])[0].slice(0, 220)} | ${marked.compatTitle.slice(0, 160)})`);
+    assert(marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ") === `${AG2}:none ${AG}:80` && marked.agSame
+        && marked.agText.includes(`2. ticket ${AG} ("backlog") "${AG} — [27] ${AG}" — 3: high (3) [stated 80 days ago, unreviewed]`)
+        && days(marked.board.find((t) => t.key === AG)?.unreviewed) === 80 && days(marked.board.find((t) => t.key === AG2)?.unreviewed) === "none"
+        && marked.pcText.includes("[stated 80 days ago, unreviewed]") && (marked.pcBoard.find((t) => t.key === AG)?.unreviewed as { days?: number } | undefined)?.days === 80,
+      `the agenda's item and plan_context's board ticket marked 80 days (its newer statement's), over both doors, the higher one beside them not (${marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ")} | ${(marked.agText.match(/2\. .*/) ?? ["none"])[0]})`);
+
+    // The operator decides: a reject over REST, one over MCP, and the note's finding mooted as a scan moots one.
+    const rejected = await rest("POST", `/v1/priority-findings/${found.id}/review`, { decision: "reject", note: "[27] still medium" });
+    const rejectedM = await mcp("review_priority_finding", { id: agF.id, decision: "reject" });
+    await sql`UPDATE priority_findings SET status = 'moot', moot_at = now() WHERE id = ${noteF.id}::uuid`;
+    const after = await reads();
+    assert(rejected.status === 200 && !rejectedM.isError && after.rest.every((r) => days(on(r, STALE)?.unreviewed) === "none" && days(r?.priority?.find((p) => p.self)?.unreviewed) === "none")
+        && after.items.every((i) => i.unreviewed === false) && after.board.every((t) => t.unreviewed === false)
+        && after.texts.every((t) => !t.includes("unreviewed") && !t.includes("Unreviewed:")) && !after.compatTitle.includes("unreviewed") && !after.agText.includes("unreviewed"),
+      `rejected or mooted, a finding marks nothing: every read, the agenda and the board say none (${after.rest.map((r) => days(on(r, STALE)?.unreviewed)).join(" ")} | ${after.items.map((i) => days(i.unreviewed)).join(" ")})`);
+    assert(bare(after) === bare(marked) && marked.order[0].includes(tid),
+      `with the marks or without, every read's order, rank and effective priority are the same (${bare(marked).slice(0, 200)})`);
+
+    // A brain without the table (before 142): the priorities as read, every mark null, said once.
+    await sql`ALTER TABLE priority_findings RENAME TO priority_findings_away_27`;
+    let gone;
+    try { gone = await reads(); } finally { await sql`ALTER TABLE priority_findings_away_27 RENAME TO priority_findings`; }
+    assert(bare(gone) === bare(marked) && gone.rest.every((r) => (r?.priority?.length ?? 0) > 0 && r!.priority!.every((p) => p.unreviewed === null)) && gone.items.every((i) => i.unreviewed === null)
+        && gone.texts.every((t) => t.split("Whether these priorities are unreviewed could not be read").length === 2 && t.includes(`ticket ${STALE} at 2 (medium (2))`)),
+      `without priority_findings every read keeps its priorities, order and effective values, each mark null and said once (${gone.rest.map((r) => r?.priority?.map((p) => String(p.unreviewed)).join("/")).join(" ")})`);
+  } finally {
+    await sql`UPDATE priority_findings SET status = 'moot', moot_at = now() WHERE status = 'pending'`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

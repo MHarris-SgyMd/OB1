@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AgendaItem, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, PriorityTerm, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AgendaItem, AuditChange, ClosedTicket, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, PriorityTerm, ProposalSide, ProposalWriter, RelationWord, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, UnreviewedMark, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -208,7 +208,8 @@ const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?:
  * Compact (review pass 4: a 100-row list's structured value grew from 35 KB to 103 KB, which Claude Code hands the
  * model beside the text): `kind` and `effective` always; `level` whenever stated, None's 0 included; every other field
  * only where it says something — no null, no false, no zero urgency or unblocks — and no `key` on a result's own
- * thought, which is the result's id. Over REST the core's value keeps every field.
+ * thought, which is the result's id. Over REST the core's value keeps every field. `unreviewed` (SMD-3671 PR 3) where
+ * an item is marked, and as null where the marks were not read, which says something; none, no field.
  */
 const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
   Array.isArray(priority) ? priority.map((p) => ({
@@ -219,7 +220,14 @@ const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
     ...(p.dueAt !== null ? { dueAt: p.dueAt } : {}), ...(p.urgency !== 0 ? { urgency: p.urgency } : {}), ...(p.overdue ? { overdue: true } : {}),
     ...(p.unblocks !== 0 ? { unblocks: p.unblocks } : {}), ...(p.settled ? { settled: true } : {}),
     ...(p.waiting ? { waiting: true, ...(p.notBefore !== null ? { notBefore: p.notBefore } : {}) } : {}),
+    ...(p.unreviewed || p.unreviewed === null ? { unreviewed: unreviewedField(p.unreviewed) } : {}),
   })) : null;
+/**
+ * An unreviewed mark as a typed field (SMD-3671 PR 3): the finding's id, the statement's time and age in days, and the
+ * window it was found under; false for none, null not read. Undefined from a REST core older than this server.
+ */
+const unreviewedField = (u: UnreviewedMark | undefined) =>
+  u ? { findingId: u.findingId, statedAt: u.statedAt, days: u.days, windowDays: u.windowDays } : u;
 const priorityFields = (h: { priority?: readonly PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number }) =>
   ({ priority: priorityField(h.priority), priorityMore: h.priorityMore ?? 0, priorityNotRead: h.priorityNotRead ?? 0 });
 /** The compat pair's priority fields (search, fetch): only where an item is prioritised, or a failed read's null; every other result keeps ChatGPT's shape. */
@@ -861,6 +869,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     if (data.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
+    notes.push(...unreviewedNotes(marksOf(data)));
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(data)) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
@@ -943,7 +952,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marksOf(data)).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -988,7 +997,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marksOf(data)).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -2776,6 +2785,22 @@ const PRIORITY_UNREAD_COMPAT = `${PRIORITY_UNREAD_WHY} whose title has no \`[pri
 const PRIORITY_UNREAD_TITLE = "[priority not read] ";
 /** How many prioritised items a title names: the rest counted, the field keeping them all. */
 const PRIORITY_IN_TITLE = 2;
+/**
+ * An item's unreviewed mark in words (SMD-3671 PR 3), after its priority: how long ago its newest stale statement was
+ * made, and that no operator has decided sleep's finding on it. Nothing for none, nor for a mark not read (said once a
+ * reply, UNREVIEWED_UNREAD). A finding whose statements' times were not read is said unreviewed without an age.
+ */
+const unreviewedWords = (u: UnreviewedMark | undefined): string =>
+  !u ? "" : u.days === null ? ", unreviewed" : `, stated ${u.days === 0 ? "today" : `${u.days} day${u.days === 1 ? "" : "s"} ago`}, unreviewed`;
+/** What "unreviewed" means, said once a reply that marks an item (SMD-3671 PR 3), as the claimed line's key is. */
+const UNREVIEWED_KEY = "Unreviewed: sleep's priority review found that statement stale (older than its window, with nothing done on the item since) and no operator has decided the finding yet (list_priority_findings, review_priority_finding). A mark, not a weight: it moves no order. It lags the review, which runs at most every 6 hours, and with sleep off nothing is marked.";
+/** The marks not read, said once a reply (SMD-3671 PR 3), as a failed priorities read is. */
+const UNREVIEWED_UNREAD = "⚠ Whether these priorities are unreviewed could not be read (for instance, a brain before migration 142, or a server role without SELECT on priority_findings): one not marked unreviewed may still be.";
+/** The unreviewed lines a reply says once, from the marks its items carry: the key where one is marked, the unread note where one was not read. */
+const unreviewedNotes = (marks: readonly (UnreviewedMark | undefined)[]): string[] =>
+  [marks.some((u) => !!u) ? UNREVIEWED_KEY : null, marks.some((u) => u === null) ? UNREVIEWED_UNREAD : null].filter((x): x is string => x !== null);
+/** Every mark a page's results carry, for unreviewedNotes. */
+const marksOf = (hits: readonly { priority?: readonly PriorityOn[] | null }[]) => hits.flatMap((h) => (h.priority ?? []).map((p) => p.unreviewed));
 /** Who an item is to the result it labels: the result itself (a ticket's own row said as its ticket), or a ticket it names. */
 const priorityWho = (p: PriorityOn) => (p.self ? (p.kind === "ticket" ? `this ticket's row (${p.key})` : "this thought") : `ticket ${p.key}`);
 /**
@@ -2791,7 +2816,7 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   const rest = all.length - shown.length + more;
   const unread = notRead > 0 ? `${notRead} more ticket${notRead === 1 ? "" : "s"} it names not read` : "";
   if (!shown.length) return title || !unread ? null : `none known on the items read; ${unread}.`;
-  const state = (p: PriorityOn) => `${p.settled ? ", settled" : ""}${p.waiting && p.notBefore ? `, not before ${p.notBefore}` : ""}`;
+  const state = (p: PriorityOn) => `${p.settled ? ", settled" : ""}${p.waiting && p.notBefore ? `, not before ${p.notBefore}` : ""}${unreviewedWords(p.unreviewed)}`;
   // A stated None is a statement, not an unknown (review pass 3: "none (0)" read as "no priority known").
   const stated = (level: number) => `${level === 0 ? "stated " : ""}${levelText(level)}`;
   const term = (t: PriorityTerm) => (t.term === "level" && Number(t.detail.level) === 0 ? `stated ${agendaTerm(t)}` : agendaTerm(t));
@@ -2826,6 +2851,8 @@ function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; la
     i.lapsedClaim.length ? `lapsed claim by ${i.lapsedClaim.map((c) => quoted(c.holder, 80)).join(", ")}${and(more.lapsedClaim)}: check before starting` : null,
     // A blocker's identity is free text in another system (053): quoted and cut, as a title is.
     i.blockers.length ? `blocked by ${i.blockers.slice(0, 10).map((b) => quoted(b, 80)).join(", ")}${and(Math.max(0, i.blockers.length - 10) + more.blockers)}` : null,
+    // SMD-3671 PR 3: sleep's pending stale finding on it, a mark: its place above is unchanged.
+    i.unreviewed ? unreviewedWords(i.unreviewed).slice(2) : null,
   ].filter(Boolean);
   return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
 }
@@ -2850,6 +2877,7 @@ export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => ren
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
+  lines.push(...unreviewedNotes(v.items.map((i) => i.unreviewed)));
   // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
   lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
   if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
@@ -2899,6 +2927,8 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   // A text match has no ranking for current work (review pass 2): newest first.
   const order = k.vectorFailed?.matched === "text" ? "newest first, matched as one text" : "current work ranked first";
   out.push(`\n## Knowledge: ${k.hits.length} hit${k.hits.length === 1 ? "" : "s"}, ${order}${literal ? ` (${literal})` : ""}`);
+  // The unreviewed lines, said once a reply: the board says only those the knowledge did not (SMD-3671 PR 3).
+  const knownMarks = unreviewedNotes(marksOf(k.hits));
   if (k.hits.length) {
     const notes: string[] = [];
     if (k.hits.some((t) => (t.claimed?.length ?? 0) > 0)) notes.push(CLAIMED_KEY);
@@ -2906,6 +2936,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (k.hits.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     if (k.hits.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(k.hits)) notes.push(STALE_KEY);
+    notes.push(...knownMarks);
     // A hit cut to its head says so under its text, and how to read the whole (SMD-4191).
     const blocks = hitBlocks(k.hits, literal).map((b, i) => {
       const h = k.hits[i];
@@ -2939,6 +2970,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     out.push(b.boardSync ? `Board-sync last stamped ${b.boardSync.at}${typeof b.boardSync.outcome === "string" ? `, its last pass ${quoted(b.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
     if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
     else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
+    out.push(...unreviewedNotes(b.tickets.map((i) => i.unreviewed)).filter((n) => !knownMarks.includes(n)));
   }
   out.push(`\n## Specs and deliverables: not available here (${v.specs.reason}; waits on ${v.specs.waitsOn.join(", ")}).`);
   out.push(`## Procedures: not available here (${v.procedures.reason}; waits on ${v.procedures.waitsOn.join(", ")}).`);
@@ -2966,7 +2998,9 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,
         // Counts as the ticket has them, not as the budget listed them (review pass 3).
         tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, blockers: i.blockers.length + ((v.board.available && v.board.ticketMore?.[i.key]?.blockers) || 0),
-                                              claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0 })),
+                                              claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0,
+                                              // SMD-3671 PR 3: false for none, null not read (and from a REST core older than this server).
+                                              unreviewed: unreviewedField(i.unreviewed) ?? null })),
         moreOpen: v.board.moreOpen ?? [], othersMore: v.board.othersMore ?? 0, waitingMore: v.board.waitingMore ?? 0,
         // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
         // Compact (SMD-4191): the settled by key; an unknown status type with its word, which guard() holds to a token.

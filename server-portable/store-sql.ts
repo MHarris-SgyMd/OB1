@@ -28,7 +28,7 @@ import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, normaliseStaleUnreviewed, type Unreviewed, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1307,6 +1307,19 @@ export class SqlStore implements ThoughtStore {
       total: Number(rows[0]?.total ?? 0), before: Number(rows[0]?.before ?? 0), findings: page.map(normalisePriorityFinding),
       next: last ? { grp: Number(last.grp) === 0 ? 0 : 1, sk: String(last.sk), id: String(last.id) } : null,
     };
+  }
+
+  // SMD-3671 PR 3: the unreviewed mark's read, one statement for a page. Both literals are in its text, so a cached
+  // generic plan can still use 142's partial index of the pending (kind, item_kind, item_key), as the pending listing's
+  // does; the items are two parallel arrays, unnested in step. The database's now rides each row, so the days count on
+  // the clock that stamped the statements.
+  async staleUnreviewedOn(items: readonly { kind: string; key: string }[]): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]> {
+    if (items.length === 0) return [];
+    const rows = await this.sql`
+      SELECT f.id::text AS id, f.item_kind, f.item_key, f.evidence, f.window_days, now() AS now
+        FROM unnest(${this.sql.array(items.map((i) => i.kind), "TEXT")}::text[], ${this.sql.array(items.map((i) => i.key), "TEXT")}::text[]) AS i(kind, key)
+        JOIN priority_findings f ON f.kind = 'stale' AND f.status = 'pending' AND f.item_kind = i.kind AND f.item_key = i.key` as Record<string, unknown>[];
+    return rows.map(normaliseStaleUnreviewed).filter((r) => r !== null);
   }
 
   // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142
